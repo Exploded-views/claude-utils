@@ -1,6 +1,8 @@
 package sync
 
 import (
+	"bytes"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,6 +43,16 @@ func TestNormalizeRemote(t *testing.T) {
 		{"https://github.com/onlyowner", ""},
 		{"https://github.com/acme/../../etc", ""},
 		{"git@github.com:acme/a b.git", "github.com/acme/a_b"},
+		// An unescaped '/' in a URL password leaves '@' in the path.
+		{"https://alice:pa/ss@github.com/acme/app.git", ""},
+		{"git@github.com:acme/app@v2.git", ""},
+		// Reserved Windows device names, with or without an extension.
+		{"git@github.com:acme/con.git", "github.com/acme/_con"},
+		{"git@github.com:acme/aux.txt.git", "github.com/acme/_aux.txt"},
+		{"git@github.com:NUL/Com1", "github.com/_nul/_com1"},
+		{"git@github.com:acme/lpt9.git", "github.com/acme/_lpt9"},
+		{"git@github.com:acme/console.git", "github.com/acme/console"},
+		{"git@github.com:acme/com10.git", "github.com/acme/com10"},
 	}
 	for _, c := range cases {
 		got, ok := NormalizeRemote(c.in)
@@ -52,6 +64,22 @@ func TestNormalizeRemote(t *testing.T) {
 		}
 		if !ok || got != c.want {
 			t.Errorf("NormalizeRemote(%q) = %q,%v want %q", c.in, got, ok, c.want)
+		}
+	}
+}
+
+func TestValidKey(t *testing.T) {
+	good := []string{"github.com/acme/app", "gitlab.example.com/g/sub/app", "h/r", "a.b/c_d/e-f"}
+	bad := []string{"", "path", "github.com", "../../escaped", "a/../b", "a/./b", "/abs/olute", "a//b",
+		"a/b/", "Github.com/acme/app", "a/b c", `a\b/c`, "a/b@c", "a:b/c", "a/.."}
+	for _, k := range good {
+		if !validKey(k) {
+			t.Errorf("validKey(%q) = false", k)
+		}
+	}
+	for _, k := range bad {
+		if validKey(k) {
+			t.Errorf("validKey(%q) = true", k)
 		}
 	}
 }
@@ -560,6 +588,32 @@ func TestRemoteKey_CacheKeyOverrideWins(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(shared, "remotes", "github.com", "acme", "app", "memory", "b.md")); err != nil {
 		t.Errorf("explicit key should be used verbatim: %v", err)
+	}
+}
+
+func TestRemoteKey_InvalidCacheKeyOverrideIsRejected(t *testing.T) {
+	gitEnv(t)
+	shared := filepath.Join(t.TempDir(), "sync")
+	a := newMachine(t, "alice", shared)
+	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(app, "a.md", "a\n")
+	c := &ProjectCache{Projects: map[string]ProjectEntry{a.hash(app): {Key: "../../escaped"}}}
+	if err := c.Save(shared); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+	a.sync()
+	if _, err := os.Stat(filepath.Join(filepath.Dir(shared), "escaped", "memory", "a.md")); err == nil {
+		t.Error("cache key ../../escaped wrote memory outside the sync dir")
+	}
+	// Rejected override: fall back to what the checkout says.
+	if _, err := os.Stat(filepath.Join(shared, "remotes", "github.com", "acme", "app", "memory", "a.md")); err != nil {
+		t.Errorf("an invalid key should fall back to the derived remote key: %v", err)
+	}
+	if !strings.Contains(logs.String(), "../../escaped") {
+		t.Errorf("rejected override should be logged, got %q", logs.String())
 	}
 }
 

@@ -93,7 +93,9 @@ func NormalizeRemote(raw string) (string, bool) {
 		return "", false
 	}
 	for i, s := range segs {
-		if s == "" || s == "." || s == ".." {
+		// '@' left in a path is the tail of a URL password that contained
+		// an unescaped '/'; the real host is not what we parsed.
+		if s == "" || s == "." || s == ".." || strings.Contains(s, "@") {
 			return "", false
 		}
 		segs[i] = sanitizeSegment(s)
@@ -102,6 +104,10 @@ func NormalizeRemote(raw string) (string, bool) {
 }
 
 func isLetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
+
+// windowsReserved are device names Windows refuses as a file name, with or
+// without an extension.
+var windowsReserved = regexp.MustCompile(`^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)`)
 
 // sanitizeSegment keeps a path segment safe to use as a directory name on
 // every platform.
@@ -115,7 +121,33 @@ func sanitizeSegment(s string) string {
 			b.WriteByte('_')
 		}
 	}
-	return b.String()
+	out := b.String()
+	if windowsReserved.MatchString(out) {
+		out = "_" + out
+	}
+	return out
+}
+
+// validKey reports whether k is acceptable as a repo-side key: what
+// NormalizeRemote can produce. At least two segments, each of [a-z0-9._-]
+// and neither "." nor "..", so a key can never leave remotes/ or collide with
+// a one-segment path key.
+func validKey(k string) bool {
+	segs := strings.Split(k, "/")
+	if len(segs) < 2 {
+		return false
+	}
+	for _, s := range segs {
+		if s == "" || s == "." || s == ".." {
+			return false
+		}
+		for _, r := range s {
+			if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '.' || r == '-' || r == '_') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 var windowsDrive = regexp.MustCompile(`^([A-Za-z])--(.+)$`)
@@ -278,9 +310,10 @@ type RemoteMap struct {
 	// none. Replaceable in tests.
 	Lookup func(dir string) string
 
-	cache *ProjectCache
-	keys  map[string]string // folder name -> key; "" means path key
-	dirty bool              // cache changed since it was last saved
+	cache  *ProjectCache
+	keys   map[string]string // folder name -> key; "" means path key
+	warned map[string]bool   // invalid overrides already logged, by folder name
+	dirty  bool              // cache changed since it was last saved
 }
 
 // NewRemoteMap loads the per-PC cache and resolves every project folder.
@@ -289,7 +322,7 @@ func NewRemoteMap(syncDir, claudeRoot string) (*RemoteMap, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &RemoteMap{syncDir: syncDir, claudeRoot: claudeRoot, Lookup: gitOrigin, cache: c, keys: map[string]string{}}
+	m := &RemoteMap{syncDir: syncDir, claudeRoot: claudeRoot, Lookup: gitOrigin, cache: c, keys: map[string]string{}, warned: map[string]bool{}}
 	m.Refresh()
 	return m, nil
 }
@@ -350,10 +383,20 @@ func (m *RemoteMap) resolve(hash string) string {
 	e := prev
 	var key string
 
+	override := e.Key // an invalid one is ignored but left in the file for the user to fix
+	if override != "" && override != "path" && !validKey(override) {
+		if !m.warned[hash] {
+			m.warned[hash] = true
+			log.Printf("remote keys: ignoring invalid \"key\" %q for %s in %s (want host/owner/repo of [a-z0-9._-])",
+				override, hash, ProjectCachePath(m.syncDir))
+		}
+		override = ""
+	}
+
 	switch {
-	case e.Key == "path":
-	case e.Key != "":
-		key = e.Key
+	case override == "path":
+	case override != "":
+		key = override
 	default:
 		dir := e.Dir
 		if dir != "" {
