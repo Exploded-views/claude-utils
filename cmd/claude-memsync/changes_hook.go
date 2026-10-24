@@ -30,7 +30,7 @@ type hookInput struct {
 
 // hookFraming opens every additionalContext, so the model reads the list of
 // paths as a notice to act on rather than as part of the user's prompt.
-const hookFraming = "Memory notes changed on another machine since you last looked (read a file before relying on it):"
+const hookFraming = "Memory notes changed in the sync repo (this or another machine) since you last looked (read a file before relying on it):"
 
 // markerMaxAge is how long a session's marker survives without being touched.
 const markerMaxAge = 30 * 24 * time.Hour

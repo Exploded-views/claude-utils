@@ -17,7 +17,7 @@ import (
 const hookSecret = "SECRET-NOTE-CONTENT-91c2"
 
 // framingLine is spelled out here so a change to the wording is deliberate.
-const framingLine = "Memory notes changed on another machine since you last looked (read a file before relying on it):"
+const framingLine = "Memory notes changed in the sync repo (this or another machine) since you last looked (read a file before relying on it):"
 
 // addNotes commits one note per project directory name to the sync repo that
 // cfgPath points at.

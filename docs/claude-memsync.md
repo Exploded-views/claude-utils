@@ -574,21 +574,22 @@ pushes a note while a session is open for hours, that session never sees it.
 `claude-memsync changes` lets a hook say so:
 
 ```sh
-claude-memsync changes (--since <rev> | --marker <file>) [--project <dir>] [--json] [--limit N] [--update-marker]
+claude-memsync changes (--since <rev> | --marker <file>) [--project <dir>] [--json] [--limit N] [--update-marker] [--synced]
 claude-memsync changes --hook            # for UserPromptSubmit / SessionStart hooks
 ```
 
 It compares the sync repo's current `HEAD` with an earlier point and lists the
 memory files that were added, changed or deleted in between. It only reads the
 repo; it never fetches (the daemon does that), so it reflects what this PC has
-already pulled or committed itself.
+already pulled and copied into `~/.claude`, or committed itself.
 
 | Flag | Meaning |
 |---|---|
 | `--since` | A git revision (full or abbreviated SHA, branch, `HEAD~3`). A revision that doesn't resolve is an error (exit 1). Exactly one of `--since` and `--marker` is required. |
 | `--marker` | The path of a **marker file** whose first line is the base commit. |
-| `--update-marker` | Only valid with `--marker`. Rewrites the marker to the current `HEAD` afterwards (atomically, mode `0600`). A marker that doesn't exist yet is created and nothing is reported: that call just sets the baseline. An empty marker (say, one made with `touch`), or one whose commit is gone (garbage-collected after a rebase, or the repo was re-cloned), is reset the same way: nothing is reported, `"reset": true` is set in the JSON, one warning line goes to stderr, and the exit code is 0. Without `--update-marker` an unresolvable marker is an error. A file whose first line is not a commit id (7 to 64 hex digits) is not a marker: it is never overwritten, and the command fails with `marker <path> does not contain a commit id` (exit 1). The marker is never moved backwards: if `HEAD` is an ancestor of the commit it already names (the repo was reset to an older commit), it is left alone. |
+| `--update-marker` | Only valid with `--marker`. Rewrites the marker to the current `HEAD` afterwards (atomically, mode `0600`). A marker that doesn't exist yet is created and nothing is reported: that call just sets the baseline. An empty marker (say, one made with `touch`), or one whose commit is gone (garbage-collected after a rebase, or the repo was re-cloned), is reset the same way: nothing is reported, `"reset": true` is set in the JSON, one warning line goes to stderr, and the exit code is 0. Without `--update-marker` an unresolvable marker is an error. A file whose first line is not a commit id (7 to 64 hex digits) is not a marker: it is never overwritten, and the command fails with `marker <path> does not contain a commit id` (exit 1). If the commit being compared up to (`HEAD`, or the synced one) is an ancestor of the commit the marker names (the repo was reset or force-pushed back), nothing is reported and the marker is moved back to it, so the same report is not repeated on every run. |
 | `--project` | Only this project: a project directory (`/home/alice/src/app`) or Claude's folder name for it (`-home-alice-src-app`). |
+| `--synced` | Compare with the commit last copied into `~/.claude` (`.state/synced-head`) instead of `HEAD`, when that file exists and names a commit. Without it the CLI uses `HEAD`. Hook mode always does this and rejects the flag. |
 | `--json` | Print JSON instead of text. |
 | `--limit` | List at most N changes (default 20), then `...N more`. `0` lifts the cap. |
 | `--hook` | Hook mode, see [Hook mode](#hook-mode). Takes only `--config`, `--project` and `--limit`. |
@@ -609,6 +610,7 @@ With `--json`:
   "head": "3f2a9c1e...",
   "since": "91be0aa4...",
   "total": 2,
+  "hidden": 0,
   "more": 0,
   "busy": false,
   "reset": false,
@@ -625,7 +627,24 @@ With `--json`:
 ```
 
 `status` is `added`, `changed` or `deleted`; `local` is where Claude Code reads
-the file on this PC. Only files directly under a project's `memory/` folder are
+the file on this PC. `"localKept": true` (and, in text, the note `(local copy
+kept; the incoming version was saved next to the mirror copy as
+.from-remote-*)`) marks a non-deleted change whose local file does not hold the
+committed bytes: the daemon skipped it (held back by the scrub, or edited here
+since), so the local file keeps its own text and the incoming version sits
+beside the mirror copy as `.from-remote-*`. It costs one `git cat-file --batch`
+for all listed changes.
+
+**Denylist.** A change is left out of the list when its repo path or its local
+path matches a pattern in your [denylist](#denylist) (the file the daemon
+reads), and the text output says `N changed file(s) whose name matches your
+denylist are not listed`; in JSON the entries are omitted and `"hidden": N`
+counts them (`total` counts only the listed ones). A peer, which has its own
+denylist, can push a file whose name yours would hold back, and the name must
+not reach a prompt. If the denylist exists but cannot be read or parsed, no
+names are listed at all, only the count (`N changed file(s) are not listed (the
+denylist could not be read)`), and one line goes to stderr. With no denylist
+file everything is listed. Only files directly under a project's `memory/` folder are
 reported, and a rename shows up as a delete plus an add. File and project names
 with unprintable characters (a newline, say) are shown quoted in the text
 output. Only names and paths are ever printed, never note contents.
@@ -648,11 +667,16 @@ hook's `cwd`, unless you pass it; the `cwd` follows Claude's `cd`, so it is
 only the fallback. When something changed it prints
 
 ```json
-{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"Memory notes changed on another machine since you last looked (read a file before relying on it):\nadded /home/alice/.claude/projects/-home-alice-src-app/memory/feedback_tests.md\nchanged /home/alice/.claude/projects/-home-alice-src-app/memory/MEMORY.md"}}
+{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"Memory notes changed in the sync repo (this or another machine) since you last looked (read a file before relying on it):\nadded /home/alice/.claude/projects/-home-alice-src-app/memory/feedback_tests.md\nchanged /home/alice/.claude/projects/-home-alice-src-app/memory/MEMORY.md"}}
 ```
 
-with that framing line, then one `status path` line per change (and `… and N more` past `--limit`),
-and nothing at all when nothing changed. The marker only moves after that
+with that framing line, then one `status path` line per change (and `… and N more` past `--limit`,
+and the denylist count line),
+and nothing at all when nothing changed. The hook reports up to the commit
+recorded in `.state/synced-head` (what the daemon has copied into `~/.claude`),
+or `HEAD` when there is no such record, and advances its marker to that same
+commit; a commit that was pulled but not yet copied is reported by the first
+prompt after the copy, never before it. The marker only moves after that
 output was written, and never backwards. The first call in a session just
 records the baseline. Any error exits 0 and writes one line to stderr, and so
 does a panic, so the hook can never block a prompt. On an error before the
@@ -696,9 +720,12 @@ keeps a stuck `git` from holding up the prompt.
   `cwd` is used, and `cwd` follows Claude's `cd`, so after a `cd` into a
   subdirectory it won't match the project's folder name. Pass `--project`
   explicitly if that bites.
-- There is a brief window between the daemon's pull and its copy into
-  `~/.claude`: a change can be reported before the file at `local` has been
-  updated.
+- The hook waits for the daemon's copy: it reports up to `.state/synced-head`,
+  so the file at `local` has been updated when it is named. The CLI compares up
+  to `HEAD` unless you pass `--synced`, so it can name a file the daemon has
+  not copied yet.
+- With no `synced-head` record (a PC that has not run a daemon cycle since the
+  upgrade) the hook falls back to `HEAD`.
 
 ## Deletes
 
@@ -735,6 +762,10 @@ This means:
     ├── .gitattributes                    # MEMORY.md merge=claude-memory-index
     ├── .gitignore                        # excludes config.json, .state/, etc.
     ├── .state/manifest.json              # per-PC delete-detection state
+    ├── .state/synced-head                # per-PC, last commit copied into ~/.claude
+    ├── .state/paused                     # per-PC, present while syncing waits for a hand-resolved rebase/merge
+    ├── .state/pull-running               # per-PC, nonce around the daemon's own pull
+    ├── .state/hook-markers/<session>     # per-PC, `changes --hook` baselines
     ├── .state/parked.json, parked/       # per-PC, only during an unfinished park
     ├── .state/parked.broken-<ts>/        # per-PC, a park that was set aside
     ├── distilled/                        # shared distilled-memory catalog
