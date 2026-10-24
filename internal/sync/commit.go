@@ -27,8 +27,13 @@ const denylistRel = "denylist.txt"
 // path and rule name only. Deletions are never scanned. If cfg.RequireDenylist
 // is set and the denylist is missing, or the denylist cannot be parsed,
 // nothing at all is committed. Those cases are logged and return (false, nil)
-// so the caller still pulls and pushes what is already committed.
+// so the caller still pulls and pushes what is already committed. While a
+// merge or rebase is unresolved, a file with conflict markers is never staged:
+// CommitMirror fails instead (see refuseConflictMarkers).
 func CommitMirror(repo *gitwt.Repo, cfg config.Config, msg string) (bool, error) {
+	if err := refuseConflictMarkers(repo); err != nil {
+		return false, err
+	}
 	if err := repo.AddAll(); err != nil {
 		return false, fmt.Errorf("add: %w", err)
 	}

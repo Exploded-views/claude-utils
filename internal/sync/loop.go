@@ -80,8 +80,13 @@ func (l *Loop) Run(ctx context.Context) error {
 		log.Println("load manifest (continuing without delete detection):", err)
 		manifest = NewManifest()
 	}
-	// A park the last run did not finish must be undone before Reconcile
-	// compares the trees: the parked mirror copies differ from the Claude ones.
+	// A rebase or merge a crash left stopped holds conflict markers: abort it
+	// before anything is staged. Then a park the last run did not finish must
+	// be undone before Reconcile compares the trees: the parked mirror copies
+	// differ from the Claude ones.
+	if err := abortInterrupted(repo); err != nil {
+		log.Println("abort interrupted rebase or merge:", newPathGuard(l.Cfg).Err(err))
+	}
 	if err := finishParked(repo, roots); err != nil {
 		log.Println("finish parked files:", newPathGuard(l.Cfg).Err(err))
 	}
@@ -228,6 +233,11 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	// the restore error below) is stripped of denylisted names.
 	g := newPathGuard(l.Cfg)
 	defer func() { err = g.Err(err) }()
+	// A rebase or merge a crash left stopped holds conflict markers: it goes
+	// before anything is staged, whether or not anything is parked.
+	if err := abortInterrupted(repo); err != nil {
+		return fmt.Errorf("abort interrupted rebase or merge: %w", err)
+	}
 	// A park an earlier cycle (or a crashed run) did not finish comes first:
 	// nothing may be committed, or parked over, while files are still away.
 	if err := finishParked(repo, roots); err != nil {

@@ -297,26 +297,44 @@ func (r *Repo) Pull(branch string) error {
 // RebaseInProgress reports whether a rebase is stopped in this work-tree, as a
 // conflicting `pull --rebase` leaves it.
 func (r *Repo) RebaseInProgress() bool {
-	for _, name := range []string{"rebase-merge", "rebase-apply"} {
-		out, err := r.Run("rev-parse", "--git-path", name)
-		p := strings.TrimSpace(out)
-		if err != nil || p == "" {
-			continue
-		}
-		if !filepath.IsAbs(p) {
-			p = filepath.Join(r.Dir, p) // relative to the -C directory
-		}
-		if _, err := os.Stat(p); err == nil {
-			return true
-		}
+	return r.gitPathExists("rebase-merge") || r.gitPathExists("rebase-apply")
+}
+
+// MergeInProgress reports whether a merge is unfinished (MERGE_HEAD exists).
+func (r *Repo) MergeInProgress() bool {
+	return r.gitPathExists("MERGE_HEAD")
+}
+
+// gitPathExists reports whether name exists in the git directory.
+func (r *Repo) gitPathExists(name string) bool {
+	out, err := r.Run("rev-parse", "--git-path", name)
+	p := strings.TrimSpace(out)
+	if err != nil || p == "" {
+		return false
 	}
-	return false
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(r.Dir, p) // relative to the -C directory
+	}
+	_, err = os.Stat(p)
+	return err == nil
+}
+
+// HasUnmerged reports whether the index holds unmerged (conflicted) entries.
+func (r *Repo) HasUnmerged() bool {
+	out, err := r.Run("ls-files", "-u", "-z")
+	return err == nil && out != ""
 }
 
 // RebaseAbort abandons the rebase in progress, restoring the branch and the
 // work-tree to where the pull found them.
 func (r *Repo) RebaseAbort() error {
 	_, err := r.Run("rebase", "--abort")
+	return err
+}
+
+// MergeAbort abandons the merge in progress.
+func (r *Repo) MergeAbort() error {
+	_, err := r.Run("merge", "--abort")
 	return err
 }
 

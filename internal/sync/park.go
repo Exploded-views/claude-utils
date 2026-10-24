@@ -31,7 +31,8 @@ import (
 // The order makes a crash at any point recoverable: the bytes are saved and
 // the state file is written (and fsynced) before the work-tree is touched, and
 // the state is deleted only after every path is restored. finishParked is also
-// run when the daemon starts, before Reconcile.
+// run when the daemon starts, before Reconcile. A rebase or merge left stopped is
+// aborted first (see abortInterrupted), parked or not.
 
 const (
 	parkFile    = "file"    // the path existed; its bytes are in .state/parked/<path>
@@ -196,10 +197,6 @@ func finishParked(repo *gitwt.Repo, roots Roots) error {
 	st, err := loadPark(repo)
 	if err != nil || st == nil {
 		return err
-	}
-	// A crash in the middle of the pull can leave a rebase stopped.
-	if repo.RebaseInProgress() {
-		_ = repo.RebaseAbort()
 	}
 	upstream := map[string]bool{}
 	postRev, _ := repo.Run("rev-parse", "HEAD")
