@@ -230,16 +230,34 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) error {
 		return nil
 	}
 
+	// Whatever CommitMirror left uncommitted (held back by the scrub, or
+	// everything when the denylist policy blocks the commit) is parked: the
+	// mirror copy is reset to HEAD so the pull runs on a clean tree, the pull
+	// is not propagated over the Claude copy, and the mirror is refilled from
+	// the Claude copy afterwards. The Claude copy is authoritative throughout.
+	held, err := parkUncommitted(repo)
+	if err != nil {
+		return fmt.Errorf("park held-back files: %w", err)
+	}
 	preRev, _ := repo.Run("rev-parse", "HEAD")
 	if err := repo.Pull(l.Branch); err != nil {
 		// Don't propagate first-time failure (no upstream yet); push will create it.
 		log.Println("pull:", err)
 	}
 	postRev, _ := repo.Run("rev-parse", "HEAD")
+	upstream := map[string]bool{}
 	if strings.TrimSpace(preRev) != strings.TrimSpace(postRev) && strings.TrimSpace(preRev) != "" {
-		if err := propagateChanges(repo, roots, strings.TrimSpace(preRev), strings.TrimSpace(postRev)); err != nil {
+		if err := propagateChanges(repo, roots, strings.TrimSpace(preRev), strings.TrimSpace(postRev), held); err != nil {
 			return fmt.Errorf("propagate: %w", err)
 		}
+		if out, err := repo.Run("diff", "--name-only", "-z", "--no-renames", strings.TrimSpace(preRev), strings.TrimSpace(postRev)); err == nil {
+			for _, p := range strings.Split(out, "\x00") {
+				upstream[p] = true
+			}
+		}
+	}
+	if err := unpark(roots, held, upstream); err != nil {
+		return fmt.Errorf("restore held-back files: %w", err)
 	}
 
 	if err := repo.Push(l.Branch); err != nil {
@@ -273,7 +291,7 @@ func remoteAndLocalIdle(repo *gitwt.Repo, branch string) (bool, error) {
 
 // propagateChanges replays the file changes between pre and post revisions
 // from the mirror back into Claude's tree.
-func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string) error {
+func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string, skip map[string]bool) error {
 	out, err := repo.Run("diff", "--name-status", pre+".."+post)
 	if err != nil {
 		return err
@@ -301,7 +319,7 @@ func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string) error {
 			path = fields[1]
 		}
 		hash, name, ok := splitMirrorPath(path)
-		if !ok {
+		if !ok || skip[path] {
 			continue
 		}
 		switch {
@@ -311,6 +329,79 @@ func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string) error {
 			if err := CopyToClaude(roots, hash, name); err != nil {
 				log.Printf("propagate %s: %v", path, err)
 			}
+		}
+	}
+	return nil
+}
+
+// parkUncommitted resets every uncommitted memory file in the mirror to HEAD
+// (removing it if HEAD lacks it) and returns the set of paths it touched.
+func parkUncommitted(repo *gitwt.Repo) (map[string]bool, error) {
+	out, err := repo.Run("status", "--porcelain", "-z", "--no-renames", "--untracked-files=all", "--", "projects")
+	if err != nil {
+		return nil, err
+	}
+	held := map[string]bool{}
+	var paths []string
+	for _, e := range strings.Split(out, "\x00") {
+		if len(e) < 4 {
+			continue
+		}
+		p := e[3:]
+		if _, _, ok := splitMirrorPath(p); ok && !held[p] {
+			held[p] = true
+			paths = append(paths, p)
+		}
+	}
+	if len(paths) == 0 {
+		return held, nil
+	}
+	tracked := map[string]bool{}
+	if ls, err := repo.Run(append([]string{"ls-tree", "-r", "--name-only", "HEAD", "--"}, paths...)...); err == nil {
+		for _, p := range strings.Split(ls, "\n") {
+			tracked[p] = true
+		}
+	}
+	var restore []string
+	for _, p := range paths {
+		if tracked[p] {
+			restore = append(restore, p)
+		} else if err := os.Remove(filepath.Join(repo.Dir, filepath.FromSlash(p))); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+	}
+	if len(restore) > 0 {
+		if _, err := repo.Run(append([]string{"checkout", "-q", "HEAD", "--"}, restore...)...); err != nil {
+			return nil, err
+		}
+	}
+	return held, nil
+}
+
+// unpark makes the mirror copy of each parked path match the Claude copy
+// again, so the next CommitMirror re-checks the user's version. If the pull
+// changed a parked path, the incoming version is kept beside it as a
+// .from-remote-* backup (as Reconcile does), since committing the user's
+// version later would otherwise silently revert it.
+func unpark(roots Roots, held, upstream map[string]bool) error {
+	for p := range held {
+		hash, name, _ := splitMirrorPath(p)
+		mp := filepath.Join(roots.Mirror, hash, "memory", name)
+		if upstream[p] {
+			if b, err := os.ReadFile(mp); err == nil {
+				backup := fmt.Sprintf("%s.from-remote-%s", mp, randSuffix())
+				if err := writeAtomic(backup, b); err != nil {
+					return err
+				}
+				log.Printf("scrub: a held-back file changed upstream; incoming copy kept as %s", filepath.Base(backup))
+			}
+		}
+		err := CopyToMirror(roots, hash, name)
+		if errors.Is(err, fs.ErrNotExist) {
+			err = RemoveFromMirror(roots, hash, name)
+		}
+		if err != nil {
+			return err
 		}
 	}
 	return nil
