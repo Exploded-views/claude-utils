@@ -93,3 +93,23 @@ func TestPark_PullTickReconcilesAfterParkFinishes(t *testing.T) {
 		t.Errorf("Reconcile did not run: %q, %v", got, ok)
 	}
 }
+
+// A stuck MEMORY.md (3 failed restores) is set aside. The mirror copy then
+// holds the HEAD version, so the Claude copy is copied over it: Reconcile must
+// not merge a section the user removed back in.
+func TestPark_StuckMemoryIndexNotResurrectedAfterSetAside(t *testing.T) {
+	f := unfinishedParkFixture(t)
+	captureLog(t)
+	for i := 0; i < 5; i++ {
+		f.loop.pullTick(f.repo, f.roots)
+	}
+	if parkedOnDisk(f) {
+		t.Fatal("park still unfinished after 5 cycles")
+	}
+	if got, _ := f.claudeCopy("MEMORY.md"); strings.Contains(got, "## Old") {
+		t.Errorf("removed MEMORY.md section resurrected in the Claude copy after set-aside")
+	}
+	if m, _ := os.ReadFile(filepath.Join(f.roots.Mirror, "p1", "memory", "MEMORY.md")); strings.Contains(string(m), "## Old") {
+		t.Errorf("mirror copy still holds the removed section")
+	}
+}

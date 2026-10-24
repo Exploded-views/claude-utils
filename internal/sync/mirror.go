@@ -170,6 +170,10 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 
 			case cExists && mExists && !bytes.Equal(cBytes, mBytes):
 				if name == "MEMORY.md" {
+					// The base is "" on purpose. The mirror copy is normally
+					// HEAD's, and a base equal to it would make every section
+					// "unchanged" on that side: the Claude copy would win
+					// outright and the peer's sections would be dropped.
 					merged, _ := merge.Merge("", string(cBytes), string(mBytes))
 					if err := writeAtomic(cp, []byte(merged)); err != nil {
 						return rep, err

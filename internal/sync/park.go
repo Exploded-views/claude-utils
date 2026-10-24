@@ -275,6 +275,7 @@ func finishParked(repo *gitwt.Repo, roots Roots) error {
 			if qerr != nil {
 				return errors.Join(append(errs, qerr)...)
 			}
+			refreshMirror(roots, stuck)
 			log.Printf("PARKED FILES STUCK: %d path(s) could not be restored in %d cycles; their saved bytes were moved to %s, see the docs to recover them", len(stuck), maxRestoreFailures, dir)
 		}
 		if len(still) == 0 {
@@ -370,6 +371,33 @@ func quarantinePaths(repo *gitwt.Repo, paths []parkedPath) (string, error) {
 		return "", err
 	}
 	return filepath.ToSlash(filepath.Join(manifestStateDir, filepath.Base(dir))), nil
+}
+
+// refreshMirror makes the mirror copy of each set-aside memory path match its
+// Claude copy, which is authoritative (removed if the Claude copy is gone). The
+// mirror copy is HEAD's version, since the park reset it; left alone, a
+// Reconcile would merge it back into the Claude copy, bringing back a MEMORY.md
+// section the user had removed. A failure is only logged: the Claude copy is
+// untouched, and the next cycle's watcher event or Reconcile syncs it anyway.
+// The log gives the count only, as a path may match the denylist.
+func refreshMirror(roots Roots, paths []parkedPath) {
+	failed := 0
+	for _, e := range paths {
+		hash, name, ok := splitMirrorPath(e.Path)
+		if !ok {
+			continue
+		}
+		err := CopyToMirror(roots, hash, name)
+		if errors.Is(err, fs.ErrNotExist) {
+			err = RemoveFromMirror(roots, hash, name)
+		}
+		if err != nil {
+			failed++
+		}
+	}
+	if failed > 0 {
+		log.Printf("could not refresh the mirror copy of %d set-aside file(s)", failed)
+	}
 }
 
 // restoreParked puts one parked path back, from its saved bytes. It reports
