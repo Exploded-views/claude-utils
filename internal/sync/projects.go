@@ -140,6 +140,7 @@ type RemoteMap struct {
 	dirty  bool              // cache changed since it was last saved
 
 	vanished map[string]string // key -> folder whose claim was just released
+	join     map[string]bool   // folders that gained their key and are not joined to its notes yet
 }
 
 // NewRemoteMap loads the per-PC cache and resolves every project folder.
@@ -149,7 +150,7 @@ func NewRemoteMap(syncDir, claudeRoot string) (*RemoteMap, error) {
 		return nil, err
 	}
 	m := &RemoteMap{syncDir: syncDir, claudeRoot: claudeRoot, Lookup: gitOrigin, Why: gitFailure, cache: c,
-		keys: map[string]string{}, owner: map[string]string{}, warned: map[string]bool{}, failed: map[string]bool{}, denied: map[string]bool{}, vanished: map[string]string{}}
+		keys: map[string]string{}, owner: map[string]string{}, warned: map[string]bool{}, failed: map[string]bool{}, denied: map[string]bool{}, vanished: map[string]string{}, join: map[string]bool{}}
 	m.Refresh()
 	return m, nil
 }
@@ -234,6 +235,9 @@ func (m *RemoteMap) Key(hash string) string {
 	return k
 }
 
+// joined records that the folder's notes have been merged with its key's.
+func (m *RemoteMap) joined(hash string) { delete(m.join, hash) }
+
 // MemoryDir is the repo-side memory directory for a remote key.
 func (m *RemoteMap) MemoryDir(key string) string {
 	return filepath.Join(m.syncDir, remotesDir, filepath.FromSlash(key), "memory")
@@ -273,6 +277,11 @@ func (m *RemoteMap) resolve(hash string) string {
 	prev, had := m.cache.Projects[hash]
 	e := prev
 	key := m.claim(hash, m.wantedKey(hash, &e))
+	if key != "" && key != lastKey(prev) {
+		m.join[hash] = true // a new claim, a key change or a moved claim
+	} else if key == "" {
+		delete(m.join, hash)
+	}
 	e.LastKey = key
 
 	m.keys[hash] = key

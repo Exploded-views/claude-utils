@@ -196,6 +196,11 @@ func (l *Loop) handleEvent(watcher *fsnotify.Watcher, roots Roots, ev fsnotify.E
 	if shouldIgnoreFile(name) {
 		return false, nil
 	}
+	// A folder that has just gained a remote key is joined to the notes under
+	// that key before anything of its own reaches them.
+	if err := roots.JoinIfNeeded(hash); err != nil {
+		return false, fmt.Errorf("join %s: %w", hash, err)
+	}
 
 	switch {
 	case ev.Op&(fsnotify.Create|fsnotify.Write) != 0:
@@ -293,6 +298,10 @@ func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string) error {
 	apply := func(path string, deleted bool) {
 		hash, name, ok := claudeFolderFor(roots, path)
 		if !ok {
+			return
+		}
+		if err := roots.JoinIfNeeded(hash); err != nil {
+			log.Printf("propagate %s: join: %v", path, err)
 			return
 		}
 		if deleted {

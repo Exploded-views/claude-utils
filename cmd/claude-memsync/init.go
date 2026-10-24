@@ -253,7 +253,8 @@ func writeGitattributes(syncDir string) error {
 // embeds machine-specific paths (e.g. MergeDriverPath), so it must NOT be
 // shared across workstations; each PC writes its own at init time. Likewise,
 // daemon.pid is runtime state and *.from-remote-* are local conflict backups
-// surfaced for the user — none of these should propagate.
+// surfaced for the user (*.local-before-join-* is the same for a folder that
+// just joined a remote key) — none of these should propagate.
 func writeGitignore(syncDir string) error {
 	path := filepath.Join(syncDir, ".gitignore")
 	content := `# Managed by claude-memsync — local-only daemon state, must not sync.
@@ -263,6 +264,7 @@ daemon.pid
 *.tmp
 *.tmp.*
 *.from-remote-*
+*.local-before-join-*
 # Distilled catalog index is a derived artifact; each PC regenerates it locally
 # from the synced entry files (avoids merge conflicts on the generated table).
 distilled/DISTILLED.md

@@ -85,3 +85,21 @@ func TestResolveProjectKey_WarnsWhenTheExistingConfigCannotBeLoaded(t *testing.T
 		t.Errorf("flag: %q, warning %q", got, out.String())
 	}
 }
+
+// Local conflict backups never reach the sync repo: the one a join makes
+// (.local-before-join-*) as much as the one Reconcile makes (.from-remote-*).
+func TestWriteGitignore_ExcludesLocalBackups(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeGitignore(dir); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"*.from-remote-*", "*.local-before-join-*"} {
+		if !strings.Contains(string(b), want+"\n") {
+			t.Errorf(".gitignore lacks %q:\n%s", want, b)
+		}
+	}
+}

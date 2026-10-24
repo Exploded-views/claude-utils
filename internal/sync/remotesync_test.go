@@ -64,7 +64,7 @@ func files(t *testing.T, dir string) []string {
 	}
 	var out []string
 	for _, e := range es {
-		if !e.IsDir() && !strings.HasPrefix(e.Name(), ".") && !strings.Contains(e.Name(), ".from-remote-") {
+		if !e.IsDir() && !strings.HasPrefix(e.Name(), ".") && !isBackupName(e.Name()) {
 			out = append(out, e.Name())
 		}
 	}
@@ -226,6 +226,118 @@ func TestRemoteSync_DeleteAndRmRfAreTheSameAsInPathMode(t *testing.T) {
 				t.Errorf("rm -rf (reconcile): mirror = %v, want empty", got)
 			}
 		})
+	}
+}
+
+// A folder that gains a key is joined to the notes under it, not reconciled
+// with them: the shared side wins, nothing is deleted, and the manifest says
+// nothing about what the folder had.
+func TestRemoteSync_JoinKeepsSharedNotesAndSavesTheLocalOnes(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	b := newMachine(t, "bob")
+	appA := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(appA, "MEMORY.md", "# Mem\n\n## From A\na\n")
+	a.write(appA, "same.md", "same\n")
+	a.write(appA, "diff.md", "shared\n")
+	a.write(appA, "only-shared.md", "s\n")
+	a.sync()
+
+	b.pullFrom(a)
+	appB := mkRepo(t, filepath.Join(b.home, "code", "app"), "git@github.com:acme/app.git")
+	b.write(appB, "MEMORY.md", "# Mem\n\n## From B\nb\n")
+	b.write(appB, "same.md", "same\n")
+	b.write(appB, "diff.md", "local\n")
+	b.write(appB, "only-local.md", "l\n")
+	// The manifest remembers a file the folder no longer has; that is not a delete.
+	man := NewManifest()
+	man.Add(b.hash(appB) + "/memory/only-shared.md")
+	if err := man.Save(b.stateDir()); err != nil {
+		t.Fatal(err)
+	}
+	rep := b.sync()
+
+	shared := remoteDir(b.cfg.SyncDir, appKey)
+	if !eq(files(t, shared), "MEMORY.md", "diff.md", "only-local.md", "only-shared.md", "same.md") {
+		t.Fatalf("shared = %v", files(t, shared))
+	}
+	if got := readFile(t, filepath.Join(shared, "diff.md")); got != "shared\n" {
+		t.Errorf("shared diff.md = %q, want the shared version", got)
+	}
+	if got, _ := b.read(appB, "diff.md"); got != "shared\n" {
+		t.Errorf("local diff.md = %q, want the shared version", got)
+	}
+	idx := readFile(t, filepath.Join(shared, "MEMORY.md"))
+	if !strings.Contains(idx, "From A") || !strings.Contains(idx, "From B") {
+		t.Errorf("MEMORY.md was not merged: %q", idx)
+	}
+	if got, ok := b.read(appB, "only-shared.md"); !ok || got != "s\n" {
+		t.Errorf("a shared-only file must reach Claude, got %q,%v", got, ok)
+	}
+	backups, _ := filepath.Glob(filepath.Join(shared, "diff.md.local-before-join-*"))
+	if len(backups) != 1 || readFile(t, backups[0]) != "local\n" {
+		t.Errorf("want the local diff.md saved once as .local-before-join-*, got %v", backups)
+	}
+	if len(rep.BackedUp) != 1 {
+		t.Errorf("report.BackedUp = %v", rep.BackedUp)
+	}
+
+	// The join happens once: afterwards a delete is a delete again.
+	b.remove(appB, "only-local.md")
+	b.sync()
+	if !eq(files(t, shared), "MEMORY.md", "diff.md", "only-shared.md", "same.md") {
+		t.Errorf("after the join a local delete must reach the shared notes, got %v", files(t, shared))
+	}
+}
+
+// A clone whose Claude folder appears while the daemon runs is joined to the
+// shared notes before its first watcher event, so its first MEMORY.md cannot
+// overwrite the shared index.
+func TestRemoteSync_NewFolderWhileRunningIsJoinedBeforeItsFirstEvent(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	b := newMachine(t, "bob")
+	appA := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(appA, "MEMORY.md", "# Mem\n\n## From A\na\n")
+	a.write(appA, "topic.md", "t\n")
+	a.sync()
+
+	b.pullFrom(a)
+	roots, err := NewRoots(b.cfg) // daemon started; the clone does not exist yet
+	if err != nil {
+		t.Fatal(err)
+	}
+	appB := mkRepo(t, filepath.Join(b.home, "code", "app"), "git@github.com:acme/app.git")
+	b.write(appB, "MEMORY.md", "# Mem\n\n## From B\nb\n") // Claude's first memory in the new clone
+	l := &Loop{Cfg: b.cfg}
+	ev := fsnotify.Event{Name: filepath.Join(b.claude, b.hash(appB), "memory", "MEMORY.md"), Op: fsnotify.Create}
+	if _, err := l.handleEvent(nil, roots, ev); err != nil {
+		t.Fatal(err)
+	}
+	idx := readFile(t, filepath.Join(remoteDir(b.cfg.SyncDir, appKey), "MEMORY.md"))
+	if !strings.Contains(idx, "From A") {
+		t.Errorf("shared MEMORY.md lost A's section: %q", idx)
+	}
+}
+
+// Moving a claim the documented way joins the new holder to the shared notes:
+// its stale, same-named note does not replace the current one.
+func TestRemoteSync_MovingTheClaimDoesNotLetStaleNotesWin(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	first := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	second := mkRepo(t, filepath.Join(a.home, "src", "app-copy"), "git@github.com:acme/app.git")
+	a.write(first, "topic.md", "current\n")
+	a.write(second, "topic.md", "stale\n")
+	a.sync()
+	if got := readFile(t, filepath.Join(remoteDir(a.cfg.SyncDir, appKey), "topic.md")); got != "current\n" {
+		t.Fatalf("setup: shared topic.md = %q", got)
+	}
+	setCacheKey(t, a, first, "path")
+	setCacheKey(t, a, second, appKey)
+	a.sync()
+	if got := readFile(t, filepath.Join(remoteDir(a.cfg.SyncDir, appKey), "topic.md")); got != "current\n" {
+		t.Errorf("shared topic.md regressed to %q after the claim moved", got)
 	}
 }
 
@@ -609,4 +721,24 @@ func (m *machine) pullFrom(o *machine) {
 			m.t.Fatal(err)
 		}
 	}
+}
+
+func setCacheKey(t *testing.T, m *machine, projectDir, key string) {
+	t.Helper()
+	c, err := LoadProjectCache(m.cfg.SyncDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := c.Projects[m.hash(projectDir)]
+	e.Key = key
+	c.Projects[m.hash(projectDir)] = e
+	if err := c.Save(m.cfg.SyncDir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readFile(t *testing.T, p string) string {
+	t.Helper()
+	b, _ := os.ReadFile(p)
+	return string(b)
 }

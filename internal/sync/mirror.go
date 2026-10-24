@@ -119,7 +119,7 @@ type SyncReport struct {
 	CopiedToMirror    []string // relative paths copied Claude → mirror
 	CopiedToClaude    []string // relative paths copied mirror → Claude
 	Merged            []string // MEMORY.md paths semantically merged
-	BackedUp          []string // mirror copies preserved as .from-remote-* on collision
+	BackedUp          []string // copies preserved as .from-remote-* (mirror) or .local-before-join-* (Claude's) on collision
 	RemovedFromMirror []string // user-deleted files removed from mirror (manifest-detected)
 }
 
@@ -161,6 +161,12 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 		if err := os.MkdirAll(mirrorMem, 0700); err != nil {
 			return rep, err
 		}
+		if r.joinPending(hash) {
+			if err := r.joinFolder(hash, &rep); err != nil {
+				return rep, err
+			}
+			continue
+		}
 
 		files := map[string]struct{}{}
 		// Walk Claude side
@@ -180,7 +186,7 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 				if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 					continue
 				}
-				if strings.Contains(e.Name(), ".from-remote-") {
+				if isBackupName(e.Name()) {
 					continue
 				}
 				files[e.Name()] = struct{}{}
@@ -254,6 +260,9 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 // CopyToMirror copies a single Claude-side file into the mirror, creating
 // parent dirs as needed. Used by the watcher loop on a file change.
 func CopyToMirror(r Roots, hash, name string) error {
+	if err := r.JoinIfNeeded(hash); err != nil {
+		return err
+	}
 	src := filepath.Join(r.Claude, hash, "memory", name)
 	dst := filepath.Join(r.MirrorMemDir(hash), name)
 	b, err := os.ReadFile(src)
@@ -284,6 +293,9 @@ func CopyToClaude(r Roots, hash, name string) error {
 // RemoveFromMirror handles a Claude-side delete: remove the corresponding
 // mirror file so the next commit propagates the deletion.
 func RemoveFromMirror(r Roots, hash, name string) error {
+	if err := r.JoinIfNeeded(hash); err != nil {
+		return err
+	}
 	target := filepath.Join(r.MirrorMemDir(hash), name)
 	err := os.Remove(target)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -291,6 +303,134 @@ func RemoveFromMirror(r Roots, hash, name string) error {
 	}
 	return err
 }
+
+// backupMarkers are in the name of the local-only conflict backups: the mirror
+// copy Reconcile replaced (.from-remote-*) and the Claude copy a join replaced
+// (.local-before-join-*). Both are git-ignored and never synced.
+var backupMarkers = []string{".from-remote-", ".local-before-join-"}
+
+func isBackupName(name string) bool {
+	for _, m := range backupMarkers {
+		if strings.Contains(name, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// joinPending reports whether the folder has just gained its remote key (a new
+// claim, a key change, a claim moved to it) and not yet been joined to the
+// notes already stored under that key.
+func (r Roots) joinPending(hash string) bool {
+	if r.Remote == nil || r.Remote.Key(hash) == "" {
+		return false
+	}
+	return r.Remote.join[hash]
+}
+
+// JoinIfNeeded joins the folder to its key's notes if it just gained the key.
+// Every path that touches a folder's mirror directory calls it first, so the
+// folder's own, possibly diverged, notes never overwrite the shared ones.
+func (r Roots) JoinIfNeeded(hash string) error {
+	if !r.joinPending(hash) {
+		return nil
+	}
+	var rep SyncReport
+	return r.joinFolder(hash, &rep)
+}
+
+// joinFolder reconciles one folder that has just gained a remote key with the
+// notes already under that key, which another PC (or this folder's own earlier
+// life under another key) may have written. Unlike Reconcile the shared side
+// is authoritative and nothing is ever deleted:
+//
+//   - MEMORY.md is merged with internal/merge and written to both sides;
+//   - another file that differs keeps the shared version in both places and
+//     the local one is saved next to the shared copy as
+//     <name>.local-before-join-<random> (git-ignored);
+//   - a file only the shared side has is copied into Claude;
+//   - a file only the folder has is copied into the shared side.
+//
+// The manifest is not consulted: the folder has no history with this key, so
+// "missing here" says nothing about a delete.
+func (r Roots) joinFolder(hash string, rep *SyncReport) error {
+	claudeMem := filepath.Join(r.Claude, hash, "memory")
+	mirrorMem := r.MirrorMemDir(hash)
+	if err := os.MkdirAll(mirrorMem, 0700); err != nil {
+		return err
+	}
+	names := map[string]struct{}{}
+	for _, dir := range []string{claudeMem, mirrorMem} {
+		entries, err := os.ReadDir(dir)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read %s: %w", dir, err)
+		}
+		for _, e := range entries {
+			if e.IsDir() || strings.HasPrefix(e.Name(), ".") || isBackupName(e.Name()) {
+				continue
+			}
+			names[e.Name()] = struct{}{}
+		}
+	}
+	sorted := make([]string, 0, len(names))
+	for n := range names {
+		sorted = append(sorted, n)
+	}
+	sort.Strings(sorted)
+
+	for _, name := range sorted {
+		cp, mp := filepath.Join(claudeMem, name), filepath.Join(mirrorMem, name)
+		rel := filepath.ToSlash(filepath.Join(hash, "memory", name))
+		cExists, cBytes := readIfExists(cp)
+		mExists, mBytes := readIfExists(mp)
+		switch {
+		case cExists && !mExists:
+			if err := writeAtomic(mp, cBytes); err != nil {
+				return fmt.Errorf("write mirror %s: %w", mp, err)
+			}
+			rep.CopiedToMirror = append(rep.CopiedToMirror, rel)
+		case !cExists && mExists:
+			if !r.mayImport(hash, name) {
+				continue
+			}
+			if err := os.MkdirAll(claudeMem, 0700); err != nil {
+				return err
+			}
+			if err := writeAtomic(cp, mBytes); err != nil {
+				return fmt.Errorf("write claude %s: %w", cp, err)
+			}
+			rep.CopiedToClaude = append(rep.CopiedToClaude, rel)
+		case bytes.Equal(cBytes, mBytes):
+		case name == "MEMORY.md":
+			merged, _ := merge.Merge("", string(cBytes), string(mBytes))
+			if err := writeAtomic(cp, []byte(merged)); err != nil {
+				return err
+			}
+			if err := writeAtomic(mp, []byte(merged)); err != nil {
+				return err
+			}
+			rep.Merged = append(rep.Merged, rel)
+		default:
+			backup := fmt.Sprintf("%s.local-before-join-%s", mp, randSuffix())
+			if err := writeAtomic(backup, cBytes); err != nil {
+				return err
+			}
+			if err := writeAtomic(cp, mBytes); err != nil {
+				return err
+			}
+			rep.BackedUp = append(rep.BackedUp, rel)
+		}
+	}
+	r.Remote.joined(hash)
+	return nil
+}
+
+// mayImport reports whether a file that only the mirror has may be copied into
+// the folder.
+func (r Roots) mayImport(hash, name string) bool { return true }
 
 func readIfExists(p string) (bool, []byte) {
 	b, err := os.ReadFile(p)
