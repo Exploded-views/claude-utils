@@ -273,6 +273,54 @@ func TestRemoteMap_AmbiguousDecodeFallsBackToPathKeyAndRecordsCandidates(t *test
 	}
 }
 
+// The log lines about one folder name the Claude folder and keys only: a
+// later change redacts them in one place, and a path would be a leak there.
+func TestRemoteMap_FolderLogLinesCarryNoPaths(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	dashed := mkRepo(t, filepath.Join(a.home, "src", "my-app"), "git@github.com:acme/one.git")
+	mkRepo(t, filepath.Join(a.home, "src", "my.app"), "git@github.com:acme/two.git")
+	logs := captureLog(t)
+	a.write(dashed, "note.md", "hi\n")
+	a.remoteMap()
+	out := logs.String()
+	if !strings.Contains(out, a.hash(dashed)) || !strings.Contains(out, "matches 2 directories") {
+		t.Fatalf("want the candidates line for the folder, got %q", out)
+	}
+	if strings.Contains(out, a.cfg.SyncDir) || strings.Contains(out, a.home) {
+		t.Errorf("the candidates line leaks a path: %q", out)
+	}
+}
+
+// A cache that could not be saved is still dirty: the next save retries it.
+func TestRemoteMap_FailedSaveIsRetried(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.open(app)
+	m := a.remoteMap()
+	// Forget the saved cache, then make .state/ unusable so the save fails.
+	if err := os.RemoveAll(filepath.Join(a.cfg.SyncDir, ".state")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.cfg.SyncDir, ".state"), []byte("in the way"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	logs := captureLog(t)
+	m.cache.Projects = map[string]ProjectEntry{}
+	m.Refresh()
+	if !strings.Contains(logs.String(), "save cache") {
+		t.Fatalf("setup: the save should have failed, log = %q", logs.String())
+	}
+	if err := os.Remove(filepath.Join(a.cfg.SyncDir, ".state")); err != nil {
+		t.Fatal(err)
+	}
+	m.save()
+	if _, err := os.Stat(ProjectCachePath(a.cfg.SyncDir)); err != nil {
+		t.Errorf("the failed save was not retried: %v", err)
+	}
+}
+
 func TestRemoteMap_AmbiguousButSameRemoteResolves(t *testing.T) {
 	gitEnv(t)
 	a := newMachine(t, "alice")

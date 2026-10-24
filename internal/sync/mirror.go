@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -84,8 +83,8 @@ func (r Roots) LogSuperseded() {
 	for _, h := range hashes {
 		key := r.Remote.keys[h]
 		if key != "" && isDir(filepath.Join(r.Mirror, h, "memory")) {
-			log.Printf("remote keys: %s is now stored as remotes/%s; its old copy projects/%s/memory in the sync repo is no longer updated",
-				h, key, h)
+			logFolder(h, "now stored as remotes/%s; its old copy projects/%s/memory in the sync repo is no longer updated",
+				key, h)
 		}
 	}
 }

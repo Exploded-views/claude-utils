@@ -107,6 +107,13 @@ func (c *ProjectCache) Save(syncDir string) error {
 	return writeAtomic(ProjectCachePath(syncDir), b)
 }
 
+// logFolder is how every log line about one project folder is written. It
+// prints the Claude folder name and keys, never a directory, and callers pass
+// nothing else: that way the lines can be redacted in this one place.
+func logFolder(folder, format string, args ...any) {
+	log.Printf("remote keys: %s: "+format, append([]any{folder}, args...)...)
+}
+
 // RemoteMap decides, for each local Claude project folder, whether it is
 // stored under a remote key and which one.
 //
@@ -259,8 +266,8 @@ func (m *RemoteMap) claim(hash, want string) string {
 	if h, taken := m.owner[want]; taken && h != hash {
 		if !m.denied[hash] {
 			m.denied[hash] = true
-			log.Printf("remote keys: %s would be stored as remotes/%s, which %s already holds on this PC; keeping its path key",
-				hash, want, h)
+			logFolder(hash, "would be stored as remotes/%s, which %s already holds on this PC; keeping its path key",
+				want, h)
 		}
 		return ""
 	}
@@ -327,8 +334,8 @@ func (m *RemoteMap) wantedKey(hash string, e *ProjectEntry) string {
 				// spell where the name is ambiguous.
 				e.Candidates = cands
 				if !reflect.DeepEqual(prevCandidates, cands) {
-					log.Printf("remote keys: %s matches %d directories with different remotes; keeping its previous key (set \"dir\" in %s to choose)",
-						hash, len(cands), ProjectCachePath(m.syncDir))
+					logFolder(hash, "matches %d directories with different remotes; keeping its previous key (set \"dir\" in .state/projects.json to choose)",
+						len(cands))
 				}
 			}
 		}
@@ -353,8 +360,7 @@ func (m *RemoteMap) wantedKey(hash string, e *ProjectEntry) string {
 			// its path key, which forks its notes from other PCs until
 			// this is fixed. Say so once, without the path.
 			m.failed[hash] = true
-			log.Printf("remote keys: %s: cannot read the git origin (%s); using its path key until git answers",
-				hash, m.Why(dir))
+			logFolder(hash, "cannot read the git origin (%s); using its path key until git answers", m.Why(dir))
 		}
 	}
 	return key
@@ -365,8 +371,9 @@ func (m *RemoteMap) save() {
 	if !m.dirty {
 		return
 	}
-	m.dirty = false
 	if err := m.cache.Save(m.syncDir); err != nil {
-		log.Println("remote keys: save cache:", err)
+		log.Println("remote keys: save cache:", err) // still dirty: the next save retries
+		return
 	}
+	m.dirty = false
 }
