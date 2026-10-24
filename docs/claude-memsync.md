@@ -352,23 +352,41 @@ has no `memory/`. memsync therefore:
   answer) keeps syncing the notes it already has but is never filled in
 
 What's left is the case of two real clones of one remote on the same PC, each
-with its own `memory/`. They share the single repo-side folder, and the
-committed copy in the sync repo is the merge base between them:
+with its own `memory/`. They share the single repo-side folder. The merge base
+between them is **this PC's own record** of the content it last synced for each
+shared file (`~/.claudesync/.state/sync-state.json`, a hash per file, plus the
+`MEMORY.md` text itself under `.state/base/`), not the sync repo's last commit:
+HEAD can be ahead of the clones (a pull that was not yet copied into them, after
+a crash) or behind them (a file held back from commits), and judging against it
+would revert remote edits, deletes and pruning. Both the mirror copy (where a
+pull or the watcher leaves its result) and every clone are compared with the
+record:
 
-- a clone whose copy still equals the base is stale: it takes the other
-  clone's change, with no backup
-- a file the base or that clone's manifest entry knew about, and that the clone
-  no longer has, counts as deleted there, and the delete is applied to the
-  other clones and the repo. The one exception is a file another clone has
-  edited since the base: the edit is kept and restored
+- a copy that equals the record is stale: it takes the changed side, with no
+  backup
+- a file counts as deleted when the repo-side copy is gone, or a clone lacks a
+  file that its manifest entry knew about, and no copy has changed since the
+  record. The delete is applied to the other clones and the repo. A copy that
+  differs from the record is a real edit, so the edit is kept and restored to
+  whoever lost it
 - a `MEMORY.md` section removed in one clone stays removed
-- only a real divergence (both clones edited a file since the base) uses the
-  collision rules: `MEMORY.md` is merged three-way, and for any other file the
-  most recently modified copy wins and the other is saved as
-  `<name>.from-remote-<random>` next to the repo-side copy
+- only a real divergence (several copies changed since the record, including a
+  pulled change meeting a local edit) uses the collision rules: `MEMORY.md` is
+  merged three-way against the recorded text, and for any other file the most
+  recently modified copy wins and the other is saved as
+  `<name>.from-remote-<random>` next to the repo-side copy (a pulled copy counts
+  as the oldest)
 
-A file that isn't in the last commit yet has no base, so the clones' copies of
-it are unioned instead.
+The record is advanced at the end of every reconcile and for each file a pull
+brings in, after the clones hold it. So if the daemon dies between the pull and
+the copy into the clones, the next start compares the pulled work-tree with the
+record and finishes the job.
+
+With no record for a file (first run, or a file this PC never synced) nothing
+can be judged stale or deleted, so nothing is ever deleted: the copies are
+unioned, `MEMORY.md` is merged with an empty base, and for any other file the
+newest wins and the others are backed up. A clone that appears later is the same
+case: what it lacks was never received, not deleted.
 
 `*.from-remote-*` backups, here and in cross-PC collisions, are git-ignored.
 They exist only on the PC that produced them, are never synced, and are never
@@ -402,15 +420,26 @@ user delete and removed from the mirror; the next push propagates it. A file
 that's in the mirror, missing from Claude, but **not** in the manifest is treated
 as an inbound new file from another PC and copied into Claude.
 
+In `remote` mode, where several clones share a folder, the same decision also
+takes this PC's record of what it last synced into account (see
+[Worktrees and several clones](#worktrees-and-several-clones)): a delete never
+overrides an edit made since then.
+
 This means:
 
-- Delete a memory while the daemon is running → propagates immediately (watcher
-  catches it).
+- Delete a memory while the daemon is running → propagates when the change is
+  flushed (the watcher catches it; in `remote` mode it asks for a reconcile
+  instead of touching the repo, so a burst of deletes can be judged as a whole).
 - Delete a memory while the daemon is stopped → propagates on next startup
   (manifest-driven reconcile).
 - First-ever run on a PC has no manifest, so deletes can't be inferred from prior
   state. The daemon takes the safe path: never infer deletes, bring everything
   together. Subsequent runs work normally.
+- In `remote` mode, removing a clone's whole `memory/` directory, or its whole
+  project folder, is that clone leaving its group, not a delete of every file in
+  it: the shared notes stay in the repo and in the other clones. Once the
+  manifest has forgotten the folder, the next reconcile fills a folder that
+  still exists with the shared notes again.
 
 ## On-disk layout
 
@@ -426,6 +455,8 @@ This means:
     ├── .gitattributes                    # MEMORY.md merge=claude-memory-index
     ├── .gitignore                        # excludes config.json, .state/, etc.
     ├── .state/manifest.json              # per-PC delete-detection state
+    ├── .state/sync-state.json            # per-PC record of what was last synced per shared file (remote mode)
+    ├── .state/base/...                   # per-PC copy of each shared MEMORY.md at that point (merge base)
     ├── .state/projects.json              # per-PC folder->directory cache (remote mode)
     ├── distilled/                        # shared distilled-memory catalog
     │   ├── DISTILLED.md                  # derived index (gitignored)
