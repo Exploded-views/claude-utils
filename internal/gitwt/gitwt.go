@@ -303,16 +303,22 @@ func (r *Repo) Pull(branch string) error {
 }
 
 // Fetch does `git fetch origin <branch>`, which also moves origin/<branch>.
+// Ref logging is forced on, whatever the user's global config says: the
+// rebase's --fork-point reads origin/<branch>'s reflog.
 func (r *Repo) Fetch(branch string) error {
-	_, err := r.Run("fetch", "origin", branch)
+	_, err := r.Run("-c", "core.logAllRefUpdates=true", "fetch", "origin", branch)
 	return err
 }
 
-// RebaseOnto does `git rebase --autostash origin/<branch>`, the second half of
-// Pull. The rebase's reflog entries are named reflogAction, so that the
-// reflog says who started it (see ReflogSubjects).
+// RebaseOnto does `git rebase --fork-point --autostash origin/<branch>`, the
+// second half of Pull. --fork-point is what `git pull --rebase` uses: without
+// it, commits a force-push removed upstream (say, a purged secret) would be
+// replayed and pushed back. The rebase's reflog entries are named
+// reflogAction, so that the reflog says who started it (see ReflogSubjects);
+// ref logging is forced on so those entries exist.
 func (r *Repo) RebaseOnto(branch, reflogAction string) error {
-	_, err := r.run([]string{"GIT_REFLOG_ACTION=" + reflogAction}, nil, "rebase", "--autostash", "origin/"+branch)
+	_, err := r.run([]string{"GIT_REFLOG_ACTION=" + reflogAction}, nil,
+		"-c", "core.logAllRefUpdates=true", "rebase", "--fork-point", "--autostash", "origin/"+branch)
 	return err
 }
 
