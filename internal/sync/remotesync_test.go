@@ -456,12 +456,15 @@ func TestRemoteSync_KeyFlipDoesNotResurrectADelete(t *testing.T) {
 	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
 	a.write(app, "x.md", "x\n")
 	a.write(app, "z.md", "z\n")
-	a.sync() // projects/<hash> has x, z
+	a.sync()                      // projects/<hash> has x, z
+	a.commitSyncRepo("path mode") // a folder that leaves a directory with no commit yet has nothing to resurrect
 
 	a.cfg.ProjectKey = "remote"
 	a.sync() // remotes/<key> has x, z; the old copy stays
+	a.commitSyncRepo("remote mode")
 	a.remove(app, "z.md")
 	a.sync()
+	a.commitSyncRepo("deleted")
 	if !eq(files(t, remoteDir(a.cfg.SyncDir, appKey)), "x.md") {
 		t.Fatalf("setup: shared = %v", files(t, remoteDir(a.cfg.SyncDir, appKey)))
 	}
@@ -1389,5 +1392,120 @@ func TestRemoteSync_CrashBetweenClaimAndJoinStillJoinsOnRestart(t *testing.T) {
 	b.sync()
 	if _, err := os.Stat(filepath.Join(remoteDir(b.cfg.SyncDir, appKey), "diff.md")); err == nil {
 		t.Error("the joined folder's delete did not reach the shared notes")
+	}
+}
+
+// A PC switched back from remote to path imports from projects/<hash>/ only
+// what changed since the folder left it: a note deleted while in remote mode
+// does not come back from the old copy. A folder that never left behaves as in
+// path mode on main.
+func TestRemoteSync_SwitchingBackToPathDoesNotResurrectDeletedNotes(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	a.cfg.ProjectKey = "path"
+	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	plain := mkdirs(t, a.home, "notes")[0]
+	for _, d := range []string{app, plain} {
+		a.write(d, "x.md", "x\n")
+		a.write(d, "z.md", "z\n")
+	}
+	a.sync()
+	a.commitSyncRepo("path mode")
+
+	a.cfg.ProjectKey = "remote"
+	a.sync()
+	a.commitSyncRepo("remote mode")
+	a.remove(app, "z.md") // deleted while in remote mode; the old copy keeps it
+	a.sync()
+	a.commitSyncRepo("deleted")
+	if err := os.WriteFile(filepath.Join(a.pathDir(app), "new.md"), []byte("from a path-mode PC\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// A path-keyed folder that never left: its repo-only file is a note from another PC.
+	if err := os.WriteFile(filepath.Join(a.pathDir(plain), "peer.md"), []byte("p\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a.commitSyncRepo("a path-mode PC pushes")
+
+	a.cfg.ProjectKey = "path" // the switch back
+	a.sync()
+	a.sync()
+	if _, ok := a.read(app, "z.md"); ok {
+		t.Error("z.md was deleted in remote mode and is unchanged in the old copy: it must not come back")
+	}
+	if got, ok := a.read(app, "new.md"); !ok || got != "from a path-mode PC\n" {
+		t.Errorf("a file added to the old copy after the folder left must be imported, got %q,%v", got, ok)
+	}
+	if got, ok := a.read(plain, "peer.md"); !ok || got != "p\n" {
+		t.Errorf("a folder that never left must import repo-only files as before, got %q,%v", got, ok)
+	}
+}
+
+// A LeftAt anchor of "" (the sync repo had no commit when the folder left)
+// means everything in the directory is new: nothing could have been deleted
+// before the first commit.
+func TestRemoteSync_EmptyAnchorImportsEverything(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	a.cfg.ProjectKey = "path"
+	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(app, "x.md", "x\n")
+	a.sync() // no git repo in the sync dir: no HEAD
+	a.cfg.ProjectKey = "remote"
+	a.sync() // leaves projects/<hash>/memory with anchor ""
+	c, _ := LoadProjectCache(a.cfg.SyncDir)
+	if anchor, ok := c.Projects[a.hash(app)].LeftAt["projects/"+a.hash(app)+"/memory"]; !ok || anchor != "" {
+		t.Fatalf("setup: want an empty anchor, got %q,%v", anchor, ok)
+	}
+	if err := os.WriteFile(filepath.Join(a.pathDir(app), "other.md"), []byte("o\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	setCacheKey(t, a, app, "path")
+	a.sync()
+	if got, ok := a.read(app, "other.md"); !ok || got != "o\n" {
+		t.Errorf("an empty anchor must not block imports, got %q,%v", got, ok)
+	}
+}
+
+// Once the folder has re-joined a directory its LeftAt entry for it goes; with
+// a repo-only file the gate held back it stays, or the next reconcile would
+// take that file for a note from another PC.
+func TestRemoteSync_LeftAtIsClearedByARejoinThatRefusedNothing(t *testing.T) {
+	gitEnv(t)
+	flip := func(t *testing.T, deleteInPathMode bool) (*machine, string, ProjectEntry) {
+		a := newMachine(t, "alice")
+		app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+		a.write(app, "x.md", "x\n")
+		a.write(app, "z.md", "z\n")
+		a.sync()
+		a.commitSyncRepo("remote mode")
+		setCacheKey(t, a, app, "path") // leaves remotes/<key>/memory
+		a.sync()
+		if deleteInPathMode {
+			a.remove(app, "z.md")
+			a.sync()
+		}
+		setCacheKey(t, a, app, "") // and comes back: a rejoin
+		a.sync()
+		a.sync()
+		c, _ := LoadProjectCache(a.cfg.SyncDir)
+		return a, app, c.Projects[a.hash(app)]
+	}
+	dir := "remotes/" + appKey + "/memory"
+
+	a, app, e := flip(t, false)
+	if _, ok := e.LeftAt[dir]; ok {
+		t.Errorf("the rejoin refused nothing; LeftAt should be cleared: %v", e.LeftAt)
+	}
+	if _, ok := e.LeftAt["projects/"+a.hash(app)+"/memory"]; !ok {
+		t.Errorf("the other directory's entry must stay: %v", e.LeftAt)
+	}
+
+	a, app, e = flip(t, true)
+	if _, ok := e.LeftAt[dir]; !ok {
+		t.Errorf("a file was held back; LeftAt must stay: %v", e.LeftAt)
+	}
+	if _, ok := a.read(app, "z.md"); ok {
+		t.Error("z.md was deleted in path mode and came back from the shared notes")
 	}
 }

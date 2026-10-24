@@ -37,9 +37,11 @@ type ProjectEntry struct {
 	Candidates []string `json:"candidates,omitempty"`
 	// LeftAt records, per repo directory this folder used to be stored in
 	// ("projects/<hash>/memory", "remotes/<key>/memory"), the sync repo's HEAD
-	// when the folder left it ("" if that could not be read). A file only the
-	// repo has in a directory the folder comes back to is imported only if it
-	// changed since. Written by the daemon.
+	// when the folder left it ("" if the repo had no commit: everything in the
+	// directory then counts as new). A file only the repo has in a directory the
+	// folder comes back to is imported only if it changed since. An anchor that
+	// no longer resolves imports nothing. The entry for a remote directory goes
+	// when the folder re-joins it (see joined). Written by the daemon.
 	LeftAt map[string]string `json:"leftAt,omitempty"`
 	// JoinPending is set when the folder gains or changes its key and cleared
 	// once it has been joined to that key's notes (see Joining a key in the
@@ -125,8 +127,12 @@ func (c *ProjectCache) Save(syncDir string) error {
 }
 
 // logFolder is how every log line about one project folder is written. It
-// prints the Claude folder name and keys, never a directory, and callers pass
-// nothing else: that way the lines can be redacted in this one place.
+// prints the Claude folder name and keys, and callers pass nothing else (no
+// directory, no URL). The folder name is not free of paths: Claude derives it
+// from the project's absolute path, every character that is not a letter or
+// digit turned into '-', so it reveals that path in escaped form. Keeping the
+// formatting in this one place is what lets the lines be redacted or
+// changed together.
 func logFolder(folder, format string, args ...any) {
 	log.Printf("remote keys: %s: "+format, append([]any{folder}, args...)...)
 }
@@ -156,8 +162,8 @@ type RemoteMap struct {
 	denied map[string]bool   // folders already logged as refused a key, by folder name
 	dirty  bool              // cache changed since it was last saved
 
-	restored map[string]bool   // keys whose vanished holder's notes were restored from HEAD, until the holder's folder returns
-	join     map[string]bool   // folders that gained their key and are not joined to its notes yet
+	restored map[string]bool // keys whose vanished holder's notes were restored from HEAD, until the holder's folder returns
+	join     map[string]bool // folders that gained their key and are not joined to its notes yet
 
 	changed    map[string]map[string]bool // "anchor dir" -> paths git says changed since (nil: unknown)
 	diffFailed map[string]bool            // folders already logged as unable to compare, by folder name
@@ -169,9 +175,7 @@ func NewRemoteMap(syncDir, claudeRoot string) (*RemoteMap, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &RemoteMap{syncDir: syncDir, claudeRoot: claudeRoot, Lookup: gitOrigin, Why: gitFailure, cache: c,
-		keys: map[string]string{}, owner: map[string]string{}, warned: map[string]bool{}, failed: map[string]bool{}, denied: map[string]bool{}, restored: map[string]bool{}, join: map[string]bool{},
-		changed: map[string]map[string]bool{}, diffFailed: map[string]bool{}}
+	m := newRemoteMap(syncDir, claudeRoot, c)
 	for h, e := range c.Projects {
 		if e.JoinPending {
 			m.join[h] = true // claimed on an earlier run, never joined
@@ -179,6 +183,34 @@ func NewRemoteMap(syncDir, claudeRoot string) (*RemoteMap, error) {
 	}
 	m.Refresh()
 	return m, nil
+}
+
+func newRemoteMap(syncDir, claudeRoot string, c *ProjectCache) *RemoteMap {
+	return &RemoteMap{syncDir: syncDir, claudeRoot: claudeRoot, Lookup: gitOrigin, Why: gitFailure, cache: c,
+		keys: map[string]string{}, owner: map[string]string{}, warned: map[string]bool{}, failed: map[string]bool{}, denied: map[string]bool{}, restored: map[string]bool{}, join: map[string]bool{},
+		changed: map[string]map[string]bool{}, diffFailed: map[string]bool{}}
+}
+
+// newLeftGate is the part of a RemoteMap that path mode needs: it answers
+// mayImport for the folders the cache says left a repo directory (a PC that was
+// on remote and is back on path). nil if there is no cache or no folder has
+// left anywhere, which is every PC that never used remote keys: path mode then
+// is what it always was. It never resolves, claims or writes anything.
+func newLeftGate(syncDir string) *RemoteMap {
+	if _, err := os.Stat(ProjectCachePath(syncDir)); err != nil {
+		return nil
+	}
+	c, err := LoadProjectCache(syncDir)
+	if err != nil {
+		return nil
+	}
+	for _, e := range c.Projects {
+		if len(e.LeftAt) > 0 {
+			c.readOnly = true
+			return newRemoteMap(syncDir, "", c)
+		}
+	}
+	return nil
 }
 
 // Refresh re-resolves every project folder under the Claude root and saves
@@ -351,11 +383,35 @@ func (m *RemoteMap) Key(hash string) string {
 }
 
 // joined records that the folder's notes have been merged with its key's, and
-// saves that, so a restart does not join it again.
-func (m *RemoteMap) joined(hash string) {
+// saves that, so a restart does not join it again. The folder's LeftAt entry for
+// the key's directory goes with it, unless the join held back a file that only
+// the repo had (refused): such a file is still indistinguishable from a note the
+// folder deleted, and would be imported by the next reconcile once the entry
+// is gone.
+func (m *RemoteMap) joined(hash string, refused bool) {
 	delete(m.join, hash)
-	if e, ok := m.cache.Projects[hash]; ok && e.JoinPending {
-		e.JoinPending = false
+	e, ok := m.cache.Projects[hash]
+	if !ok {
+		return
+	}
+	changed := e.JoinPending
+	e.JoinPending = false
+	if dir := repoDir(lastKey(e), hash); !refused {
+		if _, left := e.LeftAt[dir]; left {
+			out := make(map[string]string, len(e.LeftAt))
+			for k, v := range e.LeftAt {
+				if k != dir {
+					out[k] = v
+				}
+			}
+			if len(out) == 0 {
+				out = nil
+			}
+			e.LeftAt = out
+			changed = true
+		}
+	}
+	if changed {
 		m.cache.Projects[hash] = e
 		m.dirty = true
 		m.save()
@@ -479,15 +535,17 @@ func (m *RemoteMap) head() string {
 // that hash is stored in, may be copied into the folder. A folder that never
 // left dir imports anything: that is a note from another PC. One that came back
 // to dir imports only what changed since it left; the rest cannot be told
-// from a copy that was deleted here while the folder was elsewhere. When git
-// cannot say, nothing is imported.
+// from a copy that was deleted here while the folder was elsewhere. An anchor
+// of "" (the repo had no commit when it left) means everything is new. When git
+// cannot say (the anchor no longer resolves, say because it was garbage
+// collected, or git fails), nothing is imported and the daemon logs why once.
 func (m *RemoteMap) mayImport(hash, dir, name string) bool {
 	anchor, left := m.cache.Projects[hash].LeftAt[dir]
 	if !left {
 		return true
 	}
 	if anchor == "" {
-		return false
+		return true // the repo had no commit yet: nothing could have been deleted
 	}
 	set, ok := m.changed[anchor+" "+dir]
 	if !ok {

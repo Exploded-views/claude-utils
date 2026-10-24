@@ -40,6 +40,11 @@ type Roots struct {
 	// under remotes/<host>/<owner>/<repo>/ instead of projects/<hash>/. Nil
 	// means every project is keyed by its path (the default).
 	Remote *RemoteMap
+
+	// leftGate, in path mode, holds back the repo-only files of a folder that
+	// used to be stored under a remote key (see newLeftGate). nil: path mode
+	// as it always was.
+	leftGate *RemoteMap
 }
 
 // NewRoots builds the Roots for a config, resolving project keys when
@@ -55,6 +60,8 @@ func NewRoots(cfg config.Config) (Roots, error) {
 			return r, err
 		}
 		r.Remote = m
+	} else {
+		r.leftGate = newLeftGate(cfg.SyncDir)
 	}
 	return r, nil
 }
@@ -161,6 +168,9 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 	}
 	if r.Remote != nil {
 		r.Remote.forgetChanges()
+	}
+	if r.leftGate != nil {
+		r.leftGate.forgetChanges()
 	}
 
 	for _, hash := range hashes {
@@ -463,6 +473,7 @@ func (r Roots) joinFolder(hash string, rep *SyncReport) error {
 	}
 	sort.Strings(sorted)
 
+	refused := false // a file only the repo has was held back by the LeftAt gate
 	for _, name := range sorted {
 		cp, mp := filepath.Join(claudeMem, name), filepath.Join(mirrorMem, name)
 		rel := filepath.ToSlash(filepath.Join(hash, "memory", name))
@@ -476,6 +487,7 @@ func (r Roots) joinFolder(hash string, rep *SyncReport) error {
 			rep.CopiedToMirror = append(rep.CopiedToMirror, rel)
 		case !cExists && mExists:
 			if !r.mayImport(hash, name) {
+				refused = true
 				continue
 			}
 			if err := os.MkdirAll(claudeMem, 0700); err != nil {
@@ -506,7 +518,7 @@ func (r Roots) joinFolder(hash string, rep *SyncReport) error {
 			rep.BackedUp = append(rep.BackedUp, rel)
 		}
 	}
-	r.Remote.joined(hash)
+	r.Remote.joined(hash, refused)
 	return nil
 }
 
@@ -514,6 +526,9 @@ func (r Roots) joinFolder(hash string, rep *SyncReport) error {
 // the folder.
 func (r Roots) mayImport(hash, name string) bool {
 	if r.Remote == nil {
+		if r.leftGate != nil {
+			return r.leftGate.mayImport(hash, remotesPathDir(hash), name)
+		}
 		return true
 	}
 	return r.Remote.mayImport(hash, repoDir(r.Remote.Key(hash), hash), name)
