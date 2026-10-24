@@ -775,10 +775,16 @@ What happens:
   collides or overwrites. The deletion is detected at commit time: a pure
   rename (a delete plus a 100% identical add) stays a rename and is not
   archived, while a rename that also edited the note keeps the rename and
-  archives the old content. To keep two hosts' archive commits from stopping on
-  a rename/delete conflict, the daemon's pull uses `-s recursive -Xno-renames`
-  when `archiveDeletes` is on; an edit to a note another host renamed then
-  conflicts like any text merge instead of following the rename.
+  archives the old content. Two hosts that archive the same note
+  on the same day leave git a conflict that needs no decision (each moved the
+  note to its own hash-named path, which git reads as a rename on both sides,
+  or a rename against a delete). When the daemon's own pull stops on conflicts
+  and **every** conflicted path is of exactly that shape (an `archive/` copy
+  added by either side, or a `projects/<folder>/memory/` note deleted on both),
+  it keeps both copies, drops the note and continues the rebase, logging only a
+  count. Any other conflict, including one extra path, aborts as described
+  under Rebase conflicts. This does not depend on the merge strategy, and
+  ordinary renames and edits merge as they always did.
 - **Other hosts** pulling that commit remove the note from their `~/.claude`
   copy exactly as for any delete, and never touch `archive/`. The directory is
   never mirrored into `~/.claude`, and routing, Reconcile, the manifest,

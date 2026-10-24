@@ -317,13 +317,10 @@ func (r *Repo) Fetch(branch string) error {
 // reflogAction, so that the reflog says who started it (see ReflogSubjects);
 // ref logging is forced on so those entries exist, and the merge backend so
 // they have the "(start)" form whatever rebase.backend the user set.
-//
-// opts are extra options for the rebase (for example "-Xno-renames").
-func (r *Repo) RebaseOnto(branch, reflogAction string, opts ...string) error {
-	args := []string{"-c", "core.logAllRefUpdates=true", "-c", "rebase.backend=merge", "rebase", "--fork-point", "--autostash"}
-	args = append(args, opts...)
-	args = append(args, "origin/"+branch)
-	_, err := r.run([]string{"GIT_REFLOG_ACTION=" + reflogAction}, nil, args...)
+func (r *Repo) RebaseOnto(branch, reflogAction string) error {
+	_, err := r.run([]string{"GIT_REFLOG_ACTION=" + reflogAction}, nil,
+		"-c", "core.logAllRefUpdates=true", "-c", "rebase.backend=merge",
+		"rebase", "--fork-point", "--autostash", "origin/"+branch)
 	return err
 }
 
@@ -464,4 +461,46 @@ func (r *Repo) LsRemoteHead(branch string) (string, error) {
 		return line[:i], nil
 	}
 	return "", nil
+}
+
+// UnmergedEntry is one index entry of a conflicted path: its stage (1 base,
+// 2 the branch being rebased onto, 3 the commit being applied) and blob id.
+type UnmergedEntry struct {
+	Path  string
+	Stage int
+	Oid   string
+}
+
+// UnmergedEntries lists the conflicted index entries.
+func (r *Repo) UnmergedEntries() ([]UnmergedEntry, error) {
+	out, err := r.Run("ls-files", "-u", "-z")
+	if err != nil {
+		return nil, err
+	}
+	var es []UnmergedEntry
+	for _, rec := range strings.Split(out, "\x00") {
+		// "<mode> <oid> <stage>\t<path>"
+		tab := strings.IndexByte(rec, '\t')
+		if tab < 0 {
+			continue
+		}
+		f := strings.Fields(rec[:tab])
+		if len(f) != 3 {
+			continue
+		}
+		st, err := strconv.Atoi(f[2])
+		if err != nil {
+			continue
+		}
+		es = append(es, UnmergedEntry{Path: rec[tab+1:], Stage: st, Oid: f[1]})
+	}
+	return es, nil
+}
+
+// RebaseContinue continues the stopped rebase without opening an editor. env
+// is extra KEY=VALUE settings (the reflog action, so the reflog still names the
+// daemon's pull).
+func (r *Repo) RebaseContinue(env ...string) error {
+	_, err := r.run(append([]string{"GIT_EDITOR=true"}, env...), nil, "-c", "core.editor=true", "rebase", "--continue")
+	return err
 }

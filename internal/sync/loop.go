@@ -379,8 +379,24 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	var conflictErr error
 	// The marker names the rebase for the reflog, so the next start knows a
 	// rebase found stopped is ours to abort; it stays while one is.
-	if err := runPull(repo, l.Branch, l.Cfg.ArchiveDeletes); err != nil {
-		if repo.RebaseInProgress() {
+	if err := runPull(repo, l.Branch); err != nil {
+		if repo.RebaseInProgress() && l.Cfg.ArchiveDeletes {
+			// Two hosts archiving one note conflict in a way that needs no
+			// decision (see archive_resolve.go); anything else stays stopped.
+			n, rerr := resolveArchiveConflicts(repo)
+			if n > 0 {
+				l.logln(resolvedLine(n))
+			}
+			if rerr != nil {
+				l.logln("pull:", g.Err(rerr))
+			}
+			if !repo.RebaseInProgress() && rerr == nil {
+				err = nil
+			}
+		}
+		if err == nil {
+			// resolved: the pull is done
+		} else if repo.RebaseInProgress() {
 			conflictErr = abortRebaseConflict(repo)
 		} else {
 			// Don't propagate first-time failure (no upstream yet); push will create it.

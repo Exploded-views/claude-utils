@@ -55,13 +55,7 @@ const reflogDepth = 2000
 // runPull is `git pull --rebase --autostash` as the daemon runs it, in two
 // steps: the fetch, then the marker, then the rebase named by the marker's
 // nonce. The marker is left for the caller to clear (see clearPullMark).
-//
-// With noRenames the rebase does not pair deletes with adds. A move to archive/
-// is a rename to git, and two hosts that archive the same note differently
-// would otherwise stop on a rename/delete conflict; as a delete plus an add the
-// commits merge. (Edits made on one host to a note another host renamed no
-// longer follow the rename: they conflict, as in any text merge.)
-func runPull(repo *gitwt.Repo, branch string, noRenames ...bool) error {
+func runPull(repo *gitwt.Repo, branch string) error {
 	if err := repo.Fetch(branch); err != nil {
 		return err
 	}
@@ -70,11 +64,7 @@ func runPull(repo *gitwt.Repo, branch string, noRenames ...bool) error {
 	if err != nil {
 		return fmt.Errorf("mark pull: %w", err)
 	}
-	var confs []string
-	if len(noRenames) > 0 && noRenames[0] {
-		confs = append(confs, "-s", "recursive", "-Xno-renames") // ort ignores the option in a rebase
-	}
-	return repo.RebaseOnto(branch, pullAction(nonce), confs...)
+	return repo.RebaseOnto(branch, pullAction(nonce))
 }
 
 // afterFetch runs between the fetch and the marker; a variable so a test can

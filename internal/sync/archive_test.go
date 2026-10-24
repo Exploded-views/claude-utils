@@ -397,3 +397,133 @@ func TestArchive_TwoHostsSameBytes_Collapse(t *testing.T) {
 		t.Errorf("want one archived copy, got %d", n)
 	}
 }
+
+var bigNote = strings.Repeat("a long line, so git sees the copy as a rename\n", 10)
+
+// The same two-host case with notes big enough for git to see each archive copy
+// as a rename of the note: the two renames collide (rename/rename, one note to
+// two archive paths), and the pull must resolve it and keep both versions.
+func TestArchive_TwoHostsSameDay_RenameRenameResolved(t *testing.T) {
+	a := archivePC(t, map[string]string{"x.md": bigNote + "v0\n"})
+	b := a.addPC("pc-b")
+	b.loop.Cfg.ArchiveDeletes = true
+	logs := captureLog(t)
+
+	a.editLocal("x.md", bigNote+"v1\n")
+	a.flushOK()
+	a.userDeletes("x.md")
+	a.flushOK()
+	b.userDeletes("x.md")
+	b.flushOK()
+	b.flushOK()
+
+	out := mustGit(t, gitwt.New(a.origin), "ls-tree", "-r", "--name-only", "main")
+	for _, v := range []string{"v0", "v1"} {
+		if !strings.Contains(out, archPath("p1", "x.md", bigNote+v+"\n")) {
+			t.Errorf("origin lacks the %s copy:\n%s", v, out)
+		}
+	}
+	if strings.Contains(out, "projects/p1/memory/x.md") {
+		t.Errorf("note still live:\n%s", out)
+	}
+	if b.repo.RebaseInProgress() || b.repo.HasUnmerged() {
+		t.Error("B is wedged in a rebase")
+	}
+	if !strings.Contains(logs.String(), "auto-resolved") {
+		t.Errorf("no count-only log line:\n%s", logs.String())
+	}
+	if _, ok := b.claudeCopy("x.md"); ok {
+		t.Error("B's ~/.claude still has the note")
+	}
+}
+
+// A peer's real rename and a local edit of the old name merge as before (the
+// default merge follows the rename), with archiving on.
+func TestArchive_PeerRenameAndLocalEditCarriedAcross(t *testing.T) {
+	a := archivePC(t, map[string]string{"old.md": bigNote})
+	a.editLocal("old.md", bigNote+"local edit\n")
+	a.peerRename("old.md", "new.md")
+	a.flushOK()
+	got, ok := a.claudeCopy("new.md")
+	if !ok || !strings.Contains(got, "local edit") {
+		t.Fatalf("new.md = %q ok=%v", got, ok)
+	}
+	if _, ok := a.claudeCopy("old.md"); ok {
+		t.Error("old.md survived the rename")
+	}
+	if tree := headTree(t, a.repo); strings.Contains(tree, "archive/") {
+		t.Errorf("a rename was archived:\n%s", tree)
+	}
+}
+
+// A conflict that mixes an archive path with an ordinary note conflict is not
+// in the safe set: the pull aborts as it always did.
+func TestArchive_MixedConflictAborts(t *testing.T) {
+	a := archivePC(t, map[string]string{"x.md": bigNote + "v0\n", "z.md": "one\ntwo\nthree\n"})
+	b := a.addPC("pc-b")
+	b.loop.Cfg.ArchiveDeletes = true
+	a.editLocal("x.md", bigNote+"v1\n")
+	a.editLocal("z.md", "one\nA's line\nthree\n")
+	a.flushOK()
+	a.userDeletes("x.md")
+	a.flushOK()
+	b.userDeletes("x.md")
+	b.editLocal("z.md", "one\nB's line\nthree\n")
+	err := b.loop.flush(b.repo, b.roots, true)
+	if err == nil || !strings.Contains(err.Error(), "rebase conflict") {
+		t.Fatalf("want the usual conflict abort, got %v", err)
+	}
+	if b.repo.RebaseInProgress() {
+		t.Error("the rebase was left stopped")
+	}
+	if b.originHas("archive/") && strings.Contains(mustGit(t, gitwt.New(b.origin), "ls-tree", "-r", "--name-only", "main"), ".v0") {
+		t.Error("B's commit was pushed")
+	}
+}
+
+// Two hosts adding the same ordinary note differently still abort.
+func TestArchive_PlainAddAddAborts(t *testing.T) {
+	a := archivePC(t, map[string]string{"keep.md": "k\n"})
+	a.peerPush("n.md", "peer's\n")
+	a.editLocal("n.md", "mine\n")
+	err := a.loop.flush(a.repo, a.roots, true)
+	if err == nil || !strings.Contains(err.Error(), "rebase conflict") || a.repo.RebaseInProgress() {
+		t.Fatalf("got %v, in progress %v", err, a.repo.RebaseInProgress())
+	}
+}
+
+func TestPlanArchiveResolution_SafeSetIsExact(t *testing.T) {
+	u := func(p string, st int, oid string) gitwt.UnmergedEntry {
+		return gitwt.UnmergedEntry{Path: p, Stage: st, Oid: oid}
+	}
+	arch := "archive/2026-10-25/p1/x.aaaaaaaa.md"
+	note := "projects/p1/memory/x.md"
+	safe := [][]gitwt.UnmergedEntry{
+		{u(arch, 1, "b"), u(arch, 3, "c")}, // DU
+		{u(arch, 3, "c")},                  // UA
+		{u(arch, 2, "c")},                  // AU
+		{u(note, 1, "b"), u(arch, 2, "c"), u("archive/2026-10-25/p1/x.bbbbbbbb.md", 3, "d")}, // rename/rename
+		{u(arch, 2, "c"), u(arch, 3, "c")},                                                   // identical add/add
+	}
+	for i, es := range safe {
+		if _, ok := planArchiveResolution(es); !ok {
+			t.Errorf("safe shape %d refused", i)
+		}
+	}
+	unsafe := [][]gitwt.UnmergedEntry{
+		nil,
+		{u("archive/INDEX.md", 1, "a"), u("archive/INDEX.md", 2, "b"), u("archive/INDEX.md", 3, "c")},
+		{u(arch, 1, "b"), u(arch, 2, "c")},                  // the commit deleted a copy
+		{u(arch, 2, "c"), u(arch, 3, "d")},                  // differing add/add
+		{u(note, 1, "a"), u(note, 2, "b"), u(note, 3, "c")}, // a note's content conflict
+		{u(note, 2, "b"), u(note, 3, "c")},                  // add/add of a note
+		{u(note, 1, "a"), u(note, 2, "b")},                  // modify/delete of a note
+		{u(arch, 3, "c"), u(note, 2, "b"), u(note, 3, "c")}, // one safe path, one not
+		{u("distilled/e.md", 1, "a")},
+	}
+	for i, es := range unsafe {
+		if _, ok := planArchiveResolution(es); ok {
+			t.Errorf("unsafe shape %d accepted", i)
+		}
+	}
+}
