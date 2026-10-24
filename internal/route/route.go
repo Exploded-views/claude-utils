@@ -43,6 +43,13 @@ var validKinds = map[string]bool{KindPersonal: true, KindProject: true, KindInfr
 type Repo struct {
 	Config string `json:"config"`
 	Kind   string `json:"kind"`
+	// Remote is the repo's name on the remote (mem-project-<a>). Optional:
+	// when empty it is derived from the config's remote URL. Relations in the
+	// registry name repos this way.
+	Remote string `json:"remote,omitempty"`
+	// Client names the client of a client or orch repo. Optional: when empty
+	// it is derived from the repo name (mem-client-<name>, mem-orch-<name>).
+	Client string `json:"client,omitempty"`
 }
 
 // IsClient reports a repo holding a client's notes: kind client or orch.
@@ -115,6 +122,17 @@ type File struct {
 	Routes   []Rule `json:"routes"`
 	// Default must be "deny" (or empty): the only policy there is.
 	Default string `json:"default,omitempty"`
+
+	// Registry is the directory of the registry repo (a normal sync dir)
+	// whose related.json declares the relations between repos. Optional.
+	Registry string `json:"registry,omitempty"`
+	// RelatedRoot is where the fetch-only clones of related repos live
+	// (<RelatedRoot>/<repo>). Default: a "related" dir beside the registry.
+	RelatedRoot string `json:"relatedRoot,omitempty"`
+	// RelatedRemotes maps a related repo's name to the URL its read-only
+	// clone is fetched from (in practice an ssh alias of a read-only deploy
+	// key).
+	RelatedRemotes map[string]string `json:"relatedRemotes,omitempty"`
 }
 
 // Load reads and validates routes.json. A rule may name a repo that is not in
@@ -368,6 +386,9 @@ func (r *Router) Owns(repo string) func(folder string) bool {
 		return r.Decide(folder).Repo == repo
 	}
 }
+
+// Escape is the folder name Claude Code uses for a project directory.
+func Escape(p string) string { return escape(p) }
 
 func hash8(s string) string {
 	h := sha256.Sum256([]byte(s))

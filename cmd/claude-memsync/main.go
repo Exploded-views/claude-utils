@@ -26,6 +26,12 @@ func main() {
 		os.Exit(runDistill(os.Args[2:]))
 	case "changes":
 		os.Exit(runChanges(os.Args[2:]))
+	case "relate":
+		os.Exit(runRelate(os.Args[2:]))
+	case "unrelate":
+		os.Exit(runUnrelate(os.Args[2:]))
+	case "related":
+		os.Exit(runRelated(os.Args[2:]))
 	case "install":
 		os.Exit(runInstall(os.Args[2:]))
 	case "uninstall":
@@ -54,6 +60,9 @@ Subcommands:
   run         Run the sync daemon in the foreground
   distill     Rebuild the distilled-memory catalog index (see --prune, --dry-run)
   changes     List memory files changed in the sync repo since a commit (for hooks)
+  relate      Declare a read or join relation between two memory repos (registry)
+  unrelate    Remove a relation
+  related     List relations; "related sync" fetches read clones, "related context" prints a session index
   install     Install as a system service (Windows Service / systemd unit / launchd plist)
   uninstall   Remove the system service
   start       Start the system service

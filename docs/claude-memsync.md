@@ -876,6 +876,51 @@ Install the unit as usual (`claude-memsync install --config ~/.claudesync.d/pers
 - `distill` and `changes` without `--config` use the personal repo's config (the primary one); an explicit `--config` always means that single repo.
 - `distill --prune` leaves an entry alone when the folder it came from is not in `~/.claude/projects` on this host: the entry was made on another host, and "file gone" is not the same as "folder never here".
 
+## Related projects
+
+A repo can name other repos whose notes are worth seeing while you work in it, without joining them. Relations are declared in the registry repo (a normal sync dir, for example `mem-registry`), never in the project repos, so a public project repo never names a memory repo.
+
+In `routes.json`:
+
+```json
+{
+  "registry": "~/.claudesync.d/mem-registry",
+  "relatedRoot": "~/.claudesync.d/related",
+  "relatedRemotes": { "mem-project-<b>": "git@<read-only-deploy-key-alias>:<org>/mem-project-<b>.git" },
+  "repos": {
+    "a": { "config": "...", "kind": "project", "remote": "mem-project-<a>" }
+  }
+}
+```
+
+`remote` is the repo's name on the remote (default: the basename of its config's remote URL); relations use it. `client` (optional, client and orch repos) names the client; default: the part of the repo name after `mem-client-` or `mem-orch-`. `relatedRoot` defaults to a `related` dir beside the registry and must not lie inside any sync dir or `~/.claude`.
+
+The registry file is `related.json` in the registry repo: `[{"repo": "mem-project-<a>", "related": [{"repo": "mem-project-<b>", "mode": "read"}]}]`.
+
+```
+claude-memsync relate mem-project-<a> mem-project-<b> --read     # or --join
+claude-memsync unrelate mem-project-<a> mem-project-<b>
+claude-memsync related [mem-project-<a>]                          # list, with this host's state
+claude-memsync related sync                                       # fetch the read clones now
+claude-memsync related context --project <dir>                    # the session index (below)
+```
+
+`relate` and `unrelate` edit the registry and commit it there (the registry's own daemon pushes it).
+
+**read** (the default idea): a fetch-only clone at `<relatedRoot>/<repo>`, fetched from the URL in `relatedRemotes` (in practice a read-only deploy key's ssh alias) on the daemon's pull interval and at `related sync`. It is never mirrored into `~/.claude`, never watched, and has no push path: the clone is a separate type with no Push, and its push URL is disabled. If the clone is encrypted (`.age-recipients`) and this host cannot decrypt it, it is listed as "not readable on this host" and skipped.
+
+**join**: nothing is automated. `related sync` prints the steps for making this host a full member (the normal `init`, a `repos` entry, a route).
+
+**Boundaries (default deny)**, checked when a relation is declared and again whenever the registry is loaded (a hand-edited edge that fails is listed as refused and ignored):
+
+- Both ends must be `mem-*` repos, and private (`mem-` names only until the private-only check lands).
+- Relations are among `mem-personal`, `mem-project-*` and `mem-infra-*`, or between two repos of the same client (both kind client, same client name).
+- Join needs both ends to be the same kind.
+- No edge to or from a `mem-client-*` repo from anything else, and none between different clients.
+- `mem-orch-all` may read `mem-orch-<client>`, and nothing else; never join. Every other orch edge is refused.
+
+**Session context.** Put `claude-memsync related context --project "$CLAUDE_PROJECT_DIR"` in a SessionStart hook. It prints, for the repo that owns the project, one entry per read relation: the repo name, note count, read-only path and the headings of its `MEMORY.md` (never note bodies), within `--per-relation` (default 2000) and `--total` (default 6000) characters. It prints nothing for a project without relations and never fails the session. `changes --hook` also lists, under a "related, read-only repos" label, the paths that changed in those clones since the session last looked. Allow `Read(<relatedRoot>/**)` and nothing wider.
+
 ## Limitations / known issues
 
 - **Path consistency required**: Claude derives the per-project memory directory
