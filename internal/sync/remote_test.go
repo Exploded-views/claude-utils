@@ -2,12 +2,15 @@ package sync
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	gosync "sync"
 	"testing"
 	"time"
 
@@ -1751,6 +1754,184 @@ func TestHandleEvent_RemoteKeyedFileGoesToSharedFolder(t *testing.T) {
 	}
 	if !l.needReconcile {
 		t.Error("two folders share the key, so the sibling needs a reconcile")
+	}
+}
+
+// ---- a member leaving its group ----
+
+// repoFiles lists the files in a repo-side memory dir.
+func repoFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	es, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range es {
+		if !e.IsDir() && !strings.Contains(e.Name(), ".from-remote-") {
+			out = append(out, e.Name())
+		}
+	}
+	return out
+}
+
+// Losing a clone's whole memory/ dir, or its whole project folder, is that
+// clone leaving the group. It is not a delete of each file in it: the shared
+// notes stay in the repo and in the other clone.
+func TestRemoteKey_RemovedMemoryDirOrFolderLeavesTheGroup(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		remove func(a *machine, c string) error
+	}{
+		{"memory dir", func(a *machine, c string) error {
+			return os.RemoveAll(filepath.Join(a.claude, a.hash(c), "memory"))
+		}},
+		{"project folder", func(a *machine, c string) error {
+			return os.RemoveAll(filepath.Join(a.claude, a.hash(c)))
+		}},
+	} {
+		for _, clones := range []int{1, 2} {
+			t.Run(fmt.Sprintf("%s with %d clone(s)", tc.name, clones), func(t *testing.T) {
+				a, c1, c2, repoDir := twoClones(t)
+				if clones == 1 {
+					if err := os.RemoveAll(filepath.Join(a.claude, a.hash(c2))); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for _, f := range []string{"one.md", "two.md", "MEMORY.md"} {
+					a.write(c1, f, "# "+f+"\n")
+				}
+				a.sync()
+				if err := tc.remove(a, c1); err != nil {
+					t.Fatal(err)
+				}
+				a.sync()
+				if got := repoFiles(t, repoDir); len(got) != 3 {
+					t.Errorf("shared notes wiped from the repo: %v", got)
+				}
+				if clones == 2 {
+					for _, f := range []string{"one.md", "two.md", "MEMORY.md"} {
+						if _, ok := a.read(c2, f); !ok {
+							t.Errorf("%s was deleted from the other clone", f)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+// The loop sees an `rm -rf` of a clone's memory/ as a burst of Remove events.
+// None of them may reach the repo, whether the dir still exists when an event
+// is handled or not, and the other clone keeps its notes.
+func TestLoop_RemovingMemoryDirWhileRunningKeepsSharedNotes(t *testing.T) {
+	a, c1, c2, repoDir := twoClones(t)
+	origin := withOrigin(t, a.cfg.SyncDir)
+	_ = origin
+	var files []string
+	for i := 0; i < 40; i++ {
+		f := fmt.Sprintf("note_%02d.md", i)
+		files = append(files, f)
+		a.write(c1, f, f+"\n")
+	}
+	a.sync()
+	if err := gitwt.New(a.cfg.SyncDir).Push("main"); err != nil {
+		t.Fatal(err)
+	}
+
+	a.cfg.DebounceMs = 100
+	flushed := make(chan struct{}, 64)
+	l := &Loop{Cfg: a.cfg, Branch: "main", Hostname: "alice", OnFlush: func(bool, error) { flushed <- struct{}{} }}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- l.Run(ctx) }()
+	var once gosync.Once
+	stop := func() {
+		once.Do(func() {
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Error("loop did not stop")
+			}
+		})
+	}
+	defer stop()
+	waitFlush := func(what string) {
+		t.Helper()
+		select {
+		case <-flushed:
+		case <-time.After(20 * time.Second):
+			t.Fatalf("no flush %s", what)
+		}
+	}
+	waitFlush("at startup")
+	time.Sleep(200 * time.Millisecond)
+	for len(flushed) > 0 {
+		<-flushed
+	}
+
+	if err := os.RemoveAll(filepath.Join(a.claude, a.hash(c1), "memory")); err != nil {
+		t.Fatal(err)
+	}
+	waitFlush("after the rm -rf")
+	// One more debounce window, in case events straggled in.
+	time.Sleep(400 * time.Millisecond)
+	stop()
+
+	if got := repoFiles(t, repoDir); len(got) != len(files) {
+		t.Errorf("rm -rf of one clone's memory/ wiped the shared notes: %d of %d left", len(got), len(files))
+	}
+	for _, f := range files {
+		if _, ok := a.read(c2, f); !ok {
+			t.Errorf("%s deleted from the other clone", f)
+		}
+	}
+	if out, err := gitwt.New(a.cfg.SyncDir).Run("log", "--diff-filter=D", "--name-only", "--format=", "-5"); err != nil || strings.TrimSpace(out) != "" {
+		t.Errorf("a commit deleted shared notes: %q %v", out, err)
+	}
+}
+
+// A single deleted file is still a delete: the Remove event asks for a
+// reconcile instead of touching the repo, and the reconcile applies it.
+func TestHandleEvent_RemoveInRemoteModeDefersToReconcile(t *testing.T) {
+	a, c1, c2, repoDir := twoClones(t)
+	a.write(c1, "topic.md", "x\n")
+	a.write(c1, "keep.md", "k\n")
+	a.sync()
+	roots, err := NewRoots(a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.remove(c1, "topic.md")
+	l := &Loop{Cfg: a.cfg}
+	ev := fsnotify.Event{Name: filepath.Join(a.claude, a.hash(c1), "memory", "topic.md"), Op: fsnotify.Remove}
+	handled, err := l.handleEvent(nil, roots, ev)
+	if err != nil || !handled || !l.needReconcile {
+		t.Fatalf("handled=%v needReconcile=%v err=%v", handled, l.needReconcile, err)
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, "topic.md")); err != nil {
+		t.Error("the event itself must not delete from the repo")
+	}
+	// The dir going away is not a file delete at all.
+	if err := os.RemoveAll(filepath.Join(a.claude, a.hash(c2), "memory")); err != nil {
+		t.Fatal(err)
+	}
+	l = &Loop{Cfg: a.cfg}
+	ev = fsnotify.Event{Name: filepath.Join(a.claude, a.hash(c2), "memory", "keep.md"), Op: fsnotify.Remove}
+	if handled, err := l.handleEvent(nil, roots, ev); err != nil || handled {
+		t.Errorf("a Remove under a vanished memory dir: handled=%v err=%v", handled, err)
+	}
+	if len(l.removed) != 0 {
+		t.Errorf("a vanished memory dir should record no deletes: %v", l.removed)
+	}
+	dirEv := fsnotify.Event{Name: filepath.Join(a.claude, a.hash(c2), "memory"), Op: fsnotify.Remove}
+	if handled, err := l.handleEvent(nil, roots, dirEv); err != nil || handled {
+		t.Errorf("a Remove of the dir itself: handled=%v err=%v", handled, err)
+	}
+	a.sync()
+	if _, err := os.Stat(filepath.Join(repoDir, "keep.md")); err != nil {
+		t.Error("keep.md lost")
 	}
 }
 

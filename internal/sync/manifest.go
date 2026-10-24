@@ -94,6 +94,18 @@ func (m *Manifest) Has(rel string) bool {
 	return ok
 }
 
+// HasFolder reports whether any file of the project folder hash's memory/ dir
+// was present at last sync.
+func (m *Manifest) HasFolder(hash string) bool {
+	prefix := hash + "/memory/"
+	for p := range m.files {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // Len returns the number of files tracked.
 func (m *Manifest) Len() int { return len(m.files) }
 

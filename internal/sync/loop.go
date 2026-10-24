@@ -31,6 +31,11 @@ type Loop struct {
 	// the single-file copy: a new project folder appeared, or several local
 	// folders share one repo-side directory (remote mode).
 	needReconcile bool
+
+	// removed holds the manifest keys of files whose Remove event arrived
+	// since the last reconcile (remote mode), so that a file created and
+	// deleted within one debounce window still counts as deleted.
+	removed []string
 }
 
 // Run blocks until ctx is canceled. Returns the first fatal error or nil
@@ -156,6 +161,9 @@ func (l *Loop) Run(ctx context.Context) error {
 			if roots.Remote != nil {
 				roots.Remote.Refresh() // pick up moved checkouts and new remotes
 			}
+			if err := refreshMemoryWatches(watcher, roots.Claude); err != nil {
+				log.Println("refresh memory watches:", err) // a memory/ dir may have been recreated
+			}
 			l.reconcile(roots)
 			err := l.flush(repo, roots, true)
 			if err != nil {
@@ -177,6 +185,10 @@ func (l *Loop) reconcile(roots Roots) {
 		log.Println("load manifest:", err)
 		m = NewManifest()
 	}
+	for _, rel := range l.removed {
+		m.Add(rel)
+	}
+	l.removed = nil
 	if _, err := Reconcile(roots, m); err != nil {
 		log.Println("reconcile:", err)
 	}
@@ -228,6 +240,9 @@ func (l *Loop) handleEvent(watcher *fsnotify.Watcher, roots Roots, ev fsnotify.E
 		if err := CopyToMirror(roots, hash, name); err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				// Race: file vanished between event and read. Treat as remove.
+				if roots.Remote != nil {
+					return l.deferRemove(roots, hash, name), nil
+				}
 				return true, RemoveFromMirror(roots, hash, name)
 			}
 			return false, fmt.Errorf("copy to mirror %s/%s: %w", hash, name, err)
@@ -235,12 +250,32 @@ func (l *Loop) handleEvent(watcher *fsnotify.Watcher, roots Roots, ev fsnotify.E
 		return true, nil
 
 	case ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0:
+		if roots.Remote != nil {
+			return l.deferRemove(roots, hash, name), nil
+		}
 		if err := RemoveFromMirror(roots, hash, name); err != nil {
 			return false, fmt.Errorf("remove from mirror %s/%s: %w", hash, name, err)
 		}
 		return true, nil
 	}
 	return false, nil
+}
+
+// deferRemove reacts to a file Remove event in remote mode without touching the
+// sync repo, and reports whether a flush is needed. Several clones share one
+// repo-side copy, so a wrongly applied delete wipes everyone's notes, and an
+// `rm -rf` of a memory/ dir arrives as a burst of file Removes that may be
+// handled before or after the dir is gone. So: if the dir is gone the folder
+// left its group and the events mean nothing; otherwise the delete is left to
+// the next reconcile, which judges it against the manifest and this PC's record
+// when the burst is over.
+func (l *Loop) deferRemove(roots Roots, hash, name string) bool {
+	if !isDir(filepath.Join(roots.Claude, hash, "memory")) {
+		return false
+	}
+	l.removed = append(l.removed, filepath.ToSlash(filepath.Join(hash, "memory", name)))
+	l.needReconcile = true
+	return true
 }
 
 // flush stages local changes, optionally commits, pulls remote work, propagates

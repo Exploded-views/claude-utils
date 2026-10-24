@@ -275,6 +275,24 @@ func recordFile(st *SyncState, gkey, mirrorMem, name string) {
 // case in path mode) it is the plain two-way rule set documented on
 // Reconcile. With several (two clones of one remote on this PC) each file goes through reconcileMulti.
 func reconcileGroup(r Roots, g group, manifest *Manifest, st *SyncState, rep *SyncReport) error {
+	if r.Remote != nil {
+		// A folder whose memory/ dir is gone, though the manifest had files
+		// in it, has left the group: someone removed the directory (or the
+		// whole project folder), which says nothing about each file in it.
+		// Deleting them from the shared copy would wipe every clone's notes.
+		// Path mode keeps main's behavior. In remote mode the folder is
+		// filled again by a later pass, once the manifest forgets it.
+		stay := g.locals[:0:0]
+		for _, h := range g.locals {
+			if isDir(filepath.Join(r.Claude, h, "memory")) || !manifest.HasFolder(h) {
+				stay = append(stay, h)
+			}
+		}
+		if len(stay) == 0 {
+			return nil
+		}
+		g.locals = stay
+	}
 	if err := os.MkdirAll(g.mirrorMem, 0700); err != nil {
 		return err
 	}
