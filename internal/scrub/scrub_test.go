@@ -1,0 +1,129 @@
+package scrub
+
+import (
+	"strings"
+	"testing"
+)
+
+// Fixtures are assembled at run time so this file never contains a literal
+// that looks like a credential (secret scanners would flag the repo itself).
+func rep(prefix string, n int, ch string) string { return prefix + strings.Repeat(ch, n) }
+
+func TestScan_Rules(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    string // expected rule name
+	}{
+		{"rsa key", "notes\n-----BEGIN RSA PRIVATE KEY-----\nabc\n", "private-key"},
+		{"openssh key", "-----BEGIN OPENSSH PRIVATE KEY-----\n", "private-key"},
+		{"plain key", "-----BEGIN PRIVATE KEY-----\n", "private-key"},
+		{"ghp", "token is " + rep("ghp_", 36, "a"), "github-token"},
+		{"gho", rep("gho_", 36, "B"), "github-token"},
+		{"ghu", rep("ghu_", 36, "1"), "github-token"},
+		{"ghs", rep("ghs_", 36, "c"), "github-token"},
+		{"ghr", rep("ghr_", 36, "d"), "github-token"},
+		{"fine-grained pat", rep("github_pat_", 40, "e"), "github-token"},
+		{"openai key", "key: " + rep("sk-", 32, "a"), "openai-api-key"},
+		{"openai project key", rep("sk-proj-", 30, "a"), "openai-api-key"},
+		{"anthropic key", rep("sk-ant-api03-", 30, "a"), "anthropic-api-key"},
+		{"slack bot", rep("xoxb-", 20, "1"), "slack-token"},
+		{"slack user", rep("xoxp-", 20, "1"), "slack-token"},
+		{"slack app-level", rep("xoxa-", 20, "1"), "slack-token"},
+		{"aws access key", "id " + rep("AKIA", 16, "A"), "aws-access-key"},
+		{"jwt", rep("eyJ", 12, "a") + "." + rep("eyJ", 12, "b") + "." + rep("", 16, "c"), "jwt"},
+		{"password assignment", `password = "` + strings.Repeat("x", 16) + `"`, "credential-assignment"},
+		{"token colon", `"api_key": "` + strings.Repeat("y", 20) + `"`, "credential-assignment"},
+		{"secret single quote", `client_secret='` + strings.Repeat("z", 24) + `'`, "credential-assignment"},
+		{"api-key mixed case", `API_KEY = "` + strings.Repeat("q", 16) + `"`, "credential-assignment"},
+	}
+	s := New(nil)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := s.Scan([]byte(c.content))
+			if len(got) == 0 {
+				t.Fatalf("no rule matched %q", c.name)
+			}
+			found := false
+			for _, g := range got {
+				if g == c.want {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("got rules %v, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestScan_CleanContent(t *testing.T) {
+	clean := []string{
+		"---\nname: build notes\ntype: feedback\n---\nRun go test ./... before pushing.\n",
+		"Use the sk-learn pipeline docs for the model.\n",
+		"risk-assessment-for-the-quarterly-review is done\n",
+		"The password is stored in the vault, never in this file.\n",
+		`password = "short"`,
+		`token = "` + strings.Repeat("x", 15) + `"`, // one under the minimum
+		"ghp_tooshort\n",
+		"AKIA is the prefix AWS uses\n",
+		"see https://example.com/eyJ/docs\n",
+	}
+	s := New(nil)
+	for _, c := range clean {
+		if got := s.Scan([]byte(c)); len(got) != 0 {
+			t.Errorf("Scan(%q) = %v, want none", c, got)
+		}
+	}
+}
+
+func TestScan_ReturnsEachRuleOnce(t *testing.T) {
+	content := rep("ghp_", 36, "a") + "\n" + rep("ghp_", 36, "b") + "\n"
+	got := New(nil).Scan([]byte(content))
+	if len(got) != 1 || got[0] != "github-token" {
+		t.Errorf("got %v, want [github-token]", got)
+	}
+}
+
+func TestParseDenylist(t *testing.T) {
+	src := "# comment\n\n  \nacme-corp\\.internal\r\n^client: .*\n"
+	d, err := ParseDenylist(strings.NewReader(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d) != 2 {
+		t.Fatalf("got %d patterns, want 2", len(d))
+	}
+}
+
+func TestDenylist_CaseInsensitiveAndRuleName(t *testing.T) {
+	d, err := ParseDenylist(strings.NewReader("# header\nproject-nightjar\nwidget\\d+\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(d)
+	got := s.Scan([]byte("working on Project-NightJar today"))
+	if len(got) != 1 || got[0] != "denylist:2" {
+		t.Errorf("got %v, want [denylist:2] (line number of the pattern)", got)
+	}
+	if got := s.Scan([]byte("WIDGET42")); len(got) != 1 || got[0] != "denylist:3" {
+		t.Errorf("got %v, want [denylist:3]", got)
+	}
+	if got := s.Scan([]byte("nothing to see")); len(got) != 0 {
+		t.Errorf("got %v, want none", got)
+	}
+}
+
+func TestParseDenylist_InvalidPattern(t *testing.T) {
+	_, err := ParseDenylist(strings.NewReader("ok\n(unclosed\n"))
+	if err == nil {
+		t.Fatal("want error for invalid regex")
+	}
+	if !strings.Contains(err.Error(), "line 2") {
+		t.Errorf("error should name the line: %v", err)
+	}
+	// The error must not echo the pattern text back (it may be sensitive).
+	if strings.Contains(err.Error(), "unclosed") {
+		t.Errorf("error leaks pattern: %v", err)
+	}
+}
