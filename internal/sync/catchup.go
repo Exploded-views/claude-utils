@@ -24,6 +24,10 @@ func syncedHeadPath(repo *gitwt.Repo) string {
 	return filepath.Join(repo.Dir, manifestStateDir, syncedHeadFile)
 }
 
+// SyncedHead returns the commit recorded as copied into the Claude tree, or
+// "" when there is no record. The record may name a commit that is gone.
+func SyncedHead(repo *gitwt.Repo) (string, error) { return loadSyncedHead(repo) }
+
 // headRev is HEAD's commit id; "" on an unborn branch.
 func headRev(repo *gitwt.Repo) string {
 	rev, err := repo.Run("rev-parse", "--verify", "--quiet", "HEAD")

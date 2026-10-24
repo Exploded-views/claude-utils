@@ -608,9 +608,9 @@ func TestMarker_EmptyIsResetUnderUpdateMarker(t *testing.T) {
 	}
 }
 
-// A marker ahead of HEAD (the repo was reset to an older commit) is left
-// where it is: moving it back would report the same changes twice.
-func TestMarker_NeverMovesBackwards(t *testing.T) {
+// A marker ahead of HEAD (the repo was reset to an older commit) follows HEAD
+// back, reporting nothing, so the same report is not repeated on every run.
+func TestMarker_FollowsHeadBack(t *testing.T) {
 	f := newFixture(t)
 	older := f.commit(map[string]string{mem(appHash, "a.md"): "a\n"})
 	newer := f.commit(map[string]string{mem(appHash, "b.md"): "b\n"})
@@ -621,11 +621,11 @@ func TestMarker_NeverMovesBackwards(t *testing.T) {
 	if _, err := f.repo.Run("reset", "--hard", older); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Compute(Options{SyncDir: f.repo.Dir, ClaudeDir: f.claude, Marker: m, UpdateMarker: true, Limit: 20}); err != nil {
-		t.Fatal(err)
+	if r, err := Compute(Options{SyncDir: f.repo.Dir, ClaudeDir: f.claude, Marker: m, UpdateMarker: true, Limit: 20}); err != nil || r.Total != 0 {
+		t.Fatalf("reported %+v, %v", r, err)
 	}
-	if b, _ := os.ReadFile(m); strings.TrimSpace(string(b)) != newer {
-		t.Errorf("marker moved back to %q", b)
+	if b, _ := os.ReadFile(m); strings.TrimSpace(string(b)) != older {
+		t.Errorf("marker = %q, want %s", b, older)
 	}
 	// Moving forward again still works.
 	f.commit(map[string]string{mem(appHash, "c.md"): "c\n"})
@@ -783,5 +783,62 @@ func TestResult_TextQuotesUnprintableNames(t *testing.T) {
 	// JSON is escaped by the encoder.
 	if b, _ := json.Marshal(r); strings.Contains(string(b), "\n") || strings.Contains(string(b), "\x1b") {
 		t.Errorf("raw control characters in JSON: %q", b)
+	}
+}
+
+func TestCompute_UpperReplacesHead(t *testing.T) {
+	f := newFixture(t)
+	base := f.commit(map[string]string{mem(appHash, "a.md"): "a\n"})
+	mid := f.commit(map[string]string{mem(appHash, "b.md"): "b\n"})
+	f.commit(map[string]string{mem(appHash, "c.md"): "c\n"})
+
+	o := f.opts(base)
+	o.Upper = mid
+	r, err := Compute(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Head != mid || r.Total != 1 || find(r, "b.md") == nil {
+		t.Errorf("Upper = mid: head %s total %d %+v", r.Head, r.Total, r.Changes)
+	}
+
+	// An Upper that names no commit is not a bound: HEAD is.
+	o.Upper = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	r, err = Compute(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Head != f.head() || r.Total != 2 {
+		t.Errorf("bad Upper: head %s total %d", r.Head, r.Total)
+	}
+}
+
+// An upper bound behind the marker means history moved back: the changes in
+// between were reported already, so nothing is, and the marker follows.
+func TestCompute_UpperBehindSinceReportsNothing(t *testing.T) {
+	f := newFixture(t)
+	older := f.commit(map[string]string{mem(appHash, "a.md"): "a\n"})
+	newer := f.commit(map[string]string{mem(appHash, "b.md"): "b\n"})
+	marker := filepath.Join(t.TempDir(), "m")
+	if err := WriteMarker(marker, newer); err != nil {
+		t.Fatal(err)
+	}
+	o := Options{SyncDir: f.repo.Dir, ClaudeDir: f.claude, Marker: marker, Upper: older, UpdateMarker: true, DeferMarker: true}
+	r, err := Compute(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Total != 0 || len(r.Changes) != 0 {
+		t.Errorf("reported %+v", r.Changes)
+	}
+	if b, _ := os.ReadFile(marker); strings.TrimSpace(string(b)) != older {
+		t.Errorf("marker = %q, want %s", b, older)
+	}
+
+	// With --since there is no marker to move, and still nothing to report.
+	o = f.opts(newer)
+	o.Upper = older
+	if r, err := Compute(o); err != nil || r.Total != 0 {
+		t.Errorf("--since ahead of the bound: %+v %v", r, err)
 	}
 }

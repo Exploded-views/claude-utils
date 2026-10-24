@@ -8,6 +8,8 @@ import (
 	"os"
 
 	"github.com/MarimerLLC/claude-utils/internal/changes"
+	"github.com/MarimerLLC/claude-utils/internal/gitwt"
+	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
 
 // defaultChangesLimit keeps the output small enough to drop into a prompt.
@@ -41,6 +43,7 @@ func changesCmd(stdin io.Reader, stdout, stderr io.Writer, args []string) (code 
 	asJSON := flags.Bool("json", false, "print JSON instead of text")
 	limit := flags.Int("limit", defaultChangesLimit, "list at most N changes, then \"...N more\" (0 = no limit)")
 	update := flags.Bool("update-marker", false, "with --marker, rewrite the file to the current HEAD afterwards (a missing or stale marker only records the baseline)")
+	synced := flags.Bool("synced", false, "compare with the commit last copied into ~/.claude (.state/synced-head) instead of HEAD")
 	hook := flags.Bool("hook", false, "run as a Claude Code hook: read its JSON from stdin, keep a per-session marker, print additionalContext JSON")
 	if err := flags.Parse(args); err != nil {
 		if hookRequested(args) {
@@ -49,7 +52,7 @@ func changesCmd(stdin io.Reader, stdout, stderr io.Writer, args []string) (code 
 		return 2
 	}
 	if *hook {
-		if flagsSet(flags, "since", "marker", "update-marker", "json") || *limit < 0 {
+		if flagsSet(flags, "since", "marker", "update-marker", "json", "synced") || *limit < 0 {
 			fmt.Fprintln(stderr, "changes: --hook takes only --config, --project and --limit")
 			return 0
 		}
@@ -73,8 +76,13 @@ func changesCmd(stdin io.Reader, stdout, stderr io.Writer, args []string) (code 
 		fmt.Fprintln(stderr, "changes:", err)
 		return 1
 	}
+	upper := ""
+	if *synced {
+		upper = syncedUpper(cfg.SyncDir)
+	}
 	res, err := changes.Compute(changes.Options{
 		SyncDir:      cfg.SyncDir,
+		Upper:        upper,
 		ClaudeDir:    cfg.ClaudeProjectsDir,
 		Since:        *since,
 		Marker:       *marker,
@@ -102,6 +110,17 @@ func changesCmd(stdin io.Reader, stdout, stderr io.Writer, args []string) (code 
 	}
 	fmt.Fprint(stdout, res.Text())
 	return 0
+}
+
+// syncedUpper is the commit the daemon last copied into ~/.claude, for use as
+// changes.Options.Upper; "" (so HEAD) when there is no record or it cannot be
+// read. Compute checks that the commit exists.
+func syncedUpper(syncDir string) string {
+	rec, err := syncpkg.SyncedHead(gitwt.New(syncDir))
+	if err != nil {
+		return ""
+	}
+	return rec
 }
 
 // hookRequested reports whether args ask for hook mode, for the case where

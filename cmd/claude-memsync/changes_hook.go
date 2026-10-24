@@ -76,6 +76,7 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, project str
 		SyncDir:      cfg.SyncDir,
 		ClaudeDir:    cfg.ClaudeProjectsDir,
 		Marker:       marker,
+		Upper:        syncedUpper(cfg.SyncDir),
 		Project:      project,
 		Limit:        limit,
 		UpdateMarker: true,

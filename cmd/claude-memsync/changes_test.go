@@ -223,3 +223,33 @@ func TestChangesCmd_UpdateMarkerNeverOverwritesANote(t *testing.T) {
 		t.Errorf("stdout %q stderr %q", out.String(), errb.String())
 	}
 }
+
+// The CLI compares with HEAD unless --synced asks for what was copied into
+// ~/.claude.
+func TestChangesCmd_Synced(t *testing.T) {
+	cfgPath, base := changesRepo(t)
+	cfg, _ := loadDistillConfig(cfgPath)
+	writeSyncedHead(t, cfg.SyncDir, base)
+
+	run := func(args ...string) (int, string) {
+		var out, errb bytes.Buffer
+		code := changesCmd(strings.NewReader(""), &out, &errb, append([]string{"--config", cfgPath, "--since", base, "--json"}, args...))
+		if code != 0 {
+			t.Fatalf("exit %d: %s", code, errb.String())
+		}
+		var res struct {
+			Total int    `json:"total"`
+			Head  string `json:"head"`
+		}
+		if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+			t.Fatal(err)
+		}
+		return res.Total, res.Head
+	}
+	if total, _ := run(); total != 2 {
+		t.Errorf("default compares with HEAD: total = %d, want 2", total)
+	}
+	if total, head := run("--synced"); total != 0 || head != base {
+		t.Errorf("--synced: total = %d head = %s, want 0 and %s", total, head, base)
+	}
+}

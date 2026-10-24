@@ -36,6 +36,12 @@ type Options struct {
 	// /home/alice/src/app, or Claude's escaped folder name for it.
 	Project string
 
+	// Upper, if it resolves to a commit, replaces HEAD as the newest commit
+	// the report looks at (Result.Head is then Upper). The caller passes the
+	// commit whose files were copied into ~/.claude, so a session is not told
+	// about a file that is not there yet. Empty, or naming no commit: HEAD.
+	Upper string
+
 	// Limit caps how many changes are listed; the rest are only counted.
 	// Zero means no cap.
 	Limit int
@@ -80,7 +86,7 @@ func (c Change) Display() string {
 
 // Result is what Compute returns and what --json prints.
 type Result struct {
-	Head    string   `json:"head"`    // current HEAD of the sync repo
+	Head    string   `json:"head"`    // the newest commit looked at: HEAD, or Options.Upper
 	Since   string   `json:"since"`   // the commit Since or Marker resolved to
 	Busy    bool     `json:"busy"`    // the repo is mid-rebase/merge; nothing was reported
 	Reset   bool     `json:"reset"`   // the marker named a lost commit and was reset to Head
@@ -89,7 +95,8 @@ type Result struct {
 	Changes []Change `json:"changes"` // never nil
 }
 
-// Compute lists the memory files that changed between opts.Since and HEAD.
+// Compute lists the memory files that changed between opts.Since and HEAD (or
+// opts.Upper).
 func Compute(opts Options) (Result, error) {
 	repo := gitwt.New(opts.SyncDir)
 	res := Result{Changes: []Change{}}
@@ -97,6 +104,11 @@ func Compute(opts Options) (Result, error) {
 	head, ok := revParse(repo, "HEAD")
 	if !ok {
 		return res, fmt.Errorf("%s has no commits yet", opts.SyncDir)
+	}
+	if opts.Upper != "" {
+		if up, ok := revParse(repo, opts.Upper); ok {
+			head = up
+		}
 	}
 	res.Head = head
 
@@ -127,6 +139,17 @@ func Compute(opts Options) (Result, error) {
 		return res, WriteMarker(opts.Marker, head)
 	}
 	res.Since = since
+	if since != head {
+		// The upper bound is behind where the report last got to: history
+		// moved back (a reset, a force-push). What lies between was reported
+		// already, and a diff in that direction would repeat it on every run.
+		if _, err := repo.Run("merge-base", "--is-ancestor", head, since); err == nil {
+			if opts.UpdateMarker {
+				return res, WriteMarker(opts.Marker, head)
+			}
+			return res, nil
+		}
+	}
 
 	spec := ":(literal)projects/"
 	if opts.Project != "" {

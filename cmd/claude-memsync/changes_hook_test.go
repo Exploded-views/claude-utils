@@ -366,3 +366,156 @@ func TestHook_PrunesOldMarkers(t *testing.T) {
 		}
 	}
 }
+
+// HEAD moved outside a cycle (a hand `git pull`/rebase, or a propagate that
+// failed): .state/synced-head still names the older commit, so ~/.claude has
+// not got the new file yet. The hook reports it at once and advances its
+// marker; once catch-up has copied the file, nothing is reported again. The
+// session was told to read a file that was not there yet, and never told again.
+func TestHook_WaitsForSyncedHead(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	cfg, _ := loadDistillConfig(cfgPath)
+	ignoreState(t, cfg.SyncDir)
+	repo := gitwt.New(cfg.SyncDir)
+	in := hookJSON("sess-sh", "/home/alice/src/app", "UserPromptSubmit")
+	if code, out, _ := runHook(t, in, "--config", cfgPath, "--hook"); code != 0 || out != "" {
+		t.Fatalf("baseline: %d %q", code, out)
+	}
+	rec, _ := repo.Run("rev-parse", "HEAD")
+	state := filepath.Join(cfg.SyncDir, ".state")
+	if err := os.MkdirAll(state, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, "synced-head"), []byte(rec), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	addNotes(t, cfgPath, map[string]string{"-home-alice-src-app/memory/late.md": "late"})
+	local := filepath.Join(cfg.ClaudeProjectsDir, "-home-alice-src-app", "memory", "late.md")
+
+	reportedWhileCurrent := false
+	_, out1, _ := runHook(t, in, "--config", cfgPath, "--hook")
+	if strings.Contains(out1, "late.md") {
+		if _, err := os.Stat(local); err == nil {
+			reportedWhileCurrent = true
+		}
+	}
+
+	// Catch-up runs: the file reaches ~/.claude and the record moves to HEAD.
+	if err := os.MkdirAll(filepath.Dir(local), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(local, []byte("late"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	head, _ := repo.Run("rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(state, "synced-head"), []byte(head), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, out2, _ := runHook(t, in, "--config", cfgPath, "--hook")
+	if strings.Contains(out2, "late.md") {
+		reportedWhileCurrent = true
+	}
+	if !reportedWhileCurrent {
+		t.Errorf("late.md was never reported while ~/.claude had it (first report %q came before catch-up, second %q)", out1, out2)
+	}
+}
+
+// HEAD moves back to an ancestor of the marker (git reset by hand, or the
+// fork-point rebase onto an upstream that was force-pushed back to drop a
+// commit). The changes in between were reported already: nothing is reported
+// now, the marker follows HEAD back, and what comes next is reported once.
+func TestHook_HeadMovedBackIsReportedOnce(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	cfg, _ := loadDistillConfig(cfgPath)
+	ignoreState(t, cfg.SyncDir)
+	repo := gitwt.New(cfg.SyncDir)
+	in := hookJSON("sess-back", "/home/alice/src/app", "UserPromptSubmit")
+	runHook(t, in, "--config", cfgPath, "--hook")
+	older, _ := repo.Run("rev-parse", "HEAD")
+	older = strings.TrimSpace(older)
+	addNotes(t, cfgPath, map[string]string{"-home-alice-src-app/memory/purged.md": "p"})
+	if _, out, _ := runHook(t, in, "--config", cfgPath, "--hook"); !strings.Contains(out, "purged.md") {
+		t.Fatalf("setup: purged.md not reported: %q", out)
+	}
+	if _, err := repo.Run("reset", "--hard", older); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		code, out, errs := runHook(t, in, "--config", cfgPath, "--hook")
+		if code != 0 || out != "" || errs != "" {
+			t.Fatalf("after reset, run %d: exit %d stdout %q stderr %q", i, code, out, errs)
+		}
+	}
+	if mb, _ := os.ReadFile(markerPath(t, cfgPath, "sess-back")); strings.TrimSpace(string(mb)) != older {
+		t.Errorf("marker = %q, want it moved back to %s", mb, older)
+	}
+	addNotes(t, cfgPath, map[string]string{"-home-alice-src-app/memory/next.md": "n"})
+	_, out, _ := runHook(t, in, "--config", cfgPath, "--hook")
+	if !strings.Contains(out, "next.md") || strings.Contains(out, "purged.md") {
+		t.Errorf("after the next commit: %q", out)
+	}
+}
+
+// A detached HEAD (the user is mid-way through a hand resolution) is not
+// recorded in synced-head. The hook reports up to the record, not up to the
+// detached commit.
+func TestHook_DetachedHead(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	cfg, _ := loadDistillConfig(cfgPath)
+	ignoreState(t, cfg.SyncDir)
+	repo := gitwt.New(cfg.SyncDir)
+	in := hookJSON("sess-det", "/home/alice/src/app", "UserPromptSubmit")
+	runHook(t, in, "--config", cfgPath, "--hook")
+	rec, _ := repo.Run("rev-parse", "HEAD")
+	writeSyncedHead(t, cfg.SyncDir, rec)
+	if _, err := repo.Run("checkout", "--detach"); err != nil {
+		t.Fatal(err)
+	}
+	addNotes(t, cfgPath, map[string]string{"-home-alice-src-app/memory/detached.md": "d"})
+	if code, out, errs := runHook(t, in, "--config", cfgPath, "--hook"); code != 0 || out != "" || errs != "" {
+		t.Fatalf("detached, ahead of the record: exit %d stdout %q stderr %q", code, out, errs)
+	}
+
+	// Without a record a detached HEAD is still a commit: report up to it.
+	if err := os.Remove(filepath.Join(cfg.SyncDir, ".state", "synced-head")); err != nil {
+		t.Fatal(err)
+	}
+	if _, out, _ := runHook(t, in, "--config", cfgPath, "--hook"); !strings.Contains(out, "detached.md") {
+		t.Errorf("no record, detached HEAD: %q", out)
+	}
+}
+
+// A record that names no commit is no bound at all.
+func TestHook_UnresolvableSyncedHeadFallsBackToHead(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	cfg, _ := loadDistillConfig(cfgPath)
+	ignoreState(t, cfg.SyncDir)
+	in := hookJSON("sess-bad", "/home/alice/src/app", "UserPromptSubmit")
+	runHook(t, in, "--config", cfgPath, "--hook")
+	writeSyncedHead(t, cfg.SyncDir, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n")
+	addNotes(t, cfgPath, map[string]string{"-home-alice-src-app/memory/x.md": "x"})
+	if _, out, _ := runHook(t, in, "--config", cfgPath, "--hook"); !strings.Contains(out, "x.md") {
+		t.Errorf("got %q", out)
+	}
+}
+
+func writeSyncedHead(t *testing.T, syncDir, rec string) {
+	t.Helper()
+	state := filepath.Join(syncDir, ".state")
+	if err := os.MkdirAll(state, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, "synced-head"), []byte(strings.TrimSpace(rec)+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ignoreState gives the test repo the .gitignore init writes, so .state and
+// the denylist are never committed by addNotes.
+func ignoreState(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".state/\ndenylist.txt\nconfig.json\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
