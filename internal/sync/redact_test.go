@@ -256,3 +256,170 @@ func TestPathGuard(t *testing.T) {
 		t.Error("nil guard")
 	}
 }
+
+// guardFor is a pathGuard over a denylist with the given lines.
+func guardFor(t *testing.T, patterns ...string) (*pathGuard, *pullFixture) {
+	t.Helper()
+	f := newPullFixture(t, nil)
+	if err := os.WriteFile(f.loop.Cfg.DenylistPath(), []byte(strings.Join(patterns, "\n")+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return newPathGuard(f.loop.Cfg), f
+}
+
+// Only the matching tokens are replaced. The exit status and git's reason stay,
+// so the error is still diagnosable, and the chain still unwraps.
+func TestRedact_ReplacesOnlyMatchingTokens(t *testing.T) {
+	g, f := guardFor(t, "heron")
+	_, runErr := f.repo.Run("show", "HEAD:projects/p1/memory/heron.md")
+	if runErr == nil {
+		t.Fatal("expected git show to fail")
+	}
+	got := g.Err(fmt.Errorf("pull: %w", runErr)).Error()
+	for _, want := range []string{"pull: git show", "exit status 128", "fatal:", redactedPath} {
+		if !strings.Contains(got, want) {
+			t.Errorf("redacted error lost %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "heron") {
+		t.Errorf("leaked: %q", got)
+	}
+	if !errors.Is(g.Err(fmt.Errorf("w: %w", os.ErrPermission)), os.ErrPermission) {
+		t.Error("chain lost")
+	}
+}
+
+// A denylisted word that also sits in the remote URL (an org or firm name)
+// must not turn every push or pull error into a placeholder.
+func TestRedact_WordInRemoteURLKeepsTheCause(t *testing.T) {
+	g, _ := guardFor(t, "heron")
+	push := errors.New("git push --set-upstream origin main: exit status 128: fatal: unable to access " +
+		"'https://git.example.com/heron/memory.git/': Could not resolve host: git.example.com")
+	got := g.Err(fmt.Errorf("push: %w", push)).Error()
+	for _, want := range []string{"push: git push", "exit status 128", "unable to access", "Could not resolve host"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("cause lost, missing %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "heron") {
+		t.Errorf("leaked: %q", got)
+	}
+	if strings.Contains(got, "matches the denylist") {
+		t.Errorf("claims a path matched: %q", got)
+	}
+}
+
+// Anchored patterns see the repo-relative path whatever surrounds it: git's
+// :(literal) pathspec prefix, quotes, colons, tabs, or an absolute root.
+func TestRedact_AnchoredPatternsThroughGitSyntax(t *testing.T) {
+	g, f := guardFor(t, "^projects/[^/]+/memory/heron", "^projects/[^/]+/memory/night owl")
+	abs := filepath.ToSlash(filepath.Join(f.roots.Mirror, "p1", "memory", "heron.md"))
+	for name, text := range map[string]string{
+		"literal pathspec":  "error: pathspec ':(literal)projects/p1/memory/heron.md' did not match any file(s) known to git",
+		"icase pathspec":    "error: pathspec ':(literal,icase)projects/p1/memory/heron.md' did not match",
+		"double quotes":     `error: pathspec "projects/p1/memory/heron.md" did not match`,
+		"colon after":       "error: projects/p1/memory/heron.md: needs merge",
+		"absolute root":     "open " + abs + ": permission denied",
+		"tab-indented":      "overwritten:\n\tprojects/p1/memory/heron.md\nAborting",
+		"quoted with space": "error: pathspec 'projects/p1/memory/night owl.md' did not match",
+		"bare with space":   "overwritten:\n\tprojects/p1/memory/night owl.md\nAborting",
+	} {
+		got := g.Err(errors.New(text)).Error()
+		if strings.Contains(got, "heron") || strings.Contains(got, "night") || strings.Contains(got, "owl") {
+			t.Errorf("%s: leaked: %q", name, got)
+		}
+		if !strings.Contains(got, redactedPath) {
+			t.Errorf("%s: want the placeholder: %q", name, got)
+		}
+	}
+	for _, text := range []string{
+		"error: pathspec ':(literal)projects/p1/memory/day.md' did not match",
+		"error: projects/p1/memory/day owl.md: needs merge",
+	} {
+		if got := g.Err(errors.New(text)).Error(); got != text {
+			t.Errorf("an unlisted name changed: %q", got)
+		}
+	}
+}
+
+// A long file list is checked in full: there is no cap on the words examined.
+func TestRedact_LongFileList(t *testing.T) {
+	g, _ := guardFor(t, "^projects/[^/]+/memory/heron")
+	for _, n := range []int{30, 500} {
+		var list []string
+		for i := 0; i < n; i++ {
+			list = append(list, fmt.Sprintf("projects/p1/memory/n%03d.md", i))
+		}
+		list = append(list, "projects/p1/memory/heron.md")
+		text := "git pull --rebase --autostash origin main: exit status 1: error: The following untracked " +
+			"working tree files would be overwritten by merge:\n\t" + strings.Join(list, "\n\t") +
+			"\nPlease move or remove them before you merge.\nAborting"
+		got := g.Err(errors.New(text)).Error()
+		if strings.Contains(got, "heron") {
+			t.Errorf("%d names: leaked", n)
+		}
+		for _, want := range []string{"exit status 1", "n000.md", "Please move or remove them", "Aborting"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("%d names: lost %q", n, want)
+			}
+		}
+	}
+}
+
+// Each line is also tested as a whole, for a name the word splitting breaks up.
+func TestRedact_WholeLine(t *testing.T) {
+	g, _ := guardFor(t, `^\s*my heron's (?:very )?private note\.md$`)
+	got := g.Err(errors.New("overwritten:\n\tmy heron's private note.md\nAborting")).Error()
+	if strings.Contains(got, "heron") || !strings.Contains(got, "Aborting") {
+		t.Errorf("got %q", got)
+	}
+}
+
+// With a denylist that cannot be parsed, paths and file names go but the rest
+// of the message stays.
+func TestRedact_UnreadableDenylistKeepsTheCause(t *testing.T) {
+	f := newPullFixture(t, nil)
+	if err := os.WriteFile(f.loop.Cfg.DenylistPath(), []byte("(unclosed\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	g := newPathGuard(f.loop.Cfg)
+	got := g.Err(errors.New("rename /home/u/.claudesync/projects/p1/memory/a.md: permission denied; also b.md")).Error()
+	if strings.Contains(got, "/home") || strings.Contains(got, "a.md") || strings.Contains(got, "b.md") {
+		t.Errorf("leaked: %q", got)
+	}
+	if !strings.Contains(got, "permission denied") {
+		t.Errorf("cause lost: %q", got)
+	}
+}
+
+// The log sites outside flush are guarded too: a failed manifest build names
+// the Claude projects dir, whose name here holds a denylisted word.
+func TestRedact_RefreshManifestError(t *testing.T) {
+	f := redactFixture(t, nil)
+	logs := captureLog(t)
+	f.loop.Cfg.ClaudeProjectsDir = filepath.Join(t.TempDir(), "nightjar-projects")
+	if err := os.WriteFile(f.loop.Cfg.ClaudeProjectsDir, []byte("not a dir"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f.loop.refreshManifest(Roots{Claude: f.loop.Cfg.ClaudeProjectsDir})
+	if !strings.Contains(logs.String(), "build manifest") {
+		t.Fatalf("the error was not triggered; log:\n%s", logs)
+	}
+	requireNoName(t, "log", logs.String())
+}
+
+// handleEvent's vanished-file race removes the mirror copy; that error is
+// guarded like the others.
+func TestRedact_HandleEventVanishedFileRemoveError(t *testing.T) {
+	f := redactFixture(t, map[string]string{"keep.md": "k\n"})
+	captureLog(t)
+	mirrorCopy := filepath.Join(f.roots.Mirror, "p1", "memory", secretName)
+	blockDir(t, filepath.Join(mirrorCopy, "sub")) // a non-empty dir: Remove fails
+	_, err := f.loop.handleEvent(nil, f.roots, fsnotify.Event{
+		Name: filepath.Join(f.roots.Claude, "p1", "memory", secretName), Op: fsnotify.Write,
+	})
+	if err == nil {
+		t.Fatal("the remove error was not triggered")
+	}
+	requireNoName(t, "handleEvent error", err.Error())
+}

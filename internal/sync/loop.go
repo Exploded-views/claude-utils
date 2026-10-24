@@ -67,7 +67,7 @@ func (l *Loop) Run(ctx context.Context) error {
 		return fmt.Errorf("watch %s: %w", roots.Claude, err)
 	}
 	if err := refreshMemoryWatches(watcher, roots.Claude); err != nil {
-		log.Println("refresh memory watches:", err)
+		log.Println("refresh memory watches:", newPathGuard(l.Cfg).Err(err))
 	}
 
 	debounce := time.NewTimer(time.Hour)
@@ -84,7 +84,7 @@ func (l *Loop) Run(ctx context.Context) error {
 	// to detect deletes that happened while the daemon was off), then flush.
 	manifest, err := LoadManifest(l.Cfg.SyncDir)
 	if err != nil {
-		log.Println("load manifest (continuing without delete detection):", err)
+		log.Println("load manifest (continuing without delete detection):", newPathGuard(l.Cfg).Err(err))
 		manifest = NewManifest()
 	}
 	// What a crash left behind is undone before Reconcile compares the trees: a
@@ -96,7 +96,7 @@ func (l *Loop) Run(ctx context.Context) error {
 		}
 	}
 	if err := l.flush(repo, roots, true); err != nil {
-		log.Println("initial flush:", err)
+		log.Println("initial flush:", newPathGuard(l.Cfg).Err(err))
 		if l.OnFlush != nil {
 			l.OnFlush(true, err)
 		}
@@ -117,7 +117,7 @@ func (l *Loop) Run(ctx context.Context) error {
 			}
 			handled, err := l.handleEvent(watcher, roots, ev)
 			if err != nil {
-				log.Println("event:", err)
+				log.Println("event:", newPathGuard(l.Cfg).Err(err))
 				continue
 			}
 			if !handled {
@@ -130,12 +130,12 @@ func (l *Loop) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			log.Println("watcher error:", err)
+			log.Println("watcher error:", newPathGuard(l.Cfg).Err(err))
 
 		case <-debounce.C:
 			err := l.flush(repo, roots, true)
 			if err != nil {
-				log.Println("flush (local):", err)
+				log.Println("flush (local):", newPathGuard(l.Cfg).Err(err))
 			}
 			l.refreshManifest(roots)
 			l.rebuildDistilledIndex()
@@ -201,7 +201,7 @@ func (l *Loop) pullTick(repo *gitwt.Repo, roots Roots) {
 	// watcher missed.
 	m, err := LoadManifest(l.Cfg.SyncDir)
 	if err != nil {
-		log.Println("load manifest:", err)
+		log.Println("load manifest:", newPathGuard(l.Cfg).Err(err))
 		m = NewManifest()
 	}
 	if l.startCycle(repo, roots) {
@@ -211,7 +211,7 @@ func (l *Loop) pullTick(repo *gitwt.Repo, roots Roots) {
 	}
 	err = l.flush(repo, roots, true)
 	if err != nil {
-		log.Println("flush (pull):", err)
+		log.Println("flush (pull):", newPathGuard(l.Cfg).Err(err))
 	}
 	l.refreshManifest(roots)
 	l.rebuildDistilledIndex()
@@ -254,7 +254,10 @@ func (l *Loop) handleEvent(watcher *fsnotify.Watcher, roots Roots, ev fsnotify.E
 		if err := CopyToMirror(roots, hash, name); err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				// Race: file vanished between event and read. Treat as remove.
-				return true, RemoveFromMirror(roots, hash, name)
+				if err := RemoveFromMirror(roots, hash, name); err != nil {
+					return true, newPathGuard(l.Cfg).PathErr("remove from mirror", "projects/"+hash+"/memory/"+name, err)
+				}
+				return true, nil
 			}
 			return false, newPathGuard(l.Cfg).PathErr("copy to mirror", "projects/"+hash+"/memory/"+name, err)
 		}
@@ -473,11 +476,11 @@ func refreshMemoryWatches(w *fsnotify.Watcher, claudeRoot string) error {
 func (l *Loop) refreshManifest(roots Roots) {
 	m, err := BuildFromClaudeTree(roots.Claude)
 	if err != nil {
-		log.Println("build manifest:", err)
+		log.Println("build manifest:", newPathGuard(l.Cfg).Err(err))
 		return
 	}
 	if err := m.Save(l.Cfg.SyncDir); err != nil {
-		log.Println("save manifest:", err)
+		log.Println("save manifest:", newPathGuard(l.Cfg).Err(err))
 	}
 }
 
