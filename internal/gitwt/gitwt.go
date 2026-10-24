@@ -8,7 +8,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -280,6 +282,111 @@ func (r *Repo) Commit(message string) (bool, error) {
 // Pull does `git pull --rebase --autostash origin <branch>`.
 func (r *Repo) Pull(branch string) error {
 	_, err := r.Run("pull", "--rebase", "--autostash", "origin", branch)
+	return err
+}
+
+// RebaseInProgress reports whether a rebase is stopped in this work-tree, as a
+// conflicting `pull --rebase` leaves it.
+func (r *Repo) RebaseInProgress() bool {
+	for _, name := range []string{"rebase-merge", "rebase-apply"} {
+		out, err := r.Run("rev-parse", "--git-path", name)
+		p := strings.TrimSpace(out)
+		if err != nil || p == "" {
+			continue
+		}
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(r.Dir, p) // relative to the -C directory
+		}
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// RebaseAbort abandons the rebase in progress, restoring the branch and the
+// work-tree to where the pull found them.
+func (r *Repo) RebaseAbort() error {
+	_, err := r.Run("rebase", "--abort")
+	return err
+}
+
+// UnmergedPaths lists the paths with unresolved conflicts.
+func (r *Repo) UnmergedPaths() ([]string, error) {
+	out, err := r.Run("diff", "--name-only", "--diff-filter=U", "-z")
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, p := range strings.Split(out, "\x00") {
+		if p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths, nil
+}
+
+// MergeKeepOurs merges ref into HEAD and settles every conflict in favor of
+// HEAD: overlapping hunks keep HEAD's lines, and a file one side deleted keeps
+// HEAD's choice. If it cannot finish, the merge is aborted and the error
+// returned, leaving HEAD and the work-tree as they were. Error text is git's
+// own and may name paths; callers should not log it.
+func (r *Repo) MergeKeepOurs(ref string) error {
+	err := r.mergeKeepOurs(ref)
+	if err != nil {
+		_, _ = r.Run("merge", "--abort")
+	}
+	return err
+}
+
+func (r *Repo) mergeKeepOurs(ref string) error {
+	if _, err := r.Run("merge", "-X", "ours", "--no-edit", ref); err == nil {
+		return nil
+	}
+	// What -X ours does not settle: modify/delete, and MEMORY.md when the merge
+	// driver reports a conflict. Stage 2 is HEAD's side.
+	out, err := r.Run("ls-files", "-u", "-z")
+	if err != nil {
+		return err
+	}
+	hasOurs := map[string]bool{}
+	var unmerged []string
+	for _, e := range strings.Split(out, "\x00") {
+		tab := strings.IndexByte(e, '\t')
+		if tab < 0 {
+			continue
+		}
+		p := e[tab+1:]
+		if !hasOurs[p] {
+			unmerged = append(unmerged, p)
+		}
+		hasOurs[p] = hasOurs[p] || strings.HasSuffix(e[:tab], " 2")
+	}
+	if len(unmerged) == 0 {
+		return errors.New("merge failed without conflicts")
+	}
+	var keep, drop []string
+	for _, p := range unmerged {
+		if hasOurs[p] {
+			keep = append(keep, Literal(p))
+		} else {
+			drop = append(drop, Literal(p))
+		}
+	}
+	if len(keep) > 0 {
+		if err := r.withPathspecs(keep, "checkout", "--ours"); err != nil {
+			return err
+		}
+		if err := r.withPathspecs(keep, "add"); err != nil {
+			return err
+		}
+	}
+	if len(drop) > 0 {
+		if err := r.withPathspecs(drop, "rm", "-q"); err != nil {
+			return err
+		}
+	}
+	_, err = r.Run("commit", "--no-edit")
 	return err
 }
 

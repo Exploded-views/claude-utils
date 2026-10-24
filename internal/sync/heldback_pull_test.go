@@ -155,6 +155,21 @@ func (f *pullFixture) peerPush(name, content string) {
 	mustGit(f.t, f.peer, "push", "-q", "origin", "main")
 }
 
+// peerWrite pushes a file at an arbitrary repo path (peerPush is memory-only).
+func (f *pullFixture) peerWrite(rel, content string) {
+	f.t.Helper()
+	mustGit(f.t, f.peer, "pull", "-q", "origin", "main")
+	writeRepoFile(f.t, f.peer, rel, content)
+	mustGit(f.t, f.peer, "add", "-A")
+	mustGit(f.t, f.peer, "commit", "-q", "-m", "peer: "+rel)
+	mustGit(f.t, f.peer, "push", "-q", "origin", "main")
+}
+
+func (f *pullFixture) originHas(rel string) bool {
+	out, _ := f.repo.Run("ls-tree", "-r", "--name-only", "origin/main")
+	return strings.Contains(out, rel)
+}
+
 func (f *pullFixture) claudeCopy(name string) (string, bool) {
 	b, err := os.ReadFile(filepath.Join(f.roots.Claude, "p1", "memory", name))
 	if err != nil {
