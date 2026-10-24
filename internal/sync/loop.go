@@ -13,6 +13,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
+	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/distill"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
@@ -166,6 +167,39 @@ func (l *Loop) Run(ctx context.Context) error {
 	}
 }
 
+// keyless reports (and logs) that encryption is on but this host's identity
+// cannot read the repo.
+func (l *Loop) keyless(repo *gitwt.Repo) bool {
+	err := agecrypt.CheckKeyed(repo)
+	if errors.Is(err, agecrypt.ErrKeyless) {
+		log.Println("encryption: keyless, syncing stopped:", err)
+		return true
+	}
+	if err != nil {
+		log.Println("encryption: key check failed:", err)
+	}
+	return false
+}
+
+// keylessPull is all a keyless host does in a cycle: fetch and rebase what
+// others pushed, which is how the recipients change that admits this host
+// arrives. Nothing is committed, propagated to the Claude tree or pushed, and
+// the synced head is not recorded, so catchUp copies the new content once the
+// host can read it.
+func (l *Loop) keylessPull(repo *gitwt.Repo) {
+	if handResolving(repo) {
+		return
+	}
+	if err := runPull(repo, l.Branch); err != nil {
+		if repo.RebaseInProgress() {
+			_ = abortRebaseConflict(repo)
+		} else {
+			log.Println("pull:", newPathGuard(l.Cfg).Err(err))
+		}
+	}
+	clearPullMark(repo)
+}
+
 // recoverLeftovers undoes what a crash or an earlier failed cycle left: a
 // rebase or merge the daemon's own pull left stopped, then an unfinished park.
 // A rebase or merge the daemon did not start is the user's: it returns
@@ -206,6 +240,11 @@ func (l *Loop) takeRecovery(repo *gitwt.Repo, roots Roots) error {
 // Reconcile would merge them into the Claude tree), nor while a rebase or
 // merge is still stopped.
 func (l *Loop) startCycle(repo *gitwt.Repo, roots Roots) bool {
+	// A keyless clone holds ciphertext: Reconcile would copy it into the
+	// Claude tree.
+	if l.keyless(repo) {
+		return false
+	}
 	err := l.recoverLeftovers(repo, roots)
 	l.recovered = &recovery{err}
 	if errors.Is(err, errHandResolving) {
@@ -314,6 +353,12 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	// the restore error below) is stripped of denylisted names.
 	g := newPathGuard(l.Cfg)
 	defer func() { err = g.Err(err) }()
+	// Without a key that reads the repo nothing may be committed, pulled into
+	// the Claude tree or pushed.
+	if l.keyless(repo) {
+		l.keylessPull(repo)
+		return agecrypt.ErrKeyless
+	}
 	// A rebase or merge the daemon left stopped goes first (one the user is
 	// resolving ends the cycle), before anything is staged, and then
 	// a park an earlier cycle (or a crashed run) did not finish: nothing may be
@@ -350,9 +395,11 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 		return pause()
 	}
 	clearPaused(repo)
+	logUnreviewed(repo)
 	if includeLocal {
 		_, err := CommitMirror(repo, l.Cfg, fmt.Sprintf("auto: %s @ %s", l.Hostname, time.Now().UTC().Format(time.RFC3339)))
-		if err != nil {
+		// Unreviewed recipients stop commits and pushes; pulling goes on.
+		if err != nil && !errors.Is(err, agecrypt.ErrRecipientsUnreviewed) {
 			return fmt.Errorf("commit: %w", err)
 		}
 	}
@@ -428,9 +475,12 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 		}
 	}
 	if conflictErr == nil && strings.TrimSpace(preRev) != strings.TrimSpace(postRev) && strings.TrimSpace(preRev) != "" {
+		noteRecipientsChange(repo, strings.TrimSpace(preRev), strings.TrimSpace(postRev))
 		if err := propagate(repo, roots, strings.TrimSpace(preRev), strings.TrimSpace(postRev), st.skip(), g); err != nil {
 			settled = false
-			return fmt.Errorf("propagate: %w", err)
+			if !errors.Is(err, errPendingCiphertext) { // not a failure: the rest of the cycle goes on
+				return fmt.Errorf("propagate: %w", err)
+			}
 		}
 	}
 	if conflictErr != nil {
@@ -440,11 +490,23 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	if l.PushAllowed != nil && !l.PushAllowed() {
 		return nil
 	}
+	logUnreviewed(repo)
+	if err := agecrypt.PushGuard(repo, l.Branch); err != nil {
+		if !errors.Is(err, agecrypt.ErrRecipientsUnreviewed) { // logged once by logUnreviewed
+			log.Println(err)
+		}
+		return err
+	}
 	if err := repo.Push(l.Branch); err != nil {
 		return fmt.Errorf("push: %w", err)
 	}
 	return nil
 }
+
+// errPendingCiphertext is propagateChanges' report that some files hold
+// ciphertext this host cannot read. They were not copied; the synced head is
+// not advanced past them.
+var errPendingCiphertext = errors.New("some files hold ciphertext this host cannot read")
 
 // propagate is propagateChanges; a variable so a test can make it fail.
 var propagate = propagateChanges
@@ -512,6 +574,12 @@ func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string, skip map[
 		return err
 	}
 	fields := strings.Split(out, "\x00")
+	pending := 0
+	defer func() {
+		if pending > 0 {
+			log.Printf("propagate: %d file(s) hold ciphertext this host cannot read; left pending", pending)
+		}
+	}()
 	for i := 0; i < len(fields); {
 		status := fields[i]
 		i++
@@ -546,10 +614,15 @@ func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string, skip map[
 		case 'D':
 			_ = os.Remove(filepath.Join(roots.Claude, hash, "memory", name))
 		default:
-			if err := CopyToClaude(roots, hash, name); err != nil {
+			if err := CopyToClaude(roots, hash, name); errors.Is(err, ErrCiphertext) {
+				pending++
+			} else if err != nil {
 				log.Printf("propagate %s: %v", g.Path(path), g.Err(err))
 			}
 		}
+	}
+	if pending > 0 {
+		return errPendingCiphertext
 	}
 	return nil
 }

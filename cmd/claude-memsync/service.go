@@ -249,6 +249,9 @@ func runStatus(args []string) int {
 		if line := visibilityLine(cfg); line != "" {
 			fmt.Println(line)
 		}
+		for _, line := range encryptionLines(cfg) {
+			fmt.Println(line)
+		}
 	}
 	return 0
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
 
@@ -168,6 +169,10 @@ func catchUpSkips(repo *gitwt.Repo, roots Roots, rec, head string) (map[string]b
 		if !ok || skip[p] || status == "" || !roots.owns(hash) {
 			continue
 		}
+		if status[0] != 'D' && undecryptableAt(repo, head, p) {
+			skip[p] = true // never copy ciphertext; a later re-encryption brings the file again
+			continue
+		}
 		curOK, cur := readIfExists(filepath.Join(roots.Claude, hash, "memory", name))
 		recBytes, recOK := blobAt(repo, rec, p)
 		if curOK == recOK && bytes.Equal(cur, recBytes) {
@@ -186,11 +191,26 @@ func catchUpSkips(repo *gitwt.Repo, roots Roots, rec, head string) (map[string]b
 	return skip, keep, nil
 }
 
+// undecryptableAt reports whether p at rev is ciphertext this host cannot read.
+func undecryptableAt(repo *gitwt.Repo, rev, p string) bool {
+	out, err := repo.Run("show", rev+":"+p)
+	if err != nil || !agecrypt.IsCiphertext([]byte(out)) {
+		return false
+	}
+	_, err = agecrypt.PlainReader(repo)([]byte(out))
+	return err != nil
+}
+
 // blobAt is the content of p at rev; false if it does not exist there.
 func blobAt(repo *gitwt.Repo, rev, p string) ([]byte, bool) {
 	out, err := repo.Run("show", rev+":"+p)
 	if err != nil {
 		return nil, false
 	}
-	return []byte(out), true
+	// An encrypted repo stores ciphertext; the Claude tree gets plaintext.
+	plain, err := agecrypt.PlainReader(repo)([]byte(out))
+	if err != nil {
+		return nil, false
+	}
+	return plain, true
 }

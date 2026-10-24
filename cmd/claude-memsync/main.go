@@ -30,6 +30,12 @@ func main() {
 		os.Exit(runDistill(os.Args[2:]))
 	case "archive":
 		os.Exit(runArchive(os.Args[2:]))
+	case "age-filter":
+		os.Exit(runAgeFilter())
+	case "age-textconv":
+		os.Exit(runAgeTextconv(os.Args[2:]))
+	case "recipients":
+		os.Exit(runRecipients(os.Args[2:]))
 	case "changes":
 		os.Exit(runChanges(os.Args[2:]))
 	case "relate":
@@ -72,6 +78,7 @@ Subcommands:
   relate      Declare a read or join relation between two memory repos (registry)
   unrelate    Remove a relation
   related     List relations; "related sync" fetches read clones, "related context" prints a session index
+  recipients  add | remove | list | accept the age recipients of an encrypted repo
   install     Install as a system service (Windows Service / systemd unit / launchd plist)
   uninstall   Remove the system service
   start       Start the system service

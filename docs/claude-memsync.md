@@ -1105,6 +1105,103 @@ If the copy is encrypted (`.age-recipients`) and this host cannot decrypt it, it
 - `mem-orch-all` may read `mem-orch-<client>`, and nothing else; never join. Every other orch edge is refused.
 
 **Session context.** Put `claude-memsync related context --project "$CLAUDE_PROJECT_DIR"` in a SessionStart hook. It prints, for the repo that owns the project, one entry per read relation: the repo name, note count, read-only path and the headings of its `MEMORY.md` (never note bodies), within `--per-relation` (default 2000) and `--total` (default 6000) characters. Headings and changed paths that match the owning repo's denylist are counted, never printed. It prints nothing for a project without relations and never fails the session. `changes --hook` also lists, under a "related, read-only repos" label, the paths that changed in those clones since the session last looked. Allow `Read(<relatedRoot>/**)` and nothing wider.
+## Encryption at rest
+
+`claude-memsync init --encrypt --remote <url>` encrypts every file in the sync
+repo with [age](https://age-encryption.org) before it reaches git, so the remote
+host stores only ciphertext. It is opt-in: a repo made without `--encrypt` is
+unchanged. `--encrypt` supports a new (empty) remote or one that is already
+encrypted; it refuses a remote that holds plaintext history.
+
+How it works:
+
+- A git clean/smudge filter (`claude-memsync age-filter`, git's long-running
+  filter protocol) encrypts on `git add` and decrypts on checkout, so the work
+  tree and the Claude tree stay plaintext. Encryption is deterministic (cached
+  by content and recipient set), so checkouts and rebases never leave the clone
+  dirty. The filter is `required`: if the binary is missing, git fails instead of
+  storing plaintext.
+- `claude-memmerge` decrypts the three versions, merges and writes ciphertext
+  back. Notes use a plain line merge (`--text`) whose conflict markers are
+  readable in the work tree; `MEMORY.md` keeps the semantic merge.
+- `.gitattributes`, `.gitignore` and `.age-recipients` (public keys only) stay
+  plaintext, at the repo root only; nested copies are encrypted like any file.
+  Everything else is encrypted. The filter rules are written to
+  `$GIT_DIR/info/attributes`, which outranks every `.gitattributes`, so an
+  upstream or nested `.gitattributes` cannot switch encryption off.
+- Commit messages are `memsync: N files`: no note names, no host name. A neutral
+  author is set when git has none configured.
+- Before every push the daemon checks that each blob it would send (outside the
+  three files above) starts with `age-encryption.org/v1`, and refuses the push
+  otherwise.
+- The secret scrub reads the plaintext, not the ciphertext.
+
+### Keys
+
+`init --encrypt` generates a per-host X25519 identity (mode 0600; default
+`<user config dir>/claude-memsync/identity.txt`, or `--identity <file>`) and
+prints only the **public** recipient. An existing age identity file, or an
+unencrypted SSH ed25519/RSA key (age cannot use ssh-agent, so a passphrase-protected
+key does not work for a daemon), can be used instead. Back the identity up
+offline: without a listed key the data is unrecoverable.
+
+Pass an **offline recovery recipient** at init (`--recipient <public-key>`,
+repeatable) or add one later with `recipients add`. Keep that key's secret off
+every synced machine.
+
+### Adding and removing a machine
+
+A second machine runs `init --encrypt` against the same remote. It is *keyless*
+until its public key is listed: the daemon commits and pushes nothing, copies
+nothing into the Claude tree (it only pulls), and `status` says so. On a machine
+that can read the repo:
+
+    claude-memsync recipients add <public-key>
+    claude-memsync recipients list
+    claude-memsync recipients remove <public-key>
+
+Each edits `.age-recipients`, re-encrypts every file to the new set and commits
+(the daemon pushes). The commit is built from HEAD alone: anything else staged
+in the sync repo is neither committed nor unstaged. These actions (and
+`accept --yes`) refuse to run while the daemon holds the sync dir; stop it first. A removed key cannot read content written after the change,
+but it still reads everything it already fetched; rewriting history does not
+help once a key has fetched it, so treat removal as "stop future leakage".
+
+### Reviewing recipient changes
+
+Anyone with write access to the remote could add their own key to
+`.age-recipients`. Each host therefore **pins** the recipient set it has
+reviewed (in its git dir, never committed). Init pins the set it first sees
+(trust on first use), and `recipients add|remove` update the pin. The filter
+encrypts only to the pinned set. If a pull brings a different
+`.age-recipients`, the host logs a warning once, `status` shows
+`recipients UNREVIEWED`, and nothing is committed or pushed (pulling continues)
+until a person runs `claude-memsync recipients accept` (it shows the added and
+removed keys as short fingerprints; add `--yes` to accept). A changed
+`.gitattributes` anywhere in the repo is held to the same review. Accepting
+re-encrypts everything in HEAD to the new set and commits it, so no blob a newly
+admitted host cannot read is pushed afterwards. Ciphertext a host cannot read is
+never written into the Claude tree. A machine that was
+admitted by another host sees exactly this on its first pull and accepts it.
+
+### What GitHub (or any host) can still see
+
+Encryption hides note contents and the diffs inside them. The host still sees:
+file names (project folder hashes and note names), file sizes (plaintext plus
+about 200 bytes per recipient), commit times and counts, branch names, the
+commit graph, and the recipients' public keys. It cannot search or render the
+notes, and its secret scanning sees only ciphertext. Hiding names and timing
+would need name hashing or a different tool.
+
+### Limits
+
+- Recipients you add apply to new content; old history stays readable to
+  whoever could read it.
+- The ciphertext cache (`.git/memage-cache`) holds ciphertext only and is not
+  pruned; delete the directory at any time.
+- Moving the `claude-memsync` or `claude-memmerge` binary breaks the configured
+  paths (re-run `init --force`, or fix the `filter.memage.*` and `merge.*` git
+  config).
 
 ## Limitations / known issues
 

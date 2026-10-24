@@ -44,9 +44,7 @@ func (r *Repo) run(env []string, stdin []byte, args ...string) (string, error) {
 	full := append([]string{"-C", r.Dir}, args...)
 	cmd := exec.Command("git", full...)
 	proc.HideWindow(cmd)
-	if len(env) > 0 {
-		cmd.Env = append(os.Environ(), env...)
-	}
+	cmd.Env = repoEnv(env)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
@@ -57,6 +55,33 @@ func (r *Repo) run(env []string, stdin []byte, args ...string) (string, error) {
 		return stdout.String(), fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.String(), nil
+}
+
+// RunEnv is RunStdin with extra environment variables (KEY=VALUE), e.g. a
+// private GIT_INDEX_FILE.
+func (r *Repo) RunEnv(env []string, stdin []byte, args ...string) (string, error) {
+	return r.run(env, stdin, args...)
+}
+
+// RunClean is Run; kept for callers that want to say the output must not
+// depend on the environment (run already drops git's repository-location
+// variables, see repoEnv).
+func (r *Repo) RunClean(args ...string) (string, error) { return r.run(nil, nil, args...) }
+
+// repoEnv is the environment for git: the caller's, minus the variables that
+// would redirect git to another repository than the -C directory.
+func repoEnv(extra []string) []string {
+	var env []string
+	for _, e := range os.Environ() {
+		k, _, _ := strings.Cut(e, "=")
+		switch k {
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+			"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_PREFIX":
+			continue
+		}
+		env = append(env, e)
+	}
+	return append(env, extra...)
 }
 
 // IsRepo reports whether r.Dir is inside an existing git work-tree.
@@ -75,6 +100,25 @@ func (r *Repo) Clone(url string) error {
 		return fmt.Errorf("git clone %s: %w: %s", url, err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// CloneNoCheckout is Clone without populating the work-tree (`clone -n`), so
+// config that checkout depends on (filters) can be set first.
+func (r *Repo) CloneNoCheckout(url string) error {
+	cmd := exec.Command("git", "clone", "-n", url, r.Dir)
+	proc.HideWindow(cmd)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git clone -n %s: %w: %s", url, err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// HasHead reports whether HEAD points at a commit (false in an empty repo).
+func (r *Repo) HasHead() bool {
+	_, err := r.Run("rev-parse", "--verify", "--quiet", "HEAD")
+	return err == nil
 }
 
 // Init runs `git init` in r.Dir. The directory is created if missing.
