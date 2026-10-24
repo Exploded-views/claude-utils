@@ -89,6 +89,45 @@ func (r *Repo) AddAll() error {
 	return err
 }
 
+// StagedChange is one entry from `git diff --cached --name-status`.
+type StagedChange struct {
+	Status byte   // 'A' added, 'M' modified, 'D' deleted, ...
+	Path   string // slash-separated, relative to the work-tree root
+}
+
+// StagedChanges lists what is staged relative to HEAD. Renames are reported as
+// a delete plus an add so callers never see a status with two paths.
+func (r *Repo) StagedChanges() ([]StagedChange, error) {
+	out, err := r.Run("diff", "--cached", "--name-status", "--no-renames", "-z")
+	if err != nil {
+		return nil, err
+	}
+	fields := strings.Split(out, "\x00")
+	var changes []StagedChange
+	for i := 0; i+1 < len(fields); i += 2 {
+		if fields[i] == "" {
+			break
+		}
+		changes = append(changes, StagedChange{Status: fields[i][0], Path: fields[i+1]})
+	}
+	return changes, nil
+}
+
+// StagedContent returns the staged (index) content of path.
+func (r *Repo) StagedContent(path string) ([]byte, error) {
+	out, err := r.Run("show", ":"+path)
+	return []byte(out), err
+}
+
+// Unstage removes paths from the index, leaving the work-tree untouched.
+func (r *Repo) Unstage(paths ...string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	_, err := r.Run(append([]string{"reset", "-q", "--"}, paths...)...)
+	return err
+}
+
 // HasStagedChanges reports whether there is anything staged that would be
 // included in a commit.
 func (r *Repo) HasStagedChanges() (bool, error) {

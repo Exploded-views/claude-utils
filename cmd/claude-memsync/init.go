@@ -140,10 +140,7 @@ func bootstrap(cfg config.Config, force bool) error {
 	printReport(report)
 
 	// Step 6: stage + commit + push.
-	if err := repo.AddAll(); err != nil {
-		return fmt.Errorf("git add: %w", err)
-	}
-	committed, err := repo.Commit("init: bootstrap from " + hostname())
+	committed, err := syncpkg.CommitMirror(repo, cfg, "init: bootstrap from "+hostname())
 	if err != nil {
 		return fmt.Errorf("git commit: %w", err)
 	}
@@ -220,6 +217,7 @@ func writeGitignore(syncDir string) error {
 config.json
 daemon.pid
 .state/
+denylist.txt
 *.tmp
 *.tmp.*
 *.from-remote-*

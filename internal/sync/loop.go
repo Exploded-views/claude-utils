@@ -220,10 +220,7 @@ func (l *Loop) handleEvent(watcher *fsnotify.Watcher, roots Roots, ev fsnotify.E
 // early — skipping the full pull/push churn that dominates idle ticks.
 func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) error {
 	if includeLocal {
-		if err := repo.AddAll(); err != nil {
-			return fmt.Errorf("add: %w", err)
-		}
-		_, err := repo.Commit(fmt.Sprintf("auto: %s @ %s", l.Hostname, time.Now().UTC().Format(time.RFC3339)))
+		_, err := CommitMirror(repo, l.Cfg, fmt.Sprintf("auto: %s @ %s", l.Hostname, time.Now().UTC().Format(time.RFC3339)))
 		if err != nil {
 			return fmt.Errorf("commit: %w", err)
 		}
