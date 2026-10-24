@@ -93,7 +93,11 @@ func savePark(repo *gitwt.Repo) (*parkState, error) {
 		return nil, err
 	}
 	st := &parkState{}
-	// A crash before the state file was written leaves bytes nobody refers to.
+	// Bytes with no state file beside them are nobody's, or the only copy of a
+	// set-aside that failed halfway: never deleted, moved aside.
+	if err := setAsideOrphanBytes(repo); err != nil {
+		return nil, err
+	}
 	if err := os.RemoveAll(parkBytesDir(repo)); err != nil {
 		return nil, err
 	}
@@ -130,6 +134,23 @@ func savePark(repo *gitwt.Repo) (*parkState, error) {
 		return nil, err
 	}
 	return st, nil
+}
+
+// setAsideOrphanBytes moves a parked/ directory that has no parked.json beside
+// it into a new .state/parked.broken-<ts>/, and logs where.
+func setAsideOrphanBytes(repo *gitwt.Repo) error {
+	if _, err := os.Stat(parkBytesDir(repo)); err != nil || parkedExists(repo) {
+		return nil
+	}
+	dir, err := newBrokenDir(repo)
+	if err != nil {
+		return err
+	}
+	if err := moveFile(parkBytesDir(repo), filepath.Join(dir, parkedDir)); err != nil {
+		return err
+	}
+	log.Printf("%s/ had no %s beside it; moved to %s so a new park cannot delete it", parkedDir, parkedJSON, filepath.ToSlash(filepath.Join(manifestStateDir, filepath.Base(dir))))
+	return nil
 }
 
 func writeParkState(repo *gitwt.Repo, st *parkState) error {
@@ -287,14 +308,12 @@ func finishParked(repo *gitwt.Repo, roots Roots) error {
 		}
 		return errors.Join(errs...)
 	}
-	// The state file goes first: if the saved bytes outlive it, the next park
-	// just clears them, while a state file without its bytes could never finish.
 	return clearPark(repo)
 }
 
 // clearPark deletes the state, then the saved bytes. The state file goes first:
-// if the bytes outlive it, the next park just clears them, while a state file
-// without its bytes could never finish.
+// if the bytes outlive it, the next park moves them aside (setAsideOrphanBytes),
+// while a state file without its bytes could never finish.
 func clearPark(repo *gitwt.Repo) error {
 	if err := os.Remove(parkStatePath(repo)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
@@ -326,6 +345,9 @@ func newBrokenDir(repo *gitwt.Repo) (string, error) {
 	}
 }
 
+// moveFile is os.Rename; a variable so a test can make a move fail.
+var moveFile = os.Rename
+
 // quarantinePark moves a parked.json that cannot be used, and the saved bytes
 // beside it, into a new .state/parked.broken-<ts>/. It returns the directory's
 // name relative to the sync dir, which is safe to log.
@@ -334,8 +356,11 @@ func quarantinePark(repo *gitwt.Repo) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for src, name := range map[string]string{parkStatePath(repo): parkedJSON, parkBytesDir(repo): parkedDir} {
-		if err := os.Rename(src, filepath.Join(dir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	// The bytes go first: if the second move fails, parked.json is still in
+	// place and the next try finishes the job. The other order could leave
+	// bytes without a state file, to be cleared by the next savePark.
+	for _, m := range []struct{ src, name string }{{parkBytesDir(repo), parkedDir}, {parkStatePath(repo), parkedJSON}} {
+		if err := moveFile(m.src, filepath.Join(dir, m.name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return "", err
 		}
 	}

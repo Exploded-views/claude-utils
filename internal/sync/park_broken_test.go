@@ -138,3 +138,90 @@ func TestPark_RepeatedRestoreFailureIsSetAside(t *testing.T) {
 		t.Errorf("want a log line naming the broken dir:\n%s", logs)
 	}
 }
+
+// savedAnywhere finds a file with these bytes under .state, wherever it was
+// moved to.
+func savedAnywhere(f *pullFixture, want string) bool {
+	found := false
+	filepath.WalkDir(filepath.Join(f.repo.Dir, manifestStateDir), func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			if b, _ := os.ReadFile(p); string(b) == want {
+				found = true
+			}
+		}
+		return nil
+	})
+	return found
+}
+
+// Setting a broken park aside moves parked/ before parked.json. If the second
+// move fails, parked.json is still in place, the bytes are safe in the new
+// directory, and the next try finishes the job.
+func TestPark_QuarantineMovesBytesBeforeState(t *testing.T) {
+	f := newPullFixture(t, map[string]string{"note.md": "alpha\n"})
+	captureLog(t)
+	f.writeParkState(`{"preRev": "x", "paths": [`)
+	saved := filepath.Join(parkBytesDir(f.repo), "projects", "p1", "memory", "kept.md")
+	if err := os.MkdirAll(filepath.Dir(saved), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(saved, []byte("saved bytes\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	real := moveFile
+	moveFile = func(src, dst string) error {
+		if filepath.Base(src) == parkedJSON {
+			return os.ErrPermission
+		}
+		return real(src, dst)
+	}
+	t.Cleanup(func() { moveFile = real })
+
+	if err := finishParked(f.repo, f.roots); err == nil {
+		t.Fatal("want the failed move reported")
+	}
+	if !parkedOnDisk(f) {
+		t.Error("parked.json went first: the bytes would be left without their state file")
+	}
+	if !savedAnywhere(f, "saved bytes\n") {
+		t.Fatal("the saved bytes are gone")
+	}
+	// A later savePark must not clear the only copy.
+	f.editLocal("fresh.md", "fresh\n")
+	if _, err := savePark(f.repo); err != nil {
+		t.Fatal(err)
+	}
+	if !savedAnywhere(f, "saved bytes\n") {
+		t.Error("a later savePark deleted the only copy")
+	}
+}
+
+// parked/ with no parked.json beside it holds bytes nobody refers to, or the
+// only copy of a failed set-aside: savePark moves it aside instead of clearing
+// it.
+func TestPark_SaveParkMovesAsideBytesWithoutState(t *testing.T) {
+	f := newPullFixture(t, map[string]string{"note.md": "alpha\n"})
+	logs := captureLog(t)
+	orphan := filepath.Join(parkBytesDir(f.repo), "projects", "p1", "memory", "orphan.md")
+	if err := os.MkdirAll(filepath.Dir(orphan), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(orphan, []byte("orphan bytes\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f.editLocal("fresh.md", "fresh\n")
+
+	st, err := savePark(f.repo)
+	if err != nil || st == nil {
+		t.Fatalf("savePark: %v, %v", st, err)
+	}
+	if !savedAnywhere(f, "orphan bytes\n") {
+		t.Error("the unreferenced bytes were deleted")
+	}
+	if _, err := os.Stat(orphan); err == nil {
+		t.Error("the old parked/ was left in place to be mixed with the new park")
+	}
+	if len(brokenDirs(f)) != 1 || !strings.Contains(logs.String(), "parked.broken-") {
+		t.Errorf("want the move logged with the directory; dirs %v\n%s", brokenDirs(f), logs)
+	}
+}
