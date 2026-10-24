@@ -330,10 +330,22 @@ var backupMarkers = []string{".from-remote-", ".local-before-join-"}
 // .git/info/exclude, which is per-PC and never committed, so a backup cannot be
 // staged whatever the tracked .gitignore says (a sync dir made before a pattern
 // existed has an older one). Missing lines are appended; existing ones are
-// kept. A sync dir that is not a git repo (yet) is left alone.
+// kept. It writes only when the sync dir is itself the top of a git work tree
+// (compared after resolving symlinks): not when it is no repo yet, and not when
+// it sits inside another repo, whose exclude file is not ours. A pattern that
+// the file already negates ("!*.from-remote-*") is not appended after the
+// negation; the returned error names it, for the caller to log, once the
+// others are written.
 func EnsureLocalExcludes(syncDir string) error {
 	repo := gitwt.New(syncDir)
 	if !repo.IsRepo() {
+		return nil
+	}
+	top, err := repo.Run("rev-parse", "--show-toplevel")
+	if err != nil {
+		return err
+	}
+	if !samePath(strings.TrimSpace(top), syncDir) {
 		return nil
 	}
 	out, err := repo.Run("rev-parse", "--git-path", "info/exclude")
@@ -349,18 +361,34 @@ func EnsureLocalExcludes(syncDir string) error {
 		return err
 	}
 	have := map[string]bool{}
+	var negated []string
 	for _, l := range strings.Split(string(existing), "\n") {
 		have[strings.TrimSpace(l)] = true
 	}
 	var add strings.Builder
 	for _, m := range backupMarkers {
-		if pat := "*" + m + "*"; !have[pat] {
+		pat := "*" + m + "*"
+		switch {
+		case have[pat]:
+		case have["!"+pat]:
+			negated = append(negated, pat)
+		default:
 			add.WriteString(pat + "\n")
 		}
 	}
-	if add.Len() == 0 {
-		return nil
+	if add.Len() > 0 {
+		if err := appendExclude(p, existing, add.String()); err != nil {
+			return err
+		}
 	}
+	if len(negated) > 0 {
+		return fmt.Errorf("%s negates %s; not adding it, so backups of that kind can reach git unless the tracked .gitignore lists them",
+			p, strings.Join(negated, " and "))
+	}
+	return nil
+}
+
+func appendExclude(p string, existing []byte, text string) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
 		return err
 	}
@@ -369,12 +397,19 @@ func EnsureLocalExcludes(syncDir string) error {
 		return err
 	}
 	defer f.Close()
-	text := add.String()
 	if len(existing) > 0 && existing[len(existing)-1] != '\n' {
 		text = "\n" + text
 	}
 	_, err = f.WriteString(text)
 	return err
+}
+
+// samePath reports whether a and b name the same directory once symlinks are
+// resolved.
+func samePath(a, b string) bool {
+	ra, err1 := filepath.EvalSymlinks(a)
+	rb, err2 := filepath.EvalSymlinks(b)
+	return err1 == nil && err2 == nil && filepath.Clean(ra) == filepath.Clean(rb)
 }
 
 // isBackup reports whether name is a local-only conflict backup that must not

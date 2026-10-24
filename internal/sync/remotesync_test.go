@@ -1369,3 +1369,120 @@ func TestRemoteSync_ResetIsPersistedSoACrashCannotSkipIt(t *testing.T) {
 		t.Error("after a crash before the reset, the local-only file was pushed")
 	}
 }
+
+// The patterns land where git reads them when the sync dir has a separate git
+// dir or is a linked worktree.
+func TestEnsureLocalExcludes_WorksForSeparateGitDirAndLinkedWorktree(t *testing.T) {
+	gitEnv(t)
+	root := t.TempDir()
+	check := func(name, syncDir string) {
+		if err := EnsureLocalExcludes(syncDir); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if err := EnsureLocalExcludes(syncDir); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if _, err := gitwt.New(syncDir).Run("check-ignore", "-q", "remotes/h/o/r/memory/a.md.local-before-join-1"); err != nil {
+			t.Errorf("%s: backup not ignored: %v", name, err)
+		}
+	}
+	sep := filepath.Join(root, "sep")
+	if err := os.MkdirAll(sep, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitwt.New(sep).Run("init", "-q", "--separate-git-dir", filepath.Join(root, "sep.git")); err != nil {
+		t.Fatal(err)
+	}
+	check("separate git dir", sep)
+
+	main := mkRepo(t, filepath.Join(root, "main"), "")
+	wt := filepath.Join(root, "wt")
+	addWorktree(t, main, wt)
+	check("linked worktree", wt)
+}
+
+// A sync dir that is not a repo but sits inside one is left alone: the
+// enclosing repo's info/exclude is not ours to edit.
+func TestEnsureLocalExcludes_LeavesAnEnclosingRepoAlone(t *testing.T) {
+	gitEnv(t)
+	parent := mkRepo(t, filepath.Join(t.TempDir(), "home"), "")
+	syncDir := filepath.Join(parent, ".claudesync")
+	if err := os.MkdirAll(syncDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	excl := filepath.Join(parent, ".git", "info", "exclude")
+	before := readFile(t, excl)
+	if err := EnsureLocalExcludes(syncDir); err != nil {
+		t.Fatal(err)
+	}
+	if after := readFile(t, excl); after != before {
+		t.Errorf("the enclosing repo's info/exclude was changed:\n%q", after)
+	}
+}
+
+// A symlinked path to the sync dir is the same sync dir.
+func TestEnsureLocalExcludes_ResolvesSymlinks(t *testing.T) {
+	gitEnv(t)
+	root := t.TempDir()
+	real := mkRepo(t, filepath.Join(root, "real"), "")
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("no symlinks:", err)
+	}
+	if err := EnsureLocalExcludes(link); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, filepath.Join(real, ".git", "info", "exclude")); !strings.Contains(got, "*.local-before-join-*\n") {
+		t.Errorf("a symlinked sync dir was skipped: %q", got)
+	}
+}
+
+// A user's negation of a pattern is respected: the pattern is not appended
+// after it, and the error says so for the caller to log. The other pattern is
+// still written.
+func TestEnsureLocalExcludes_DoesNotOverrideAUserNegation(t *testing.T) {
+	gitEnv(t)
+	dir := mkRepo(t, filepath.Join(t.TempDir(), "sync"), "")
+	excl := filepath.Join(dir, ".git", "info", "exclude")
+	if err := os.MkdirAll(filepath.Dir(excl), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(excl, []byte("!*.from-remote-*\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := EnsureLocalExcludes(dir)
+	if err == nil || !strings.Contains(err.Error(), "*.from-remote-*") {
+		t.Errorf("want an error naming the negated pattern, got %v", err)
+	}
+	got := readFile(t, excl)
+	if strings.Contains(got, "\n*.from-remote-*") || strings.HasPrefix(got, "*.from-remote-*") {
+		t.Errorf("the pattern was appended after the user's negation: %q", got)
+	}
+	if !strings.Contains(got, "*.local-before-join-*\n") {
+		t.Errorf("the other pattern should still be written: %q", got)
+	}
+}
+
+// A failure to write the excludes is logged and never stops NewRoots, which init
+// and the daemon both go through.
+func TestNewRoots_LogsAndCarriesOnWhenTheExcludesCannotBeWritten(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	if err := gitwt.New(a.cfg.SyncDir).Init("main"); err != nil {
+		t.Fatal(err)
+	}
+	excl := filepath.Join(a.cfg.SyncDir, ".git", "info", "exclude")
+	if err := os.MkdirAll(filepath.Dir(excl), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(excl, []byte("!*.local-before-join-*\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	logs := captureLog(t)
+	if _, err := NewRoots(a.cfg); err != nil {
+		t.Fatalf("NewRoots must carry on: %v", err)
+	}
+	if !strings.Contains(logs.String(), "negates *.local-before-join-*") {
+		t.Errorf("want the negation logged, got %q", logs.String())
+	}
+}
