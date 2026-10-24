@@ -10,9 +10,54 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
 
+// pullMarkerFile is written to .state before the daemon's own pull and removed
+// after it. A rebase or merge found stopped while it exists is the daemon's
+// (a crash in the pull left it); one found without it was started by the user,
+// who is resolving it by hand.
+const pullMarkerFile = "pull-running"
+
+func pullMarkerPath(repo *gitwt.Repo) string {
+	return filepath.Join(repo.Dir, manifestStateDir, pullMarkerFile)
+}
+
+func markPull(repo *gitwt.Repo) error { return writeSynced(pullMarkerPath(repo), nil) }
+
+func pullMarked(repo *gitwt.Repo) bool {
+	_, err := os.Stat(pullMarkerPath(repo))
+	return err == nil
+}
+
+// clearPullMark removes the marker, unless a rebase or merge is still stopped:
+// that one is still the daemon's to abort.
+func clearPullMark(repo *gitwt.Repo) {
+	if repo.RebaseInProgress() || repo.MergeInProgress() {
+		return
+	}
+	_ = os.Remove(pullMarkerPath(repo))
+}
+
+// errHandResolving ends a cycle early: a rebase or merge is stopped in the sync
+// repo and the daemon did not start it.
+var errHandResolving = errors.New("a rebase or merge is in progress in the sync repo and the daemon did not start it; assuming you are resolving it by hand, this cycle stages, reconciles, pulls and pushes nothing until it is finished")
+
+// abortDaemonInterrupted is abortInterrupted for what the daemon's own pull
+// left. A stopped rebase or merge without the marker is the user's, and is left
+// alone: it returns errHandResolving.
+func abortDaemonInterrupted(repo *gitwt.Repo) error {
+	if (repo.RebaseInProgress() || repo.MergeInProgress()) && !pullMarked(repo) {
+		return errHandResolving
+	}
+	if err := abortInterrupted(repo); err != nil {
+		return err
+	}
+	_ = os.Remove(pullMarkerPath(repo)) // a marker left by a pull that finished
+	return nil
+}
+
 // abortInterrupted abandons a rebase or merge that was left stopped, which is
-// what a crash (or a kill) in the middle of a pull leaves behind. It runs at
-// startup and at the start of every flush, whether or not anything is parked:
+// what a crash (or a kill) in the middle of a pull leaves behind. The daemon
+// calls it through abortDaemonInterrupted, at startup and at the start of every
+// flush, whether or not anything is parked, but only for its own pull:
 // the work-tree of a stopped rebase or merge holds conflict markers, and the
 // next commit would stage them. Aborting restores the branch and the tree to
 // where the operation found them; the local commits are kept.

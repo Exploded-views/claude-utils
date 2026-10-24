@@ -26,6 +26,18 @@ func noMarkersAnywhere(t *testing.T, f *pullFixture) {
 	}
 }
 
+// markDaemonPull is what the daemon writes before its own pull: the marker
+// that says a stopped rebase or merge is the daemon's to abort.
+func markDaemonPull(t *testing.T, f *pullFixture) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(f.repo.Dir, ".state"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.repo.Dir, ".state", "pull-running"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // crashedMerge leaves a conflicted merge behind, as a kill in the middle of a
 // merge would.
 func crashedMerge(t *testing.T) *pullFixture {
@@ -41,6 +53,7 @@ func crashedMerge(t *testing.T) *pullFixture {
 	if _, err := f.repo.Run("merge", "--no-edit", "origin/main"); err == nil {
 		t.Fatal("expected a conflicted merge")
 	}
+	markDaemonPull(t, f)
 	return f
 }
 
@@ -63,6 +76,19 @@ func crashedRebase(t *testing.T) *pullFixture {
 	}
 	if parkedOnDisk(f) {
 		t.Fatal("nothing should be parked")
+	}
+	markDaemonPull(t, f)
+	return f
+}
+
+// userRebase is a rebase the user started by hand in the sync repo and is
+// resolving: the same stopped state as crashedRebase, but no marker, because
+// the daemon did not start it.
+func userRebase(t *testing.T) *pullFixture {
+	t.Helper()
+	f := crashedRebase(t)
+	if err := os.Remove(filepath.Join(f.repo.Dir, ".state", "pull-running")); err != nil {
+		t.Fatal(err)
 	}
 	return f
 }
@@ -164,5 +190,102 @@ func TestCommitMirror_MarkerLookalikesCommitWhenQuiet(t *testing.T) {
 	ok, err := CommitMirror(f.repo, f.loop.Cfg, "c")
 	if err != nil || !ok {
 		t.Fatalf("committed=%v err=%v", ok, err)
+	}
+}
+
+// A rebase the daemon did not start is the user's, who is resolving it by hand.
+// A whole cycle (the pull tick, and a restart) leaves it untouched: nothing is
+// staged, reconciled, committed or pushed, and the cycle logs it once.
+func TestInterrupted_UserStartedRebaseSurvivesCycles(t *testing.T) {
+	f := userRebase(t)
+	logs := captureLog(t)
+	f.peerPush("peer1.md", "peer one\n")
+	f.editLocal("new.md", "written meanwhile\n")
+	writeMem(t, f.roots.Claude, "p1", "clean.md", "a\nclaude edit\n")
+	before := f.head()
+	tip := strings.TrimSpace(mustGit(t, f.repo, "ls-remote", "origin", "refs/heads/main"))
+	markers, _ := os.ReadFile(filepath.Join(f.roots.Mirror, "p1", "memory", "clean.md"))
+	if !strings.Contains(string(markers), "<<<<<<<") {
+		t.Fatal("the stopped rebase should hold conflict markers")
+	}
+
+	logs.Reset()
+	f.loop.pullTick(f.repo, f.roots)
+	if n := strings.Count(logs.String(), "in progress in the sync repo"); n != 1 {
+		t.Errorf("want one log line per cycle, got %d:\n%s", n, logs)
+	}
+	f.loop.pullTick(f.repo, f.roots)
+	if n := strings.Count(logs.String(), "in progress in the sync repo"); n != 2 {
+		t.Errorf("want one log line per cycle, got %d total:\n%s", n, logs)
+	}
+	f.restart()
+
+	if !f.repo.RebaseInProgress() {
+		t.Fatal("the user's rebase was aborted")
+	}
+	if got, _ := os.ReadFile(filepath.Join(f.roots.Mirror, "p1", "memory", "clean.md")); string(got) != string(markers) {
+		t.Errorf("the work-tree file was touched: %q", got)
+	}
+	if f.head() != before {
+		t.Error("HEAD moved")
+	}
+	if staged, _ := f.repo.Run("diff", "--cached", "--name-only", "--diff-filter=A"); strings.Contains(staged, "new.md") {
+		t.Errorf("a file was staged: %q", staged)
+	}
+	if _, ok := f.claudeCopy("peer1.md"); ok {
+		t.Error("Reconcile ran")
+	}
+	if got, _ := f.claudeCopy("clean.md"); got != "a\nclaude edit\n" {
+		t.Errorf("Claude copy = %q", got)
+	}
+	if now := strings.TrimSpace(mustGit(t, f.repo, "ls-remote", "origin", "refs/heads/main")); now != tip {
+		t.Error("origin moved")
+	}
+}
+
+// A rebase the daemon's own pull left stopped (a crash) is aborted on start, and
+// the marker goes with it.
+func TestInterrupted_DaemonStartedRebaseAbortedOnStart(t *testing.T) {
+	f := crashedRebase(t)
+	if !pullMarked(f.repo) {
+		t.Fatal("setup: no marker")
+	}
+	f.restart()
+	if inProgress(f) {
+		t.Error("the daemon's own stopped rebase was not aborted")
+	}
+	if pullMarked(f.repo) {
+		t.Error("marker left behind")
+	}
+	noMarkersAnywhere(t, f)
+}
+
+// The marker brackets the daemon's pull (a pre-rebase hook sees it) and is gone
+// after a normal cycle and after one that stopped on a conflict.
+func TestPullMarker_ClearedAfterCycles(t *testing.T) {
+	f := newPullFixture(t, map[string]string{"clean.md": "a\nb\n"})
+	captureLog(t)
+	hook := "#!/bin/sh\n[ -e .state/pull-running ] && touch .state/hook-saw-marker\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(f.repo.Dir, ".git", "hooks", "pre-rebase"), []byte(hook), 0700); err != nil {
+		t.Fatal(err)
+	}
+	f.peerPush("other.md", "o\n")
+	f.editLocal("clean.md", "a\nlocal\n")
+	if err := f.loop.flush(f.repo, f.roots, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(f.repo.Dir, ".state", "hook-saw-marker")); err != nil {
+		t.Error("the marker was not there while the pull ran")
+	}
+	if pullMarked(f.repo) {
+		t.Error("marker left after a normal pull")
+	}
+	f.peerPush("clean.md", "a\npeer\n")
+	f.editLocal("clean.md", "a\nlocal 2\n")
+	if err := f.loop.flush(f.repo, f.roots, true); err == nil {
+		t.Fatal("want the conflict error")
+	}
+	if pullMarked(f.repo) {
+		t.Error("marker left after an aborted conflict")
 	}
 }

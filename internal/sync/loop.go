@@ -154,10 +154,15 @@ func (l *Loop) Run(ctx context.Context) error {
 }
 
 // recoverLeftovers undoes what a crash or an earlier failed cycle left: a
-// stopped rebase or merge, then an unfinished park. Last, it copies into the
+// rebase or merge the daemon's own pull left stopped, then an unfinished park.
+// A rebase or merge the daemon did not start is the user's: it returns
+// errHandResolving and nothing else is done. Last, it copies into the
 // Claude tree whatever moved the sync repo's HEAD outside a cycle (catchUp).
 func (l *Loop) recoverLeftovers(repo *gitwt.Repo, roots Roots) error {
-	if err := abortInterrupted(repo); err != nil {
+	if err := abortDaemonInterrupted(repo); err != nil {
+		if errors.Is(err, errHandResolving) {
+			return err
+		}
 		return fmt.Errorf("abort interrupted rebase or merge: %w", err)
 	}
 	if err := finishParked(repo, roots); err != nil {
@@ -175,7 +180,11 @@ func (l *Loop) takeRecovery(repo *gitwt.Repo, roots Roots) error {
 		l.recovered = nil
 		return r.err
 	}
-	return l.recoverLeftovers(repo, roots)
+	err := l.recoverLeftovers(repo, roots)
+	if errors.Is(err, errHandResolving) {
+		log.Println(err)
+	}
+	return err
 }
 
 // startCycle runs recoverLeftovers ahead of a Reconcile and keeps the result
@@ -186,6 +195,10 @@ func (l *Loop) takeRecovery(repo *gitwt.Repo, roots Roots) error {
 func (l *Loop) startCycle(repo *gitwt.Repo, roots Roots) bool {
 	err := l.recoverLeftovers(repo, roots)
 	l.recovered = &recovery{err}
+	if errors.Is(err, errHandResolving) {
+		log.Println(err)
+		return false
+	}
 	if err != nil {
 		log.Println("recover earlier cycle:", newPathGuard(l.Cfg).Err(err))
 	}
@@ -288,10 +301,14 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	// the restore error below) is stripped of denylisted names.
 	g := newPathGuard(l.Cfg)
 	defer func() { err = g.Err(err) }()
-	// A stopped rebase or merge goes first, before anything is staged, and then
+	// A rebase or merge the daemon left stopped goes first (one the user is
+	// resolving ends the cycle), before anything is staged, and then
 	// a park an earlier cycle (or a crashed run) did not finish: nothing may be
 	// committed, or parked over, while files are still away.
 	if err := l.takeRecovery(repo, roots); err != nil {
+		if errors.Is(err, errHandResolving) {
+			return nil // already logged, once for the cycle
+		}
 		return err
 	}
 	// The cycle's HEAD is recorded once it is reflected in the Claude tree
@@ -331,6 +348,11 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	}
 	preRev, _ := repo.Run("rev-parse", "HEAD")
 	var conflictErr error
+	// The marker tells the next start that a rebase found stopped is ours to
+	// abort; it stays while one is.
+	if err := markPull(repo); err != nil {
+		return fmt.Errorf("mark pull: %w", err)
+	}
 	if err := repo.Pull(l.Branch); err != nil {
 		if repo.RebaseInProgress() {
 			conflictErr = abortRebaseConflict(repo)
@@ -339,6 +361,7 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 			log.Println("pull:", g.Err(err))
 		}
 	}
+	clearPullMark(repo)
 	postRev, _ := repo.Run("rev-parse", "HEAD")
 	if conflictErr == nil && strings.TrimSpace(preRev) != strings.TrimSpace(postRev) && strings.TrimSpace(preRev) != "" {
 		if err := propagate(repo, roots, strings.TrimSpace(preRev), strings.TrimSpace(postRev), st.skip(), g); err != nil {
