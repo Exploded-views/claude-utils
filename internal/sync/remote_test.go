@@ -783,6 +783,464 @@ func TestRemoteKey_TwoClonesDivergentEditsMergeOrBackUp(t *testing.T) {
 	}
 }
 
+// reconcileOnly is machine.sync without the commit: the state when a commit
+// did not include the mirror change (scrub held it back, the denylist policy
+// blocked the commit, or the daemon stopped before committing).
+func (m *machine) reconcileOnly() SyncReport {
+	m.t.Helper()
+	roots, err := NewRoots(m.cfg)
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	man, err := LoadManifest(m.stateDir())
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	rep, err := Reconcile(roots, man)
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	nm, err := BuildFromClaudeTree(m.claude)
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	if err := nm.Save(m.stateDir()); err != nil {
+		m.t.Fatal(err)
+	}
+	return rep
+}
+
+// commitShared commits the shared work-tree as a pull would have left it.
+func commitShared(t *testing.T, dir string) {
+	t.Helper()
+	r := gitwt.New(dir)
+	if err := r.AddAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Commit("pulled"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func backupWith(t *testing.T, repoDir, name, content string) bool {
+	t.Helper()
+	ms, _ := filepath.Glob(filepath.Join(repoDir, name+".from-remote-*"))
+	for _, m := range ms {
+		if b, _ := os.ReadFile(m); string(b) == content {
+			return true
+		}
+	}
+	return false
+}
+
+// A pull moved HEAD but the members were not brought to it (daemon stopped or
+// crashed between pull and propagate, or CopyToClaude failed, e.g. a locked
+// file on Windows). The members still equal what this PC last synced, so they
+// are stale and take the pulled edit; HEAD is not the merge base.
+func TestRemoteKey_PulledButNotPropagatedIsNotReverted(t *testing.T) {
+	t.Run("two clones", func(t *testing.T) {
+		a, c1, _, repoDir := twoClones(t)
+		a.write(c1, "topic.md", "v1\n")
+		a.write(c1, "MEMORY.md", "# Mem\n\n## A\nalpha\n")
+		a.sync()
+		if err := os.WriteFile(filepath.Join(repoDir, "topic.md"), []byte("remote v2\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repoDir, "MEMORY.md"), []byte("# Mem\n\n## A\nalpha\n\n## R\nremote\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		commitShared(t, a.cfg.SyncDir)
+		a.sync()
+		got, _ := a.read(c1, "topic.md")
+		if got != "remote v2\n" && !backupWith(t, repoDir, "topic.md", "remote v2\n") {
+			t.Errorf("remote edit of topic.md lost with no backup: clone=%q", got)
+		}
+		if idx, _ := a.read(c1, "MEMORY.md"); !strings.Contains(idx, "## R") {
+			t.Errorf("remote MEMORY.md section dropped: %q", idx)
+		}
+	})
+	t.Run("single clone (control: path rules keep it)", func(t *testing.T) {
+		gitEnv(t)
+		shared := t.TempDir()
+		a := newMachine(t, "alice", shared)
+		app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+		repoDir := filepath.Join(shared, "remotes", "github.com", "acme", "app", "memory")
+		a.write(app, "topic.md", "v1\n")
+		a.write(app, "MEMORY.md", "# Mem\n\n## A\nalpha\n")
+		a.sync()
+		_ = os.WriteFile(filepath.Join(repoDir, "topic.md"), []byte("remote v2\n"), 0600)
+		_ = os.WriteFile(filepath.Join(repoDir, "MEMORY.md"), []byte("# Mem\n\n## A\nalpha\n\n## R\nremote\n"), 0600)
+		commitShared(t, shared)
+		a.sync()
+		got, _ := a.read(app, "topic.md")
+		if got != "remote v2\n" && !backupWith(t, repoDir, "topic.md", "remote v2\n") {
+			t.Errorf("control: remote edit lost: %q", got)
+		}
+		if idx, _ := a.read(app, "MEMORY.md"); !strings.Contains(idx, "## R") {
+			t.Errorf("control: remote section dropped: %q", idx)
+		}
+	})
+}
+
+// HEAD holds an old version (a file held back from commits keeps it): a delete
+// in one clone still sticks, because the other clone equals this PC's record.
+func TestRemoteKey_DeleteSticksWhenHeadHoldsAnOldVersion(t *testing.T) {
+	a, c1, c2, repoDir := twoClones(t)
+	a.write(c1, "topic.md", "v0\n")
+	a.sync() // HEAD: v0
+	a.write(c1, "topic.md", "v1 token\n")
+	a.reconcileOnly() // c2 and the mirror get v1; not committed
+	if got, _ := a.read(c2, "topic.md"); got != "v1 token\n" {
+		t.Fatalf("setup: c2 = %q", got)
+	}
+	roots, _ := NewRoots(a.cfg)
+	a.remove(c1, "topic.md")
+	_ = RemoveFromMirror(roots, a.hash(c1), "topic.md")
+	a.reconcileOnly()
+	a.reconcileOnly()
+	for _, d := range []string{c1, c2} {
+		if _, ok := a.read(d, "topic.md"); ok {
+			t.Errorf("%s: deleted file resurrected", filepath.Base(d))
+		}
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, "topic.md")); err == nil {
+		t.Error("deleted file back in the mirror")
+	}
+}
+
+// Same old HEAD: c1 prunes MEMORY.md back to exactly the HEAD version. That
+// must not look stale; c2's un-pruned copy equals the record and takes the prune.
+func TestRemoteKey_PruningSticksWhenHeadHoldsAnOldVersion(t *testing.T) {
+	a, c1, c2, _ := twoClones(t)
+	a.write(c1, "MEMORY.md", "# Mem\n\n## Keep\nk\n")
+	a.sync() // HEAD
+	a.write(c1, "MEMORY.md", "# Mem\n\n## Keep\nk\n\n## New\nn\n")
+	a.reconcileOnly()
+	roots, _ := NewRoots(a.cfg)
+	a.write(c1, "MEMORY.md", "# Mem\n\n## Keep\nk\n")
+	_ = CopyToMirror(roots, a.hash(c1), "MEMORY.md")
+	a.reconcileOnly()
+	for _, d := range []string{c1, c2} {
+		if idx, _ := a.read(d, "MEMORY.md"); strings.Contains(idx, "## New") {
+			t.Errorf("%s: pruned section resurrected: %q", filepath.Base(d), idx)
+		}
+	}
+}
+
+// Nothing committed for the file (e.g. a new held-back one): an edit in one
+// clone and a delete in the other within one debounce window. The watcher has
+// already removed the mirror copy, but the edit differs from the record, so the
+// edit wins.
+func TestRemoteKey_EditBeatsDeleteWithNothingCommitted(t *testing.T) {
+	a, c1, c2, _ := twoClones(t)
+	a.write(c1, "topic.md", "v1\n")
+	a.reconcileOnly() // c2 gets v1; nothing committed
+	roots, _ := NewRoots(a.cfg)
+	a.write(c2, "topic.md", "v2 edit\n")
+	_ = CopyToMirror(roots, a.hash(c2), "topic.md")
+	a.remove(c1, "topic.md")
+	_ = RemoveFromMirror(roots, a.hash(c1), "topic.md")
+	a.reconcileOnly()
+	if got, ok := a.read(c2, "topic.md"); !ok || got != "v2 edit\n" {
+		t.Errorf("edit made since the last sync was deleted: %q %v", got, ok)
+	}
+}
+
+// withOrigin gives the sync repo at shared a local bare origin, as the daemon
+// has, and returns the origin's path. .state/ is ignored as init arranges.
+func withOrigin(t *testing.T, shared string) string {
+	t.Helper()
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	if out, err := exec.Command("git", "init", "--bare", "-q", "-b", "main", origin).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+	repo := gitwt.New(shared)
+	if err := repo.Init("main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(shared, ".gitignore"), []byte(".state/\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SetRemote(origin); err != nil {
+		t.Fatal(err)
+	}
+	return origin
+}
+
+// peerPush is another PC: it clones origin, changes the given repo files
+// (a nil content deletes the file) and pushes.
+func peerPush(t *testing.T, origin string, files map[string]*string) {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "peer")
+	peer := gitwt.New(dir)
+	if err := peer.Clone(origin); err != nil {
+		t.Fatal(err)
+	}
+	for rel, content := range files {
+		p := filepath.Join(dir, filepath.FromSlash(rel))
+		if content == nil {
+			if err := os.Remove(p); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err := os.WriteFile(p, []byte(*content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := peer.AddAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := peer.Commit("peer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.Push("main"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func str(s string) *string { return &s }
+
+const appMem = "remotes/github.com/acme/app/memory/"
+
+// The daemon dies after the pull moved HEAD and before propagateChanges ran.
+// On restart the members still equal this PC's record while the work-tree has
+// the pulled files, so the pull is brought in rather than overwritten.
+func TestRemoteKey_CrashBetweenPullAndPropagateIsRecovered(t *testing.T) {
+	a, c1, c2, repoDir := twoClones(t)
+	origin := withOrigin(t, a.cfg.SyncDir)
+	a.write(c1, "topic.md", "v1\n")
+	a.write(c1, "gone.md", "g\n")
+	a.write(c1, "MEMORY.md", "# Mem\n\n## A\nalpha\n\n## Old\nold\n")
+	a.sync()
+	sr := gitwt.New(a.cfg.SyncDir)
+	if err := sr.Push("main"); err != nil {
+		t.Fatal(err)
+	}
+	peerPush(t, origin, map[string]*string{
+		appMem + "topic.md":  str("remote v2\n"),
+		appMem + "gone.md":   nil,
+		appMem + "MEMORY.md": str("# Mem\n\n## A\nalpha\n"),
+	})
+	if err := sr.Pull("main"); err != nil {
+		t.Fatal(err)
+	}
+	// ...crash: propagateChanges never ran.
+	if got, _ := a.read(c1, "topic.md"); got != "v1\n" {
+		t.Fatalf("setup: c1 = %q", got)
+	}
+
+	rep := a.reconcileOnly() // the daemon's startup reconcile
+	for _, d := range []string{c1, c2} {
+		if got, _ := a.read(d, "topic.md"); got != "remote v2\n" {
+			t.Errorf("%s: topic.md = %q, want the pulled edit", filepath.Base(d), got)
+		}
+		if _, ok := a.read(d, "gone.md"); ok {
+			t.Errorf("%s: pulled delete not applied", filepath.Base(d))
+		}
+		if idx, _ := a.read(d, "MEMORY.md"); strings.Contains(idx, "## Old") {
+			t.Errorf("%s: pulled pruning not applied: %q", filepath.Base(d), idx)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, "gone.md")); err == nil {
+		t.Error("the pulled delete was undone in the work-tree")
+	}
+	noBackups(t, repoDir, rep)
+}
+
+// propagateChanges records what it brought to the members, so a later delete
+// is judged against the pulled content and not against an older sync.
+func TestRemoteKey_PropagatedPullIsRecorded(t *testing.T) {
+	a, c1, c2, _ := twoClones(t)
+	origin := withOrigin(t, a.cfg.SyncDir)
+	a.write(c1, "topic.md", "v1\n")
+	a.sync()
+	sr := gitwt.New(a.cfg.SyncDir)
+	if err := sr.Push("main"); err != nil {
+		t.Fatal(err)
+	}
+	peerPush(t, origin, map[string]*string{appMem + "topic.md": str("remote v2\n")})
+
+	roots, err := NewRoots(a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := &Loop{Cfg: a.cfg, Branch: "main", Hostname: "alice"}
+	if err := l.flush(sr, roots, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{c1, c2} {
+		if got, _ := a.read(d, "topic.md"); got != "remote v2\n" {
+			t.Fatalf("%s: topic.md = %q after the pull", filepath.Base(d), got)
+		}
+	}
+	a.remove(c1, "topic.md")
+	a.sync()
+	for _, d := range []string{c1, c2} {
+		if _, ok := a.read(d, "topic.md"); ok {
+			t.Errorf("%s: delete after a pull was treated as an edit and undone", filepath.Base(d))
+		}
+	}
+}
+
+// A pulled change meets a local edit of the same file: a true conflict, so
+// MEMORY.md merges and the loser of any other file is kept as a backup.
+func TestRemoteKey_PullConflictingWithLocalEditMergesOrBacksUp(t *testing.T) {
+	a, c1, c2, repoDir := twoClones(t)
+	a.write(c1, "topic.md", "v1\n")
+	a.write(c1, "MEMORY.md", "# Mem\n\n## Base\nbase\n")
+	a.sync()
+	roots, err := NewRoots(a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pulled := func(name, content string) {
+		if err := os.WriteFile(filepath.Join(repoDir, name), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pulled("topic.md", "remote edit\n")
+	pulled("MEMORY.md", "# Mem\n\n## Base\nbase\n\n## Remote\nr\n")
+	a.write(c2, "topic.md", "local edit\n")
+	a.write(c2, "MEMORY.md", "# Mem\n\n## Base\nbase\n\n## Local\nl\n")
+	sr := gitwt.New(a.cfg.SyncDir)
+	if err := sr.AddAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sr.Commit("pulled"); err != nil {
+		t.Fatal(err)
+	}
+	if err := propagateChanges(sr, roots, "HEAD~1", "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{c1, c2} {
+		idx, _ := a.read(d, "MEMORY.md")
+		if !strings.Contains(idx, "## Remote") || !strings.Contains(idx, "## Local") {
+			t.Errorf("%s: MEMORY.md should merge both: %q", filepath.Base(d), idx)
+		}
+		if got, _ := a.read(d, "topic.md"); got != "local edit\n" {
+			t.Errorf("%s: topic.md = %q, want the local edit kept", filepath.Base(d), got)
+		}
+	}
+	if !backupWith(t, repoDir, "topic.md", "remote edit\n") {
+		t.Error("the pulled version should be kept as a backup")
+	}
+}
+
+// With no record for a file nothing can be judged deleted, even if the
+// manifest remembers it in a folder that now lacks it.
+func TestRemoteKey_NoRecordNeverDeletes(t *testing.T) {
+	a, c1, c2, _ := twoClones(t)
+	a.write(c2, "topic.md", "kept\n")
+	man := NewManifest()
+	man.Add(a.hash(c1) + "/memory/topic.md")
+	roots, err := NewRoots(a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Reconcile(roots, man); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{c1, c2} {
+		if got, _ := a.read(d, "topic.md"); got != "kept\n" {
+			t.Errorf("%s: topic.md = %q, want it kept without a record", filepath.Base(d), got)
+		}
+	}
+}
+
+// Without a record, differing non-index copies keep the newest and back up the
+// others; the index is merged with an empty base.
+func TestRemoteKey_NoRecordNewestWinsWithBackup(t *testing.T) {
+	a, c1, c2, repoDir := twoClones(t)
+	a.write(c1, "topic.md", "older\n")
+	a.write(c2, "topic.md", "newer\n")
+	past := mustTime(t, "2020-01-01T00:00:00Z")
+	if err := os.Chtimes(filepath.Join(a.claude, a.hash(c1), "memory", "topic.md"), past, past); err != nil {
+		t.Fatal(err)
+	}
+	a.sync()
+	for _, d := range []string{c1, c2} {
+		if got, _ := a.read(d, "topic.md"); got != "newer\n" {
+			t.Errorf("%s: topic.md = %q", filepath.Base(d), got)
+		}
+	}
+	if !backupWith(t, repoDir, "topic.md", "older\n") {
+		t.Error("the older copy should be backed up")
+	}
+}
+
+// A clone that appears later has no manifest entries, so what it lacks was
+// never received, not deleted.
+func TestRemoteKey_NewMemberIsFilledNotTreatedAsDeleter(t *testing.T) {
+	a, c1, c2, repoDir := twoClones(t)
+	a.write(c1, "topic.md", "x\n")
+	a.sync()
+	c3 := mkRepo(t, filepath.Join(a.home, "src", "app3"), "git@github.com:acme/app.git")
+	a.openMem(c3)
+	rep := a.sync()
+	for _, d := range []string{c1, c2, c3} {
+		if got, _ := a.read(d, "topic.md"); got != "x\n" {
+			t.Errorf("%s: topic.md = %q", filepath.Base(d), got)
+		}
+	}
+	noBackups(t, repoDir, rep)
+}
+
+func TestSyncState_RoundTripAndBase(t *testing.T) {
+	dir := t.TempDir()
+	const group = "remotes/github.com/acme/app/memory"
+	st := LoadSyncState(dir)
+	if err := st.Record(group, "MEMORY.md", []byte("idx\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Record(group, "topic.md", []byte("t\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	st = LoadSyncState(dir)
+	if h, ok := st.Hash(group, "topic.md"); !ok || h != contentHash([]byte("t\n")) {
+		t.Errorf("Hash = %q,%v", h, ok)
+	}
+	if got := st.Base(group, "MEMORY.md"); string(got) != "idx\n" {
+		t.Errorf("Base(MEMORY.md) = %q", got)
+	}
+	if got := st.Base(group, "topic.md"); got != nil {
+		t.Errorf("only the index keeps base bytes, got %q", got)
+	}
+	// Base bytes that do not match the recorded hash (a crash between the base
+	// write and the state write) are not a base.
+	bp := filepath.Join(dir, ".state", "base", filepath.FromSlash(group), "MEMORY.md")
+	if err := os.WriteFile(bp, []byte("something else\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Base(group, "MEMORY.md"); got != nil {
+		t.Errorf("mismatched base used: %q", got)
+	}
+	st.Forget(group, "MEMORY.md")
+	if _, ok := st.Hash(group, "MEMORY.md"); ok {
+		t.Error("Forget left the record")
+	}
+	if _, err := os.Stat(bp); err == nil {
+		t.Error("Forget left the base file")
+	}
+
+	// A torn or hand-mangled file is an empty record, which never deletes.
+	if err := os.WriteFile(filepath.Join(dir, ".state", stateFileName), []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := LoadSyncState(dir).Hash(group, "topic.md"); ok {
+		t.Error("corrupt state should load empty")
+	}
+	// A nil state (path mode) records and recalls nothing.
+	var none *SyncState
+	if _, ok := none.Hash(group, "x"); ok || none.Record(group, "x", nil) != nil || none.Save() != nil {
+		t.Error("nil SyncState should be inert")
+	}
+}
+
 func TestRemoteKey_SingleFolderDeletePropagates(t *testing.T) {
 	gitEnv(t)
 	shared := t.TempDir()

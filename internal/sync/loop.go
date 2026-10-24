@@ -308,10 +308,26 @@ func remoteAndLocalIdle(repo *gitwt.Repo, branch string) (bool, error) {
 
 // propagateChanges replays the file changes between pre and post revisions
 // from the mirror back into Claude's tree.
+//
+// Where several local folders share a repo-side directory the pulled file goes
+// through reconcileMulti against this PC's record, like any other change: a
+// member that still equals the record takes it, one that has changed since is
+// a true conflict. The record is advanced for each file once its members hold
+// the pulled content, so a crash before this point is recovered by the next
+// Reconcile comparing the work-tree with the record.
 func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string) error {
 	out, err := repo.Run("diff", "--name-status", pre+".."+post)
 	if err != nil {
 		return err
+	}
+	var st *SyncState
+	if roots.Remote != nil {
+		st = LoadSyncState(roots.Remote.syncDir)
+		defer func() {
+			if err := st.Save(); err != nil {
+				log.Println("save sync state:", err)
+			}
+		}()
 	}
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
@@ -325,32 +341,62 @@ func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string) error {
 		status := fields[0]
 		// For renames the format is "R<score> oldpath newpath". Treat newpath
 		// as the canonical post-image; mark old as removed.
-		var path string
 		if strings.HasPrefix(status, "R") && len(fields) >= 3 {
-			path = fields[2]
-			for _, t := range propagationTargets(roots, fields[1]) {
-				_ = os.Remove(filepath.Join(roots.Claude, t.hash, "memory", t.name))
-			}
+			propagatePath(roots, st, fields[1], true)
+			propagatePath(roots, st, fields[2], false)
 		} else {
-			path = fields[1]
-		}
-		for _, t := range propagationTargets(roots, path) {
-			if strings.HasPrefix(status, "D") {
-				_ = os.Remove(filepath.Join(roots.Claude, t.hash, "memory", t.name))
-			} else if err := CopyToClaude(roots, t.hash, t.name); err != nil {
-				log.Printf("propagate %s: %v", path, err)
-			}
+			propagatePath(roots, st, fields[1], strings.HasPrefix(status, "D"))
 		}
 	}
 	return nil
 }
 
+// propagatePath brings one pulled repo path (added, changed or, with deleted,
+// removed) to the local folders it maps to.
+func propagatePath(roots Roots, st *SyncState, path string, deleted bool) {
+	targets := propagationTargets(roots, path)
+	if len(targets) == 0 {
+		return
+	}
+	mirrorMem := roots.MirrorMemDir(targets[0].hash)
+	gkey, recorded := roots.stateKey(mirrorMem)
+	name := targets[0].name
+
+	if len(targets) > 1 {
+		g := group{mirrorMem: mirrorMem}
+		for _, t := range targets {
+			g.locals = append(g.locals, t.hash)
+		}
+		// The pull is already in the mirror. No manifest: a folder that lacks
+		// the file is simply given it (or loses it with the pull's delete).
+		if err := reconcileName(roots, g, name, NewManifest(), st, gkey, &SyncReport{}); err != nil {
+			log.Printf("propagate %s: %v", path, err)
+			return
+		}
+	} else {
+		for _, t := range targets {
+			dst := filepath.Join(roots.Claude, t.hash, "memory", t.name)
+			if deleted {
+				_ = os.Remove(dst)
+			} else if err := CopyToClaude(roots, t.hash, t.name); err != nil {
+				log.Printf("propagate %s: %v", path, err)
+				return
+			}
+		}
+	}
+	if recorded {
+		recordFile(st, gkey, mirrorMem, name)
+	}
+}
+
 // target is one local file a repo path propagates to.
 type target struct{ hash, name string }
 
-// propagationTargets maps a repo path to the local project folders and file
-// name it belongs to: the one folder for projects/<hash>/memory/<file>, every
-// local folder sharing the key for remotes/<key>/memory/<file>.
+// propagationTargets is the one place a pulled repo path is turned into Claude
+// folders: the one folder for projects/<hash>/memory/<file>, every local
+// folder sharing the key for remotes/<key>/memory/<file>. Anything that should
+// not reach Claude's tree (a path held back, say) is decided before calling
+// it, and the callers derive their groups from its result alone.
 func propagationTargets(roots Roots, p string) []target {
 	if hash, name, ok := splitMirrorPath(p); ok {
 		if roots.Remote != nil && roots.Remote.Key(hash) != "" {
