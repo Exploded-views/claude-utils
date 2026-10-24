@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/changes"
+	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
 
@@ -38,7 +39,7 @@ const markerMaxAge = 30 * 24 * time.Hour
 // changesHook implements `changes --hook`. A hook that fails or prints
 // garbage can block the user's prompt, so every error here is one line on
 // stderr, nothing on stdout, and exit 0.
-func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, project string, limit int) int {
+func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag, project string, limit int) int {
 	fail := func(err error) int {
 		fmt.Fprintln(stderr, "changes:", err)
 		return 0
@@ -53,12 +54,10 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, project str
 	if !sessionIDPattern.MatchString(in.SessionID) {
 		return 0
 	}
-	cfg, err := loadDistillConfig(cfgPath)
+	targets, err := hookTargets(cfgPath, routesFlag)
 	if err != nil {
 		return fail(err)
 	}
-	markerDir := filepath.Join(cfg.SyncDir, ".state", "hook-markers")
-	marker := filepath.Join(markerDir, in.SessionID)
 
 	if in.Event == "" {
 		return fail(fmt.Errorf("hook input has no hook_event_name"))
@@ -71,41 +70,68 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, project str
 	if project == "" {
 		project = in.Cwd
 	}
-	pruneMarkers(markerDir, in.SessionID, markerMaxAge)
-	hide, hideAll := denylistFilter(cfg, stderr)
-	res, err := changes.Compute(changes.Options{
-		SyncDir:      cfg.SyncDir,
-		ClaudeDir:    cfg.ClaudeProjectsDir,
-		Marker:       marker,
-		Upper:        syncedUpper(cfg.SyncDir),
-		Hide:         hide,
-		HideAll:      hideAll,
-		CompareLocal: true,
-		Project:      project,
-		Limit:        limit,
-		UpdateMarker: true,
-		DeferMarker:  true,
-	})
-	if err != nil {
-		return fail(err)
+
+	// One report per repo, each against its own marker. A repo reports only the
+	// folders it owns; with one repo that is all of them, as before.
+	type repoReport struct {
+		cfg    config.Config
+		marker string
+		res    changes.Result
 	}
-	if res.Busy {
-		return 0
+	var reports []repoReport
+	for _, tg := range targets {
+		markerDir := filepath.Join(tg.cfg.SyncDir, ".state", "hook-markers")
+		marker := filepath.Join(markerDir, in.SessionID)
+		pruneMarkers(markerDir, in.SessionID, markerMaxAge)
+		hide, hideAll := denylistFilter(tg.cfg, stderr)
+		res, err := changes.Compute(changes.Options{
+			SyncDir:      tg.cfg.SyncDir,
+			ClaudeDir:    tg.cfg.ClaudeProjectsDir,
+			Marker:       marker,
+			Upper:        syncedUpper(tg.cfg.SyncDir),
+			Keep:         tg.keep,
+			Hide:         hide,
+			HideAll:      hideAll,
+			CompareLocal: true,
+			Project:      project,
+			Limit:        limit,
+			UpdateMarker: true,
+			DeferMarker:  true,
+		})
+		if err != nil {
+			if len(targets) == 1 {
+				return fail(err)
+			}
+			fmt.Fprintf(stderr, "changes: repo %s: %v\n", tg.name, err)
+			continue
+		}
+		if res.Busy {
+			continue
+		}
+		if res.Reset {
+			fmt.Fprintf(stderr, "changes: marker for session %s named a commit that no longer exists; reset it\n", in.SessionID)
+		}
+		reports = append(reports, repoReport{tg.cfg, marker, res})
 	}
-	if res.Reset {
-		fmt.Fprintf(stderr, "changes: marker for session %s named a commit that no longer exists; reset it\n", in.SessionID)
-	}
-	if res.Total > 0 || res.Hidden > 0 {
-		lines := []string{hookFraming}
-		for _, c := range res.Changes {
+
+	lines := []string{hookFraming}
+	reported := false
+	for _, r := range reports {
+		if r.res.Total == 0 && r.res.Hidden == 0 {
+			continue
+		}
+		reported = true
+		for _, c := range r.res.Changes {
 			lines = append(lines, c.Status+" "+c.Describe())
 		}
-		if res.More > 0 {
-			lines = append(lines, fmt.Sprintf("… and %d more", res.More))
+		if r.res.More > 0 {
+			lines = append(lines, fmt.Sprintf("… and %d more", r.res.More))
 		}
-		if res.Hidden > 0 {
-			lines = append(lines, res.HiddenLine())
+		if r.res.Hidden > 0 {
+			lines = append(lines, r.res.HiddenLine())
 		}
+	}
+	if reported {
 		var reply struct {
 			Out struct {
 				Event   string `json:"hookEventName"`
@@ -118,12 +144,64 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, project str
 			return fail(err)
 		}
 	}
-	// Only now that the report went out does the marker move; otherwise the
+	// Only now that the report went out does a marker move; otherwise the
 	// next prompt reports the same changes again.
-	if err := changes.SaveMarker(gitwt.New(cfg.SyncDir), marker, res); err != nil {
-		return fail(err)
+	for _, r := range reports {
+		if err := changes.SaveMarker(gitwt.New(r.cfg.SyncDir), r.marker, r.res); err != nil {
+			return fail(err)
+		}
 	}
 	return 0
+}
+
+// hookTarget is one repo a hook reports on, and the gate on its folders.
+type hookTarget struct {
+	name string
+	cfg  config.Config
+	keep func(changes.Change) bool // nil: every folder
+}
+
+// hookTargets is the repos the hook reports on: the one --config names, else
+// every repo of routes.json this host has (each limited to its own folders),
+// else the default repo.
+func hookTargets(cfgPath, routesFlag string) ([]hookTarget, error) {
+	path, ok, err := resolveRoutesPath(routesFlag)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		cfg, err := loadDistillConfig(cfgPath)
+		if err != nil {
+			return nil, err
+		}
+		return []hookTarget{{name: "default", cfg: cfg}}, nil
+	}
+	set, err := loadRouted(path)
+	if err != nil {
+		return nil, err
+	}
+	gate := func(n string) func(changes.Change) bool {
+		owns := set.Router.Owns(n)
+		return func(c changes.Change) bool { return owns(c.Project) }
+	}
+	if cfgPath != "" {
+		// An explicit --config names one repo, but it still reports only the
+		// folders routes.json gives that repo, and it must be listed there.
+		cfg, err := loadDistillConfig(cfgPath)
+		if err != nil {
+			return nil, err
+		}
+		name := set.repoForSyncDir(cfg.SyncDir)
+		if name == "" {
+			return nil, fmt.Errorf("routes file %s does not list the sync dir %s", path, cfg.SyncDir)
+		}
+		return []hookTarget{{name, cfg, gate(name)}}, nil
+	}
+	var out []hookTarget
+	for _, n := range set.names() {
+		out = append(out, hookTarget{n, set.Cfgs[n], gate(n)})
+	}
+	return out, nil
 }
 
 // pruneMarkers deletes the markers in dir that were last written more than

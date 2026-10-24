@@ -165,7 +165,7 @@ func catchUpSkips(repo *gitwt.Repo, roots Roots, rec, head string) (map[string]b
 	for i := 0; i+1 < len(fields); i += 2 {
 		status, p := fields[i], fields[i+1]
 		hash, name, ok := splitMirrorPath(p)
-		if !ok || skip[p] || status == "" {
+		if !ok || skip[p] || status == "" || !roots.owns(hash) {
 			continue
 		}
 		curOK, cur := readIfExists(filepath.Join(roots.Claude, hash, "memory", name))

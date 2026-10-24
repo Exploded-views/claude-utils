@@ -876,6 +876,85 @@ set, and the daemon re-checks the push URL and these overrides before every push
 
 Config keys: `githubHost`, `recheckMaxFailures`, `recheckMaxAgeHours`, `privateOnly`, `githubTokenEnv`, `githubTokenFile`, `githubApiUrl`, `githubOrg`.
 
+## Several repos per host
+
+By default one host has one sync repo (`~/.claudesync`) and every Claude project folder goes into it. A host that works for more than one party can instead keep several notes repos, for example your own projects, one per client, and a personal catalog, and route each Claude project folder to exactly one of them. One daemon runs one sync loop per repo. A folder that no rule routes anywhere is not synced at all.
+
+Without a `routes.json` nothing changes: the daemon behaves exactly as described in the rest of this document.
+
+### Setup
+
+Each repo is a normal sync dir created by `init`. Put them next to each other, never inside another sync dir (`~/.claudesync` is itself a work-tree, and `git add -A` would pick up a nested repo):
+
+```
+claude-memsync init --remote git@github.com:<you>/mem-personal.git --sync-dir ~/.claudesync.d/personal
+claude-memsync init --remote git@github.com:<you>/mem-project-app.git --sync-dir ~/.claudesync.d/projects
+claude-memsync init --remote git@github.com:<you>/mem-client-<name>.git --sync-dir ~/.claudesync.d/client-<name>
+```
+
+Then write `~/.config/claude-memsync/routes.json` (or `$XDG_CONFIG_HOME/claude-memsync/routes.json`). It is per host and is never synced. `run`, `status` and `changes --hook` also take `--routes <file>`, and `CLAUDE_MEMSYNC_ROUTES` overrides the location. A `--routes` or environment path that does not exist is an error, not a fallback to single-repo mode.
+
+```json
+{
+  "repos": {
+    "personal": { "config": "~/.claudesync.d/personal/config.json",        "kind": "personal" },
+    "projects": { "config": "~/.claudesync.d/projects/config.json",        "kind": "project" },
+    "client-a": { "config": "~/.claudesync.d/client-<name>/config.json",   "kind": "client" }
+  },
+  "personal": "personal",
+  "routes": [
+    { "folder": "-home-<you>-scratch",            "repo": "projects" },
+    { "path":   "~/clients/<name>/**",             "repo": "client-a" },
+    { "remote": "github.com/<client-org>/**",     "repo": "client-a" },
+    { "remote": "github.com/<you>/*",             "repo": "projects" }
+  ],
+  "default": "deny"
+}
+```
+
+- `repos` names the repos this host may have, by their `config.json`, and each says what it is with `kind`: `personal`, `project`, `infra`, `client` or `orch`. A bare path string is refused, and so is a missing or unknown kind. The kind is checked against the repo's remote: a remote named `mem-client-*` must be kind `client`, and `mem-orch-*` must be `orch`, or the routes file does not load. The `personal` repo must have kind `personal`. Only folders routed to a `personal`, `project` or `infra` repo may feed the distilled catalog's worklist; `client` and `orch` never do.
+- `personal` names the repo that owns no folders. It syncs its work-tree and nothing from `~/.claude/projects`, so it is the home of the distilled catalog. No route may name it.
+- `routes` is an ordered list, **first match wins**. Each rule has exactly one matcher:
+  - `folder`: Claude's escaped folder name (every character that is not a letter or digit becomes `-`), or a glob over it.
+  - `path`: a glob over the project directory. The escaped folder name is resolved to the one existing directory it names.
+  - `remote`: a glob over the normalised git remote key of that directory's `origin`, `host/owner/repo` (ssh or https, any case, with or without `.git` or credentials, give the same key).
+  - In a glob `*` matches within one segment (`github.com/<you>/*` matches `github.com/<you>/app` but not a nested group) and `**` matches across segments.
+- `default` can only be `deny`.
+
+### What is denied
+
+A folder is denied, which means no repo reads, mirrors or writes it, when:
+
+- no rule matches;
+- the first matching rule names a repo this host does not have (not in `repos`, or its `config.json` is missing). It does **not** fall through to a later, broader rule. Keep the rules of a client on every host: a host that left the client simply removes the `repos` entry and the client's folders stay denied;
+- a `path` or `remote` rule needs the project directory and it cannot be found (the project is not checked out here), has several candidates (the escaping is lossy, so `src/my-app` and `src/my.app` look alike), or has no usable `origin`. The folder is denied **at that rule**; the rules behind it are not tried. Pin such a folder with a `folder` rule placed **before** the path and remote rules.
+
+Order the rules accordingly: `folder` pins first, then `path` rules, then `remote` rules. A rule that cannot place a folder denies it on the spot, so that a client folder whose remote cannot be read is never caught by a broad own-repo rule further down; a pin or a path rule that is placed after a remote rule is therefore never reached for such a folder. A project directory resolves to the origin of the checkout that contains it, so a subdirectory or a linked worktree of a client checkout is the client's. The remote is read with `git remote get-url origin` (so `url.<base>.insteadOf` applies) and ssh host aliases are resolved with `ssh -G`; inherited `GIT_*` environment variables are ignored.
+
+Each denied folder is logged once, by a short hash of its name and the reason, never by name or note contents. Keep rules for your own repos narrow (`github.com/<you>/*`, never `*`): a client's folder can only reach an own repo through an own rule.
+
+Rules are read once, at start; the denial decisions are re-checked on each pull tick, so a new checkout or a changed `origin` is noticed. Restart the daemon after editing `routes.json`.
+
+### How the repos stay apart
+
+Each loop only touches the folders routed to its repo, in every place it handles Claude folders: the start-up and periodic reconcile, the file watcher, the copy of pulled files into `~/.claude`, the catch-up after a manual `git pull`, restores of held-back files, and the manifest of deletes. A note that repo A pulls into `~/.claude` is therefore never seen as new by repo B.
+
+Editing a route moves a folder. The new repo treats the folder's files as Claude-only and copies them in; the old repo stops touching the folder and its copy stays frozen in git until you `git rm` it by hand. Because the old repo's manifest forgets the folder, a later move back restores that repo's files instead of deleting them. A move from a `client` or `orch` repo to one of another kind is logged (`folder <hash> moved from client repo ...`). Each host remembers the previous owners in `owners.json` next to `routes.json`.
+
+### Service, PID and lock
+
+There is still one service unit (`claude-memsync`), one process and one PID file. The PID file lives in the personal repo's sync dir (else the first repo's by name). Each sync dir takes a lock (`.state/daemon.lock`) for the life of the process, and a daemon, routed or not, refuses to start when another one holds any of the dirs it needs. The lock is released when the process dies, so a crash leaves nothing stale. One loop failing does not stop the others.
+
+Install the unit as usual (`claude-memsync install --config ~/.claudesync.d/personal/config.json`); with a routes file present, `run` loads every repo of `routes.json` this host has.
+
+### Commands
+
+- `status` lists each repo with the number of folders it owns, the number of denied folders, and the rules an earlier rule of the same kind shadows (a later rule that can never be reached first).
+- `stop` clears the pull marker of every repo.
+- `changes --hook` reports, for the project directory, the notes changed in each routed repo, each against its own per-session marker. A repo reports only the folders it owns.
+- `distill` and `changes` without `--config` use the personal repo's config (the primary one); an explicit `--config` always means that single repo.
+- `distill --prune` leaves an entry alone when the folder it came from is not in `~/.claude/projects` on this host: the entry was made on another host, and "file gone" is not the same as "folder never here".
+
 ## Limitations / known issues
 
 - **Path consistency required**: Claude derives the per-project memory directory

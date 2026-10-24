@@ -137,3 +137,40 @@ func TestPausedLine(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+// Init of one repo in a routed host never commits a folder routed elsewhere.
+func TestBootstrap_OwnsGateKeepsOtherReposFoldersOut(t *testing.T) {
+	cfg, origin := initFixture(t)
+	if err := bootstrapOwned(cfg, false, nil, func(f string) bool { return f == "not-p1" }); err != nil {
+		t.Fatal(err)
+	}
+	if files := originFiles(t, origin); strings.Contains(files, "p1/") {
+		t.Fatalf("init committed a folder routed to another repo:\n%s", files)
+	}
+	if m, err := os.ReadFile(filepath.Join(cfg.SyncDir, ".state", "manifest.json")); err != nil || strings.Contains(string(m), "p1/") {
+		t.Fatalf("manifest lists an unowned folder: %q %v", m, err)
+	}
+}
+
+func TestInitOwner_RefusesSyncDirTheRoutesDoNotList(t *testing.T) {
+	cfgs := routedHost(t, []string{"projects"}, "", []map[string]string{{"folder": "-a", "repo": "projects"}})
+	owns, err := initOwner(cfgs["projects"])
+	if err != nil || owns == nil || !owns("-a") || owns("-b") {
+		t.Fatalf("listed sync dir: owns=%v err=%v", owns != nil, err)
+	}
+	other := cfgs["projects"]
+	other.SyncDir = filepath.Join(t.TempDir(), "elsewhere")
+	if _, err := initOwner(other); err == nil || !strings.Contains(err.Error(), "does not list") {
+		t.Fatalf("unlisted sync dir: %v", err)
+	}
+}
+
+func TestInitOwner_NoRoutesFileMeansNoGate(t *testing.T) {
+	cfg, _ := initFixture(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv(routesEnv, "")
+	if owns, err := initOwner(cfg); owns != nil || err != nil {
+		t.Fatalf("owns=%v err=%v", owns != nil, err)
+	}
+}

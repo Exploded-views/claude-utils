@@ -82,7 +82,12 @@ func runInit(args []string) int {
 	}
 	cfg.MergeDriverPath = driver
 
-	if err := bootstrap(cfg, *force, denylistData); err != nil {
+	owns, err := initOwner(cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "init:", err)
+		return 1
+	}
+	if err := bootstrapOwned(cfg, *force, denylistData, owns); err != nil {
 		fmt.Fprintln(os.Stderr, "init failed:", err)
 		return 1
 	}
@@ -106,6 +111,35 @@ func readDenylistFile(path string) ([]byte, error) {
 // cfg.DenylistPath() before the first CommitMirror, so the bootstrap commit is
 // already scrubbed against it.
 func bootstrap(cfg config.Config, force bool, denylist []byte) error {
+	return bootstrapOwned(cfg, force, denylist, nil)
+}
+
+// initOwner is the Owns gate for init: with a routes file, the folders routed
+// to the repo whose sync dir this is. nil without one. A routes file that does
+// not list this sync dir is a refusal: init would otherwise copy every folder
+// into a repo no rule names.
+func initOwner(cfg config.Config) (func(string) bool, error) {
+	path, ok, err := resolveRoutesPath("")
+	if err != nil || !ok {
+		return nil, err
+	}
+	set, err := loadRouted(path)
+	if err != nil {
+		return nil, err
+	}
+	name := set.repoForSyncDir(cfg.SyncDir)
+	if name == "" {
+		return nil, fmt.Errorf("routes file %s does not list the sync dir %s; add it under repos, or point %s elsewhere", path, cfg.SyncDir, routesEnv)
+	}
+	if _, have := set.Cfgs[name]; !have {
+		set.Cfgs[name] = cfg // not initialised yet, but this host will have it
+	}
+	return set.Router.Owns(name), nil
+}
+
+// bootstrapOwned is bootstrap with the folders it may touch limited by owns
+// (nil: all of them).
+func bootstrapOwned(cfg config.Config, force bool, denylist []byte, owns func(string) bool) error {
 	// Step 1: ensure SyncDir exists / is empty.
 	info, err := os.Stat(cfg.SyncDir)
 	switch {
@@ -188,7 +222,7 @@ func bootstrap(cfg config.Config, force bool, denylist []byte) error {
 	if err := os.MkdirAll(mirrorProjects, 0700); err != nil {
 		return err
 	}
-	roots := syncpkg.Roots{Claude: cfg.ClaudeProjectsDir, Mirror: mirrorProjects}
+	roots := syncpkg.Roots{Claude: cfg.ClaudeProjectsDir, Mirror: mirrorProjects, Owns: owns}
 	// First-time init: no manifest yet. Pass nil so Reconcile doesn't try
 	// to propagate deletes (with no prior state, "missing in Claude" can't
 	// be distinguished from "this PC never had it").
@@ -217,7 +251,7 @@ func bootstrap(cfg config.Config, force bool, denylist []byte) error {
 
 	// Capture the post-init Claude state so the first Reconcile after the
 	// daemon starts can correctly detect deletions.
-	if m, err := syncpkg.BuildFromClaudeTree(cfg.ClaudeProjectsDir); err == nil {
+	if m, err := syncpkg.BuildFromClaudeTreeOwned(cfg.ClaudeProjectsDir, owns); err == nil {
 		if err := m.Save(cfg.SyncDir); err != nil {
 			fmt.Fprintln(os.Stderr, "save manifest:", err)
 		}

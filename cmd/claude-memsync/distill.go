@@ -34,6 +34,16 @@ func runDistill(args []string) int {
 		ProjectsDir:  cfg.ClaudeProjectsDir,
 		DistilledDir: cfg.DistilledPath(),
 	}
+	// With a routes file, only folders routed to non-client repos feed the
+	// catalog, whatever --config says: a client's notes never enter the worklist.
+	// A routes file that cannot be used stops distill rather than lifting the
+	// filter.
+	keep, err := distillKeep()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "distill:", err)
+		return 1
+	}
+	opts.Keep = keep
 
 	var res distill.Result
 	if *dryRun {
@@ -50,10 +60,36 @@ func runDistill(args []string) int {
 	return 0
 }
 
+// distillKeep is the worklist filter: nil without a routes file, an error when
+// one exists and is unusable.
+func distillKeep() (func(string) bool, error) {
+	path, ok, err := resolveRoutesPath("")
+	if err != nil || !ok {
+		return nil, err
+	}
+	set, err := loadRouted(path)
+	if err != nil {
+		return nil, err
+	}
+	return set.Router.NonClient, nil
+}
+
 // loadDistillConfig loads config.json, falling back to platform defaults when
 // no config exists yet (the catalog can be indexed before `init` has run).
 func loadDistillConfig(cfgPath string) (config.Config, error) {
 	if cfgPath == "" {
+		// With several repos the catalog lives in the personal one.
+		if path, ok, err := resolveRoutesPath(""); err != nil {
+			return config.Config{}, err
+		} else if ok {
+			set, err := loadRouted(path)
+			if err != nil {
+				return config.Config{}, err
+			}
+			if c, ok := set.Primary(); ok {
+				return c, nil
+			}
+		}
 		cfgPath = defaultConfigPath()
 	}
 	cfg, err := config.Load(cfgPath)

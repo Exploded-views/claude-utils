@@ -55,6 +55,11 @@ type Options struct {
 	// Marker gates which source memories belong in the catalog. Zero value
 	// means DefaultMarker.
 	Marker Marker
+	// Keep, if set, limits which project folders feed the worklist: a folder it
+	// rejects (a client's, say) is not read, so its notes never enter this
+	// catalog. Prune leaves the entries of a rejected folder alone. nil means
+	// every folder.
+	Keep func(folder string) bool
 }
 
 func (o *Options) applyDefaults() {
@@ -180,6 +185,15 @@ func Reconcile(opts Options) (Result, error) {
 		if e.OriginProject == "" || e.OriginFile == "" {
 			continue // hand-authored entry with no source; leave it alone
 		}
+		if opts.Keep != nil && !opts.Keep(e.OriginProject) {
+			continue
+		}
+		// The origin folder is not on this host (the entry came from another
+		// one, perhaps a client folder routed elsewhere): its absence says
+		// nothing about the source, so the entry stays.
+		if info, err := os.Stat(filepath.Join(opts.ProjectsDir, e.OriginProject)); err != nil || !info.IsDir() {
+			continue
+		}
 		src := filepath.Join(opts.ProjectsDir, e.OriginProject, "memory", e.OriginFile)
 		content, err := os.ReadFile(src)
 		stale := false
@@ -277,7 +291,7 @@ func analyzeSources(opts Options, catalog []Entry) ([]Origin, []Conflict) {
 	var all []src
 	byName := map[string][]src{}
 	for _, d := range dirs {
-		if !d.IsDir() {
+		if !d.IsDir() || (opts.Keep != nil && !opts.Keep(d.Name())) {
 			continue
 		}
 		memDir := filepath.Join(opts.ProjectsDir, d.Name(), "memory")

@@ -49,6 +49,11 @@ type Options struct {
 	Hide    func(Change) bool
 	HideAll bool
 
+	// Keep, if set, drops every change it returns false for before Hide and
+	// Limit, without counting it: the change is not this caller's to report
+	// (it belongs to a folder another repo owns).
+	Keep func(Change) bool
+
 	// CompareLocal sets Change.LocalKept on each listed change whose local
 	// copy differs from the committed bytes. It costs one git process for all.
 	CompareLocal bool
@@ -214,6 +219,15 @@ func Compute(opts Options) (Result, error) {
 		return res, err
 	}
 	all := parse(out, opts.ClaudeDir)
+	if opts.Keep != nil {
+		kept := all[:0]
+		for _, c := range all {
+			if opts.Keep(c) {
+				kept = append(kept, c)
+			}
+		}
+		all = kept
+	}
 	sort.Slice(all, func(i, j int) bool { return all[i].Path < all[j].Path })
 
 	res.hideAll = opts.HideAll

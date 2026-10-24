@@ -1,0 +1,536 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/MarimerLLC/claude-utils/internal/config"
+	"github.com/MarimerLLC/claude-utils/internal/gitwt"
+	"github.com/MarimerLLC/claude-utils/internal/lock"
+	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
+)
+
+// routedHost builds a fake host: a fake HOME, the named sync repos (each an
+// initialised git repo with its own config.json), and a routes.json. It sets
+// CLAUDE_MEMSYNC_ROUTES and returns the config of each repo.
+func routedHost(t *testing.T, repos []string, personal string, routes []map[string]string, extraRepos ...string) map[string]config.Config {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	t.Setenv("GIT_AUTHOR_NAME", "t")
+	t.Setenv("GIT_AUTHOR_EMAIL", "t@example.com")
+	t.Setenv("GIT_COMMITTER_NAME", "t")
+	t.Setenv("GIT_COMMITTER_EMAIL", "t@example.com")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("CLAUDE_PROJECT_DIR", "")
+
+	claude := filepath.Join(home, ".claude", "projects")
+	cfgs := map[string]config.Config{}
+	entries := map[string]any{}
+	for _, name := range repos {
+		cfg := config.Defaults()
+		cfg.SyncDir = filepath.Join(home, ".claudesync.d", name)
+		cfg.ClaudeProjectsDir = claude
+		repo := gitwt.New(cfg.SyncDir)
+		if err := repo.Init("main"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cfg.SyncDir, "README"), []byte(name), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_ = repo.AddAll()
+		if _, err := repo.Commit("init"); err != nil {
+			t.Fatal(err)
+		}
+		if err := config.Save(cfg); err != nil {
+			t.Fatal(err)
+		}
+		cfgs[name] = cfg
+		kind := "project"
+		if name == personal {
+			kind = "personal"
+		}
+		entries[name] = map[string]any{"config": cfg.Path(), "kind": kind}
+	}
+	for _, name := range extraRepos { // named in routes.json, absent on this host
+		entries[name] = map[string]any{"config": filepath.Join(home, ".claudesync.d", name, "config.json"), "kind": "client"}
+	}
+	rj := map[string]any{"repos": entries, "routes": routes, "default": "deny"}
+	if personal != "" {
+		rj["personal"] = personal
+	}
+	b, _ := json.Marshal(rj)
+	p := filepath.Join(home, ".config", "claude-memsync", "routes.json")
+	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(routesEnv, p)
+	return cfgs
+}
+
+func TestRouted_LegacyWithoutRoutesFileIsUnchanged(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv(routesEnv, "")
+	if _, ok, err := resolveRoutesPath(""); ok || err != nil {
+		t.Fatalf("ok=%v err=%v: no routes file means single-repo mode", ok, err)
+	}
+	cfg, err := loadDistillConfig("")
+	if err != nil || cfg.SyncDir != filepath.Join(home, ".claudesync") {
+		t.Fatalf("legacy default config changed: %+v %v", cfg, err)
+	}
+	if got := pidFilePath(); got != filepath.Join(home, ".claudesync", "daemon.pid") {
+		t.Fatalf("legacy pid path = %s", got)
+	}
+}
+
+func TestRouted_ExplicitMissingRoutesIsAnError(t *testing.T) {
+	t.Setenv(routesEnv, "")
+	if _, _, err := resolveRoutesPath(filepath.Join(t.TempDir(), "nope.json")); err == nil {
+		t.Fatal("a routes path that does not exist must not fall back to single-repo mode")
+	}
+}
+
+func TestRouted_SecondDaemonOnSameSyncDirRefused(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "projects"}, "personal", []map[string]string{
+		{"folder": "-a", "repo": "projects"},
+	})
+	set, err := loadRouted(os.Getenv(routesEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := set.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A second routed daemon, and a single-repo daemon on one of the dirs.
+	if _, err := set.Start(context.Background()); !errors.Is(err, lock.ErrHeld) {
+		t.Fatalf("second routed daemon: %v, want ErrHeld", err)
+	}
+	if _, err := lock.Acquire(cfgs["projects"].SyncDir); !errors.Is(err, lock.ErrHeld) {
+		t.Fatalf("lock on a routed sync dir: %v, want ErrHeld", err)
+	}
+	_ = first.Stop()
+	l, err := lock.Acquire(cfgs["projects"].SyncDir)
+	if err != nil {
+		t.Fatalf("after stop: %v", err)
+	}
+	l.Release()
+}
+
+func TestRouted_ReposSharingASyncDirRejected(t *testing.T) {
+	cfgs := routedHost(t, []string{"a", "b"}, "", nil)
+	b := cfgs["b"]
+	b.SyncDir = cfgs["a"].SyncDir
+	// b's config.json is rewritten to point at a's sync dir.
+	data, _ := json.Marshal(b)
+	if err := os.WriteFile(filepath.Join(cfgs["b"].SyncDir, "config.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadRouted(os.Getenv(routesEnv)); err == nil || !strings.Contains(err.Error(), "share the sync dir") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestRouted_StatusListsReposOwnedDeniedShadowedMissing(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "projects"}, "personal", []map[string]string{
+		{"folder": "-a", "repo": "projects"},
+		{"folder": "-a", "repo": "projects"},         // shadowed
+		{"folder": "-clientdir", "repo": "client-x"}, // repo absent
+	}, "client-x")
+	for _, f := range []string{"-a", "-clientdir", "-zzz"} {
+		if err := os.MkdirAll(filepath.Join(cfgs["projects"].ClaudeProjectsDir, f, "memory"), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set, err := loadRouted(os.Getenv(routesEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := strings.Join(set.statusLines(), "\n")
+	for _, want := range []string{
+		"projects: owns 1 folder",
+		"personal: personal, owns no folders",
+		"client-x: not on this host",
+		"denied: 2 folders",
+		"shadowed: rule 1 is never reached first (rule 0",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRouted_DistillDefaultsToPersonalRepo(t *testing.T) {
+	cfgs := routedHost(t, []string{"projects", "personal"}, "personal", nil)
+	cfg, err := loadDistillConfig("")
+	if err != nil || cfg.SyncDir != cfgs["personal"].SyncDir {
+		t.Fatalf("got %s (%v), want the personal repo", cfg.SyncDir, err)
+	}
+}
+
+// changes --hook reports, for the project dir, the notes of every routed repo,
+// and a repo reports only the folders it owns.
+func TestRouted_HookReportsAcrossReposOwnedFoldersOnly(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "projects", "client-a"}, "personal", []map[string]string{
+		{"folder": "-home-alice-src-app", "repo": "projects"},
+		{"folder": "-home-alice-src-cl", "repo": "client-a"},
+	})
+	app := hookJSON("sa", "/home/alice/src/app", "UserPromptSubmit")
+	cl := hookJSON("sc", "/home/alice/src/cl", "UserPromptSubmit")
+	runHook(t, app, "--hook")
+	runHook(t, cl, "--hook") // baselines in every repo
+
+	addNotes(t, cfgs["projects"].Path(), map[string]string{
+		"-home-alice-src-app/memory/app-note.md": "a",
+		"-home-alice-src-cl/memory/frozen.md":    "f", // a folder this repo does not own
+	})
+	addNotes(t, cfgs["client-a"].Path(), map[string]string{
+		"-home-alice-src-cl/memory/cl-note.md":  "c",
+		"-home-alice-src-app/memory/foreign.md": "x",
+	})
+
+	code, out, errs := runHook(t, app, "--hook")
+	if code != 0 || errs != "" {
+		t.Fatalf("exit %d stderr %q", code, errs)
+	}
+	if !strings.Contains(out, "app-note.md") || strings.Contains(out, "foreign.md") || strings.Contains(out, "cl-note.md") {
+		t.Errorf("app project: %s", out)
+	}
+	_, out, _ = runHook(t, cl, "--hook")
+	if !strings.Contains(out, "cl-note.md") || strings.Contains(out, "frozen.md") {
+		t.Errorf("client project: %s", out)
+	}
+	if strings.Contains(out, "unowned") {
+		t.Errorf("owned-folder filtering must not show up as hidden files: %s", out)
+	}
+}
+
+func TestRouted_LegacyModeRefusedWhenARoutesFileExists(t *testing.T) {
+	cfgs := routedHost(t, []string{"projects"}, "", nil)
+	if _, err := startSingle(context.Background(), cfgs["projects"]); err == nil || !strings.Contains(err.Error(), "routes file") {
+		t.Fatalf("single-repo daemon started beside a routes file: %v", err)
+	}
+	// The same, with the file only at the XDG location.
+	home := os.Getenv("HOME")
+	xdg := filepath.Join(home, "xdg")
+	if err := os.MkdirAll(filepath.Join(xdg, "claude-memsync"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(xdg, "claude-memsync", "routes.json"), []byte(`{"repos":{}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(routesEnv, "")
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	if err := os.Remove(filepath.Join(home, ".config", "claude-memsync", "routes.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacyGuard(cfgs["projects"]); err == nil {
+		t.Fatal("a routes file under XDG_CONFIG_HOME was not noticed")
+	}
+}
+
+func TestRouted_InstallWritesAbsoluteRoutesIntoTheUnit(t *testing.T) {
+	routedHost(t, []string{"projects"}, "", nil)
+	rel := filepath.Join(t.TempDir(), "r.json")
+	if err := os.WriteFile(rel, []byte(`{"repos":{}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	old := unitRoutes
+	defer func() { unitRoutes = old }()
+	unitRoutes = rel
+	args := strings.Join(serviceConfig("/abs/config.json").Arguments, " ")
+	if !strings.Contains(args, "--routes "+rel) || !strings.Contains(args, "--config /abs/config.json") {
+		t.Fatalf("unit args: %s", args)
+	}
+	if !filepath.IsAbs(rel) {
+		t.Fatal("test setup")
+	}
+}
+
+func TestRouted_ReloadSwapsTableAndKeepsOldOnBadFile(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "projects"}, "personal", []map[string]string{{"folder": "-a", "repo": "projects"}})
+	set, err := loadRouted(os.Getenv(routesEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set.Router.Decide("-a").Repo != "projects" || set.Router.Decide("-b").Repo != "" {
+		t.Fatal("setup")
+	}
+	good := `{"repos":{"personal":{"config":"` + cfgs["personal"].Path() + `","kind":"personal"},"projects":{"config":"` + cfgs["projects"].Path() + `","kind":"project"}},"personal":"personal","routes":[{"folder":"-b","repo":"projects"}]}`
+	if err := os.WriteFile(set.Path, []byte(good), 0600); err != nil {
+		t.Fatal(err)
+	}
+	set.reload()
+	if set.Router.Decide("-b").Repo != "projects" || set.Router.Decide("-a").Repo != "" {
+		t.Fatal("reload did not swap the table")
+	}
+	if err := os.WriteFile(set.Path, []byte("{broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	set.reload()
+	set.reload()
+	if set.Router.Decide("-b").Repo != "projects" {
+		t.Fatal("a bad file replaced the working table")
+	}
+}
+
+func TestRouted_DeadLoopIsRecordedAndRestartedWithBackoff(t *testing.T) {
+	routedHost(t, []string{"personal", "projects"}, "personal", nil)
+	set, err := loadRouted(os.Getenv(routesEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldMin, oldRun := loopBackoffMin, runLoop
+	defer func() { loopBackoffMin, runLoop = oldMin, oldRun }()
+	loopBackoffMin = time.Millisecond
+	var calls atomic.Int32
+	runLoop = func(ctx context.Context, l *syncpkg.Loop) error {
+		if l.Name != "projects" {
+			<-ctx.Done()
+			return nil
+		}
+		if calls.Add(1) < 3 {
+			return errors.New("watch failed")
+		}
+		<-ctx.Done()
+		return nil
+	}
+	run, err := set.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for calls.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if calls.Load() < 3 {
+		t.Fatalf("loop restarted %d times, want 3 starts", calls.Load())
+	}
+	out := strings.Join(set.statusLines(), "\n")
+	if !strings.Contains(out, "loop stopped") || !strings.Contains(out, "watch failed") {
+		t.Errorf("status does not show the dead loop:\n%s", out)
+	}
+	_ = run.Stop()
+}
+
+func TestRouted_StopFindsALegacyPidFile(t *testing.T) {
+	routedHost(t, []string{"personal"}, "personal", nil)
+	legacy := legacyPidFilePath()
+	if err := os.MkdirAll(filepath.Dir(legacy), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte("4242"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if pid, err := readPidFile(); err != nil || pid != 4242 {
+		t.Fatalf("pid=%d err=%v", pid, err)
+	}
+	if err := removePidFile(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(legacy); err == nil {
+		t.Fatal("legacy pid file left behind")
+	}
+}
+
+func writeSource(t *testing.T, claude, folder, name string) {
+	t.Helper()
+	p := filepath.Join(claude, folder, "memory", name+".md")
+	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nname: " + name + "\ndescription: d\nmetadata:\n  type: feedback\n  scope: environment\n---\n\nbody\n"
+	if err := os.WriteFile(p, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// captureStdout runs f and returns what it printed to stdout.
+func captureStdout(t *testing.T, f func() int) (int, string) {
+	t.Helper()
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	code := f()
+	w.Close()
+	os.Stdout = old
+	b, _ := io.ReadAll(r)
+	return code, string(b)
+}
+
+func TestFailClosed_DistillRefusesACorruptRoutesFile(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal"}, "personal", nil)
+	if err := os.WriteFile(os.Getenv(routesEnv), []byte("{broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{nil, {"--config", cfgs["personal"].Path()}} {
+		if code, out := captureStdout(t, func() int { return runDistill(args) }); code != 1 || strings.Contains(out, "indexed") {
+			t.Errorf("args %v: exit %d, output %q: distill ran with an unusable routes file", args, code, out)
+		}
+	}
+}
+
+func TestFailClosed_DistillWithExplicitConfigStillDropsClientFolders(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "projects", "client-a"}, "personal", []map[string]string{
+		{"folder": "-own", "repo": "projects"},
+		{"folder": "-client", "repo": "client-a"},
+	})
+	claude := cfgs["personal"].ClaudeProjectsDir
+	writeSource(t, claude, "-own", "own-note")
+	writeSource(t, claude, "-client", "client-note")
+	// client-a is a client repo in routes.json only if marked: routedHost marks
+	// extra repos; mark this one by rewriting.
+	set, _ := loadRouted(os.Getenv(routesEnv))
+	f := set.Router.File()
+	r := f.Repos["client-a"]
+	r.Kind = "client"
+	f.Repos["client-a"] = r
+	b, _ := json.Marshal(f)
+	if err := os.WriteFile(os.Getenv(routesEnv), b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{nil, {"--config", cfgs["personal"].Path()}} {
+		code, out := captureStdout(t, func() int { return runDistill(args) })
+		if code != 0 || !strings.Contains(out, "own-note") || strings.Contains(out, "client-note") {
+			t.Errorf("args %v: exit %d, output:\n%s", args, code, out)
+		}
+	}
+}
+
+func TestFailClosed_HookWithConfigAppliesTheReposGateAndRefusesUnusableRoutes(t *testing.T) {
+	cfgs := routedHost(t, []string{"projects", "client-a"}, "", []map[string]string{
+		{"folder": "-home-alice-src-app", "repo": "projects"},
+		{"folder": "-home-alice-src-cl", "repo": "client-a"},
+	})
+	cp := cfgs["projects"].Path()
+	in := hookJSON("s", "/home/alice/src/app", "UserPromptSubmit")
+	runHook(t, in, "--config", cp, "--hook")
+	addNotes(t, cp, map[string]string{
+		"-home-alice-src-app/memory/mine.md":  "a",
+		"-home-alice-src-cl/memory/frozen.md": "f",
+	})
+	_, out, _ := runHook(t, hookJSON("s", "/home/alice/src/cl", "UserPromptSubmit"), "--config", cp, "--hook", "--project", "/home/alice/src/cl")
+	if strings.Contains(out, "frozen.md") {
+		t.Errorf("--config bypassed the owns gate: %s", out)
+	}
+	if err := os.WriteFile(os.Getenv(routesEnv), []byte("{broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	addNotes(t, cp, map[string]string{"-home-alice-src-app/memory/more.md": "b"})
+	_, out, errs := runHook(t, in, "--config", cp, "--hook")
+	if out != "" || errs == "" {
+		t.Errorf("unusable routes: stdout %q stderr %q, want nothing reported and an error", out, errs)
+	}
+}
+
+func TestFailClosed_StatusAndStopRefuseUnusableRoutes(t *testing.T) {
+	routedHost(t, []string{"personal"}, "personal", nil)
+	if err := os.WriteFile(os.Getenv(routesEnv), []byte("{broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := allConfigs(); err == nil {
+		t.Error("allConfigs fell back to the default config")
+	}
+	if handled, code := routedStatus(); !handled || code != 1 {
+		t.Errorf("status: handled=%v exit %d, want a refusal", handled, code)
+	}
+}
+
+func TestRouted_RemoteNameMustAgreeWithKind(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "a"}, "personal", nil)
+	a := cfgs["a"]
+	for remote, wantErr := range map[string]bool{
+		"git@github.com:org/mem-client-x.git": true, // kind is project
+		"git@github.com:org/mem-orch-x.git":   true,
+		"git@github.com:org/mem-project-x":    false,
+	} {
+		a.RemoteURL = remote
+		if err := config.Save(a); err != nil {
+			t.Fatal(err)
+		}
+		_, err := loadRouted(os.Getenv(routesEnv))
+		if (err != nil) != wantErr {
+			t.Errorf("remote %s: err=%v, wantErr=%v", remote, err, wantErr)
+		}
+	}
+	// The matching kinds load.
+	for remote, kind := range map[string]string{"git@github.com:org/mem-client-x.git": "client", "git@github.com:org/mem-orch-x.git": "orch"} {
+		a.RemoteURL = remote
+		if err := config.Save(a); err != nil {
+			t.Fatal(err)
+		}
+		set, _ := loadRouted(os.Getenv(routesEnv)) // still project: refused
+		if set != nil {
+			t.Fatalf("%s: loaded with the wrong kind", remote)
+		}
+		b, _ := os.ReadFile(os.Getenv(routesEnv))
+		var m map[string]any
+		_ = json.Unmarshal(b, &m)
+		m["repos"].(map[string]any)["a"].(map[string]any)["kind"] = kind
+		nb, _ := json.Marshal(m)
+		if err := os.WriteFile(os.Getenv(routesEnv), nb, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadRouted(os.Getenv(routesEnv)); err != nil {
+			t.Errorf("%s as %s: %v", remote, kind, err)
+		}
+	}
+}
+
+func TestRouted_ClientAndOrchFoldersNeverInDistillWorklist(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "projects", "client-a", "orch-a"}, "personal", []map[string]string{
+		{"folder": "-own", "repo": "projects"},
+		{"folder": "-client", "repo": "client-a"},
+		{"folder": "-orch", "repo": "orch-a"},
+	})
+	b, _ := os.ReadFile(os.Getenv(routesEnv))
+	var m map[string]any
+	_ = json.Unmarshal(b, &m)
+	repos := m["repos"].(map[string]any)
+	repos["client-a"].(map[string]any)["kind"] = "client"
+	repos["orch-a"].(map[string]any)["kind"] = "orch"
+	nb, _ := json.Marshal(m)
+	if err := os.WriteFile(os.Getenv(routesEnv), nb, 0600); err != nil {
+		t.Fatal(err)
+	}
+	claude := cfgs["personal"].ClaudeProjectsDir
+	for f, n := range map[string]string{"-own": "own-note", "-client": "client-note", "-orch": "orch-note"} {
+		writeSource(t, claude, f, n)
+	}
+	code, out := captureStdout(t, func() int { return runDistill(nil) })
+	if code != 0 || !strings.Contains(out, "own-note") || strings.Contains(out, "client-note") || strings.Contains(out, "orch-note") {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+}
+
+func TestRouted_UnflaggedRepoRefused(t *testing.T) {
+	routedHost(t, []string{"personal"}, "personal", nil)
+	p := os.Getenv(routesEnv)
+	if err := os.WriteFile(p, []byte(`{"repos":{"personal":"/some/config.json"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadRouted(p); err == nil || !strings.Contains(err.Error(), "kind") {
+		t.Fatalf("err = %v, want a message naming kind", err)
+	}
+}

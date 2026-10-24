@@ -104,6 +104,12 @@ func (m *Manifest) Add(rel string) { m.files[rel] = struct{}{} }
 // existing memory file. Used to refresh the manifest after each successful
 // sync and to bootstrap on first run.
 func BuildFromClaudeTree(claudeRoot string) (*Manifest, error) {
+	return BuildFromClaudeTreeOwned(claudeRoot, nil)
+}
+
+// BuildFromClaudeTreeOwned is BuildFromClaudeTree restricted to the folders
+// owns accepts (nil accepts all).
+func BuildFromClaudeTreeOwned(claudeRoot string, owns func(folder string) bool) (*Manifest, error) {
 	m := NewManifest()
 	entries, err := os.ReadDir(claudeRoot)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -113,7 +119,7 @@ func BuildFromClaudeTree(claudeRoot string) (*Manifest, error) {
 		return nil, err
 	}
 	for _, e := range entries {
-		if !e.IsDir() {
+		if !e.IsDir() || (owns != nil && !owns(e.Name())) {
 			continue
 		}
 		memDir := filepath.Join(claudeRoot, e.Name(), "memory")

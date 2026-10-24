@@ -31,7 +31,16 @@ import (
 type Roots struct {
 	Claude string // ~/.claude/projects
 	Mirror string // ~/.claudesync/projects
+
+	// Owns, if set, says whether this repo may touch a Claude folder. A folder
+	// it rejects is invisible to the repo: Reconcile, the watcher, propagate,
+	// catch-up, park restores and the manifest all skip it. nil means every
+	// folder, as with a single repo per host.
+	Owns func(folder string) bool
 }
+
+// owns reports whether the repo may touch folder.
+func (r Roots) owns(folder string) bool { return r.Owns == nil || r.Owns(folder) }
 
 // MemoryDirs lists every <hash>/memory directory found under either root.
 func (r Roots) MemoryDirs() ([]string, error) {
@@ -45,7 +54,7 @@ func (r Roots) MemoryDirs() ([]string, error) {
 			return nil, fmt.Errorf("read %s: %w", root, err)
 		}
 		for _, e := range entries {
-			if !e.IsDir() {
+			if !e.IsDir() || !r.owns(e.Name()) {
 				continue
 			}
 			seen[e.Name()] = struct{}{}

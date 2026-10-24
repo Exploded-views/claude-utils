@@ -32,6 +32,12 @@ type Loop struct {
 	// no longer private).
 	PushAllowed func() bool
 
+	// Name labels this loop's log lines when several repos run in one process.
+	Name string
+	// Owns gates which Claude folders this loop may touch (see Roots.Owns).
+	// nil means all of them: one repo per host.
+	Owns func(folder string) bool
+
 	// recovered is the outcome of a recoverLeftovers the cycle already ran
 	// before flush, so flush does not repeat it: a path whose restore keeps
 	// failing is counted once per cycle.
@@ -57,7 +63,7 @@ func (l *Loop) Run(ctx context.Context) error {
 	}
 
 	mirrorProjects := filepath.Join(l.Cfg.SyncDir, "projects")
-	roots := Roots{Claude: l.Cfg.ClaudeProjectsDir, Mirror: mirrorProjects}
+	roots := Roots{Claude: l.Cfg.ClaudeProjectsDir, Mirror: mirrorProjects, Owns: l.Owns}
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -72,7 +78,7 @@ func (l *Loop) Run(ctx context.Context) error {
 		return fmt.Errorf("watch %s: %w", roots.Claude, err)
 	}
 	if err := refreshMemoryWatches(watcher, roots.Claude); err != nil {
-		log.Println("refresh memory watches:", newPathGuard(l.Cfg).Err(err))
+		l.logln("refresh memory watches:", newPathGuard(l.Cfg).Err(err))
 	}
 
 	debounce := time.NewTimer(time.Hour)
@@ -89,7 +95,7 @@ func (l *Loop) Run(ctx context.Context) error {
 	// to detect deletes that happened while the daemon was off), then flush.
 	manifest, err := LoadManifest(l.Cfg.SyncDir)
 	if err != nil {
-		log.Println("load manifest (continuing without delete detection):", newPathGuard(l.Cfg).Err(err))
+		l.logln("load manifest (continuing without delete detection):", newPathGuard(l.Cfg).Err(err))
 		manifest = NewManifest()
 	}
 	// What a crash left behind is undone before Reconcile compares the trees: a
@@ -97,12 +103,12 @@ func (l *Loop) Run(ctx context.Context) error {
 	// copies of an unfinished park differ from the Claude ones.
 	if l.startCycle(repo, roots) {
 		if _, err := Reconcile(roots, manifest); err != nil {
-			log.Println("initial reconcile:", newPathGuard(l.Cfg).Err(err))
+			l.logln("initial reconcile:", newPathGuard(l.Cfg).Err(err))
 		}
 	}
 	if err := l.flush(repo, roots, true); err != nil {
 		if !errors.Is(err, errHandResolving) { // already logged
-			log.Println("initial flush:", newPathGuard(l.Cfg).Err(err))
+			l.logln("initial flush:", newPathGuard(l.Cfg).Err(err))
 		}
 		if l.OnFlush != nil {
 			l.OnFlush(true, err)
@@ -124,7 +130,7 @@ func (l *Loop) Run(ctx context.Context) error {
 			}
 			handled, err := l.handleEvent(watcher, roots, ev)
 			if err != nil {
-				log.Println("event:", newPathGuard(l.Cfg).Err(err))
+				l.logln("event:", newPathGuard(l.Cfg).Err(err))
 				continue
 			}
 			if !handled {
@@ -137,12 +143,12 @@ func (l *Loop) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			log.Println("watcher error:", newPathGuard(l.Cfg).Err(err))
+			l.logln("watcher error:", newPathGuard(l.Cfg).Err(err))
 
 		case <-debounce.C:
 			err := l.flush(repo, roots, true)
 			if err != nil && !errors.Is(err, errHandResolving) {
-				log.Println("flush (local):", newPathGuard(l.Cfg).Err(err))
+				l.logln("flush (local):", newPathGuard(l.Cfg).Err(err))
 			}
 			l.refreshManifest(roots)
 			l.rebuildDistilledIndex()
@@ -189,7 +195,7 @@ func (l *Loop) takeRecovery(repo *gitwt.Repo, roots Roots) error {
 	}
 	err := l.recoverLeftovers(repo, roots)
 	if errors.Is(err, errHandResolving) {
-		log.Println(err)
+		l.logln(err)
 	}
 	return err
 }
@@ -203,14 +209,14 @@ func (l *Loop) startCycle(repo *gitwt.Repo, roots Roots) bool {
 	err := l.recoverLeftovers(repo, roots)
 	l.recovered = &recovery{err}
 	if errors.Is(err, errHandResolving) {
-		log.Println(err)
+		l.logln(err)
 		return false
 	}
 	if err != nil {
-		log.Println("recover earlier cycle:", newPathGuard(l.Cfg).Err(err))
+		l.logln("recover earlier cycle:", newPathGuard(l.Cfg).Err(err))
 	}
 	if parkedExists(repo) || repo.RebaseInProgress() || repo.MergeInProgress() {
-		log.Println("reconcile skipped: held-back files are still parked or a rebase/merge is unresolved; retrying next cycle")
+		l.logln("reconcile skipped: held-back files are still parked or a rebase/merge is unresolved; retrying next cycle")
 		return false
 	}
 	return true
@@ -225,17 +231,17 @@ func (l *Loop) pullTick(repo *gitwt.Repo, roots Roots) {
 	// watcher missed.
 	m, err := LoadManifest(l.Cfg.SyncDir)
 	if err != nil {
-		log.Println("load manifest:", newPathGuard(l.Cfg).Err(err))
+		l.logln("load manifest:", newPathGuard(l.Cfg).Err(err))
 		m = NewManifest()
 	}
 	if l.startCycle(repo, roots) {
 		if _, err := Reconcile(roots, m); err != nil {
-			log.Println("reconcile:", newPathGuard(l.Cfg).Err(err))
+			l.logln("reconcile:", newPathGuard(l.Cfg).Err(err))
 		}
 	}
 	err = l.flush(repo, roots, true)
 	if err != nil && !errors.Is(err, errHandResolving) {
-		log.Println("flush (pull):", newPathGuard(l.Cfg).Err(err))
+		l.logln("flush (pull):", newPathGuard(l.Cfg).Err(err))
 	}
 	l.refreshManifest(roots)
 	l.rebuildDistilledIndex()
@@ -269,7 +275,7 @@ func (l *Loop) handleEvent(watcher *fsnotify.Watcher, roots Roots, ev fsnotify.E
 		return false, nil
 	}
 	hash, name := parts[0], parts[2]
-	if shouldIgnoreFile(name) {
+	if shouldIgnoreFile(name) || !roots.owns(hash) {
 		return false, nil
 	}
 
@@ -327,13 +333,13 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	pause := func() error {
 		settled = false
 		markPaused(repo)
-		log.Println(errHandResolving)
+		l.logln(errHandResolving)
 		return errHandResolving
 	}
 	defer func() {
 		if settled {
 			if rerr := recordHead(repo); rerr != nil {
-				log.Println("record synced head:", g.Err(rerr))
+				l.logln("record synced head:", g.Err(rerr))
 			}
 		}
 	}()
@@ -383,7 +389,7 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 			conflictErr = abortRebaseConflict(repo)
 		} else {
 			// Don't propagate first-time failure (no upstream yet); push will create it.
-			log.Println("pull:", g.Err(err))
+			l.logln("pull:", g.Err(err))
 		}
 	}
 	clearPullMark(repo)
@@ -495,7 +501,7 @@ func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string, skip map[
 		// A rename's old path is removed; its new path is the post-image.
 		path := paths[want-1]
 		if status[0] == 'R' && !skip[paths[0]] {
-			if hash, name, ok := splitMirrorPath(paths[0]); ok {
+			if hash, name, ok := splitMirrorPath(paths[0]); ok && roots.owns(hash) {
 				_ = os.Remove(filepath.Join(roots.Claude, hash, "memory", name))
 			}
 		}
@@ -503,7 +509,7 @@ func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string, skip map[
 			continue
 		}
 		hash, name, ok := splitMirrorPath(path)
-		if !ok {
+		if !ok || !roots.owns(hash) {
 			continue
 		}
 		switch status[0] {
@@ -554,13 +560,13 @@ func refreshMemoryWatches(w *fsnotify.Watcher, claudeRoot string) error {
 // and saves it. Called after every successful flush so that the next
 // Reconcile reasons against an up-to-date "as of last sync" snapshot.
 func (l *Loop) refreshManifest(roots Roots) {
-	m, err := BuildFromClaudeTree(roots.Claude)
+	m, err := BuildFromClaudeTreeOwned(roots.Claude, roots.Owns)
 	if err != nil {
-		log.Println("build manifest:", newPathGuard(l.Cfg).Err(err))
+		l.logln("build manifest:", newPathGuard(l.Cfg).Err(err))
 		return
 	}
 	if err := m.Save(l.Cfg.SyncDir); err != nil {
-		log.Println("save manifest:", newPathGuard(l.Cfg).Err(err))
+		l.logln("save manifest:", newPathGuard(l.Cfg).Err(err))
 	}
 }
 
@@ -578,7 +584,7 @@ func (l *Loop) rebuildDistilledIndex() {
 		ProjectsDir:  l.Cfg.ClaudeProjectsDir,
 		DistilledDir: dir,
 	}); err != nil {
-		log.Println("rebuild distilled index:", newPathGuard(l.Cfg).Err(err))
+		l.logln("rebuild distilled index:", newPathGuard(l.Cfg).Err(err))
 	}
 }
 
@@ -598,4 +604,13 @@ func shouldIgnoreFile(name string) bool {
 		return true
 	}
 	return false
+}
+
+// logln logs like log.Println, prefixed with the loop's name when it has one,
+// so the lines of several repos in one process can be told apart.
+func (l *Loop) logln(args ...any) {
+	if l.Name != "" {
+		args = append([]any{"[" + l.Name + "]"}, args...)
+	}
+	log.Println(args...)
 }
