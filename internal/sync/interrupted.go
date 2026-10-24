@@ -86,11 +86,20 @@ func stoppedByMarkedPull(repo *gitwt.Repo) bool {
 		return false
 	}
 	for _, s := range subjects {
-		if strings.Contains(s, " (start): ") {
+		if isRebaseStart(s) {
 			return strings.HasPrefix(s, pullAction(nonce)+" (start): ")
 		}
 	}
 	return false
+}
+
+// isRebaseStart reports whether a reflog subject is a rebase's start entry,
+// "<action> (start): checkout <upstream>". Only the part before the first
+// "): " counts, so a replayed commit whose own subject contains " (start): "
+// ("<action> (pick): notes (start): kickoff") is not taken for one.
+func isRebaseStart(subject string) bool {
+	head, _, ok := strings.Cut(subject, "): ")
+	return ok && strings.HasSuffix(head+")", " (start)")
 }
 
 // ClearStalePullMarker removes the pull marker of the sync repo in dir unless a
@@ -118,8 +127,8 @@ func clearPullMark(repo *gitwt.Repo) {
 }
 
 // errHandResolving ends a cycle early: a rebase or merge is stopped in the sync
-// repo and the daemon did not start it.
-var errHandResolving = errors.New("a rebase or merge is in progress in the sync repo and the daemon did not start it; assuming you are resolving it by hand, this cycle stages, reconciles, pulls and pushes nothing until it is finished (to give it up: git -C ~/.claudesync rebase --abort, or merge --abort; see docs: Rebase conflicts)")
+// repo that is not recognised as the daemon's own.
+var errHandResolving = errors.New("a rebase or merge is in progress in the sync repo that is not recognised as the daemon's own; assuming you are resolving it by hand, this cycle stages, reconciles, pulls and pushes nothing until it is finished (to give it up: git -C ~/.claudesync rebase --abort, or merge --abort; see docs: Rebase conflicts)")
 
 // handResolving reports whether a rebase or merge is stopped in the sync repo.
 // Where the daemon checks it, nothing of its own can be: what its pull left

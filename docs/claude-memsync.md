@@ -22,7 +22,9 @@ of its own — just a git remote you can push to.
 ## Prerequisites
 
 - Go 1.23+ to build.
-- `git` 2.x on PATH at runtime (the daemon shells out to it).
+- `git` 2.26 or later on PATH at runtime (the daemon shells out to it; older
+  versions record a rebase's start in the reflog differently, so the daemon
+  could not tell its own stopped rebase from yours and would pause instead).
 - A private git remote you can `git push` to from your terminal. The daemon
   inherits your normal git credentials (Git Credential Manager on Windows, SSH
   agent or `~/.gitconfig` credential helpers on Linux/macOS). Confirm `git push`
@@ -359,9 +361,14 @@ daemon does guard, in case you did not, is this. It records no synced `HEAD` (se
 below) while a rebase or merge is stopped or `HEAD` is detached, and logs a
 detached `HEAD` once. It aborts only a rebase its own pull started. The pull is
 a `git fetch`, then a marker, `~/.claudesync/.state/pull-running`, holding a
-random nonce, then `git rebase --autostash origin/<branch>` run with
-`GIT_REFLOG_ACTION="memsync-pull <nonce>"`, which git writes into the reflog of
-`HEAD` as the start of that rebase. A stopped rebase is the daemon's only if the
+random nonce, then `git rebase --fork-point --autostash origin/<branch>` run
+with `GIT_REFLOG_ACTION="memsync-pull <nonce>"`, which git writes into the
+reflog of `HEAD` as the start of that rebase. `--fork-point` is what
+`git pull --rebase` does too: commits that a force-push removed upstream (a
+purged secret, say) are not replayed and pushed back. Ref logging is switched
+on for these two commands whatever your global git config says. If the daemon
+ever fails to recognise its own rebase, it errs the safe way: it leaves the
+rebase alone and pauses as described below, and `rebase --abort` gets you out. A stopped rebase is the daemon's only if the
 newest rebase start in that reflog (`git -C ~/.claudesync reflog`) carries the
 marker's nonce. With no marker, or with a nonce that is not the newest start, it
 is yours, whatever the timing: that holds for a marker a kill left behind, and
