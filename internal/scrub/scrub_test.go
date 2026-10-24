@@ -169,3 +169,68 @@ func TestScan_CredentialAssignmentTable(t *testing.T) {
 		}
 	}
 }
+
+// The new rules are built from pieces so no token-shaped literal is in the file.
+func TestScan_MoreRules(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{"url password", "dsn " + "postgres://" + "svc_user" + ":" + "s3cr3tPw9x" + "@db.example.com:5432/app", "url-credentials"},
+		{"url password https", "https://" + "alice" + ":" + "hunter2hunter2" + "@example.com/x", "url-credentials"},
+		{"openai svcacct", rep("sk-svcacct-", 30, "a"), "openai-api-key"},
+		{"openai admin", rep("sk-admin-", 30, "a"), "openai-api-key"},
+		{"stripe sk", rep("sk_live_", 24, "a"), "stripe-key"},
+		{"stripe rk", rep("rk_live_", 24, "B"), "stripe-key"},
+		{"google api key", rep("AIza", 35, "a"), "google-api-key"},
+		{"gitlab pat", rep("glpat-", 20, "a"), "gitlab-token"},
+		{"aws secret", "aws_secret_access_key = " + rep("", 40, "a"), "aws-secret-key"},
+		{"aws secret upper", "AWS_SECRET_ACCESS_KEY=" + rep("", 40, "A"), "aws-secret-key"},
+		{"github after underscore", "GITHUB_TOKEN_" + rep("ghp_", 36, "a"), "github-token"},
+		{"stripe after underscore", "STRIPE_" + rep("sk_live_", 24, "a"), "stripe-key"},
+		{"github after equals", "GH=" + rep("gho_", 36, "a"), "github-token"},
+	}
+	s := New(nil)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for _, g := range s.Scan([]byte(c.content)) {
+				if g == c.want {
+					return
+				}
+			}
+			t.Errorf("rule %q did not match %q", c.want, c.name)
+		})
+	}
+}
+
+func TestScan_MoreRulesCleanContent(t *testing.T) {
+	clean := []string{
+		// Placeholders in URLs.
+		"postgres://user:password@localhost:5432/db",
+		"https://" + "alice:" + "<password>" + "@example.com",
+		"https://" + "alice:" + "${DB_PASS}" + "@example.com",
+		"https://" + "alice:" + "{{ .Pass }}" + "@example.com",
+		"mysql://root:changeme@db",
+		"https://user:pass@example.com",
+		// No password, or not userinfo.
+		"ssh://git@github.com/org/repo.git",
+		"https://example.com:8080/path@x",
+		"mailto:someone@example.com",
+		// Near misses for the key formats.
+		"sk-svcacct-short",
+		"sk_live_ is the Stripe live prefix",
+		"sk_test_" + strings.Repeat("a", 24),
+		"AIza is a Google prefix; AIzaShort",
+		"glpat-short",
+		"aws_secret_access_key = <your secret key goes here, 40 chars>",
+		"aws_secret_access_key = $" + strings.Repeat("A", 39),
+		"aws_secret_access_key = " + strings.Repeat("a", 39),
+	}
+	s := New(nil)
+	for _, c := range clean {
+		if got := s.Scan([]byte(c)); len(got) != 0 {
+			t.Errorf("Scan(%q) = %v, want none", c, got)
+		}
+	}
+}

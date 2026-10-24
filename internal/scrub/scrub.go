@@ -21,29 +21,61 @@ import (
 type rule struct {
 	name string
 	re   *regexp.Regexp
+	// accept, if set, vets each match's submatches; the rule fires only if
+	// one passes. It lets a rule exclude placeholders RE2 cannot express.
+	accept func(sub [][]byte) bool
 }
+
+// tokenStart is what may precede a vendor token prefix. \b is no use: "_" is a
+// word character, so it would miss "GITHUB_TOKEN_ghp_...".
+const tokenStart = `(?:^|[^A-Za-z0-9])`
 
 // builtin is the always-on rule set. The patterns favor few false positives on
 // ordinary prose over catching every conceivable credential format: a memory
 // file is mostly English, and a scrub that holds back harmless notes trains
 // users to turn it off.
 var builtin = []rule{
-	{"private-key", regexp.MustCompile(`-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----`)},
-	{"github-token", regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})`)},
-	{"anthropic-api-key", regexp.MustCompile(`\bsk-ant-[A-Za-z0-9_-]{20,}`)},
-	// Hyphens are only allowed after the sk-proj- prefix, so kebab-case prose
-	// that happens to start with "sk-" is not flagged.
-	{"openai-api-key", regexp.MustCompile(`\bsk-(?:proj-[A-Za-z0-9_-]{20,}|[A-Za-z0-9]{20,})`)},
-	{"slack-token", regexp.MustCompile(`\bxox[abdoprs]-[A-Za-z0-9-]{10,}`)},
-	{"aws-access-key", regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`)},
-	{"jwt", regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`)},
+	{name: "private-key", re: regexp.MustCompile(`-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----`)},
+	{name: "github-token", re: regexp.MustCompile(tokenStart + `(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})`)},
+	{name: "anthropic-api-key", re: regexp.MustCompile(`\bsk-ant-[A-Za-z0-9_-]{20,}`)},
+	// Hyphens are only allowed after the sk-proj-, sk-svcacct- and sk-admin-
+	// prefixes, so kebab-case prose that happens to start with "sk-" is not
+	// flagged.
+	{name: "openai-api-key", re: regexp.MustCompile(`\bsk-(?:(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}|[A-Za-z0-9]{20,})`)},
+	{name: "stripe-key", re: regexp.MustCompile(tokenStart + `[sr]k_live_[A-Za-z0-9]{16,}`)},
+	{name: "google-api-key", re: regexp.MustCompile(tokenStart + `AIza[0-9A-Za-z_-]{35}`)},
+	{name: "gitlab-token", re: regexp.MustCompile(tokenStart + `glpat-[A-Za-z0-9_-]{20,}`)},
+	{name: "slack-token", re: regexp.MustCompile(`\bxox[abdoprs]-[A-Za-z0-9-]{10,}`)},
+	{name: "aws-access-key", re: regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`)},
+	{name: "jwt", re: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`)},
+	// A 40-character value after aws_secret_access_key. A value starting with
+	// "<" or "$" is a placeholder.
+	{name: "aws-secret-key", re: regexp.MustCompile(`(?i)aws_secret_access_key["']?\s*[:=]\s*["']?[^\s<$"']\S{39}`)},
+	// scheme://user:password@host. Placeholders (user:password@, <...>, ${...},
+	// {{...}}) are excluded: the character class rejects the brackets, and
+	// accept rejects the usual dummy words.
+	{name: "url-credentials", re: regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://([^\s:/@<>{}$*"']+):([^\s:/@<>{}$*"']{4,})@`), accept: realURLPassword},
 	// password/token/secret/api_key assigned a quoted value of 16+ characters
 	// with no whitespace. The name may carry only a few suffixes (_key,
 	// _value, ...): "tokenizer", "secretName" and "token_type" hold ordinary
 	// config words that are long enough to look like secrets. Unquoted values
 	// are ignored: prose like "the token is rotated weekly" is far more common
 	// than an unquoted secret.
-	{"credential-assignment", regexp.MustCompile(`(?i)(?:password|passwd|token|secret|api[_-]?key)(?:[_-]?(?:access[_-]?key|key|value|string|str|data))?["']?\s*[:=]\s*["'][^"'\s]{16,}["']`)},
+	{name: "credential-assignment", re: regexp.MustCompile(`(?i)(?:password|passwd|token|secret|api[_-]?key)(?:[_-]?(?:access[_-]?key|key|value|string|str|data))?["']?\s*[:=]\s*["'][^"'\s]{16,}["']`)},
+}
+
+// placeholderPasswords are the dummy passwords documentation uses.
+var placeholderPasswords = map[string]bool{
+	"password": true, "passwd": true, "pass": true, "pwd": true, "secret": true,
+	"changeme": true, "example": true, "redacted": true, "yourpassword": true,
+	"your_password": true, "your-password": true, "mypassword": true,
+	"xxxx": true, "xxxxx": true, "xxxxxx": true, "xxxxxxxx": true,
+}
+
+// realURLPassword reports whether sub[2], the password in a URL's userinfo,
+// is not an obvious placeholder.
+func realURLPassword(sub [][]byte) bool {
+	return !placeholderPasswords[strings.ToLower(string(sub[2]))]
 }
 
 // DenylistPattern is one user-supplied regex and the line it came from.
@@ -92,7 +124,7 @@ func New(deny []DenylistPattern) *Scanner { return &Scanner{deny: deny} }
 func (s *Scanner) Scan(content []byte) []string {
 	var hits []string
 	for _, r := range builtin {
-		if r.re.Match(content) {
+		if r.matches(content) {
 			hits = append(hits, r.name)
 		}
 	}
@@ -102,4 +134,16 @@ func (s *Scanner) Scan(content []byte) []string {
 		}
 	}
 	return hits
+}
+
+func (r rule) matches(content []byte) bool {
+	if r.accept == nil {
+		return r.re.Match(content)
+	}
+	for _, sub := range r.re.FindAllSubmatch(content, -1) {
+		if r.accept(sub) {
+			return true
+		}
+	}
+	return false
 }
