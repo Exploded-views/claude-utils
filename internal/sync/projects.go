@@ -11,7 +11,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"time"
+
+	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
 
 // ProjectEntry is one project's record in the per-PC cache. All fields are
@@ -20,15 +23,24 @@ import (
 //   - Dir pins the local directory this folder name stands for.
 //   - Key overrides the repo-side key outright (a value like
 //     "github.com/acme/app"), or "path" to force the path key.
-//   - LastKey is the key the daemon last resolved for this folder. It is
-//     kept while the directory is gone or git cannot answer.
+//   - LastKey is the key the daemon last resolved for this folder: the claim
+//     on that key, not just a note. It is kept while the directory is gone or
+//     git cannot answer, and editing it moves the claim (stop the daemon
+//     first).
 //   - Candidates is written by the daemon when the folder name decodes to
 //     several directories; set Dir to the right one.
+//   - LeftAt is written by the daemon (see the field).
 type ProjectEntry struct {
 	Dir        string   `json:"dir,omitempty"`
 	Key        string   `json:"key,omitempty"`
 	LastKey    string   `json:"lastKey,omitempty"`
 	Candidates []string `json:"candidates,omitempty"`
+	// LeftAt records, per repo directory this folder used to be stored in
+	// ("projects/<hash>/memory", "remotes/<key>/memory"), the sync repo's HEAD
+	// when the folder left it ("" if that could not be read). A file only the
+	// repo has in a directory the folder comes back to is imported only if it
+	// changed since. Written by the daemon.
+	LeftAt map[string]string `json:"leftAt,omitempty"`
 }
 
 // ProjectCache maps Claude project folder names to what the daemon worked out
@@ -141,6 +153,9 @@ type RemoteMap struct {
 
 	vanished map[string]string // key -> folder whose claim was just released
 	join     map[string]bool   // folders that gained their key and are not joined to its notes yet
+
+	changed    map[string]map[string]bool // "anchor dir" -> paths git says changed since (nil: unknown)
+	diffFailed map[string]bool            // folders already logged as unable to compare, by folder name
 }
 
 // NewRemoteMap loads the per-PC cache and resolves every project folder.
@@ -150,7 +165,8 @@ func NewRemoteMap(syncDir, claudeRoot string) (*RemoteMap, error) {
 		return nil, err
 	}
 	m := &RemoteMap{syncDir: syncDir, claudeRoot: claudeRoot, Lookup: gitOrigin, Why: gitFailure, cache: c,
-		keys: map[string]string{}, owner: map[string]string{}, warned: map[string]bool{}, failed: map[string]bool{}, denied: map[string]bool{}, vanished: map[string]string{}, join: map[string]bool{}}
+		keys: map[string]string{}, owner: map[string]string{}, warned: map[string]bool{}, failed: map[string]bool{}, denied: map[string]bool{}, vanished: map[string]string{}, join: map[string]bool{},
+		changed: map[string]map[string]bool{}, diffFailed: map[string]bool{}}
 	m.Refresh()
 	return m, nil
 }
@@ -277,6 +293,10 @@ func (m *RemoteMap) resolve(hash string) string {
 	prev, had := m.cache.Projects[hash]
 	e := prev
 	key := m.claim(hash, m.wantedKey(hash, &e))
+	if old := lastKey(prev); key != old {
+		logFolder(hash, "key changed from %s to %s", keyLabel(old), keyLabel(key))
+		e.LeftAt = m.leave(e.LeftAt, repoDir(old, hash), repoDir(key, hash))
+	}
 	if key != "" && key != lastKey(prev) {
 		m.join[hash] = true // a new claim, a key change or a moved claim
 	} else if key == "" {
@@ -297,6 +317,91 @@ func (m *RemoteMap) resolve(hash string) string {
 	}
 	return key
 }
+
+// keyLabel is a key as it is written in log lines.
+func keyLabel(k string) string {
+	if k == "" {
+		return "path"
+	}
+	return k
+}
+
+// repoDir is the memory directory, relative to the sync repo, that a folder is
+// stored in under key ("" for the path key).
+func repoDir(key, hash string) string {
+	if key == "" {
+		return remotesPathDir(hash)
+	}
+	return remotesDir + "/" + key + "/memory"
+}
+
+func remotesPathDir(hash string) string { return "projects/" + hash + "/memory" }
+
+// leave notes in left (a copy, so the cache entry it came from is not changed
+// behind its back) that the folder stopped using from, at the sync repo's
+// current HEAD.
+func (m *RemoteMap) leave(left map[string]string, from, to string) map[string]string {
+	if from == to {
+		return left
+	}
+	out := make(map[string]string, len(left)+1)
+	for k, v := range left {
+		out[k] = v
+	}
+	out[from] = m.head()
+	return out
+}
+
+// head is the sync repo's HEAD commit, or "" if that cannot be read (not a
+// repo, no commit yet).
+func (m *RemoteMap) head() string {
+	out, err := gitwt.New(m.syncDir).Run("rev-parse", "--verify", "--quiet", "HEAD")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+// mayImport reports whether a file that only the repo has, in the directory dir
+// that hash is stored in, may be copied into the folder. A folder that never
+// left dir imports anything: that is a note from another PC. One that came back
+// to dir imports only what changed since it left; the rest cannot be told
+// from a copy that was deleted here while the folder was elsewhere. When git
+// cannot say, nothing is imported.
+func (m *RemoteMap) mayImport(hash, dir, name string) bool {
+	anchor, left := m.cache.Projects[hash].LeftAt[dir]
+	if !left {
+		return true
+	}
+	if anchor == "" {
+		return false
+	}
+	set, ok := m.changed[anchor+" "+dir]
+	if !ok {
+		out, err := gitwt.New(m.syncDir).Run("diff", "--name-only", "-z", anchor+"..HEAD", "--", dir)
+		if err != nil {
+			if !m.diffFailed[hash] {
+				m.diffFailed[hash] = true
+				logFolder(hash, "cannot tell what changed in %s since the folder left it (%s); not importing files that only the repo has there",
+					dir, classifyGitFailure(err))
+			}
+			set = nil
+		} else {
+			set = map[string]bool{}
+			for _, p := range strings.Split(out, "\x00") {
+				if p != "" {
+					set[p] = true
+				}
+			}
+		}
+		m.changed[anchor+" "+dir] = set
+	}
+	return set[dir+"/"+name]
+}
+
+// forgetChanges drops the repo comparisons mayImport has cached; call it
+// before a pass that should see the repo as it is now.
+func (m *RemoteMap) forgetChanges() { m.changed = map[string]map[string]bool{} }
 
 // claim grants want to hash unless another folder holds it, and releases
 // whatever hash held before. "" (the path key) is always granted.

@@ -154,6 +154,9 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 	if err != nil {
 		return rep, err
 	}
+	if r.Remote != nil {
+		r.Remote.forgetChanges()
+	}
 
 	for _, hash := range hashes {
 		claudeMem := filepath.Join(r.Claude, hash, "memory")
@@ -218,7 +221,11 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 				rep.RemovedFromMirror = append(rep.RemovedFromMirror, rel)
 
 			case !cExists && mExists:
-				// Not in manifest → new from another PC.
+				// Not in manifest → new from another PC (or, in remote mode, a
+				// leftover the folder has no business importing).
+				if !r.mayImport(hash, name) {
+					continue
+				}
 				if err := os.MkdirAll(claudeMem, 0700); err != nil {
 					return rep, err
 				}
@@ -359,6 +366,7 @@ func (r Roots) joinFolder(hash string, rep *SyncReport) error {
 	if err := os.MkdirAll(mirrorMem, 0700); err != nil {
 		return err
 	}
+	r.Remote.forgetChanges()
 	names := map[string]struct{}{}
 	for _, dir := range []string{claudeMem, mirrorMem} {
 		entries, err := os.ReadDir(dir)
@@ -430,7 +438,12 @@ func (r Roots) joinFolder(hash string, rep *SyncReport) error {
 
 // mayImport reports whether a file that only the mirror has may be copied into
 // the folder.
-func (r Roots) mayImport(hash, name string) bool { return true }
+func (r Roots) mayImport(hash, name string) bool {
+	if r.Remote == nil {
+		return true
+	}
+	return r.Remote.mayImport(hash, repoDir(r.Remote.Key(hash), hash), name)
+}
 
 func readIfExists(p string) (bool, []byte) {
 	b, err := os.ReadFile(p)

@@ -341,6 +341,168 @@ func TestRemoteSync_MovingTheClaimDoesNotLetStaleNotesWin(t *testing.T) {
 	}
 }
 
+// commitSyncRepo makes the sync dir a git repo (once) and commits the shared
+// notes, as the daemon's flush does. The per-PC .state/ is left out.
+func (m *machine) commitSyncRepo(msg string) string {
+	m.t.Helper()
+	r := gitwt.New(m.cfg.SyncDir)
+	if !r.IsRepo() {
+		if err := r.Init("main"); err != nil {
+			m.t.Fatal(err)
+		}
+	}
+	for _, top := range []string{"projects", "remotes"} {
+		if _, err := os.Stat(filepath.Join(m.cfg.SyncDir, top)); err == nil {
+			if _, err := r.Run("add", "-A", top); err != nil {
+				m.t.Fatal(err)
+			}
+		}
+	}
+	if _, err := r.Run("commit", "-q", "--allow-empty", "-m", msg); err != nil {
+		m.t.Fatal(err)
+	}
+	head, err := r.Run("rev-parse", "HEAD")
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	return strings.TrimSpace(head)
+}
+
+// A folder that comes back to a directory it left imports a file only the
+// repo has when that file changed after it left, and leaves a stale one
+// alone: nothing but the repo's history can tell it from a note a deleted
+// copy left behind. Nothing is removed from the repo: a path-keyed copy may
+// still be live on a PC that has not switched.
+func TestRemoteSync_ReturningToAMirrorDirImportsOnlyWhatChangedSinceItLeft(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	a.cfg.ProjectKey = "path"
+	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(app, "x.md", "x\n")
+	a.write(app, "z.md", "z\n")
+	a.sync()
+	a.commitSyncRepo("path mode")
+
+	a.cfg.ProjectKey = "remote"
+	a.sync()
+	a.commitSyncRepo("remote mode")
+	a.remove(app, "z.md")
+	a.sync()
+	oldCopy := a.pathDir(app)
+	if err := os.WriteFile(filepath.Join(oldCopy, "new.md"), []byte("from a path-mode PC\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a.commitSyncRepo("a path-mode PC pushes")
+
+	setCacheKey(t, a, app, "path")
+	a.sync()
+	if got, ok := a.read(app, "new.md"); !ok || got != "from a path-mode PC\n" {
+		t.Errorf("a file added to the old copy after the folder left must be imported, got %q,%v", got, ok)
+	}
+	if _, ok := a.read(app, "z.md"); ok {
+		t.Error("z.md was deleted on this PC and is unchanged in the old copy: it must not come back")
+	}
+	if !eq(files(t, oldCopy), "new.md", "x.md", "z.md") {
+		t.Errorf("nothing may be removed from the old copy, got %v", files(t, oldCopy))
+	}
+	a.sync() // and it stays that way on the next pass
+	if _, ok := a.read(app, "z.md"); ok {
+		t.Error("z.md came back on a later pass")
+	}
+}
+
+// When the repo cannot say what changed since the folder left, nothing that
+// only the repo has is imported, and the log says why without a path.
+func TestRemoteSync_UnknownLeftAtImportsNothing(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	a.cfg.ProjectKey = "path"
+	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(app, "x.md", "x\n")
+	a.sync()
+	a.commitSyncRepo("one")
+	hash := a.hash(app)
+	// The folder left projects/<hash>/memory at a commit that no longer exists.
+	c, _ := LoadProjectCache(a.cfg.SyncDir)
+	c.Projects[hash] = ProjectEntry{LeftAt: map[string]string{"projects/" + hash + "/memory": strings.Repeat("ab", 20)}}
+	if err := c.Save(a.cfg.SyncDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.pathDir(app), "other.md"), []byte("o\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	logs := captureLog(t)
+	a.cfg.ProjectKey = "remote"
+	setCacheKey(t, a, app, "path")
+	a.sync()
+	if _, ok := a.read(app, "other.md"); ok {
+		t.Error("imported a file although it cannot be told from a stale leftover")
+	}
+	out := logs.String()
+	if !strings.Contains(out, hash) || !strings.Contains(out, "not importing") || strings.Contains(out, a.home) {
+		t.Errorf("want a path-free line naming the folder, got %q", out)
+	}
+}
+
+// A key flip remote -> path -> remote does not resurrect a deleted note
+// through the stale projects/<hash> copy left behind by the first switch.
+func TestRemoteSync_KeyFlipDoesNotResurrectADelete(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	a.cfg.ProjectKey = "path"
+	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(app, "x.md", "x\n")
+	a.write(app, "z.md", "z\n")
+	a.sync() // projects/<hash> has x, z
+
+	a.cfg.ProjectKey = "remote"
+	a.sync() // remotes/<key> has x, z; the old copy stays
+	a.remove(app, "z.md")
+	a.sync()
+	if !eq(files(t, remoteDir(a.cfg.SyncDir, appKey)), "x.md") {
+		t.Fatalf("setup: shared = %v", files(t, remoteDir(a.cfg.SyncDir, appKey)))
+	}
+
+	setCacheKey(t, a, app, "path") // e.g. the documented claim move, or origin removed
+	a.sync()
+	setCacheKey(t, a, app, "")
+	a.sync()
+	if got := files(t, remoteDir(a.cfg.SyncDir, appKey)); !eq(got, "x.md") {
+		t.Errorf("deleted z.md came back in the shared notes: %v", got)
+	}
+}
+
+// In a mixed fleet a delete made on the remote-mode PC does not reach a
+// path-mode PC that still has the note, and when that PC switches later its
+// copy is pushed back. A join never infers a delete from the manifest (the
+// folder has no history with the key), so this is the documented reason to
+// switch every PC together and to delete no notes until all have switched.
+func TestRemoteSync_MixedFleetDeleteIsNotCarriedOverByALaterSwitch(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	b := newMachine(t, "bob")
+	a.cfg.ProjectKey, b.cfg.ProjectKey = "path", "path"
+	app := mkRepo(t, filepath.Join(t.TempDir(), "src", "app"), "git@github.com:acme/app.git") // same path on both PCs
+	a.write(app, "x.md", "x\n")
+	a.write(app, "y.md", "y\n")
+	a.sync()
+	b.open(app)
+	b.pullFrom(a)
+	b.sync()
+
+	a.cfg.ProjectKey = "remote"
+	a.sync()
+	a.remove(app, "x.md")
+	a.sync()
+
+	b.pullFrom(a)
+	b.cfg.ProjectKey = "remote"
+	b.sync()
+	if got := files(t, remoteDir(b.cfg.SyncDir, appKey)); !eq(got, "x.md", "y.md") {
+		t.Errorf("B's switch should push its local-only x.md and delete nothing: shared = %v", got)
+	}
+}
+
 // A second local clone of a remote that another folder already holds uses its
 // path key and stays out of the shared notes, in both directions.
 func TestRemoteSync_SecondCloneOnThisPCFallsBackAndStaysIsolated(t *testing.T) {
