@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/merge"
@@ -50,6 +51,8 @@ type parkedPath struct {
 type parkState struct {
 	PreRev string       `json:"preRev"` // HEAD when parking began; "" if unborn
 	Paths  []parkedPath `json:"paths"`
+	// Failures counts, per path, the consecutive restore attempts that failed.
+	Failures map[string]int `json:"failures,omitempty"`
 }
 
 // skip returns the parked paths as a set, for propagateChanges.
@@ -158,6 +161,15 @@ func resetParked(repo *gitwt.Repo, st *parkState) error {
 	return repo.CheckoutHead(restore)
 }
 
+// errBrokenPark marks a parked.json that cannot be used: it does not parse, or
+// it fails validation. Reading it at all (permissions, say) is a different
+// error.
+var errBrokenPark = errors.New("unusable parked state")
+
+// maxRestoreFailures is how many consecutive failed restores of one path are
+// tolerated before its bytes are set aside.
+const maxRestoreFailures = 3
+
 // loadPark reads parked.json; (nil, nil) when there is none.
 func loadPark(repo *gitwt.Repo) (*parkState, error) {
 	b, err := os.ReadFile(parkStatePath(repo))
@@ -169,16 +181,16 @@ func loadPark(repo *gitwt.Repo) (*parkState, error) {
 	}
 	var st parkState
 	if err := json.Unmarshal(b, &st); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", parkedJSON, err)
+		return nil, fmt.Errorf("%w: parse %s: %v", errBrokenPark, parkedJSON, err)
 	}
 	for _, e := range st.Paths {
 		// The file is ours, but a path that escapes the work-tree would make
 		// the restore write outside it.
 		if e.Path == "" || path.IsAbs(e.Path) || path.Clean(e.Path) != e.Path || e.Path == ".." || strings.HasPrefix(e.Path, "../") {
-			return nil, fmt.Errorf("%s holds an invalid path", parkedJSON)
+			return nil, fmt.Errorf("%w: %s holds an invalid path", errBrokenPark, parkedJSON)
 		}
 		if e.Kind != parkFile && e.Kind != parkDeleted {
-			return nil, fmt.Errorf("%s holds an unknown kind %q", parkedJSON, e.Kind)
+			return nil, fmt.Errorf("%w: %s holds an unknown kind %q", errBrokenPark, parkedJSON, e.Kind)
 		}
 	}
 	return &st, nil
@@ -194,6 +206,16 @@ func loadPark(repo *gitwt.Repo) (*parkState, error) {
 // bytes, for every path alike.
 func finishParked(repo *gitwt.Repo, roots Roots) error {
 	st, err := loadPark(repo)
+	if errors.Is(err, errBrokenPark) {
+		// Waiting on a state file that can never be read would halt sync for
+		// good: set it aside with its bytes, say so, and carry on.
+		dir, qerr := quarantinePark(repo)
+		if qerr != nil {
+			return errors.Join(err, qerr)
+		}
+		log.Printf("PARKED STATE UNUSABLE (%v): parked.json and parked/ moved to %s; held-back files from that cycle are not restored from it, see the docs to recover them", err, dir)
+		return nil
+	}
 	if err != nil || st == nil {
 		return err
 	}
@@ -228,7 +250,30 @@ func finishParked(repo *gitwt.Repo, roots Roots) error {
 		log.Printf("scrub: %d held-back file(s) changed upstream; incoming copies kept as .from-remote-*", backedUp)
 	}
 	if len(errs) > 0 {
-		st.Paths = left
+		// A path that fails again and again would block sync for good: after
+		// maxRestoreFailures cycles in a row its bytes are set aside.
+		failures := map[string]int{}
+		var stuck []parkedPath
+		var still []parkedPath
+		for _, e := range left {
+			if n := st.Failures[e.Path] + 1; n >= maxRestoreFailures {
+				stuck = append(stuck, e)
+			} else {
+				failures[e.Path] = n
+				still = append(still, e)
+			}
+		}
+		if len(stuck) > 0 {
+			dir, qerr := quarantinePaths(repo, stuck)
+			if qerr != nil {
+				return errors.Join(append(errs, qerr)...)
+			}
+			log.Printf("PARKED FILES STUCK: %d path(s) could not be restored in %d cycles; their saved bytes were moved to %s, see the docs to recover them", len(stuck), maxRestoreFailures, dir)
+		}
+		if len(still) == 0 {
+			return clearPark(repo) // all that failed was set aside: nothing blocks the cycle
+		}
+		st.Paths, st.Failures = still, failures
 		if err := writeParkState(repo, st); err != nil {
 			errs = append(errs, err)
 		}
@@ -236,10 +281,88 @@ func finishParked(repo *gitwt.Repo, roots Roots) error {
 	}
 	// The state file goes first: if the saved bytes outlive it, the next park
 	// just clears them, while a state file without its bytes could never finish.
-	if err := os.Remove(parkStatePath(repo)); err != nil {
+	return clearPark(repo)
+}
+
+// clearPark deletes the state, then the saved bytes. The state file goes first:
+// if the bytes outlive it, the next park just clears them, while a state file
+// without its bytes could never finish.
+func clearPark(repo *gitwt.Repo) error {
+	if err := os.Remove(parkStatePath(repo)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	return os.RemoveAll(parkBytesDir(repo))
+}
+
+// newBrokenDir creates .state/parked.broken-<unix time> (with a counter if
+// that name is taken) and returns its path.
+func newBrokenDir(repo *gitwt.Repo) (string, error) {
+	state := filepath.Join(repo.Dir, manifestStateDir)
+	if err := os.MkdirAll(state, 0700); err != nil {
+		return "", err
+	}
+	base := fmt.Sprintf("parked.broken-%d", time.Now().Unix())
+	for i := 1; ; i++ {
+		name := base
+		if i > 1 {
+			name = fmt.Sprintf("%s-%d", base, i)
+		}
+		dir := filepath.Join(state, name)
+		err := os.Mkdir(dir, 0700)
+		if err == nil {
+			return dir, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return "", err
+		}
+	}
+}
+
+// quarantinePark moves a parked.json that cannot be used, and the saved bytes
+// beside it, into a new .state/parked.broken-<ts>/. It returns the directory's
+// name relative to the sync dir, which is safe to log.
+func quarantinePark(repo *gitwt.Repo) (string, error) {
+	dir, err := newBrokenDir(repo)
+	if err != nil {
+		return "", err
+	}
+	for src, name := range map[string]string{parkStatePath(repo): parkedJSON, parkBytesDir(repo): parkedDir} {
+		if err := os.Rename(src, filepath.Join(dir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+	}
+	return filepath.ToSlash(filepath.Join(manifestStateDir, filepath.Base(dir))), nil
+}
+
+// quarantinePaths moves the saved bytes of paths whose restore keeps failing
+// into a new .state/parked.broken-<ts>/parked/, with a parked.json listing
+// them. A deleted path has no bytes; it is only listed.
+func quarantinePaths(repo *gitwt.Repo, paths []parkedPath) (string, error) {
+	dir, err := newBrokenDir(repo)
+	if err != nil {
+		return "", err
+	}
+	for _, e := range paths {
+		if e.Kind != parkFile {
+			continue
+		}
+		dst := filepath.Join(dir, parkedDir, filepath.FromSlash(e.Path))
+		if err := os.MkdirAll(filepath.Dir(dst), 0700); err != nil {
+			return "", err
+		}
+		src := filepath.Join(parkBytesDir(repo), filepath.FromSlash(e.Path))
+		if err := os.Rename(src, dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+	}
+	b, err := json.MarshalIndent(&parkState{Paths: paths}, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	if err := writeSynced(filepath.Join(dir, parkedJSON), b); err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(filepath.Join(manifestStateDir, filepath.Base(dir))), nil
 }
 
 // restoreParked puts one parked path back, from its saved bytes. It reports
