@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os/exec"
 	"bytes"
 	"os"
 	"path/filepath"
@@ -101,5 +102,63 @@ func TestWriteGitignore_ExcludesLocalBackups(t *testing.T) {
 		if !strings.Contains(string(b), want+"\n") {
 			t.Errorf(".gitignore lacks %q:\n%s", want, b)
 		}
+	}
+}
+
+// init records the mode in .state/mode, and init --force into the same sync dir
+// with another mode is refused, as is a sync dir from before modes were
+// recorded (those were path-mode ones) asked to be remote.
+func TestBootstrap_RecordsTheModeAndRefusesAChange(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	t.Setenv("GIT_AUTHOR_NAME", "t")
+	t.Setenv("GIT_AUTHOR_EMAIL", "t@example.com")
+	t.Setenv("GIT_COMMITTER_NAME", "t")
+	t.Setenv("GIT_COMMITTER_EMAIL", "t@example.com")
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	if out, err := exec.Command("git", "init", "-q", "--bare", "-b", "main", origin).CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	cfg := config.Defaults()
+	cfg.SyncDir = filepath.Join(root, "sync")
+	cfg.ClaudeProjectsDir = filepath.Join(root, "claude", "projects")
+	cfg.RemoteURL = origin
+	cfg.MergeDriverPath = "claude-memmerge"
+	cfg.ProjectKey = config.ProjectKeyRemote
+	modeFile := filepath.Join(cfg.SyncDir, ".state", "mode")
+
+	if err := bootstrap(cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(modeFile); strings.TrimSpace(string(b)) != "remote" {
+		t.Fatalf("mode file = %q", b)
+	}
+	if err := bootstrap(cfg, true); err != nil {
+		t.Errorf("--force with the same mode: %v", err)
+	}
+	other := cfg
+	other.ProjectKey = config.ProjectKeyPath
+	if err := bootstrap(other, true); err == nil || !strings.Contains(err.Error(), "fresh sync dir") {
+		t.Errorf("--force with another mode = %v; want a refusal naming a fresh sync dir", err)
+	}
+	if b, _ := os.ReadFile(modeFile); strings.TrimSpace(string(b)) != "remote" {
+		t.Errorf("a refused init changed the record: %q", b)
+	}
+
+	if err := os.Remove(modeFile); err != nil { // as a sync dir made by an older version
+		t.Fatal(err)
+	}
+	if err := bootstrap(cfg, true); err == nil || !strings.Contains(err.Error(), "fresh sync dir") {
+		t.Errorf("--force remote into a sync dir with no record = %v; want a refusal", err)
+	}
+	if err := bootstrap(other, true); err != nil {
+		t.Errorf("--force path into a sync dir with no record: %v", err)
+	}
+	if b, _ := os.ReadFile(modeFile); strings.TrimSpace(string(b)) != "path" {
+		t.Errorf("mode file after a path init = %q", b)
 	}
 }

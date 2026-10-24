@@ -567,6 +567,9 @@ func TestLoopRun_RemovingAFolderWithTheLoopRunningKeepsTheSharedNotes(t *testing
 	if err := os.WriteFile(filepath.Join(a.cfg.SyncDir, ".gitignore"), []byte(".state/\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	if err := RecordMode(a.cfg.SyncDir, "remote"); err != nil {
+		t.Fatal(err)
+	}
 
 	flushed := make(chan error, 64)
 	l := &Loop{Cfg: a.cfg, OnFlush: func(_ bool, err error) { flushed <- err }}

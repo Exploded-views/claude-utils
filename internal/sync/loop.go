@@ -44,6 +44,9 @@ func (l *Loop) Run(ctx context.Context) error {
 		return fmt.Errorf("sync dir %s is not a git repo — run `claude-memsync init` first", l.Cfg.SyncDir)
 	}
 
+	if err := CheckMode(l.Cfg.SyncDir, l.Cfg.ProjectKey); err != nil {
+		return err
+	}
 	roots, err := NewRoots(l.Cfg)
 	if err != nil {
 		return fmt.Errorf("resolve project keys: %w", err)

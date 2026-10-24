@@ -109,10 +109,14 @@ func bootstrap(cfg config.Config, force bool) error {
 		if !info.IsDir() {
 			return fmt.Errorf("%s exists and is not a directory", cfg.SyncDir)
 		}
-		if !force {
-			entries, _ := os.ReadDir(cfg.SyncDir)
-			if len(entries) > 0 {
+		entries, _ := os.ReadDir(cfg.SyncDir)
+		if len(entries) > 0 {
+			if !force {
 				return fmt.Errorf("%s already exists and is non-empty (pass --force to re-use)", cfg.SyncDir)
+			}
+			// Re-using a sync dir keeps the mode it was set up for.
+			if err := syncpkg.CheckMode(cfg.SyncDir, cfg.ProjectKey); err != nil {
+				return err
 			}
 		}
 	}
@@ -164,6 +168,10 @@ func bootstrap(cfg config.Config, force bool) error {
 	// Step 4: write config.json.
 	if err := config.Save(cfg); err != nil {
 		return fmt.Errorf("save config: %w", err)
+	}
+	// The daemon refuses to run in another mode than the one recorded here.
+	if err := syncpkg.RecordMode(cfg.SyncDir, cfg.ProjectKey); err != nil {
+		return fmt.Errorf("record the project key mode: %w", err)
 	}
 
 	// Step 5: bidirectional reconcile of Claude tree ↔ mirror.
