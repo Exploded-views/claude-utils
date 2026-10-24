@@ -169,12 +169,15 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 				// already matched — nothing to do
 
 			case cExists && mExists && !bytes.Equal(cBytes, mBytes):
+				merged, conflict := "", true
 				if name == "MEMORY.md" {
 					// The base is "" on purpose. The mirror copy is normally
 					// HEAD's, and a base equal to it would make every section
 					// "unchanged" on that side: the Claude copy would win
 					// outright and the peer's sections would be dropped.
-					merged, _ := merge.Merge("", string(cBytes), string(mBytes))
+					merged, conflict = merge.Merge("", string(cBytes), string(mBytes))
+				}
+				if !conflict {
 					if err := writeAtomic(cp, []byte(merged)); err != nil {
 						return rep, err
 					}
@@ -183,6 +186,10 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 					}
 					rep.Merged = append(rep.Merged, rel)
 				} else {
+					// Any other file, or a MEMORY.md section edited on one side
+					// only (with base "" that is a conflict, and the merge text
+					// then holds conflict markers): the Claude copy wins and the
+					// mirror copy is kept beside it.
 					backup := fmt.Sprintf("%s.from-remote-%s", mp, randSuffix())
 					if err := writeAtomic(backup, mBytes); err != nil {
 						return rep, err
