@@ -3,6 +3,7 @@ package sync
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -1478,6 +1479,10 @@ func TestRemoteKey_StickyKeyOnlyChangesOnPositiveEvidence(t *testing.T) {
 
 func TestGitOrigin(t *testing.T) {
 	gitEnv(t)
+	// Messages must not depend on the user's language: gitOrigin has to ask
+	// for the C locale itself.
+	t.Setenv("LC_ALL", "de_DE.UTF-8")
+	t.Setenv("LANGUAGE", "de_DE")
 	root := t.TempDir()
 	withOrigin := mkRepo(t, filepath.Join(root, "with"), "git@github.com:acme/app.git")
 	noOrigin := mkRepo(t, filepath.Join(root, "without"), "")
@@ -1501,6 +1506,97 @@ func TestGitOrigin(t *testing.T) {
 		if url != c.url || ok != c.ok {
 			t.Errorf("%s: gitOrigin = %q,%v want %q,%v", c.name, url, ok, c.url, c.ok)
 		}
+	}
+}
+
+// gitOrigin recognises "not a repository" by git's English message, so it must
+// run git in the C locale. A stand-in git that only speaks English when asked
+// to proves it does.
+func TestGitOrigin_RunsGitInTheCLocale(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script stand-in for git")
+	}
+	bin := t.TempDir()
+	script := `#!/bin/sh
+if [ "$LC_ALL" = C ] && [ "$LANGUAGE" = C ]; then
+  echo "fatal: not a git repository (or any of the parent directories): .git" >&2
+else
+  echo "fatal: kein Git-Repository (oder irgendein Elternverzeichnis): .git" >&2
+fi
+exit 128
+`
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("LC_ALL", "de_DE.UTF-8")
+	t.Setenv("LANGUAGE", "de_DE")
+	url, ok := gitOrigin(t.TempDir())
+	if url != "" || !ok {
+		t.Errorf("gitOrigin = %q,%v, want \"\",true (not a repository)", url, ok)
+	}
+}
+
+func TestClassifyGitFailure(t *testing.T) {
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{errors.New("git rev-parse: exit status 128: fatal: detected dubious ownership in repository at '/x'"), "dubious ownership"},
+		{fmt.Errorf("git rev-parse: %w", &exec.Error{Name: "git", Err: exec.ErrNotFound}), "git not found"},
+		{errors.New("git rev-parse: exit status 1: boom"), "other"},
+	}
+	for _, c := range cases {
+		if got := classifyGitFailure(c.err); got != c.want {
+			t.Errorf("classifyGitFailure(%v) = %q, want %q", c.err, got, c.want)
+		}
+	}
+}
+
+// When git cannot answer and there is no remembered key, say so once per
+// folder, naming the Claude folder and the class of failure but not the path.
+func TestRemoteKey_LogsOnceWhenGitCannotAnswerAndNothingIsRemembered(t *testing.T) {
+	gitEnv(t)
+	shared := t.TempDir()
+	a := newMachine(t, "alice", shared)
+	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(app, "a.md", "a\n")
+	hash := a.hash(app)
+
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+	m, err := NewRemoteMap(shared, a.claude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A cache that knows the directory but no key, as after a first run where
+	// git was already failing.
+	m.cache = &ProjectCache{Version: 1, Projects: map[string]ProjectEntry{hash: {Dir: app}}}
+	m.Lookup = func(string) (string, bool) { return "", false }
+	m.Why = func(string) string { return "dubious ownership" }
+	logs.Reset()
+	m.Refresh()
+	m.Refresh()
+	out := logs.String()
+	if n := strings.Count(out, hash); n != 1 {
+		t.Fatalf("want one log line naming %s, got %d in %q", hash, n, out)
+	}
+	if !strings.Contains(out, "dubious ownership") {
+		t.Errorf("the reason class is missing: %q", out)
+	}
+	if strings.Contains(out, a.home) {
+		t.Errorf("the log leaks the project path: %q", out)
+	}
+
+	// With a remembered key there is nothing to complain about.
+	m.cache.Projects[hash] = ProjectEntry{Dir: app, LastKey: "github.com/acme/app"}
+	m.warned = map[string]bool{}
+	m.failed = map[string]bool{}
+	logs.Reset()
+	m.Refresh()
+	if logs.Len() != 0 {
+		t.Errorf("logged although the key is remembered: %q", logs.String())
 	}
 }
 

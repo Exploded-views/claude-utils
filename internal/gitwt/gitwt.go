@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -17,6 +18,10 @@ import (
 // Repo represents a local git working tree at a fixed path.
 type Repo struct {
 	Dir string
+
+	// Env is added to the environment of every git command Run starts, after
+	// the process's own (so it wins), e.g. LC_ALL=C to get untranslated messages.
+	Env []string
 }
 
 // New constructs a Repo for the given working directory. The directory does
@@ -29,6 +34,9 @@ func (r *Repo) Run(args ...string) (string, error) {
 	full := append([]string{"-C", r.Dir}, args...)
 	cmd := exec.Command("git", full...)
 	proc.HideWindow(cmd)
+	if len(r.Env) > 0 {
+		cmd.Env = append(os.Environ(), r.Env...)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

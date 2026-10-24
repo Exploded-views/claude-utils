@@ -275,7 +275,7 @@ func gitOrigin(dir string) (url string, ok bool) {
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		return "", false
 	}
-	r := gitwt.New(dir)
+	r := gitRepo(dir)
 	out, err := r.Run("rev-parse", "--show-toplevel", "--git-dir", "--git-common-dir")
 	if err != nil {
 		return "", strings.Contains(err.Error(), "not a git repository")
@@ -311,6 +311,15 @@ func gitOrigin(dir string) (url string, ok bool) {
 	return strings.TrimSpace(cfg), true
 }
 
+// gitRepo is the repo to run read-only questions about a project directory in.
+// Callers match git's English messages ("not a git repository", "dubious
+// ownership"), so git must not translate them to the user's language.
+func gitRepo(dir string) *gitwt.Repo {
+	r := gitwt.New(dir)
+	r.Env = []string{"LC_ALL=C", "LANGUAGE=C"}
+	return r
+}
+
 // resolveGitPath makes a path printed by git rev-parse (relative to dir
 // unless absolute) comparable.
 func resolveGitPath(dir, p string) (string, bool) {
@@ -320,6 +329,29 @@ func resolveGitPath(dir, p string) (string, bool) {
 	}
 	p, err := filepath.EvalSymlinks(p)
 	return p, err == nil
+}
+
+// gitFailure says why git could not answer for dir, as a class that is safe to
+// log (see classifyGitFailure).
+func gitFailure(dir string) string {
+	_, err := gitRepo(dir).Run("rev-parse", "--git-dir")
+	if err == nil {
+		return "other"
+	}
+	return classifyGitFailure(err)
+}
+
+// classifyGitFailure sorts a failed git run into "dubious ownership", "git not
+// found" or "other". Git runs in the C locale (see gitRepo), so its messages
+// can be matched.
+func classifyGitFailure(err error) string {
+	switch {
+	case errors.Is(err, exec.ErrNotFound):
+		return "git not found"
+	case strings.Contains(err.Error(), "dubious ownership"):
+		return "dubious ownership"
+	}
+	return "other"
 }
 
 // ProjectEntry is one project's record in the per-PC cache. All fields are
@@ -403,11 +435,15 @@ type RemoteMap struct {
 	// Lookup returns the origin URL for a project directory, "" if it has
 	// none, and false if git could not tell. Replaceable in tests.
 	Lookup func(dir string) (url string, ok bool)
+	// Why names the class of failure (see classifyGitFailure) after Lookup
+	// reported false. Replaceable in tests.
+	Why func(dir string) string
 
 	cache  *ProjectCache
 	keys   map[string]string // folder name -> key; "" means path key
 	fresh  map[string]bool   // folders whose key was positively resolved this run, not just remembered
 	warned map[string]bool   // invalid overrides already logged, by folder name
+	failed map[string]bool   // folders already logged as unresolvable, by folder name
 	dirty  bool              // cache changed since it was last saved
 }
 
@@ -417,7 +453,7 @@ func NewRemoteMap(syncDir, claudeRoot string) (*RemoteMap, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &RemoteMap{syncDir: syncDir, claudeRoot: claudeRoot, Lookup: gitOrigin, cache: c, keys: map[string]string{}, fresh: map[string]bool{}, warned: map[string]bool{}}
+	m := &RemoteMap{syncDir: syncDir, claudeRoot: claudeRoot, Lookup: gitOrigin, Why: gitFailure, cache: c, keys: map[string]string{}, fresh: map[string]bool{}, warned: map[string]bool{}, failed: map[string]bool{}}
 	m.Refresh()
 	return m, nil
 }
@@ -572,6 +608,13 @@ func (m *RemoteMap) resolve(hash string) string {
 				key = k
 				e.LastKey = k
 				m.fresh[hash] = k != ""
+			} else if key == "" && !m.failed[hash] {
+				// Nothing remembered and git cannot answer: the folder gets
+				// its path key, which forks its notes from other PCs until
+				// this is fixed. Say so once, without the path.
+				m.failed[hash] = true
+				log.Printf("remote keys: %s: cannot read the git origin (%s); using its path key until git answers",
+					hash, m.Why(dir))
 			}
 		}
 	}
