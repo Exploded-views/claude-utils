@@ -8,11 +8,10 @@ import (
 	"testing"
 )
 
-// Review proof (round 7, uncommitted). A peer purges a leaked file from the
-// remote by rewriting history and force-pushing. `git pull --rebase` used the
-// fork point of origin/main's reflog and dropped the old upstream commits;
-// `git rebase origin/main` replays them and the daemon pushes the purged file
-// back.
+// A peer purges a leaked file from the remote by rewriting history and
+// force-pushing. The daemon's pull must drop the old upstream commits, as
+// `git pull --rebase` does through the fork point of origin/main's reflog,
+// and never push the purged file back.
 func TestPull_ForcePushedPurgeIsNotRepublished(t *testing.T) {
 	f := newPullFixture(t, map[string]string{"clean.md": "a\n"})
 	captureLog(t)
@@ -44,10 +43,9 @@ func TestPull_ForcePushedPurgeIsNotRepublished(t *testing.T) {
 	}
 }
 
-// with no HEAD reflog (core.logAllRefUpdates=false before the
-// repo had one), the daemon cannot recognise its own conflicted rebase, so an
-// ordinary pull conflict is left stopped and the daemon pauses, saying the user
-// started it.
+// With core.logAllRefUpdates=false and no HEAD reflog yet, the daemon must
+// still recognise its own conflicted rebase and abort it, rather than leave an
+// ordinary pull conflict stopped and pause as if the user had started it.
 func TestPull_NoReflogDaemonConflictIsAborted(t *testing.T) {
 	f := newPullFixture(t, map[string]string{"clean.md": "a\nb\n"})
 	captureLog(t)
@@ -66,9 +64,9 @@ func TestPull_NoReflogDaemonConflictIsAborted(t *testing.T) {
 	}
 }
 
-// a replayed commit whose subject contains " (start): " is
-// recorded as "<action> (pick): <subject>", which the scan takes for the newest
-// rebase start, so a later conflict in the same daemon rebase is not
+// A replayed commit whose subject contains " (start): " is recorded as
+// "<action> (pick): <subject>". The scan must not take it for the newest
+// rebase start, so a later conflict in the same daemon rebase is still
 // recognised as the daemon's.
 func TestPull_PickSubjectWithStartIsNotTakenForStart(t *testing.T) {
 	f := newPullFixture(t, map[string]string{"clean.md": "a\nb\n", "other.md": "o\n"})

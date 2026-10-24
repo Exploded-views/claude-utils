@@ -315,10 +315,12 @@ func (r *Repo) Fetch(branch string) error {
 // it, commits a force-push removed upstream (say, a purged secret) would be
 // replayed and pushed back. The rebase's reflog entries are named
 // reflogAction, so that the reflog says who started it (see ReflogSubjects);
-// ref logging is forced on so those entries exist.
+// ref logging is forced on so those entries exist, and the merge backend so
+// they have the "(start)" form whatever rebase.backend the user set.
 func (r *Repo) RebaseOnto(branch, reflogAction string) error {
 	_, err := r.run([]string{"GIT_REFLOG_ACTION=" + reflogAction}, nil,
-		"-c", "core.logAllRefUpdates=true", "rebase", "--fork-point", "--autostash", "origin/"+branch)
+		"-c", "core.logAllRefUpdates=true", "-c", "rebase.backend=merge",
+		"rebase", "--fork-point", "--autostash", "origin/"+branch)
 	return err
 }
 

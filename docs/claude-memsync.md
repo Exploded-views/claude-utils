@@ -368,8 +368,8 @@ reflog of `HEAD` as the start of that rebase. `--fork-point` is what
 purged secret, say) are not replayed and pushed back. Ref logging is switched
 on for these two commands whatever your global git config says. If the daemon
 ever fails to recognise its own rebase, it errs the safe way: it leaves the
-rebase alone and pauses as described below, and `rebase --abort` gets you out. A stopped rebase is the daemon's only if the
-newest rebase start in that reflog (`git -C ~/.claudesync reflog`) carries the
+rebase alone and pauses as described below, and `rebase --abort` gets you out.
+A stopped rebase is the daemon's only if the newest rebase start in that reflog (`git -C ~/.claudesync reflog`) carries the
 marker's nonce. With no marker, or with a nonce that is not the newest start, it
 is yours, whatever the timing: that holds for a marker a kill left behind, and
 for a rebase you start during the daemon's fetch or after it. A merge is always
