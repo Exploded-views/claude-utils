@@ -18,6 +18,7 @@ type idEnv struct {
 	now     time.Time
 	log     *bytes.Buffer
 	state   string
+	have    func(string) bool // nil: every repo is present
 }
 
 func newIDEnv(t *testing.T, f File) *idEnv {
@@ -30,7 +31,7 @@ func newIDEnv(t *testing.T, f File) *idEnv {
 
 // router builds a fresh Router (a daemon restart) on the same state files.
 func (e *idEnv) router(f File) *Router {
-	r := New(f, func(string) bool { return true })
+	r := New(f, func(n string) bool { return e.have == nil || e.have(n) })
 	r.StatePath = e.state
 	r.Resolve = func(folder string) (string, resolution) {
 		if k, ok := e.remotes[folder]; ok {
@@ -237,7 +238,7 @@ func TestFallbackNeverMovesIntoOrOutOfClientRepo(t *testing.T) {
 	e3 := newIDEnv(t, idFile(Rule{Remote: "github.com/client/x", Repo: "client-a"}))
 	e3.remotes["-c"], e3.roots["-c"] = "github.com/client/x", []string{"bbb"}
 	e3.r.Decide("-c")
-	e3.remotes["-c"] = "github.com/moved/x"
+	e3.remotes["-c"] = "github.com/client/x2"
 	e3.r.Refresh()
 	if d := e3.r.Decide("-c"); d.Repo != "client-a" {
 		t.Fatalf("got %+v", d)
@@ -361,5 +362,389 @@ func TestRootCommitsRealGit(t *testing.T) {
 	gitIn(t, root, "clone", "-q", "--depth", "1", "file://"+a, sh)
 	if rs, ok := rootCommits(sh); ok || rs != nil {
 		t.Fatalf("shallow clone gave roots %v", rs)
+	}
+}
+
+// ---- review round: consent, storage, survivors, owner, cache, clock, path ----
+
+func (e *idEnv) idFile() string { return filepath.Join(filepath.Dir(e.state), "identity.json") }
+
+// heldSetup records -f under old/x -> projects, then renames it onto a rule of
+// client-a that already existed, so the folder is held.
+func heldSetup(t *testing.T) (*idEnv, File) {
+	t.Helper()
+	f := idFile(
+		Rule{Remote: "github.com/old/x", Repo: "projects"},
+		Rule{Remote: "github.com/new/**", Repo: "client-a"},
+	)
+	e := newIDEnv(t, f)
+	e.remotes["-f"], e.roots["-f"] = "github.com/old/x", []string{"aaa"}
+	e.r.Decide("-f")
+	e.remotes["-f"] = "github.com/new/x"
+	e.r.Refresh()
+	if d := e.r.Decide("-f"); d.Reason != ReasonRemoteChanged {
+		t.Fatalf("not held: %+v", d)
+	}
+	return e, f
+}
+
+func TestConsentIgnoresUnrelatedEditsAndReordering(t *testing.T) {
+	e, _ := heldSetup(t)
+	e.r.Replace(idFile(
+		Rule{Remote: "github.com/new/**", Aliases: []string{"github.com/unrelated/y"}, Repo: "client-a"},
+		Rule{Remote: "github.com/old/x", Repo: "projects"},
+	))
+	if d := e.r.Decide("-f"); d.Reason != ReasonRemoteChanged {
+		t.Fatalf("unrelated edit or reorder counted as consent: %+v", d)
+	}
+}
+
+func TestConsentIsANewPatternForTheTargetRepo(t *testing.T) {
+	e, _ := heldSetup(t)
+	e.r.Replace(idFile(
+		Rule{Remote: "github.com/old/x", Repo: "projects"},
+		Rule{Remote: "github.com/new/x", Repo: "client-a"},
+	))
+	if d := e.r.Decide("-f"); d.Repo != "client-a" {
+		t.Fatalf("a newly listed name is consent: %+v", d)
+	}
+}
+
+func TestMoveOutOfClientNeedsAnExplicitName(t *testing.T) {
+	f := idFile(
+		Rule{Remote: "github.com/client/x", Repo: "client-a"},
+		Rule{Remote: "github.com/new/**", Repo: "projects"},
+	)
+	e := newIDEnv(t, f)
+	e.remotes["-c"], e.roots["-c"] = "github.com/client/x", []string{"bbb"}
+	e.r.Decide("-c")
+	e.remotes["-c"] = "github.com/new/x"
+	e.r.Refresh()
+	if d := e.r.Decide("-c"); d.Reason != ReasonRemoteChanged {
+		t.Fatal(d)
+	}
+	// A new glob is not enough to take a client folder out.
+	e.r.Replace(idFile(
+		Rule{Remote: "github.com/client/x", Repo: "client-a"},
+		Rule{Remote: "github.com/new/*", Repo: "projects"},
+	))
+	if d := e.r.Decide("-c"); d.Repo != "" {
+		t.Fatalf("glob moved a client folder out: %+v", d)
+	}
+	// An alias naming the key is explicit.
+	e.r.Replace(idFile(
+		Rule{Remote: "github.com/client/x", Repo: "client-a"},
+		Rule{Remote: "github.com/other/z", Aliases: []string{"github.com/new/x"}, Repo: "projects"},
+	))
+	if d := e.r.Decide("-c"); d.Repo != "projects" {
+		t.Fatalf("explicit alias should consent: %+v", d)
+	}
+}
+
+func TestTwoWritersKeepBothRecords(t *testing.T) {
+	f := idFile(Rule{Remote: "github.com/o/**", Repo: "projects"})
+	e := newIDEnv(t, f)
+	a, b := e.router(f), e.router(f)
+	for _, r := range []*Router{a, b} {
+		r.mu.Lock()
+		r.loadIDsLocked()
+		r.mu.Unlock()
+	}
+	e.remotes["-a"], e.roots["-a"] = "github.com/o/a", []string{"1"}
+	e.remotes["-b"], e.roots["-b"] = "github.com/o/b", []string{"2"}
+	a.Decide("-a")
+	b.Decide("-b")
+	raw, _ := os.ReadFile(e.idFile())
+	if !strings.Contains(string(raw), "github.com/o/a") || !strings.Contains(string(raw), "github.com/o/b") {
+		t.Fatalf("a record was lost: %s", raw)
+	}
+}
+
+func TestCorruptIdentityFileDeniesRecordedFoldersAndIsNeverOverwritten(t *testing.T) {
+	f := idFile(Rule{Remote: "github.com/o/**", Repo: "projects"})
+	e := newIDEnv(t, f)
+	e.remotes["-f"], e.roots["-f"] = "github.com/o/f", []string{"1"}
+	if d := e.r.Decide("-f"); d.Repo != "projects" {
+		t.Fatal(d)
+	}
+	if err := os.WriteFile(e.idFile(), []byte("{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r2 := e.router(f)
+	if d := r2.Decide("-f"); d.Repo != "" || d.Reason != ReasonIdentityUnreadable {
+		t.Fatalf("recorded folder must be held: %+v", d)
+	}
+	// A folder that was never recorded is not affected, and nothing is written.
+	e.remotes["-new"], e.roots["-new"] = "github.com/o/n", []string{"3"}
+	if d := r2.Decide("-new"); d.Repo != "projects" {
+		t.Fatalf("new folder: %+v", d)
+	}
+	if raw, _ := os.ReadFile(e.idFile()); string(raw) != "{not json" {
+		t.Fatalf("corrupt file overwritten: %s", raw)
+	}
+	if r2.IdentityProblem() == "" {
+		t.Fatal("problem not reported")
+	}
+	if s := r2.Summarize([]string{"-f"}); !s.Unreadable {
+		t.Fatalf("summary: %+v", s)
+	}
+}
+
+func TestReadOnlyRouterWritesNothing(t *testing.T) {
+	f := idFile(Rule{Remote: "github.com/o/**", Repo: "projects"})
+	e := newIDEnv(t, f)
+	r := e.router(f)
+	r.ReadOnly = true
+	e.remotes["-f"], e.roots["-f"] = "github.com/o/f", []string{"1"}
+	if d := r.Decide("-f"); d.Repo != "projects" {
+		t.Fatal(d)
+	}
+	r.Summarize([]string{"-f"})
+	for _, p := range []string{e.idFile(), e.state} {
+		if _, err := os.Stat(p); err == nil {
+			t.Fatalf("%s written by a read-only router", p)
+		}
+	}
+}
+
+func TestWriteRetriesRenameAndSurfacesFailure(t *testing.T) {
+	old, oldSleep := renameFn, retrySleep
+	defer func() { renameFn, retrySleep = old, oldSleep }()
+	retrySleep = func(time.Duration) {}
+	n := 0
+	renameFn = func(a, b string) error {
+		n++
+		if n < 3 {
+			return fmt.Errorf("sharing violation")
+		}
+		return os.Rename(a, b)
+	}
+	p := filepath.Join(t.TempDir(), "x.json")
+	if err := writeJSONAtomic(p, map[string]int{"a": 1}, ".x-*.tmp"); err != nil || n != 3 {
+		t.Fatalf("err %v after %d tries", err, n)
+	}
+	renameFn = func(a, b string) error { return fmt.Errorf("denied") }
+	if err := writeJSONAtomic(p, map[string]int{"a": 2}, ".x-*.tmp"); err == nil {
+		t.Fatal("persistent failure not surfaced")
+	}
+	ents, _ := os.ReadDir(filepath.Dir(p))
+	for _, en := range ents {
+		if strings.HasSuffix(en.Name(), ".tmp") {
+			t.Fatalf("temp file left: %s", en.Name())
+		}
+	}
+}
+
+func TestFallbackNotForPersonalOrMissingRepo(t *testing.T) {
+	f := idFile(Rule{Remote: "github.com/old/x", Repo: "projects"})
+	e := newIDEnv(t, f)
+	e.remotes["-f"], e.roots["-f"] = "github.com/old/x", []string{"aaa"}
+	e.r.Decide("-f")
+	e.remotes["-f"] = "github.com/new/x"
+	// The recorded repo became the personal repo, which owns no folders.
+	g := idFile(Rule{Remote: "github.com/old/x", Repo: "client-a"})
+	g.Personal = "projects"
+	g.Repos["projects"] = Repo{Config: "/x", Kind: KindPersonal}
+	g.Repos["personal"] = Repo{Config: "/y", Kind: KindProject}
+	if d := e.router(g).Decide("-f"); d.Repo != "" {
+		t.Fatalf("routed to the personal repo: %+v", d)
+	}
+	// The recorded repo is not on this host.
+	e.have = func(n string) bool { return n != "projects" }
+	if d := e.router(f).Decide("-f"); d.Repo != "" {
+		t.Fatalf("routed to a repo this host lacks: %+v", d)
+	}
+}
+
+func TestNewListedFolderSharingRootsGetsNoFallback(t *testing.T) {
+	f := idFile(Rule{Remote: "github.com/old/x", Repo: "projects"})
+	e := newIDEnv(t, f)
+	e.remotes["-a"], e.roots["-a"] = "github.com/old/x", []string{"aaa"}
+	e.r.Decide("-a")
+	e.remotes["-b"], e.roots["-b"] = "github.com/other/x", []string{"aaa"}
+	// Record a different folder's identity under the name that sorts first, so a
+	// lookup by anything but the folder itself would find a record.
+	if d := e.r.Decide("-b"); d.Repo != "" || d.Note != "" {
+		t.Fatalf("got %+v", d)
+	}
+}
+
+func TestRoutesEditedAwayDeniesAtOnce(t *testing.T) {
+	f := idFile(Rule{Remote: "github.com/old/x", Repo: "projects"})
+	e := newIDEnv(t, f)
+	e.remotes["-f"], e.roots["-f"] = "github.com/old/x", []string{"aaa"}
+	e.r.Decide("-f")
+	// Same key, but the user removed the rule: that is a decision, not a rename.
+	e.r.Replace(idFile())
+	if d := e.r.Decide("-f"); d.Repo != "" || d.Note != "" {
+		t.Fatalf("got %+v", d)
+	}
+}
+
+func TestRecordedRootsSurviveARenameToAnAlias(t *testing.T) {
+	f := idFile(Rule{Remote: "github.com/old/x", Aliases: []string{"github.com/mid/x"}, Repo: "projects"})
+	e := newIDEnv(t, f)
+	e.remotes["-f"], e.roots["-f"] = "github.com/old/x", []string{"aaa"}
+	e.r.Decide("-f")
+	e.remotes["-f"] = "github.com/mid/x"
+	delete(e.roots, "-f") // unreadable at this tick: the recorded roots must stay
+	e.r.Refresh()
+	e.r.Decide("-f")
+	e.remotes["-f"], e.roots["-f"] = "github.com/new/x", []string{"aaa"}
+	e.r.Refresh()
+	if d := e.r.Decide("-f"); d.Repo != "projects" || d.Note != NoteRenamed {
+		t.Fatalf("recorded roots were lost: %+v", d)
+	}
+}
+
+func TestClientFolderTransferredToAnotherOwnerDeniesAtOnce(t *testing.T) {
+	f := idFile(Rule{Remote: "github.com/client/x", Repo: "client-a"})
+	e := newIDEnv(t, f)
+	e.remotes["-c"], e.roots["-c"] = "github.com/client/x", []string{"bbb"}
+	e.r.Decide("-c")
+	e.remotes["-c"] = "github.com/someone-else/x"
+	e.r.Refresh()
+	if d := e.r.Decide("-c"); d.Repo != "" || d.Reason != ReasonOwnerChanged {
+		t.Fatalf("got %+v", d)
+	}
+	e.remotes["-c"] = "github.com/client/x-renamed"
+	e.r.Refresh()
+	if d := e.r.Decide("-c"); d.Repo != "client-a" || d.Note != NoteRenamed {
+		t.Fatalf("same-owner rename: %+v", d)
+	}
+	// A non-client folder may change owner within the grace period.
+	e2 := newIDEnv(t, idFile(Rule{Remote: "github.com/old/x", Repo: "projects"}))
+	e2.remotes["-p"], e2.roots["-p"] = "github.com/old/x", []string{"aaa"}
+	e2.r.Decide("-p")
+	e2.remotes["-p"] = "github.com/new/x"
+	e2.r.Refresh()
+	if d := e2.r.Decide("-p"); d.Repo != "projects" {
+		t.Fatalf("non-client transfer: %+v", d)
+	}
+}
+
+func TestRootsCachedPerCheckoutAndHead(t *testing.T) {
+	r := New(idFile(), func(string) bool { return true })
+	r.Candidates = func(string) []string { return []string{"/co"} }
+	head, calls := "h1", map[string]int{}
+	shallow := "false"
+	r.Git = func(dir string, args ...string) (string, error) {
+		calls[args[0]]++
+		switch args[0] {
+		case "rev-parse":
+			if args[1] == "HEAD" {
+				return head, nil
+			}
+			return shallow, nil
+		}
+		return "c2\nc1", nil
+	}
+	for i := 0; i < 3; i++ {
+		rs, ok := r.defaultRoots("-f")
+		if !ok || len(rs) != 2 || rs[0] != "c1" {
+			t.Fatalf("roots %v %v", rs, ok)
+		}
+	}
+	if calls["rev-list"] != 1 {
+		t.Fatalf("rev-list ran %d times", calls["rev-list"])
+	}
+	head = "h2"
+	r.defaultRoots("-f")
+	if calls["rev-list"] != 2 {
+		t.Fatalf("new HEAD must recompute, got %d", calls["rev-list"])
+	}
+	shallow, head = "true", "h3"
+	for i := 0; i < 3; i++ {
+		if _, ok := r.defaultRoots("-f"); ok {
+			t.Fatal("shallow gave roots")
+		}
+	}
+	shallowChecks := calls["rev-parse"]
+	r.defaultRoots("-f")
+	if calls["rev-parse"] != shallowChecks+1 { // only the HEAD lookup
+		t.Fatalf("shallow result not cached until HEAD changes: %v", calls)
+	}
+}
+
+func TestRenamedSinceClampedToNow(t *testing.T) {
+	f := idFile(Rule{Remote: "github.com/old/x", Repo: "projects"})
+	e := newIDEnv(t, f)
+	e.remotes["-f"], e.roots["-f"] = "github.com/old/x", []string{"aaa"}
+	e.r.Decide("-f")
+	raw, _ := os.ReadFile(e.idFile())
+	future := e.now.Add(400 * 24 * time.Hour).Unix()
+	raw = []byte(strings.Replace(string(raw), `"roots"`, fmt.Sprintf(`"renamedSince": %d, "roots"`, future), 1))
+	os.WriteFile(e.idFile(), raw, 0600)
+	e.remotes["-f"] = "github.com/new/x"
+	d := e.router(f).Decide("-f")
+	if d.Repo != "projects" || d.GraceEnds.After(e.now.Add(31*24*time.Hour)) {
+		t.Fatalf("future start not clamped: %+v", d)
+	}
+}
+
+func TestGraceSurvivesKeyFlaps(t *testing.T) {
+	f := idFile(
+		Rule{Remote: "github.com/old/x", Repo: "projects"},
+		Rule{Remote: "github.com/elsewhere/**", Repo: "client-a"},
+	)
+	e := newIDEnv(t, f)
+	e.remotes["-f"], e.roots["-f"] = "github.com/old/x", []string{"aaa"}
+	e.r.Decide("-f")
+	step := func(key string, days int) Decision {
+		e.day(days)
+		e.remotes["-f"] = key
+		e.r.Refresh()
+		return e.r.Decide("-f")
+	}
+	if d := step("github.com/new/x", 0); d.Note != NoteRenamed {
+		t.Fatal(d)
+	}
+	step("github.com/elsewhere/x", 10) // routed to another repo: held
+	if d := step("github.com/newer/x", 10); d.Repo != "projects" {
+		t.Fatalf("day 20: %+v", d)
+	}
+	if d := step("github.com/new/x", 12); d.Repo != "" || d.Reason != ReasonRenameExpired {
+		t.Fatalf("flapping restarted the clock: %+v", d)
+	}
+	// A rule matching again (the old name) ends the state.
+	if d := step("github.com/old/x", 0); d.Repo != "projects" || d.Note != "" {
+		t.Fatal(d)
+	}
+	if d := step("github.com/new/x", 0); d.Note != NoteRenamed || !d.GraceEnds.After(e.now) {
+		t.Fatalf("fresh grace expected: %+v", d)
+	}
+}
+
+func TestDifferentRepositoryAtThePath(t *testing.T) {
+	f := idFile(Rule{Remote: "github.com/old/x", Repo: "projects"})
+	e := newIDEnv(t, f)
+	e.remotes["-f"], e.roots["-f"] = "github.com/old/x", []string{"aaa"}
+	e.r.Decide("-f")
+	e.remotes["-f"], e.roots["-f"] = "github.com/new/x", []string{"zzz"}
+	e.r.Refresh()
+	d := e.r.Decide("-f")
+	if d.Repo != "" || d.Reason != ReasonDifferentRepo {
+		t.Fatalf("got %+v", d)
+	}
+	if s := e.r.Summarize([]string{"-f"}); len(s.Different) != 1 {
+		t.Fatalf("summary %+v", s)
+	}
+}
+
+func TestFileCorruptedWhileRunningIsNotOverwritten(t *testing.T) {
+	f := idFile(Rule{Remote: "github.com/o/**", Repo: "projects"})
+	e := newIDEnv(t, f)
+	e.remotes["-a"], e.roots["-a"] = "github.com/o/a", []string{"1"}
+	e.r.Decide("-a")
+	if err := os.WriteFile(e.idFile(), []byte("garbage"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	e.remotes["-b"], e.roots["-b"] = "github.com/o/b", []string{"2"}
+	e.r.Decide("-b")
+	if raw, _ := os.ReadFile(e.idFile()); string(raw) != "garbage" {
+		t.Fatalf("overwritten: %s", raw)
+	}
+	if e.r.IdentityProblem() == "" {
+		t.Fatal("not reported")
 	}
 }

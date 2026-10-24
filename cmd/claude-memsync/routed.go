@@ -132,6 +132,9 @@ func loadRouted(path string) (*routedSet, error) {
 	}
 	s.Router = route.New(f, func(repo string) bool { _, ok := s.Cfgs[repo]; return ok })
 	s.Router.StatePath = filepath.Join(filepath.Dir(path), "owners.json")
+	// Only the daemon records owners and identities; status, distill and the
+	// hooks just look. Start (the daemon) turns this off.
+	s.Router.ReadOnly = true
 	return s, nil
 }
 
@@ -251,6 +254,7 @@ func (s *routedSet) Start(ctx context.Context) (*running, error) {
 	if len(s.Cfgs) == 0 {
 		return nil, fmt.Errorf("%s: this host has none of the repos", s.Path)
 	}
+	s.Router.ReadOnly = false
 	ctx, cancel := context.WithCancel(ctx)
 	r := &running{cancel: cancel}
 	for _, name := range s.names() {
@@ -403,6 +407,15 @@ func (s *routedSet) statusLines() []string {
 	}
 	for _, h := range sum.Expired {
 		lines = append(lines, fmt.Sprintf("  renamed remote: folder %s is denied, the grace period is over; add an alias", h))
+	}
+	for _, h := range sum.Transferred {
+		lines = append(lines, fmt.Sprintf("  renamed remote: client folder %s is denied, its remote moved to another owner; add an alias if that is intended", h))
+	}
+	for _, h := range sum.Different {
+		lines = append(lines, fmt.Sprintf("  different repository at this path: folder %s is denied", h))
+	}
+	if sum.Unreadable {
+		lines = append(lines, "  identity.json is unreadable: folders routed before are denied until it is fixed or removed ("+s.Router.IdentityProblem()+")")
 	}
 	for _, h := range sum.Changed {
 		lines = append(lines, fmt.Sprintf("  remote changed repos: folder %s is denied until routes.json is edited", h))

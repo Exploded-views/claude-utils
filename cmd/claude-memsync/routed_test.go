@@ -534,3 +534,31 @@ func TestRouted_UnflaggedRepoRefused(t *testing.T) {
 		t.Fatalf("err = %v, want a message naming kind", err)
 	}
 }
+
+// Status, distill and the hooks only look: their router records nothing. Only
+// the daemon's Start lets it write.
+func TestRouted_ReadOnlyUntilStarted(t *testing.T) {
+	routedHost(t, []string{"personal", "projects"}, "personal", []map[string]string{{"folder": "-x", "repo": "projects"}})
+	set, err := loadRouted(os.Getenv(routesEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !set.Router.ReadOnly {
+		t.Fatal("loadRouted must give a read-only router")
+	}
+	set.Router.Decide("-x")
+	if _, err := os.Stat(set.Router.StatePath); err == nil {
+		t.Fatal("a read-only router wrote owners.json")
+	}
+	oldRun := runLoop
+	defer func() { runLoop = oldRun }()
+	runLoop = func(ctx context.Context, l *syncpkg.Loop) error { <-ctx.Done(); return nil }
+	run, err := set.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer run.Stop()
+	if set.Router.ReadOnly {
+		t.Fatal("the daemon's router must be able to write")
+	}
+}

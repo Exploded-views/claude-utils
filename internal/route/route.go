@@ -236,6 +236,15 @@ const (
 
 	// NoteRenamed marks a folder still routed by its root commits.
 	NoteRenamed = "renamed remote: add an alias"
+
+	// ReasonIdentityUnreadable: identity.json cannot be read, so folders that
+	// were routed before are held rather than guessed at.
+	ReasonIdentityUnreadable = "identity.json is unreadable"
+	// ReasonOwnerChanged: a client folder's remote moved to another owner.
+	ReasonOwnerChanged = "client repo moved to another owner: add an alias"
+	// ReasonDifferentRepo: the checkout at the path holds other history than
+	// the one recorded.
+	ReasonDifferentRepo = "different repository at this path"
 )
 
 // Decision is the outcome for one folder. Repo is "" when it is denied.
@@ -288,7 +297,17 @@ type Router struct {
 	// Now is the clock (default time.Now).
 	Now func() time.Time
 
-	ids map[string]identity // per-folder record, see identity.go
+	// ReadOnly keeps the router from writing owners.json and identity.json:
+	// status, distill and the hooks only look.
+	ReadOnly bool
+	// Git runs git for the root-commit lookup (default: cleaned-env git).
+	Git func(dir string, args ...string) (string, error)
+
+	ids       map[string]identity // per-folder record, see identity.go
+	idBad     string              // why identity.json could not be read
+	dirty     map[string]bool     // folders changed here, not yet saved
+	rootMu    sync.Mutex
+	rootCache map[string]rootEntry
 
 	mu     sync.Mutex
 	cache  map[string]Decision
@@ -338,6 +357,7 @@ func (r *Router) Replace(f File) {
 	r.cur_.Store(normalized(f))
 	r.gen.Add(1)
 	r.cache = map[string]Decision{}
+	r.reloadIDsLocked()
 	r.mu.Unlock()
 }
 
@@ -347,6 +367,7 @@ func (r *Router) Refresh() {
 	r.mu.Lock()
 	r.gen.Add(1)
 	r.cache = map[string]Decision{}
+	r.reloadIDsLocked()
 	r.mu.Unlock()
 }
 
@@ -466,7 +487,7 @@ func (r *Router) noteLocked(folder string, d Decision) {
 			r.Logf("route: folder %s denied: %s", hash8(folder), d.Reason)
 		}
 	}
-	if d.Reason == ReasonRemoteChanged {
+	if d.Reason == ReasonRemoteChanged || d.Reason == ReasonIdentityUnreadable {
 		// Held: the owner record stays, so the move is logged if the user's
 		// route edit later accepts it.
 		return
@@ -513,20 +534,11 @@ func (r *Router) loadOwnersLocked() {
 }
 
 func (r *Router) saveOwnersLocked() {
-	if r.StatePath == "" {
+	if r.StatePath == "" || r.ReadOnly {
 		return
 	}
-	b, _ := json.MarshalIndent(r.owners, "", "  ")
-	if err := os.MkdirAll(filepath.Dir(r.StatePath), 0700); err == nil {
-		// A temp file of its own, so two daemons never write the same one.
-		if f, err := os.CreateTemp(filepath.Dir(r.StatePath), ".owners-*.tmp"); err == nil {
-			_, werr := f.Write(b)
-			cerr := f.Close()
-			if werr == nil && cerr == nil && os.Rename(f.Name(), r.StatePath) == nil {
-				return
-			}
-			os.Remove(f.Name())
-		}
+	if err := writeJSONAtomic(r.StatePath, r.owners, ".owners-*.tmp"); err != nil {
+		r.logOnceLocked("", "ownsave", "route: cannot save owners.json: %v", err)
 	}
 }
 
@@ -561,6 +573,11 @@ type Summary struct {
 	Renamed []RenamedFolder
 	Changed []string
 	Expired []string
+	// Transferred: client folders moved to another owner; Different: another
+	// repository at the path; Unreadable: identity.json cannot be read.
+	Transferred []string
+	Different   []string
+	Unreadable  bool
 }
 
 // RenamedFolder is a folder kept by its root commits until GraceEnds.
@@ -582,6 +599,10 @@ func (r *Router) Summarize(folders []string) Summary {
 			s.Changed = append(s.Changed, hash8(f))
 		case d.Reason == ReasonRenameExpired:
 			s.Expired = append(s.Expired, hash8(f))
+		case d.Reason == ReasonOwnerChanged:
+			s.Transferred = append(s.Transferred, hash8(f))
+		case d.Reason == ReasonDifferentRepo:
+			s.Different = append(s.Different, hash8(f))
 		case d.Note == NoteRenamed:
 			left := int((d.GraceEnds.Sub(r.Now()) + 24*time.Hour - 1) / (24 * time.Hour))
 			if left < 0 {
@@ -595,6 +616,7 @@ func (r *Router) Summarize(folders []string) Summary {
 		}
 		s.Owned[d.Repo]++
 	}
+	s.Unreadable = r.IdentityProblem() != ""
 	return s
 }
 
