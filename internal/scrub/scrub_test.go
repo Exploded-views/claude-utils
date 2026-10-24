@@ -127,3 +127,45 @@ func TestParseDenylist_InvalidPattern(t *testing.T) {
 		t.Errorf("error leaks pattern: %v", err)
 	}
 }
+
+func TestScan_CredentialAssignmentTable(t *testing.T) {
+	long := strings.Repeat("v", 24)
+	cases := []struct {
+		in    string
+		match bool
+	}{
+		// Real assignments.
+		{`"api_key": "` + long + `"`, true},
+		{`client_secret: "` + long + `"`, true},
+		{`client_secret: '` + long + `'`, true},
+		{`DB_PASSWORD="` + long + `"`, true},
+		{`"access_token": "` + long + `"`, true},
+		{`secret_key = "` + long + `"`, true},
+		{`apiKey: "` + long + `"`, true},
+		{`password_value: "` + long + `"`, true},
+		{`api-key_string = "` + long + `"`, true},
+		// Words that merely start with a keyword.
+		{`"tokenizer": "bert-base-uncased-large"`, false},
+		{`secretName: "letsencrypt-prod-tls-cert"`, false},
+		{`"token_type": "refresh_token_v2_long"`, false},
+		{`tokens: "` + long + `"`, false},
+		{`passwordless: "` + long + `"`, false},
+		{`secretRef: "` + long + `"`, false},
+		{`token_endpoint: "https://example.com/oauth2/token"`, false},
+		// Still conservative about short or unquoted values.
+		{`password: "` + strings.Repeat("v", 15) + `"`, false},
+		{`password: ` + long, false},
+	}
+	s := New(nil)
+	for _, c := range cases {
+		got := false
+		for _, r := range s.Scan([]byte(c.in)) {
+			if r == "credential-assignment" {
+				got = true
+			}
+		}
+		if got != c.match {
+			t.Errorf("Scan(%q) credential-assignment = %v, want %v", c.in, got, c.match)
+		}
+	}
+}

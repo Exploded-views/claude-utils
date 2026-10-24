@@ -38,9 +38,12 @@ var builtin = []rule{
 	{"aws-access-key", regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`)},
 	{"jwt", regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`)},
 	// password/token/secret/api_key assigned a quoted value of 16+ characters
-	// with no whitespace. Unquoted values are ignored: prose like "the token
-	// is rotated weekly" is far more common than an unquoted secret.
-	{"credential-assignment", regexp.MustCompile(`(?i)(?:password|passwd|token|secret|api[_-]?key)\w*["']?\s*[:=]\s*["'][^"'\s]{16,}["']`)},
+	// with no whitespace. The name may carry only a few suffixes (_key,
+	// _value, ...): "tokenizer", "secretName" and "token_type" hold ordinary
+	// config words that are long enough to look like secrets. Unquoted values
+	// are ignored: prose like "the token is rotated weekly" is far more common
+	// than an unquoted secret.
+	{"credential-assignment", regexp.MustCompile(`(?i)(?:password|passwd|token|secret|api[_-]?key)(?:[_-]?(?:access[_-]?key|key|value|string|str|data))?["']?\s*[:=]\s*["'][^"'\s]{16,}["']`)},
 }
 
 // DenylistPattern is one user-supplied regex and the line it came from.
