@@ -200,9 +200,10 @@ file name match your denylist, is **left out of the commit**. Everything else
 in the same cycle commits normally, and the held-back file is checked again on
 the next cycle, so it syncs as soon as it no longer matches.
 
-Your copy under `~/.claude/projects/...` is the authoritative one and is never
-changed or deleted because a file is held back. The mirror copy is not left
-alone, though; see the next section.
+Your copy under `~/.claude/projects/...` is the authoritative one. A file being
+held back never changes or deletes it, with one exception: a held-back
+`MEMORY.md` that merges cleanly with a peer's change is also written there (see
+step 5 of the next section). The mirror copy is not left alone, though.
 
 ### Parking held-back files around the pull
 
@@ -225,9 +226,10 @@ parked too.
 5. Each parked path is put back from its saved bytes, whatever the path. If the
    pull changed it, the incoming version is kept first: a `MEMORY.md` is merged
    3-way with the saved bytes (the same section-level merge as everywhere else,
-   against the version from before the pull), and the result is written to the
-   mirror and, only if your `~/.claude` copy still equals the saved bytes, to
-   `~/.claude` too. Otherwise (a conflicting merge, a `MEMORY.md` you changed
+   against the version from before the pull), but only if your `~/.claude` copy
+   still equals the saved bytes. A clean merge is then written to both the
+   mirror and `~/.claude`; this is the one case where parking writes to
+   `~/.claude`. Otherwise (a conflicting merge, a `MEMORY.md` you changed
    since, a deleted file, any other file) the peer's version is kept as
    `<name>.from-remote-<id>` next to it, so committing your version later
    doesn't silently revert it. The `~/.claude` copy is not consulted for the
@@ -251,16 +253,22 @@ two cases (see [Recovering parked files](#recovering-parked-files)):
 - The restore of the same path fails on 3 consecutive cycles (the count is in
   `parked.json`): that path's saved bytes are moved to a new
   `.state/parked.broken-<unix time>/parked/<path>`, logged once as
-  `PARKED FILES STUCK`, and sync resumes.
+  `PARKED FILES STUCK`, and sync resumes. For a memory file, the mirror copy is
+  then refreshed from your `~/.claude` copy, so a `MEMORY.md` section you had
+  removed does not come back.
+
+A `.state/parked/` directory found with no `parked.json` beside it is never
+deleted: the next park moves it to `.state/parked.broken-<unix time>/` and logs
+it.
 
 In practice:
 
 - A held-back file is briefly absent from, or reverted in, the work-tree
   (`~/.claudesync/...`) during each pull. Don't edit there.
 - If the peer deleted a parked file or renamed it, your version stays.
-- If the daemon dies mid-cycle, nothing is lost: your `~/.claude` copies are
-  never touched, and the parked bytes and `parked.json` are on disk before the
-  work-tree is changed. On the next start, before the startup reconcile, the
+- If the daemon dies mid-cycle, nothing is lost: the park itself does not
+  change your `~/.claude` copies, and the parked bytes and `parked.json` are
+  on disk before the work-tree is changed. On the next start, before the startup reconcile, the
   daemon finishes the leftover park the same way. Whether the crash came before
   the reset, between the reset and the pull, or after the pull, the files
   return as you had them, and a file the pull did not change gets no spurious
@@ -316,7 +324,7 @@ work-tree never holds conflict markers and none reach `~/.claude`, and it keeps
 your local commits as they were. For as long as the conflict is unresolved,
 that cycle propagates nothing into `~/.claude` and pushes nothing, and the same
 happens on every following cycle: **sync of your other notes is blocked, both
-ways, until you resolve it.** Your `~/.claude` copies are never touched.
+ways, until you resolve it.** The conflict itself changes nothing in `~/.claude`.
 
 The conflict is logged once per cycle, by **count only**, because a path may
 match your denylist:
@@ -401,7 +409,7 @@ until you reword it.
 The daemon logs the **file name and rule name only**, never the matched text:
 
 ```
-scrub: holding back projects/-home-alice-src-app/memory/notes.md (rule: github-token)
+scrub: holding back projects/-home-<user>-src-<app>/memory/notes.md (rule: github-token)
 ```
 
 Deletions are not scanned. If a file you edited was already committed in a
@@ -419,8 +427,8 @@ and lines starting with `#` are ignored. Syntax is Go's
 
 ```
 # anything mentioning these is not for the shared repo
-acme-corp\.internal
-\bproject nightjar\b
+client-name\.internal
+\bproject codename\b
 ```
 
 You can install one when setting up a PC: `claude-memsync init --remote <url>
@@ -443,7 +451,9 @@ of just that part. The rest of the message stays, including the exit status and
 git's reason. Each word is tried on its own after splitting on whitespace,
 quotes and colons (a leading `:(literal)` from git is ignored), and so are
 quoted strings, runs of words and each whole line, so a name with spaces is
-caught; there is no limit on the number of words. A word in your denylist that
+caught. On a line of up to 1024 characters every run of words is tried, so a
+name of any word count is found; on a longer line runs are limited to 12 words
+(each word and quoted string is still tested). A word in your denylist that
 also appears in the remote URL redacts the URL in the message, not the error.
 If the denylist exists but cannot be parsed, no path or file name is logged at
 all.
