@@ -88,6 +88,17 @@ func (r resolution) apply(repo *gitwt.Repo) error {
 	if err != nil {
 		return err
 	}
+	// A rename/rename merges one side's edit into the other side's copy. A copy
+	// must hold the bytes it is named for: put those back (they are in history).
+	if parts := strings.Split(r.path, "/"); len(parts) == 4 && parts[2] != archive.DistilledFolder {
+		if orig, prefix, ok := archiveNameHash(parts[3]); ok && !archiveBytesMatch(parts[3], []byte(content)) {
+			b, found := findOriginal(repo, "HEAD", r.path, parts[2], orig, prefix)
+			if !found {
+				return fmt.Errorf("an archive copy does not match its name and its original text cannot be found")
+			}
+			content = string(b)
+		}
+	}
 	full := filepath.Join(repo.Dir, filepath.FromSlash(r.path))
 	if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
 		return err

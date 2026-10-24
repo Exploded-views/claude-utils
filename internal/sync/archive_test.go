@@ -527,3 +527,196 @@ func TestPlanArchiveResolution_SafeSetIsExact(t *testing.T) {
 		}
 	}
 }
+
+// allArchiveCopiesMatchTheirNames is the invariant: every hash-named copy in
+// the tree holds bytes that hash to its name.
+func allArchiveCopiesMatchTheirNames(t *testing.T, r *gitwt.Repo) {
+	t.Helper()
+	for _, l := range strings.Split(strings.TrimSpace(headTree(t, r)), "\n") {
+		parts := strings.Split(l, "/")
+		if len(parts) != 4 || parts[0] != "archive" || parts[2] == archive.DistilledFolder {
+			continue
+		}
+		body := mustGit(t, r, "show", "HEAD:"+l)
+		if _, _, ok := archiveNameHash(parts[3]); !ok {
+			continue
+		}
+		if !archiveBytesMatch(parts[3], []byte(body)) {
+			t.Errorf("%s no longer matches its hash name", l)
+		}
+	}
+}
+
+func claudeHas(t *testing.T, f *pullFixture, name, want string) {
+	t.Helper()
+	if got, ok := f.claudeCopy(name); !ok || got != want {
+		t.Errorf("%s: ~/.claude has %q ok=%v, want %q", name, got, ok, want)
+	}
+}
+
+// The peer archives a note while this host edits it. The edit merges into the
+// archive copy (a 100% rename), which would hide the edit and break the copy's
+// name: both must survive, the edit live and the old text archived.
+func TestArchive_EditHere_ArchiveOnPeer_BothKept(t *testing.T) {
+	v0, v1 := bigNote+"v0\n", bigNote+"v1 edited\n"
+	a := archivePC(t, map[string]string{"x.md": v0})
+	b := a.addPC("pc-b")
+	b.loop.Cfg.ArchiveDeletes = true
+	logs := captureLog(t)
+
+	a.userDeletes("x.md")
+	a.flushOK() // peer archives and pushes
+	b.editLocal("x.md", v1)
+	b.flushOK() // this host pulls with an edit in flight
+	a.flushOK()
+
+	for _, f := range []*pullFixture{a, b} {
+		claudeHas(t, f, "x.md", v1)
+		allArchiveCopiesMatchTheirNames(t, f.repo)
+		if tree := headTree(t, f.repo); !strings.Contains(tree, archPath("p1", "x.md", v0)) || !strings.Contains(tree, "projects/p1/memory/x.md") {
+			t.Errorf("tree:\n%s", tree)
+		}
+		if f.repo.RebaseInProgress() {
+			t.Error("wedged")
+		}
+	}
+	if !strings.Contains(logs.String(), "restored 1 note(s)") {
+		t.Errorf("no count-only log line:\n%s", logs.String())
+	}
+	if idx := mustGit(t, b.repo, "show", "HEAD:archive/INDEX.md"); !strings.Contains(idx, "edited after archive, restored") {
+		t.Errorf("INDEX.md:\n%s", idx)
+	}
+	if mustGit(t, b.repo, "rev-parse", "HEAD") != mustGit(t, gitwt.New(b.origin), "rev-parse", "main") {
+		t.Error("B did not push")
+	}
+}
+
+// The mirror image: this host archives while the peer's edit is already pushed.
+func TestArchive_ArchiveHere_EditOnPeer_BothKept(t *testing.T) {
+	v0, v1 := bigNote+"v0\n", bigNote+"v1 edited\n"
+	a := archivePC(t, map[string]string{"x.md": v0})
+	b := a.addPC("pc-b")
+	b.loop.Cfg.ArchiveDeletes = true
+	captureLog(t)
+
+	a.editLocal("x.md", v1)
+	a.flushOK() // peer's edit is pushed
+	b.userDeletes("x.md")
+	b.flushOK() // this host archives the old text and pulls
+	a.flushOK()
+
+	for _, f := range []*pullFixture{a, b} {
+		claudeHas(t, f, "x.md", v1)
+		allArchiveCopiesMatchTheirNames(t, f.repo)
+		if tree := headTree(t, f.repo); !strings.Contains(tree, archPath("p1", "x.md", v0)) || !strings.Contains(tree, "projects/p1/memory/x.md") {
+			t.Errorf("tree:\n%s", tree)
+		}
+	}
+}
+
+// The live path is taken by different content: the edit goes beside it.
+func TestRepairEditedArchives_LivePathOccupied_ConflictCopy(t *testing.T) {
+	archClock(t)
+	captureLog(t)
+	f := newPullFixture(t, map[string]string{"x.md": "other, live\n"})
+	f.loop.Cfg.ArchiveDeletes = true
+	v0, v1 := bigNote+"v0\n", bigNote+"v1 edited\n"
+	p := archPath("p1", "x.md", v0)
+	writeRepoFile(t, f.repo, p, v0)
+	mustGit(t, f.repo, "add", "-A")
+	mustGit(t, f.repo, "commit", "-q", "-m", "archive")
+	pre := strings.TrimSpace(mustGit(t, f.repo, "rev-parse", "HEAD"))
+	writeRepoFile(t, f.repo, p, v1) // the edit merged into the copy
+	mustGit(t, f.repo, "commit", "-qam", "edit merged into the copy")
+	post := strings.TrimSpace(mustGit(t, f.repo, "rev-parse", "HEAD"))
+
+	n, err := repairEditedArchives(f.repo, f.loop.Cfg, pre, post)
+	if err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	if got := mustGit(t, f.repo, "show", "HEAD:projects/p1/memory/x.md"); got != "other, live\n" {
+		t.Errorf("the live note was replaced: %q", got)
+	}
+	h := sha256.Sum256([]byte(v1))
+	cp := "projects/p1/memory/x.conflict-" + hex.EncodeToString(h[:])[:8] + ".md"
+	if got := mustGit(t, f.repo, "show", "HEAD:"+cp); got != v1 {
+		t.Errorf("conflict copy: %q", got)
+	}
+	allArchiveCopiesMatchTheirNames(t, f.repo)
+	if out := mustGit(t, f.repo, "status", "--porcelain"); strings.TrimSpace(out) != "" {
+		t.Errorf("uncommitted leftovers:\n%s", out)
+	}
+}
+
+// When the old text cannot be found, nothing is left half done: reset and abort.
+func TestRepairEditedArchives_CannotRestore_Errors(t *testing.T) {
+	archClock(t)
+	captureLog(t)
+	f := newPullFixture(t, map[string]string{"keep.md": "k\n"})
+	f.loop.Cfg.ArchiveDeletes = true
+	p := archPath("p1", "x.md", "v0 that nobody committed\n")
+	writeRepoFile(t, f.repo, p, "something else\n")
+	pre := strings.TrimSpace(mustGit(t, f.repo, "rev-parse", "HEAD"))
+	mustGit(t, f.repo, "add", "-A")
+	mustGit(t, f.repo, "commit", "-q", "-m", "mismatched copy arrives")
+	post := strings.TrimSpace(mustGit(t, f.repo, "rev-parse", "HEAD"))
+	if _, err := repairEditedArchives(f.repo, f.loop.Cfg, pre, post); err == nil {
+		t.Fatal("want an error when the original bytes are nowhere")
+	}
+}
+
+// stageHandConflict leaves host B's repo stopped in a rebase that is not the
+// daemon's (no pull marker), on the two-host archive conflict.
+func stageHandConflict(t *testing.T) *pullFixture {
+	t.Helper()
+	a := archivePC(t, map[string]string{"x.md": "v0\n"})
+	b := a.addPC("pc-b")
+	b.loop.Cfg.ArchiveDeletes = true
+	a.editLocal("x.md", "v1\n")
+	a.flushOK()
+	a.userDeletes("x.md")
+	a.flushOK()
+	b.userDeletes("x.md")
+	if _, err := CommitMirror(b.repo, b.loop.Cfg, "b archives"); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, b.repo, "fetch", "-q", "origin", "main")
+	if _, err := b.repo.Run("rebase", "origin/main"); err == nil || !b.repo.RebaseInProgress() {
+		t.Fatalf("setup: expected a stopped rebase, err=%v", err)
+	}
+	return b
+}
+
+// A rebase the user started is never touched by the resolver.
+func TestResolveArchiveConflicts_LeavesAUserRebaseAlone(t *testing.T) {
+	b := stageHandConflict(t)
+	before := mustGit(t, b.repo, "ls-files", "-u")
+	n, err := resolveArchiveConflicts(b.repo)
+	if err != nil || n != 0 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	if !b.repo.RebaseInProgress() || mustGit(t, b.repo, "ls-files", "-u") != before {
+		t.Error("the user's rebase was changed")
+	}
+}
+
+// The same conflict, daemon's own pull, plus an INDEX.md conflict: not in the
+// safe set, so the pull aborts as before.
+func TestArchive_IndexConflictIsNeverAutoResolved(t *testing.T) {
+	a := archivePC(t, map[string]string{"x.md": "v0\n"})
+	b := a.addPC("pc-b")
+	b.loop.Cfg.ArchiveDeletes = true
+	// Host B merges the index as plain text, so two appended lines conflict.
+	if err := os.WriteFile(filepath.Join(b.repo.Dir, ".git", "info", "attributes"), []byte("archive/INDEX.md merge\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a.editLocal("x.md", "v1\n")
+	a.flushOK()
+	a.userDeletes("x.md")
+	a.flushOK()
+	b.userDeletes("x.md")
+	err := b.loop.flush(b.repo, b.roots, true)
+	if err == nil || !strings.Contains(err.Error(), "rebase conflict") || b.repo.RebaseInProgress() {
+		t.Fatalf("got %v, in progress %v", err, b.repo.RebaseInProgress())
+	}
+}

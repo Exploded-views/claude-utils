@@ -104,7 +104,7 @@ func indexLine(e Entry) string {
 }
 
 // AppendIndex appends one line for e to archive/INDEX.md, unless the index
-// already has a line for e.Path. The file is append-only; the repo merges it
+// already has that exact line. The file is append-only; the repo merges it
 // with the union driver, so two hosts appending do not conflict.
 func AppendIndex(root string, e Entry) error {
 	p := filepath.Join(root, Dir, IndexName)
@@ -114,7 +114,7 @@ func AppendIndex(root string, e Entry) error {
 		return err
 	}
 	for _, l := range strings.Split(string(b), "\n") {
-		if strings.HasSuffix(l, " | "+e.Path) {
+		if l == line {
 			return nil
 		}
 	}

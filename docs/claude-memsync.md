@@ -791,6 +791,15 @@ What happens:
   `changes` and the distill worklist only read `projects/<folder>/memory/`, so
   `archive/` is never a Claude folder. The index is merged as a union, so two
   hosts that archive in the same cycle do not conflict.
+- **An edit on one host against an archive on another** merges without a
+  conflict (git reads the archive as a rename and carries the edit into the
+  copy). After every pull the daemon checks that each archive copy that arrived
+  holds the bytes its hash name promises. If not, it puts the edit back at the
+  note's live path (as `<name>.conflict-<sha8>.<ext>` beside it when that path
+  now holds other text), restores the copy, adds an index line ("edited after
+  archive, restored"), and commits all together, so the note returns to
+  `~/.claude` on every host. If the original text cannot be found, the pull is
+  undone and nothing is pushed.
 - **`distill --prune`** archives a stale catalog entry to
   `archive/<date>/distilled/` instead of removing it.
 - **MEMORY.md** is an index, not a note: a line deleted from it is index content

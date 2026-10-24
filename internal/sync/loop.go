@@ -408,6 +408,20 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 		return pause()
 	}
 	postRev, _ := repo.Run("rev-parse", "HEAD")
+	if conflictErr == nil && l.Cfg.ArchiveDeletes && strings.TrimSpace(preRev) != strings.TrimSpace(postRev) && strings.TrimSpace(preRev) != "" {
+		// An edit that merged into an archive copy is put back (archive_repair.go).
+		n, rerr := repairEditedArchives(repo, l.Cfg, strings.TrimSpace(preRev), strings.TrimSpace(postRev))
+		if rerr != nil {
+			// Never leave a mismatched copy: back to where the cycle began.
+			if _, e := repo.Run("reset", "--hard", strings.TrimSpace(preRev)); e != nil {
+				rerr = errors.Join(rerr, e)
+			}
+			conflictErr = fmt.Errorf("pull: could not restore an edited archived note (%s); the pull was undone, local commits kept, nothing propagated or pushed", g.Err(rerr))
+		} else if n > 0 {
+			l.logln(fmt.Sprintf("pull: restored %d note(s) edited after they were archived (the archive copies are unchanged)", n))
+			postRev, _ = repo.Run("rev-parse", "HEAD")
+		}
+	}
 	if conflictErr == nil && strings.TrimSpace(preRev) != strings.TrimSpace(postRev) && strings.TrimSpace(preRev) != "" {
 		if err := propagate(repo, roots, strings.TrimSpace(preRev), strings.TrimSpace(postRev), st.skip(), g); err != nil {
 			settled = false
