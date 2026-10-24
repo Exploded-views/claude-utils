@@ -112,10 +112,12 @@ func TestChangesCmd_Limit(t *testing.T) {
 func TestChangesCmd_Usage(t *testing.T) {
 	cfgPath, _ := changesRepo(t)
 	cases := [][]string{
-		{"--config", cfgPath},                               // --since is required
+		{"--config", cfgPath},                               // --since or --marker is required
 		{"--config", cfgPath, "--since", "HEAD", "--bogus"}, // unknown flag
 		{"--config", cfgPath, "--since", "HEAD", "--limit", "-1"},
-		{"--config", cfgPath, "--since", "HEAD", "--update-marker"}, // not a marker file
+		{"--config", cfgPath, "--since", "HEAD", "--update-marker"}, // needs --marker
+		{"--config", cfgPath, "--since", "HEAD", "--marker", "m"},   // exclusive
+		{"--config", cfgPath, "--update-marker"},                    // neither
 	}
 	for _, args := range cases {
 		var out, errb bytes.Buffer
@@ -128,7 +130,7 @@ func TestChangesCmd_Usage(t *testing.T) {
 func TestChangesCmd_MarkerRoundTrip(t *testing.T) {
 	cfgPath, _ := changesRepo(t)
 	marker := filepath.Join(t.TempDir(), "seen")
-	args := []string{"--config", cfgPath, "--since", marker, "--update-marker", "--json"}
+	args := []string{"--config", cfgPath, "--marker", marker, "--update-marker", "--json"}
 
 	var out, errb bytes.Buffer
 	if code := changesCmd(&out, &errb, args); code != 0 {
@@ -140,5 +142,57 @@ func TestChangesCmd_MarkerRoundTrip(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Errorf("marker not written: %v", err)
+	}
+}
+
+func TestChangesCmd_BadSinceWithUpdateMarkerIsAnError(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	dir := t.TempDir()
+	wd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+	var out, errb bytes.Buffer
+	if code := changesCmd(&out, &errb, []string{"--config", cfgPath, "--since", "HEAD~5", "--update-marker"}); code == 0 {
+		t.Error("want a usage error")
+	}
+	if code := changesCmd(&out, &errb, []string{"--config", cfgPath, "--since", "HEAD~5"}); code != 1 {
+		t.Errorf("bad revision: exit %d, want 1", code)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("stray files: %v", entries)
+	}
+}
+
+func TestChangesCmd_MarkerReset(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	marker := filepath.Join(t.TempDir(), "seen")
+	if err := os.WriteFile(marker, []byte(strings.Repeat("ab", 20)+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"--config", cfgPath, "--marker", marker, "--update-marker", "--json"}
+	var out, errb bytes.Buffer
+	if code := changesCmd(&out, &errb, args); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	var r struct {
+		Reset bool
+		Total int
+	}
+	if err := json.Unmarshal(out.Bytes(), &r); err != nil || !r.Reset || r.Total != 0 {
+		t.Errorf("want reset with nothing reported: %s", out.String())
+	}
+	if n := strings.Count(strings.TrimSpace(errb.String()), "\n") + 1; n != 1 || !strings.Contains(errb.String(), "reset") {
+		t.Errorf("want exactly one warning line, got %q", errb.String())
+	}
+	// Without --update-marker a stale marker stays an error.
+	if err := os.WriteFile(marker, []byte(strings.Repeat("ab", 20)+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errb.Reset()
+	if code := changesCmd(&out, &errb, []string{"--config", cfgPath, "--marker", marker}); code != 1 {
+		t.Errorf("exit %d, want 1", code)
 	}
 }

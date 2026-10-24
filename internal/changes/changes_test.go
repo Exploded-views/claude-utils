@@ -170,7 +170,9 @@ func TestCompute_SinceFromMarkerFile(t *testing.T) {
 	if err := os.WriteFile(marker, []byte(base+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	r, err := Compute(f.opts(marker))
+	o := f.opts("")
+	o.Marker = marker
+	r, err := Compute(o)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,10 +188,60 @@ func TestCompute_BadSince(t *testing.T) {
 	if err := os.WriteFile(junk, []byte("not a revision\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, since := range []string{"", "deadbeefdeadbeef", "no-such-branch", filepath.Join(t.TempDir(), "missing"), junk, "--output=/tmp/x", "-1"} {
+	// --since is a revision only: a marker path is not accepted.
+	for _, since := range []string{"deadbeefdeadbeef", "no-such-branch", "HEAD~5", junk, "--output=/tmp/x", "-1"} {
 		if _, err := Compute(f.opts(since)); err == nil {
 			t.Errorf("since %q: want an error", since)
 		}
+	}
+}
+
+func TestCompute_BadMarker(t *testing.T) {
+	f := newFixture(t)
+	f.commit(map[string]string{mem(appHash, "a.md"): "a\n"})
+	dir := t.TempDir()
+	junk := filepath.Join(dir, "junk")
+	gone := filepath.Join(dir, "gone")
+	empty := filepath.Join(dir, "empty")
+	for path, body := range map[string]string{junk: "--output=x\n", gone: strings.Repeat("ab", 20) + "\n", empty: ""} {
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Without UpdateMarker none of these may be silently repaired or created.
+	for _, m := range []string{filepath.Join(dir, "missing"), junk, gone, empty} {
+		before, _ := os.ReadFile(m)
+		if _, err := Compute(Options{SyncDir: f.repo.Dir, ClaudeDir: f.claude, Marker: m, Limit: 20}); err == nil {
+			t.Errorf("marker %q: want an error", m)
+		}
+		after, _ := os.ReadFile(m)
+		if string(before) != string(after) {
+			t.Errorf("marker %q was modified", m)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "missing")); err == nil {
+		t.Error("missing marker was created without UpdateMarker")
+	}
+}
+
+func TestCompute_NeedsExactlyOneOfSinceAndMarker(t *testing.T) {
+	f := newFixture(t)
+	f.commit(map[string]string{mem(appHash, "a.md"): "a\n"})
+	marker := filepath.Join(t.TempDir(), "seen")
+	cases := map[string]Options{
+		"neither":             {},
+		"both":                {Since: "HEAD", Marker: marker},
+		"update with since":   {Since: "HEAD", UpdateMarker: true},
+		"update with neither": {UpdateMarker: true},
+	}
+	for name, o := range cases {
+		o.SyncDir, o.ClaudeDir = f.repo.Dir, f.claude
+		if _, err := Compute(o); err == nil {
+			t.Errorf("%s: want an error", name)
+		}
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("marker created despite the error")
 	}
 }
 
@@ -348,7 +400,7 @@ func TestMarker(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "sub", "seen")
 
 	// First use: no marker yet. Establish the baseline, report nothing.
-	r, err := Compute(Options{SyncDir: f.repo.Dir, ClaudeDir: f.claude, Since: marker, UpdateMarker: true, Limit: 20})
+	r, err := Compute(Options{SyncDir: f.repo.Dir, ClaudeDir: f.claude, Marker: marker, UpdateMarker: true, Limit: 20})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +413,7 @@ func TestMarker(t *testing.T) {
 
 	// New commit: reported once, then the marker moves up.
 	f.commit(map[string]string{mem(appHash, "b.md"): "b\n"})
-	o := Options{SyncDir: f.repo.Dir, ClaudeDir: f.claude, Since: marker, UpdateMarker: true, Limit: 20}
+	o := Options{SyncDir: f.repo.Dir, ClaudeDir: f.claude, Marker: marker, UpdateMarker: true, Limit: 20}
 	r, err = Compute(o)
 	if err != nil || r.Total != 1 {
 		t.Fatalf("second run: %+v %v", r, err)
@@ -384,12 +436,137 @@ func TestMarker(t *testing.T) {
 	}
 }
 
-func TestMarker_UpdateRequiresAMarkerFile(t *testing.T) {
+// A revision that does not resolve must be an error, not a marker file that
+// happens to be named like the revision.
+func TestCompute_BadRevWithUpdateMarkerCreatesNothing(t *testing.T) {
 	f := newFixture(t)
 	f.commit(map[string]string{mem(appHash, "a.md"): "a\n"})
-	o := f.opts("HEAD")
+	dir := t.TempDir()
+	wd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+
+	o := f.opts("HEAD~5")
 	o.UpdateMarker = true
 	if _, err := Compute(o); err == nil {
-		t.Error("UpdateMarker with a plain revision should be an error, not silently ignored")
+		t.Error("want an error")
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("stray files created: %v", entries)
+	}
+}
+
+// The daemon pulls with --rebase, so a marker written at an unpushed local
+// commit names a commit that is later rewritten. Compute diffs trees, so the
+// marker keeps working while the old object still exists.
+func TestMarker_SurvivesRebase(t *testing.T) {
+	f := newFixture(t)
+	base := f.commit(map[string]string{mem(appHash, "a.md"): "a\n"})
+	local := f.commit(map[string]string{mem(appHash, "own.md"): "own\n"})
+	marker := filepath.Join(t.TempDir(), "seen")
+	if err := os.WriteFile(marker, []byte(local+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate `pull --rebase`: the remote commit lands under the local one.
+	if _, err := f.repo.Run("reset", "--hard", base); err != nil {
+		t.Fatal(err)
+	}
+	f.commit(map[string]string{mem(appHash, "remote.md"): "r\n"})
+	if _, err := f.repo.Run("cherry-pick", local); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Compute(Options{SyncDir: f.repo.Dir, ClaudeDir: f.claude, Marker: marker, UpdateMarker: true, Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Total != 1 || find(r, "remote.md") == nil {
+		t.Fatalf("want only remote.md, got %+v", r)
+	}
+}
+
+// A marker whose commit is gone (pruned after a rebase, or the repo was
+// re-cloned) is reset to HEAD instead of leaving the hook silent for good.
+func TestMarker_ResetWhenUnresolvable(t *testing.T) {
+	f := newFixture(t)
+	f.commit(map[string]string{mem(appHash, "a.md"): "a\n"})
+	marker := filepath.Join(t.TempDir(), "seen")
+	if err := os.WriteFile(marker, []byte(strings.Repeat("ab", 20)+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	head := f.commit(map[string]string{mem(appHash, "new.md"): "n\n"})
+	o := Options{SyncDir: f.repo.Dir, ClaudeDir: f.claude, Marker: marker, UpdateMarker: true, Limit: 20}
+	r, err := Compute(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Reset || r.Total != 0 || len(r.Changes) != 0 || r.Since != head {
+		t.Errorf("want a reset with nothing reported: %+v", r)
+	}
+	if b, _ := os.ReadFile(marker); strings.TrimSpace(string(b)) != head {
+		t.Errorf("marker = %q, want HEAD", b)
+	}
+	// The next run is normal again.
+	f.commit(map[string]string{mem(appHash, "next.md"): "x\n"})
+	r, err = Compute(o)
+	if err != nil || r.Reset || r.Total != 1 {
+		t.Errorf("after reset: %+v %v", r, err)
+	}
+}
+
+func TestMarker_WrittenAtomically(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "new", "markers")
+	path := filepath.Join(dir, "seen")
+	if err := writeMarker(path, "abc"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMarker(path, "def"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "def\n" {
+		t.Errorf("marker = %q", b)
+	}
+	if st, _ := os.Stat(path); st.Mode().Perm() != 0600 {
+		t.Errorf("file mode = %v, want 0600", st.Mode().Perm())
+	}
+	if st, _ := os.Stat(dir); st.Mode().Perm() != 0700 {
+		t.Errorf("dir mode = %v, want 0700", st.Mode().Perm())
+	}
+	// No temp files are left behind.
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("leftover files: %v", entries)
+	}
+}
+
+// git sees a rename as a delete plus an add; --no-renames keeps it that way.
+func TestCompute_RenameIsDeletePlusAdd(t *testing.T) {
+	f := newFixture(t)
+	body := strings.Repeat("the same long note body\n", 20)
+	base := f.commit(map[string]string{mem(appHash, "old.md"): body})
+	f.commit(map[string]string{mem(appHash, "old.md"): "", mem(appHash, "new.md"): body})
+	r, err := Compute(f.opts(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, nu := find(r, "old.md"), find(r, "new.md")
+	if r.Total != 2 || old == nil || old.Status != "deleted" || nu == nil || nu.Status != "added" {
+		t.Errorf("want delete + add, got %+v", r.Changes)
+	}
+}
+
+// Note contents must never leak into any output, only names and paths.
+func TestOutput_NeverContainsNoteContent(t *testing.T) {
+	const secret = "SECRET-NOTE-CONTENT-7f3a"
+	f := newFixture(t)
+	base := f.commit(map[string]string{mem(appHash, "a.md"): "a\n"})
+	f.commit(map[string]string{mem(appHash, "a.md"): secret + " one\n", mem(appHash, "b.md"): secret + " two\n"})
+	r, err := Compute(f.opts(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(r)
+	if r.Total != 2 || strings.Contains(r.Text(), secret) || strings.Contains(string(b), secret) {
+		t.Errorf("note content leaked (total %d):\n%s\n%s", r.Total, r.Text(), b)
 	}
 }

@@ -25,9 +25,11 @@ type Options struct {
 	SyncDir   string // the sync work-tree (a git repo)
 	ClaudeDir string // ~/.claude/projects, used to build each change's local path
 
-	// Since is a git revision (SHA, abbreviated SHA, branch, HEAD~3, ...) or
-	// the path of a marker file whose first line is one.
-	Since string
+	// Since is a git revision (SHA, abbreviated SHA, branch, HEAD~3, ...).
+	// Marker is the path of a file whose first line is one. Exactly one of
+	// the two must be set.
+	Since  string
+	Marker string
 
 	// Project limits the report to one project: a project directory such as
 	// /home/alice/src/app, or Claude's escaped folder name for it.
@@ -37,9 +39,11 @@ type Options struct {
 	// Zero means no cap.
 	Limit int
 
-	// UpdateMarker rewrites the marker file named by Since to the current HEAD
-	// once the report is built. A marker file that does not exist yet is
-	// created and nothing is reported: that run only sets the baseline.
+	// UpdateMarker rewrites Marker to the current HEAD once the report is
+	// built; it is only valid with Marker. A marker file that does not exist
+	// yet is created and nothing is reported: that run only sets the baseline.
+	// A marker whose commit no longer exists is reset the same way and the
+	// result has Reset set.
 	UpdateMarker bool
 }
 
@@ -55,7 +59,8 @@ type Change struct {
 // Result is what Compute returns and what --json prints.
 type Result struct {
 	Head    string   `json:"head"`    // current HEAD of the sync repo
-	Since   string   `json:"since"`   // the commit Since resolved to
+	Since   string   `json:"since"`   // the commit Since or Marker resolved to
+	Reset   bool     `json:"reset"`   // the marker named a lost commit and was reset to Head
 	Total   int      `json:"total"`   // number of changed files
 	More    int      `json:"more"`    // changes not listed because of Limit
 	Changes []Change `json:"changes"` // never nil
@@ -72,17 +77,26 @@ func Compute(opts Options) (Result, error) {
 	}
 	res.Head = head
 
-	since, isMarker, err := resolveSince(repo, opts)
+	if opts.Since == "" && opts.Marker == "" {
+		return res, errors.New("one of --since and --marker is required")
+	}
+	if opts.Since != "" && opts.Marker != "" {
+		return res, errors.New("--since and --marker cannot be used together")
+	}
+	if opts.UpdateMarker && opts.Marker == "" {
+		return res, errors.New("--update-marker needs --marker")
+	}
+
+	since, err := resolveSince(repo, opts)
 	if err != nil {
 		return res, err
 	}
-	if opts.UpdateMarker && !isMarker {
-		return res, fmt.Errorf("--update-marker needs --since to be a marker file, not a revision")
-	}
 	if since == "" {
-		// Marker file did not exist: this run only records the baseline.
+		// Marker file missing or its commit lost: this run only records the
+		// baseline.
 		res.Since = head
-		return res, writeMarker(opts.Since, head)
+		res.Reset = opts.Marker != "" && markerExists(opts.Marker)
+		return res, writeMarker(opts.Marker, head)
 	}
 	res.Since = since
 
@@ -107,46 +121,55 @@ func Compute(opts Options) (Result, error) {
 		res.Changes = []Change{}
 	}
 	if opts.UpdateMarker {
-		if err := writeMarker(opts.Since, head); err != nil {
+		if err := writeMarker(opts.Marker, head); err != nil {
 			return res, err
 		}
 	}
 	return res, nil
 }
 
-// resolveSince turns opts.Since into a commit SHA. isMarker reports whether it
-// came from a marker file. An empty SHA with a nil error means the marker file
-// does not exist yet and opts.UpdateMarker is set.
-func resolveSince(repo *gitwt.Repo, opts Options) (sha string, isMarker bool, err error) {
-	s := opts.Since
-	if s == "" {
-		return "", false, errors.New("--since is required")
+// resolveSince turns opts.Since or opts.Marker into a commit SHA. An empty SHA
+// with a nil error means the marker has to be (re)created: the file does not
+// exist yet, or names a commit that is gone, and opts.UpdateMarker is set.
+func resolveSince(repo *gitwt.Repo, opts Options) (string, error) {
+	if s := opts.Since; s != "" {
+		if strings.HasPrefix(s, "-") {
+			return "", fmt.Errorf("--since %q is not a revision", s)
+		}
+		sha, ok := revParse(repo, s)
+		if !ok {
+			return "", fmt.Errorf("--since %q is not a commit in %s", s, opts.SyncDir)
+		}
+		return sha, nil
 	}
-	if strings.HasPrefix(s, "-") {
-		return "", false, fmt.Errorf("--since %q is not a revision or marker file", s)
-	}
-	if sha, ok := revParse(repo, s); ok {
-		return sha, false, nil
-	}
-	b, err := os.ReadFile(s)
+	m := opts.Marker
+	b, err := os.ReadFile(m)
 	switch {
 	case errors.Is(err, fs.ErrNotExist) && opts.UpdateMarker:
-		return "", true, nil
+		return "", nil
 	case errors.Is(err, fs.ErrNotExist):
-		return "", false, fmt.Errorf("--since %q is neither a commit in %s nor an existing marker file", s, opts.SyncDir)
+		return "", fmt.Errorf("marker %s does not exist", m)
 	case err != nil:
-		return "", false, fmt.Errorf("read marker: %w", err)
+		return "", fmt.Errorf("read marker: %w", err)
 	}
 	line, _, _ := strings.Cut(string(b), "\n")
 	line = strings.TrimSpace(line)
 	if line == "" || strings.HasPrefix(line, "-") {
-		return "", false, fmt.Errorf("marker %s does not contain a commit", s)
+		return "", fmt.Errorf("marker %s does not contain a commit", m)
 	}
 	sha, ok := revParse(repo, line)
-	if !ok {
-		return "", false, fmt.Errorf("marker %s names %q, which is not a commit in %s", s, line, opts.SyncDir)
+	switch {
+	case ok:
+		return sha, nil
+	case opts.UpdateMarker:
+		return "", nil
 	}
-	return sha, true, nil
+	return "", fmt.Errorf("marker %s names %q, which is not a commit in %s", m, line, opts.SyncDir)
+}
+
+func markerExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // revParse resolves rev to a full commit SHA.
@@ -158,14 +181,39 @@ func revParse(repo *gitwt.Repo, rev string) (string, bool) {
 	return strings.TrimSpace(out), true
 }
 
-func writeMarker(path, sha string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return fmt.Errorf("write marker: %w", err)
+// writeMarker replaces the marker atomically: a half-written marker would
+// make the next run fail, so write a temp file beside it and rename.
+func writeMarker(path, sha string) (err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("write marker: %w", err)
+		}
+	}()
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
 	}
-	if err := os.WriteFile(path, []byte(sha+"\n"), 0600); err != nil {
-		return fmt.Errorf("write marker: %w", err)
+	tmp, err := os.CreateTemp(dir, ".marker-*")
+	if err != nil {
+		return err
 	}
-	return nil
+	defer os.Remove(tmp.Name()) // no-op once renamed
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.WriteString(sha + "\n"); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 var driveName = regexp.MustCompile(`^[A-Za-z]--`)
