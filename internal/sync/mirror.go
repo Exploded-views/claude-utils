@@ -576,6 +576,7 @@ func reconcilePresent(name, mp string, mExists bool, mBytes []byte, locals []loc
 	same = same && (!mExists || bytes.Equal(mBytes, first.bytes))
 
 	var final []byte
+	wasMerged := false
 	switch {
 	case same:
 		final = first.bytes
@@ -599,6 +600,7 @@ func reconcilePresent(name, mp string, mExists bool, mBytes []byte, locals []loc
 			return err
 		}
 		rep.Merged = append(rep.Merged, first.rel)
+		wasMerged = true
 
 	default:
 		winner := first
@@ -633,7 +635,9 @@ func reconcilePresent(name, mp string, mExists bool, mBytes []byte, locals []loc
 		}
 	}
 
-	// Bring every local folder up to the final content.
+	// Bring every local folder up to the final content. A merge is reported as
+	// Merged only, as it always was.
+	reported := len(rep.CopiedToClaude)
 	for _, lc := range locals {
 		if lc.have && bytes.Equal(lc.bytes, final) {
 			continue
@@ -641,6 +645,9 @@ func reconcilePresent(name, mp string, mExists bool, mBytes []byte, locals []loc
 		if err := toClaude(lc, final); err != nil {
 			return err
 		}
+	}
+	if wasMerged {
+		rep.CopiedToClaude = rep.CopiedToClaude[:reported]
 	}
 	return nil
 }
