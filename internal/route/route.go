@@ -295,21 +295,24 @@ func (r *Router) Decide(folder string) Decision {
 	}
 	r.mu.Unlock()
 
-	gen := r.gen.Load()
-	d := r.decide(folder)
-	if r.afterCompute != nil {
-		r.afterCompute()
-	}
-
-	r.mu.Lock()
-	// The table changed while this was computed: the answer stands for this
-	// call only, and is neither cached nor recorded as an owner.
-	if r.gen.Load() == gen {
+	for {
+		gen := r.gen.Load()
+		d := r.decide(folder)
+		if r.afterCompute != nil {
+			r.afterCompute()
+		}
+		r.mu.Lock()
+		// The table changed while this was computed: decide again against the
+		// current one, so no caller gets an answer from the old table.
+		if r.gen.Load() != gen {
+			r.mu.Unlock()
+			continue
+		}
 		r.cache[folder] = d
 		r.noteLocked(folder, d)
+		r.mu.Unlock()
+		return d
 	}
-	r.mu.Unlock()
-	return d
 }
 
 func (r *Router) decide(folder string) Decision {

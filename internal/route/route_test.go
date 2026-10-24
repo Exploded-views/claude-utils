@@ -529,8 +529,8 @@ func TestDecideDoesNotCacheAcrossReplace(t *testing.T) {
 			r.Replace(fileOf())
 		}
 	}
-	if d := r.Decide("-a"); d.Repo != "projects" {
-		t.Fatalf("setup: %+v", d)
+	if d := r.Decide("-a"); d.Repo != "" {
+		t.Fatalf("returned a decision from the replaced table: %+v", d)
 	}
 	if d := r.Decide("-a"); d.Repo != "" {
 		t.Fatalf("stale decision cached after Replace: %+v", d)
@@ -555,5 +555,16 @@ func TestRemoteResolutionIgnoresInheritedGitEnv(t *testing.T) {
 	t.Setenv("GIT_CONFIG_VALUE_0", "git@github.com:me/mine.git")
 	if d := broadRouter(root).Decide(escape(repo)); d.Repo != "client-a" {
 		t.Fatalf("env steered resolution: %+v", d)
+	}
+}
+
+func TestBareStringRepoGetsTheSpecificRefusal(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "r.json")
+	if err := os.WriteFile(p, []byte(`{"repos":{"a":"/some/config.json"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(p)
+	if err == nil || !strings.Contains(err.Error(), "a bare path does not say what the repo is") || !strings.Contains(err.Error(), `"kind"`) {
+		t.Fatalf("err = %v", err)
 	}
 }
