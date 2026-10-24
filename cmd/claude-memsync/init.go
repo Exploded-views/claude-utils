@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
+	"github.com/MarimerLLC/claude-utils/internal/scrub"
 	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
 
@@ -27,6 +29,7 @@ func runInit(args []string) int {
 	syncDir := flags.String("sync-dir", "", "override sync work-tree (default: ~/.claudesync)")
 	claudeDir := flags.String("claude-dir", "", "override Claude projects directory (default: ~/.claude/projects)")
 	force := flags.Bool("force", false, "re-init even if sync-dir already exists")
+	denylist := flags.String("denylist", "", "UTF-8 file of regexes (one per line) to install as the denylist before the first commit")
 
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -35,6 +38,17 @@ func runInit(args []string) int {
 		fmt.Fprintln(os.Stderr, "init: --remote is required")
 		flags.Usage()
 		return 2
+	}
+
+	// Read and validate up front: a bad denylist must stop init before it
+	// touches the sync dir or the remote.
+	var denylistData []byte
+	if *denylist != "" {
+		var err error
+		if denylistData, err = readDenylistFile(*denylist); err != nil {
+			fmt.Fprintln(os.Stderr, "init:", err)
+			return 1
+		}
 	}
 
 	cfg := config.Defaults()
@@ -53,14 +67,30 @@ func runInit(args []string) int {
 	}
 	cfg.MergeDriverPath = driver
 
-	if err := bootstrap(cfg, *force); err != nil {
+	if err := bootstrap(cfg, *force, denylistData); err != nil {
 		fmt.Fprintln(os.Stderr, "init failed:", err)
 		return 1
 	}
 	return 0
 }
 
-func bootstrap(cfg config.Config, force bool) error {
+// readDenylistFile reads a user-supplied denylist and checks that it parses,
+// so init never installs one the daemon would refuse to use.
+func readDenylistFile(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("--denylist: %w", err)
+	}
+	if _, err := scrub.ParseDenylist(bytes.NewReader(data)); err != nil {
+		return nil, fmt.Errorf("--denylist %s: %w", path, err)
+	}
+	return data, nil
+}
+
+// bootstrap sets up the sync repo. A non-nil denylist is written to
+// cfg.DenylistPath() before the first CommitMirror, so the bootstrap commit is
+// already scrubbed against it.
+func bootstrap(cfg config.Config, force bool, denylist []byte) error {
 	// Step 1: ensure SyncDir exists / is empty.
 	info, err := os.Stat(cfg.SyncDir)
 	switch {
@@ -122,6 +152,12 @@ func bootstrap(cfg config.Config, force bool) error {
 	// Step 4: write config.json.
 	if err := config.Save(cfg); err != nil {
 		return fmt.Errorf("save config: %w", err)
+	}
+
+	if denylist != nil {
+		if err := os.WriteFile(cfg.DenylistPath(), denylist, 0600); err != nil {
+			return fmt.Errorf("install denylist: %w", err)
+		}
 	}
 
 	// Step 5: bidirectional reconcile of Claude tree ↔ mirror.
