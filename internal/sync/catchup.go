@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
@@ -41,15 +42,26 @@ func loadSyncedHead(repo *gitwt.Repo) (string, error) {
 	return strings.TrimSpace(string(b)), err
 }
 
+// detachedLogged is set once the detached HEAD is logged, so a HEAD that stays
+// detached is logged once, not every cycle.
+var detachedLogged atomic.Bool
+
 // recordHead writes HEAD as the last propagated commit, atomically. It writes
 // nothing while a rebase or merge is stopped or HEAD is detached: HEAD is then
 // somewhere in the middle of the user's resolution, and recording it would make
 // the commits below it look propagated when they were never copied to ~/.claude.
 func recordHead(repo *gitwt.Repo) error {
 	head := headRev(repo)
-	if head == "" || handResolving(repo) || repo.HeadDetached() {
+	if head == "" || handResolving(repo) {
 		return nil
 	}
+	if repo.HeadDetached() {
+		if !detachedLogged.Swap(true) {
+			log.Println("HEAD of the sync repo is detached: not recording what was synced until it is on a branch again (git -C ~/.claudesync checkout main)")
+		}
+		return nil
+	}
+	detachedLogged.Store(false)
 	return writeSynced(syncedHeadPath(repo), []byte(head+"\n"))
 }
 

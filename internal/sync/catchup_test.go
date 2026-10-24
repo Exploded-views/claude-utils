@@ -459,3 +459,32 @@ func TestDocs_ResolutionWithAutostashConflict(t *testing.T) {
 	f.restart()
 	f.requireDocsOutcome(true)
 }
+
+// HEAD staying detached, with no rebase or merge, is logged once, not every cycle.
+func TestRecordHead_LogsOnceWhileDetached(t *testing.T) {
+	detachedLogged.Store(false)
+	f := newPullFixture(t, map[string]string{"clean.md": "a\nb\n"})
+	logs := captureLog(t)
+	mustGit(t, f.repo, "checkout", "-q", "--detach")
+	logs.Reset()
+	for i := 0; i < 3; i++ {
+		if err := recordHead(f.repo); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := strings.Count(logs.String(), "detached"); n != 1 {
+		t.Errorf("want one log line, got %d:\n%s", n, logs)
+	}
+	mustGit(t, f.repo, "checkout", "-q", "main")
+	if err := recordHead(f.repo); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, f.repo, "checkout", "-q", "--detach")
+	logs.Reset()
+	if err := recordHead(f.repo); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(logs.String(), "detached"); n != 1 {
+		t.Errorf("a second detachment is not logged: %d\n%s", n, logs)
+	}
+}
