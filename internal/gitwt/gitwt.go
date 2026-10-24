@@ -317,10 +317,13 @@ func (r *Repo) Fetch(branch string) error {
 // reflogAction, so that the reflog says who started it (see ReflogSubjects);
 // ref logging is forced on so those entries exist, and the merge backend so
 // they have the "(start)" form whatever rebase.backend the user set.
-func (r *Repo) RebaseOnto(branch, reflogAction string) error {
-	_, err := r.run([]string{"GIT_REFLOG_ACTION=" + reflogAction}, nil,
-		"-c", "core.logAllRefUpdates=true", "-c", "rebase.backend=merge",
-		"rebase", "--fork-point", "--autostash", "origin/"+branch)
+//
+// opts are extra options for the rebase (for example "-Xno-renames").
+func (r *Repo) RebaseOnto(branch, reflogAction string, opts ...string) error {
+	args := []string{"-c", "core.logAllRefUpdates=true", "-c", "rebase.backend=merge", "rebase", "--fork-point", "--autostash"}
+	args = append(args, opts...)
+	args = append(args, "origin/"+branch)
+	_, err := r.run([]string{"GIT_REFLOG_ACTION=" + reflogAction}, nil, args...)
 	return err
 }
 

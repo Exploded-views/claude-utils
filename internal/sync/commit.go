@@ -31,32 +31,27 @@ const denylistRel = "denylist.txt"
 // merge or rebase is unresolved, a file with conflict markers is never staged:
 // CommitMirror fails instead (see refuseConflictMarkers).
 func CommitMirror(repo *gitwt.Repo, cfg config.Config, msg string) (bool, error) {
-	return CommitMirrorOwned(repo, cfg, msg, nil)
-}
-
-// CommitMirrorOwned is CommitMirror for a repo that owns only some Claude
-// folders (nil: all). With cfg.ArchiveDeletes, a note deleted from a folder the
-// repo owns is moved to archive/ in the same commit instead of leaving the repo
-// (see archiveDeletes).
-func CommitMirrorOwned(repo *gitwt.Repo, cfg config.Config, msg string, owns func(folder string) bool) (bool, error) {
 	if err := refuseConflictMarkers(repo); err != nil {
 		return false, err
 	}
 	if err := repo.AddAll(); err != nil {
 		return false, fmt.Errorf("add: %w", err)
 	}
-	var archived map[string]string // archive path -> the deleted path it keeps
-	if cfg.ArchiveDeletes {
-		var err error
-		if archived, err = archiveDeletes(repo, cfg, owns); err != nil {
-			return false, fmt.Errorf("archive deletes: %w", err)
-		}
-	}
 	// Per-PC file: never part of a commit, whatever the scrub setting. Matched
 	// case-insensitively so "Denylist.txt" from a copy or a case-folding file
 	// system is caught too.
 	if err := repo.UnstageFold(denylistRel); err != nil {
 		return false, fmt.Errorf("unstage denylist: %w", err)
+	}
+	// With archiveDeletes, each deleted note gets an archive copy staged beside
+	// its deletion. The scrub below may hold a copy back; finishArchive then
+	// holds the deletion back with it and writes the index only for the rest.
+	var units []archiveUnit
+	if cfg.ArchiveDeletes {
+		var err error
+		if units, err = stageArchiveCopies(repo, cfg); err != nil {
+			return false, fmt.Errorf("archive deletes: %w", err)
+		}
 	}
 	if cfg.Scrub {
 		ok, err := holdBack(repo, cfg)
@@ -66,9 +61,9 @@ func CommitMirrorOwned(repo *gitwt.Repo, cfg config.Config, msg string, owns fun
 		if !ok {
 			return false, nil
 		}
-		if err := keepDeletesWithArchive(repo, archived); err != nil {
-			return false, err
-		}
+	}
+	if err := finishArchive(repo, cfg, units); err != nil {
+		return false, fmt.Errorf("archive deletes: %w", err)
 	}
 	return repo.Commit(msg)
 }

@@ -301,7 +301,11 @@ func TestReconcileArchivesInsteadOfPruning(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(distilled, "gone.md")); !os.IsNotExist(err) {
 		t.Error("gone.md should have left the catalog")
 	}
-	got, err := os.ReadFile(filepath.Join(root, "archive", "2026-10-25", "distilled", "gone.md"))
+	matches, _ := filepath.Glob(filepath.Join(root, "archive", "2026-10-25", "distilled", "gone.*.md"))
+	if len(matches) != 1 {
+		t.Fatalf("archived entry files: %v", matches)
+	}
+	got, err := os.ReadFile(matches[0])
 	if err != nil || string(got) != entry {
 		t.Fatalf("archived entry: %q %v", got, err)
 	}

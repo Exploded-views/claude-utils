@@ -7,6 +7,8 @@ package archive
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -47,42 +49,38 @@ type Entry struct {
 	Path                       string // slash-separated, relative to the repo root
 }
 
-// Place writes content under archive/<today>/<folder>/<name> in root and returns
-// the slash-separated path relative to root. A name already taken that day gets
-// a suffix before its extension (note.md, note.2.md, ...): nothing is overwritten.
+// Place writes content under archive/<today>/<folder>/ in root and returns the
+// slash-separated path relative to root. The file name carries the first eight
+// hex digits of the content's SHA-256 before the extension (note.md becomes
+// note.3f2a9c1b.md). Identical copies therefore share one path, which two hosts
+// archiving the same note on the same day turn into one identical add, and
+// different content never shares one: nothing is overwritten, nothing collides.
+// A path already holding other bytes (a hash prefix collision, or a file
+// planted there) is skipped for a longer prefix.
 func Place(root, folder, name string, content []byte) (string, error) {
-	return PlaceReuse(root, folder, name, content, nil)
-}
-
-// PlaceReuse is Place, except that a taken path for which reuse returns true and
-// whose bytes equal content is returned as it is. A retry of an archive that did
-// not finish uses it to land on the file it already wrote.
-func PlaceReuse(root, folder, name string, content []byte, reuse func(rel string) bool) (string, error) {
 	date := Date()
 	ext := path.Ext(name)
 	stem := strings.TrimSuffix(name, ext)
-	for n := 1; ; n++ {
-		cand := name
-		if n > 1 {
-			cand = fmt.Sprintf("%s.%d%s", stem, n, ext)
-		}
-		rel := path.Join(Dir, date, folder, cand)
-		full := filepath.Join(root, filepath.FromSlash(rel))
-		existing, err := os.ReadFile(full)
+	sum := sha256.Sum256(content)
+	full := hex.EncodeToString(sum[:])
+	for _, n := range []int{8, 16, 32, 64} {
+		rel := path.Join(Dir, date, folder, stem+"."+full[:n]+ext)
+		fp := filepath.Join(root, filepath.FromSlash(rel))
+		existing, err := os.ReadFile(fp)
 		switch {
 		case err == nil:
-			if reuse != nil && reuse(rel) && bytes.Equal(existing, content) {
-				return rel, nil
+			if bytes.Equal(existing, content) {
+				return rel, nil // an earlier cycle wrote it (held back, or a peer)
 			}
 			continue
 		case !errors.Is(err, fs.ErrNotExist):
 			return "", err
 		}
-		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+		if err := os.MkdirAll(filepath.Dir(fp), 0o700); err != nil {
 			return "", err
 		}
 		// O_EXCL: never replace a file that appeared since the read above.
-		f, err := os.OpenFile(full, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		f, err := os.OpenFile(fp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if errors.Is(err, fs.ErrExist) {
 			continue
 		}
@@ -98,6 +96,7 @@ func PlaceReuse(root, folder, name string, content []byte, reuse func(rel string
 		}
 		return rel, nil
 	}
+	return "", errors.New("archive: no free path for " + name)
 }
 
 func indexLine(e Entry) string {
@@ -145,6 +144,12 @@ func List(root, since string) ([]Entry, error) {
 		}
 	}
 	base := filepath.Join(root, Dir)
+	if fi, err := os.Lstat(base); err != nil || !fi.IsDir() {
+		if err == nil || errors.Is(err, fs.ErrNotExist) {
+			return nil, nil // no archive (or a link posing as one)
+		}
+		return nil, err
+	}
 	dates, err := os.ReadDir(base)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -164,8 +169,8 @@ func List(root, since string) ([]Entry, error) {
 			if err != nil {
 				return err
 			}
-			if de.IsDir() {
-				return nil
+			if !de.Type().IsRegular() {
+				return nil // a directory, or a symlink or device: never followed
 			}
 			rel, _ := filepath.Rel(filepath.Join(base, d.Name()), p)
 			parts := strings.SplitN(filepath.ToSlash(rel), "/", 2)

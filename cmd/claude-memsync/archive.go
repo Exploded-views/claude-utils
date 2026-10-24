@@ -10,6 +10,7 @@ import (
 
 	"github.com/MarimerLLC/claude-utils/internal/archive"
 	"github.com/MarimerLLC/claude-utils/internal/config"
+	"github.com/MarimerLLC/claude-utils/internal/scrub"
 )
 
 // runArchive implements `claude-memsync archive list|search`. The archive is
@@ -68,6 +69,7 @@ func archiveCmd(stdout, stderr io.Writer, args []string) int {
 		if len(targets) > 1 {
 			prefix = "[" + t.name + "] "
 		}
+		hide, hidden := t.hider(stderr), 0
 		switch sub {
 		case "list":
 			entries, err := archive.List(t.syncDir, *since)
@@ -76,6 +78,10 @@ func archiveCmd(stdout, stderr io.Writer, args []string) int {
 				return 1
 			}
 			for _, e := range entries {
+				if hide(e.Path) {
+					hidden++
+					continue
+				}
 				fmt.Fprintf(stdout, "%s%s  %s  %s\n", prefix, e.Date, e.Folder, e.File)
 			}
 		case "search":
@@ -85,6 +91,10 @@ func archiveCmd(stdout, stderr io.Writer, args []string) int {
 				return 1
 			}
 			for _, h := range hits {
+				if hide(h.Path) {
+					hidden++ // a name the denylist lists is never printed
+					continue
+				}
 				if !*show {
 					fmt.Fprintf(stdout, "%s%s  (%d matching %s)\n", prefix, h.Path, len(h.Lines), plural(len(h.Lines), "line", "lines"))
 					continue
@@ -95,11 +105,38 @@ func archiveCmd(stdout, stderr io.Writer, args []string) int {
 				}
 			}
 		}
+		if hidden > 0 {
+			fmt.Fprintf(stdout, "%s(%d hidden by the denylist)\n", prefix, hidden)
+		}
 	}
 	return 0
 }
 
-type archiveTarget struct{ name, syncDir string }
+type archiveTarget struct {
+	name, syncDir string
+	denylist      string // the repo's denylist file
+}
+
+// hider returns a test for paths the repo's denylist hides. No denylist file:
+// nothing is hidden. One that exists but cannot be used hides everything, as
+// `changes` does, since it cannot vouch for any name.
+func (t archiveTarget) hider(stderr io.Writer) func(string) bool {
+	f, err := os.Open(t.denylist)
+	if errors.Is(err, fs.ErrNotExist) {
+		return func(string) bool { return false }
+	}
+	var deny []scrub.DenylistPattern
+	if err == nil {
+		deny, err = scrub.ParseDenylist(f)
+		f.Close()
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "archive: cannot use denylist %s (%v); listing no file names\n", t.denylist, err)
+		return func(string) bool { return true }
+	}
+	sc := scrub.New(deny)
+	return sc.MatchesPath
+}
 
 // archiveTargets are the repos to read: the one named by --config, else every
 // repo of the routes file this host has, else the default sync dir. Archives
@@ -110,7 +147,7 @@ func archiveTargets(cfgPath, routesFlag string) ([]archiveTarget, error) {
 		if err != nil {
 			return nil, err
 		}
-		return []archiveTarget{{"", cfg.SyncDir}}, nil
+		return []archiveTarget{{"", cfg.SyncDir, cfg.DenylistPath()}}, nil
 	}
 	path, ok, err := resolveRoutesPath(routesFlag)
 	if err != nil {
@@ -123,7 +160,7 @@ func archiveTargets(cfgPath, routesFlag string) ([]archiveTarget, error) {
 		}
 		var out []archiveTarget
 		for _, n := range set.names() {
-			out = append(out, archiveTarget{n, set.Cfgs[n].SyncDir})
+			out = append(out, archiveTarget{n, set.Cfgs[n].SyncDir, set.Cfgs[n].DenylistPath()})
 		}
 		return out, nil
 	}
@@ -134,5 +171,5 @@ func archiveTargets(cfgPath, routesFlag string) ([]archiveTarget, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []archiveTarget{{"", cfg.SyncDir}}, nil
+	return []archiveTarget{{"", cfg.SyncDir, cfg.DenylistPath()}}, nil
 }

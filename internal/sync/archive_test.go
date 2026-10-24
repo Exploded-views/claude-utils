@@ -1,6 +1,8 @@
 package sync
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,6 +55,13 @@ func (f *pullFixture) flushOK() {
 	}
 }
 
+// archPath is where archive.Place puts a note's bytes on archDay.
+func archPath(folder, name, content string) string {
+	h := sha256.Sum256([]byte(content))
+	ext := filepath.Ext(name)
+	return "archive/" + archDay + "/" + folder + "/" + strings.TrimSuffix(name, ext) + "." + hex.EncodeToString(h[:])[:8] + ext
+}
+
 func headTree(t *testing.T, r *gitwt.Repo) string {
 	t.Helper()
 	return mustGit(t, r, "ls-tree", "-r", "--name-only", "HEAD")
@@ -62,7 +71,7 @@ func TestArchive_DeleteOnHostA_ArchivedInRepo_RemovedOnHostB(t *testing.T) {
 	a := archivePC(t, map[string]string{"gone.md": "remember this\n", "keep.md": "k\n"})
 	b := a.addPC("pc-b")
 	b.loop.Cfg.ArchiveDeletes = true
-	arch := "archive/" + archDay + "/p1/gone.md"
+	arch := archPath("p1", "gone.md", "remember this\n")
 
 	a.userDeletes("gone.md")
 	a.flushOK()
@@ -223,24 +232,20 @@ func TestArchive_FlagOff_DeleteIsADelete(t *testing.T) {
 	}
 }
 
-func TestArchive_UnownedFolderIsNotArchivedByThisRepo(t *testing.T) {
+// The archive stays in the same repo, so it can only keep data: a delete is
+// archived whoever owns the folder.
+func TestArchive_AnyDeleteIsArchived(t *testing.T) {
 	a := archivePC(t, map[string]string{"keep.md": "k\n"})
-	a.roots.Owns = only("p1") // this repo does not own "pc"
-	writeMem(t, a.roots.Claude, "pc", "client.md", "client note\n")
-	// The client folder's note exists in this repo's history only as a frozen copy.
-	a.peerWrite("projects/pc/memory/client.md", "client note\n")
+	a.roots.Owns = only("p1")
+	a.peerWrite("projects/pc/memory/c.md", "frozen client copy\n")
 	a.flushOK()
-	pcNote := filepath.Join(a.roots.Claude, "pc", "memory", "client.md")
-	if err := os.Remove(pcNote); err != nil {
+	if err := os.Remove(filepath.Join(a.roots.Mirror, "pc", "memory", "c.md")); err != nil {
 		t.Fatal(err)
 	}
-	handled, err := a.loop.handleEvent(nil, a.roots, fsnotify.Event{Name: pcNote, Op: fsnotify.Remove})
-	if err != nil || handled {
-		t.Fatalf("handled=%v err=%v", handled, err)
-	}
 	a.flushOK()
-	if tree := headTree(t, a.repo); strings.Contains(tree, "archive/") {
-		t.Errorf("a folder this repo does not own was archived:\n%s", tree)
+	tree := headTree(t, a.repo)
+	if strings.Contains(tree, "projects/pc/memory/c.md") || !strings.Contains(tree, archPath("pc", "c.md", "frozen client copy\n")) {
+		t.Errorf("delete not archived:\n%s", tree)
 	}
 }
 
@@ -249,7 +254,7 @@ func TestArchive_UnownedFolderIsNotArchivedByThisRepo(t *testing.T) {
 func TestArchive_HeldBackCopyKeepsTheDeletionBack(t *testing.T) {
 	a := archivePC(t, map[string]string{"leak.md": "token: " + fakeSecret() + "\n"})
 	a.userDeletes("leak.md")
-	if _, err := CommitMirrorOwned(a.repo, a.loop.Cfg, "auto: test", nil); err != nil {
+	if _, err := CommitMirror(a.repo, a.loop.Cfg, "auto: test"); err != nil {
 		t.Fatal(err)
 	}
 	tree := headTree(t, a.repo)
@@ -281,5 +286,114 @@ func TestArchive_IndexMergesWithUnionDriver(t *testing.T) {
 	idx := mustGit(t, b.repo, "show", "HEAD:archive/INDEX.md")
 	if !strings.Contains(idx, "one.md") || !strings.Contains(idx, "two.md") {
 		t.Errorf("INDEX.md lost a line:\n%s", idx)
+	}
+}
+
+// A held-back copy must keep its note in the tree on every cycle, not only the
+// first: the leftover copy on disk must not pair with the next delete as a
+// rename. Neither the index line nor the union attribute is committed for it.
+func TestArchive_HeldBackNoteSurvivesEveryCycle(t *testing.T) {
+	a := archivePC(t, map[string]string{"leak.md": "token: " + fakeSecret() + "\n"})
+	a.userDeletes("leak.md")
+	for cycle := 1; cycle <= 3; cycle++ {
+		if _, err := CommitMirror(a.repo, a.loop.Cfg, "auto: test"); err != nil {
+			t.Fatal(err)
+		}
+		tree := headTree(t, a.repo)
+		if !strings.Contains(tree, "projects/p1/memory/leak.md") {
+			t.Fatalf("cycle %d: the note left the tree without its archive copy:\n%s", cycle, tree)
+		}
+		if strings.Contains(tree, "archive/") {
+			t.Errorf("cycle %d: archive material committed for a held-back copy:\n%s", cycle, tree)
+		}
+		if strings.Contains(mustGit(t, a.repo, "show", "HEAD:.gitattributes"), "archive/INDEX.md") {
+			t.Errorf("cycle %d: union attribute committed for a held-back copy", cycle)
+		}
+	}
+	// And through the whole loop, twice (park, pull, restore in between).
+	a.flushOK()
+	a.flushOK()
+	if tree := headTree(t, a.repo); !strings.Contains(tree, "projects/p1/memory/leak.md") || strings.Contains(tree, "archive/") {
+		t.Errorf("after two flushes:\n%s", tree)
+	}
+}
+
+// Delete plus a similar new note is git's R<100: the rename is kept, and the
+// old content is archived too, so the edit loses nothing.
+func TestArchive_NotQuiteARename_ArchivesTheOldSide(t *testing.T) {
+	old := strings.Repeat("a line long enough for rename detection\n", 10)
+	edited := old + "one more line\n"
+	a := archivePC(t, map[string]string{"old.md": old})
+	oldP := filepath.Join(a.roots.Claude, "p1", "memory", "old.md")
+	newP := filepath.Join(a.roots.Claude, "p1", "memory", "new.md")
+	_ = os.Remove(oldP)
+	writeMem(t, a.roots.Claude, "p1", "new.md", edited)
+	for _, ev := range []fsnotify.Event{{Name: oldP, Op: fsnotify.Remove}, {Name: newP, Op: fsnotify.Create}} {
+		if _, err := a.loop.handleEvent(nil, a.roots, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.flushOK()
+	tree := headTree(t, a.repo)
+	if !strings.Contains(tree, archPath("p1", "old.md", old)) {
+		t.Errorf("old content not archived:\n%s", tree)
+	}
+	if !strings.Contains(tree, "projects/p1/memory/new.md") || strings.Contains(tree, "projects/p1/memory/old.md") {
+		t.Errorf("tree:\n%s", tree)
+	}
+}
+
+// Two hosts archive the same note on the same day with different bytes (one had
+// not pulled the other's edit). Both pushes succeed and both versions are kept.
+func TestArchive_TwoHostsSameDay_BothVersionsKept(t *testing.T) {
+	a := archivePC(t, map[string]string{"x.md": "v0\n"})
+	b := a.addPC("pc-b")
+	b.loop.Cfg.ArchiveDeletes = true
+
+	a.editLocal("x.md", "v1\n")
+	a.flushOK()
+	a.userDeletes("x.md")
+	a.flushOK() // A archives v1 and pushes
+	b.userDeletes("x.md")
+	b.flushOK() // B (stale) archives v0, pulls and pushes
+
+	for _, f := range []*pullFixture{a, b} {
+		f.flushOK()
+	}
+	out := mustGit(t, gitwt.New(a.origin), "ls-tree", "-r", "--name-only", "main")
+	for _, want := range []string{archPath("p1", "x.md", "v1\n"), archPath("p1", "x.md", "v0\n")} {
+		if !strings.Contains(out, want) {
+			t.Errorf("origin lacks %s:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "projects/p1/memory/x.md") {
+		t.Errorf("note still live:\n%s", out)
+	}
+	if mustGit(t, a.repo, "rev-parse", "HEAD") != mustGit(t, gitwt.New(a.origin), "rev-parse", "main") {
+		t.Error("A is not in step with origin")
+	}
+	idx := mustGit(t, b.repo, "show", "HEAD:archive/INDEX.md")
+	if strings.Count(idx, "\n") != 2 {
+		t.Errorf("INDEX.md:\n%s", idx)
+	}
+}
+
+// Both hosts archive the identical note: one identical add, no conflict.
+func TestArchive_TwoHostsSameBytes_Collapse(t *testing.T) {
+	a := archivePC(t, map[string]string{"x.md": "same\n"})
+	b := a.addPC("pc-b")
+	b.loop.Cfg.ArchiveDeletes = true
+	a.userDeletes("x.md")
+	a.flushOK()
+	b.userDeletes("x.md")
+	b.flushOK()
+	n := 0
+	for _, l := range strings.Split(mustGit(t, gitwt.New(a.origin), "ls-tree", "-r", "--name-only", "main"), "\n") {
+		if strings.HasPrefix(l, "archive/"+archDay+"/p1/x.") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("want one archived copy, got %d", n)
 	}
 }

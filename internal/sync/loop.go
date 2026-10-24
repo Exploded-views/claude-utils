@@ -346,7 +346,7 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	}
 	clearPaused(repo)
 	if includeLocal {
-		_, err := CommitMirrorOwned(repo, l.Cfg, fmt.Sprintf("auto: %s @ %s", l.Hostname, time.Now().UTC().Format(time.RFC3339)), roots.Owns)
+		_, err := CommitMirror(repo, l.Cfg, fmt.Sprintf("auto: %s @ %s", l.Hostname, time.Now().UTC().Format(time.RFC3339)))
 		if err != nil {
 			return fmt.Errorf("commit: %w", err)
 		}
@@ -379,7 +379,7 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	var conflictErr error
 	// The marker names the rebase for the reflog, so the next start knows a
 	// rebase found stopped is ours to abort; it stays while one is.
-	if err := runPull(repo, l.Branch); err != nil {
+	if err := runPull(repo, l.Branch, l.Cfg.ArchiveDeletes); err != nil {
 		if repo.RebaseInProgress() {
 			conflictErr = abortRebaseConflict(repo)
 		} else {

@@ -759,19 +759,26 @@ upstream behavior (a delete is a delete) is unchanged when the key is off.
 Turn it on with `claude-memsync init --archive-deletes`, or set
 `"archiveDeletes": true` in `config.json` (a bootstrap for a fleet of hosts
 should set it on every host). It is per repo: with [several repos](#several-repos-per-host)
-each repo's own `config.json` decides, and a repo only ever archives folders it
-owns, so another repo never archives (or sees) a folder routed elsewhere.
+each repo's own `config.json` decides. A repo's loop only touches the folders it
+owns, so a note deleted from a folder routed to another repo is never seen, and
+never archived, by this one.
 
 What happens:
 
 - **A note deleted from a Claude memory folder** is moved in the repo to
   `archive/<YYYY-MM-DD>/<folder>/<file>` in the same commit that records the
   deletion (git shows a move), and one line is appended to `archive/INDEX.md`:
-  date, folder, file, reason (`deleted on a host`) and the archive path. A name
-  already archived the same day gets a suffix before the extension
-  (`note.md`, `note.2.md`); nothing is overwritten. The deletion is detected at
-  commit time, so a rename (a delete plus a matching add) stays a rename and is
-  not archived.
+  date, folder, file, reason (`deleted on a host`) and the archive path. The file name
+  carries the first eight hex digits of the content's SHA-256 before the
+  extension (`note.3f2a9c1b.md`), so identical copies share one path (two hosts
+  archiving the same note make one identical add) and different content never
+  collides or overwrites. The deletion is detected at commit time: a pure
+  rename (a delete plus a 100% identical add) stays a rename and is not
+  archived, while a rename that also edited the note keeps the rename and
+  archives the old content. To keep two hosts' archive commits from stopping on
+  a rename/delete conflict, the daemon's pull uses `-s recursive -Xno-renames`
+  when `archiveDeletes` is on; an edit to a note another host renamed then
+  conflicts like any text merge instead of following the rename.
 - **Other hosts** pulling that commit remove the note from their `~/.claude`
   copy exactly as for any delete, and never touch `archive/`. The directory is
   never mirrored into `~/.claude`, and routing, Reconcile, the manifest,
@@ -784,7 +791,8 @@ What happens:
   and is not archived as a file. (Deleting the whole file is archived like any
   other note.)
 - **A file the scrub holds back** is not archived, and its deletion waits with
-  it, so a note never leaves the tree without its copy.
+  it (on every cycle, with its index line and union rule), so a note never
+  leaves the tree without its copy.
 - A note created and deleted between two commits was never committed; there is
   nothing in the repo to keep.
 
@@ -795,7 +803,8 @@ claude-memsync archive list [--since 2026-10-01]
 claude-memsync archive search <term> [--show]
 ```
 
-`search` matches file names and contents, case-insensitively, and prints the
+Symlinks in the archive are never followed, and paths matching the denylist
+are not printed (they are counted instead). `search` matches file names and contents, case-insensitively, and prints the
 matching paths with a count of matching lines. `--show` also prints the lines.
 Archived notes are not injected into sessions; search them on demand. With
 several repos, each repo's archive is listed or searched in turn.

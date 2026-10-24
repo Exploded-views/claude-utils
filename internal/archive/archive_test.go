@@ -1,6 +1,8 @@
 package archive
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,51 +21,67 @@ func fixedDay(t *testing.T, day string) {
 	t.Cleanup(func() { Now = old })
 }
 
-func TestPlace_WritesUnderDateAndFolder(t *testing.T) {
+func sha8(b []byte) string {
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])[:8]
+}
+
+func TestPlace_PathCarriesDateFolderAndContentHash(t *testing.T) {
 	root := t.TempDir()
 	fixedDay(t, "2026-10-25")
 	rel, err := Place(root, "p1", "note.md", []byte("body\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rel != "archive/2026-10-25/p1/note.md" {
-		t.Fatalf("rel = %q", rel)
+	if want := "archive/2026-10-25/p1/note." + sha8([]byte("body\n")) + ".md"; rel != want {
+		t.Fatalf("rel = %q, want %q", rel, want)
 	}
 	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
 	if err != nil || string(b) != "body\n" {
 		t.Fatalf("read: %q %v", b, err)
 	}
+	rel2, _ := Place(root, "p1", "README", []byte("x"))
+	if want := "archive/2026-10-25/p1/README." + sha8([]byte("x")); rel2 != want {
+		t.Errorf("no extension: %q, want %q", rel2, want)
+	}
 }
 
-func TestPlace_SameNameSameDayGetsSuffixNeverOverwrites(t *testing.T) {
+// Identical copies collapse to one path (two hosts archiving the same note make
+// one identical add); different content never shares a path, so nothing is
+// overwritten and nothing collides.
+func TestPlace_SameBytesSamePath_DifferentBytesDifferentPath(t *testing.T) {
 	root := t.TempDir()
 	fixedDay(t, "2026-10-25")
 	r1, _ := Place(root, "p1", "note.md", []byte("one\n"))
-	r2, err := Place(root, "p1", "note.md", []byte("two\n"))
-	if err != nil {
-		t.Fatal(err)
+	r1b, err := Place(root, "p1", "note.md", []byte("one\n"))
+	if err != nil || r1 != r1b {
+		t.Fatalf("identical bytes should land on one path: %q %q %v", r1, r1b, err)
 	}
-	r3, _ := Place(root, "p1", "note.md", []byte("three\n"))
-	if r1 == r2 || r2 == r3 || r1 == r3 {
-		t.Fatalf("paths collide: %q %q %q", r1, r2, r3)
+	r2, _ := Place(root, "p1", "note.md", []byte("two\n"))
+	if r1 == r2 {
+		t.Fatal("different bytes share a path")
 	}
-	if !strings.HasSuffix(r2, ".md") || !strings.Contains(r2, "note") {
-		t.Errorf("suffix should keep name and extension: %q", r2)
-	}
-	for rel, want := range map[string]string{r1: "one\n", r2: "two\n", r3: "three\n"} {
+	for rel, want := range map[string]string{r1: "one\n", r2: "two\n"} {
 		if b, _ := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel))); string(b) != want {
 			t.Errorf("%s = %q, want %q", rel, b, want)
 		}
 	}
 }
 
-func TestPlace_RetryWithSameBytesReusesThePath(t *testing.T) {
+func TestPlace_NeverOverwritesAHashCollision(t *testing.T) {
 	root := t.TempDir()
 	fixedDay(t, "2026-10-25")
-	r1, _ := Place(root, "p1", "note.md", []byte("one\n"))
-	r2, _ := PlaceReuse(root, "p1", "note.md", []byte("one\n"), func(string) bool { return true })
-	if r1 != r2 {
-		t.Fatalf("a retry should land on the same path: %q vs %q", r1, r2)
+	// Plant a different file at the path the content would take.
+	rel := "archive/2026-10-25/p1/note." + sha8([]byte("one\n")) + ".md"
+	p := filepath.Join(root, filepath.FromSlash(rel))
+	_ = os.MkdirAll(filepath.Dir(p), 0o700)
+	_ = os.WriteFile(p, []byte("planted\n"), 0o600)
+	got, err := Place(root, "p1", "note.md", []byte("one\n"))
+	if err != nil || got == rel {
+		t.Fatalf("got %q err %v", got, err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != "planted\n" {
+		t.Error("planted file overwritten")
 	}
 }
 
@@ -166,5 +184,32 @@ func TestSearch_UsesTheSwappableReader(t *testing.T) {
 	hits, err := Search(root, "decrypted")
 	if err != nil || len(hits) != 3 {
 		t.Fatalf("hits %v err %v", hits, err)
+	}
+}
+
+// A symlink inside the archive is neither listed nor read: a search must never
+// read outside archive/.
+func TestListAndSearch_SkipSymlinks(t *testing.T) {
+	root := t.TempDir()
+	seed(t, root)
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	_ = os.WriteFile(outside, []byte("needle outside\n"), 0o600)
+	link := filepath.Join(root, "archive", "2026-10-25", "p1", "link.md")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skip("no symlinks here")
+	}
+	dirLink := filepath.Join(root, "archive", "2026-10-26")
+	if err := os.Symlink(filepath.Dir(outside), dirLink); err != nil {
+		t.Skip("no symlinks here")
+	}
+	entries, _ := List(root, "")
+	for _, e := range entries {
+		if strings.Contains(e.Path, "link") || strings.Contains(e.Path, "2026-10-26") || strings.Contains(e.Path, "secret") {
+			t.Errorf("listed through a symlink: %s", e.Path)
+		}
+	}
+	hits, err := Search(root, "outside")
+	if err != nil || len(hits) != 0 {
+		t.Errorf("search read outside the archive: %v %v", hits, err)
 	}
 }
