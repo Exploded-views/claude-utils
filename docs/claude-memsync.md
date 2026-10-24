@@ -251,8 +251,9 @@ segment that Windows reserves as a device name (`con`, `prn`, `aux`, `nul`,
 Trailing dots are dropped too, since Windows drops them from a directory name
 (`app.` is `app`), and a `key` override in the cache must already be in that
 normalized form.
-A remote whose path contains `@` is rejected, because that is what an
-unescaped `/` in a URL password leaves behind.
+A remote with an `@` left in its path or its host is rejected, because that is
+what an unescaped `/` or an `@` in a password leaves behind (`user:p@ss@host:o/r`
+is refused rather than read as host `ss@host`).
 
 ### Finding the directory behind a folder name
 
@@ -306,13 +307,24 @@ edited by hand:
   ambiguous entry). The daemon re-derives the key from it on every refresh.
 - `key` overrides the repo-side key outright, or `"path"` to force the path
   key for that project. It wins over everything else. It must look like what
-  normalization produces: at least two `/`-separated segments, each made of
+  normalization produces: at least three `/`-separated segments (host, owner,
+  repo), each made of
   `[a-z0-9._-]` and none of them `.` or `..`. An invalid value is ignored with
   a logged warning (the file is left as you wrote it) and the folder is
   resolved as if it were absent, so a typo can't point memory outside
   `remotes/`. A key another folder on this PC already holds is refused too
   (see [Worktrees and several clones](#worktrees-and-several-clones)).
-- `lastKey` and `candidates` are written by the daemon and informational.
+- `lastKey` is **the claim, not a note**. It is the key this folder holds on
+  this PC, and no other folder can take that key while it stands. The daemon
+  writes it, but editing it moves ownership: set it on a folder and that folder
+  holds the key (to the exclusion of whichever folder held it before), clear it
+  and the claim is gone. Stop the daemon first, and prefer the `key` override
+  for moving a claim (see
+  [Worktrees and several clones](#worktrees-and-several-clones)).
+- `candidates` is written by the daemon and informational.
+- `leftAt` is written by the daemon: for each repo directory the folder used to
+  be stored in, the sync repo's HEAD commit when it left. See
+  [Changing a folder's key](#changing-a-folders-key).
 
 **Stop the daemon before editing `projects.json`.** The cache is read at
 startup, and the daemon rewrites the file whenever resolution changes, so an
@@ -365,10 +377,63 @@ folder that holds it and `"key": "github.com/acme/app"` (the key) on the one tha
 should, and start the daemon. A `key` override is subject to the same rule: it
 cannot join a key another folder already holds.
 
+**A claim is released only when nothing of its holder is left**: its Claude
+folder (`~/.claude/projects/<hash>`) no longer exists, the directory recorded
+for it gives "no such file", and no directory still decodes from its name. Then
+its cache entry is dropped and a new clone of the repo can claim the key. If the
+Claude folder still exists but the checkout is gone, the claim does **not** move
+by itself (the folder may still be in use, or the checkout may be on an
+unmounted drive). A clone that wants the key is refused, and the daemon logs
+once that the holder's checkout is gone and the exact edit that moves the claim:
+stop the daemon, set `"key": "path"` on the holder and `"key": "<the key>"` on
+the new clone in `.state/projects.json`, and start it again.
+
+### Joining a key
+
+A folder **gains** a key when it claims it for the first time (a new clone, or a
+PC switching to `remote`), when its key changes, or when a claim is moved to it
+as above. Before the daemon acts on anything for that folder (a watcher event, a
+copy to the repo, a pulled change), it **joins** the folder to the notes already
+stored under the key, once. Otherwise a fresh clone's first `MEMORY.md` would
+overwrite the shared index, and a moved claim would let the new holder's stale
+notes replace the current ones. The join is not a normal reconcile: the shared
+side wins and nothing is deleted.
+
+- `MEMORY.md` is merged section by section (as everywhere else) and written to
+  both sides.
+- Any other file that differs keeps the shared version, in the repo and in
+  Claude. The folder's own version is saved next to the shared copy as
+  `<name>.local-before-join-<random>` (git-ignored, local to this PC, never
+  cleaned up; look, then delete).
+- A file only the repo has is copied into Claude.
+- A file only the folder has is copied into the repo.
+- The manifest is **not** used: the folder has no history with this key, so a
+  file missing on one side says nothing about a delete.
+
+### Changing a folder's key
+
+When a folder leaves a repo directory (its key changes from X to Y, including
+from a remote key to the path key) the daemon logs the change with the folder
+name and both keys, and records in `projects.json` the sync repo's HEAD at that
+moment (`leftAt`, one per directory it left). If the folder later uses that
+directory again, a file that only the repo has is imported into Claude **only if
+`git diff leftAt..HEAD` shows it changed since** the folder left. Anything else
+is indistinguishable from a note that was deleted on this PC while the folder
+was elsewhere (the old copy is not updated while a folder is stored under
+another key), so importing it would bring the delete back. When git cannot say
+(the commit is gone, git fails) nothing is imported and the daemon logs why.
+
+The daemon never removes such a leftover from the repo. A `projects/<hash>/`
+copy may be the live notes of a PC that is still on `path`, and removing it
+would delete them there. Clean up old copies by hand once every PC has switched.
+
 `*.from-remote-*` backups (made when a file differs between a PC and the repo
-copy) are git-ignored. They exist only on the PC that produced them, are never
-synced, and are never cleaned up by the daemon; delete them by hand once you've
-looked.
+copy) and `*.local-before-join-*` backups (made by a join) are git-ignored. They
+exist only on the PC that produced them, are never synced, and are never cleaned
+up by the daemon; delete them by hand once you've looked. `claude-memsync init`
+writes the `.gitignore` entries, so run it (with `--force`, which keeps the
+sync dir and its `projectKey`) on a PC whose sync dir predates
+`*.local-before-join-*`.
 
 ### Switching an existing setup
 
@@ -382,11 +447,25 @@ repo, saying that copy is superseded. Remove the old `projects/` copies (with
 repo: a PC left on `path` keeps writing to `projects/` and won't see the others'
 memory.
 
-A fresh clone on a new PC is filled with the shared notes the way any folder is,
-by the reconcile that runs at daemon start and on every pull interval: once
-Claude Code has created the project folder (opening the repo does that), the
-next reconcile copies the shared notes into it, with or without a `memory/`
-directory yet.
+A fresh clone on a new PC is joined to the shared notes (see
+[Joining a key](#joining-a-key)): once Claude Code has created the project
+folder (opening the repo does that), the next reconcile, or the first watcher
+event for it if that comes first, copies the shared notes into it, with or
+without a `memory/` directory yet, and merges what the folder already had.
+
+**Switch every PC that shares a project at the same time, and delete no notes
+until all of them have switched.** While some PCs are on `path` and others on
+`remote`, they write to different places (`projects/<hash>/` and
+`remotes/<key>/`) and see none of each other's changes. A delete is the worst
+case. A `remote` PC's delete removes the file from `remotes/<key>/` only; a PC
+still on `path` keeps the note in its Claude folder, and when it switches it
+joins and pushes that note back. A join cannot tell it from a new note, because
+it never infers a delete from the manifest. The reverse holds too: a note
+deleted on a `path` PC stays in the `remotes/` copy and is copied back into the
+folders of PCs that switch later. The old `projects/<hash>/` copies are
+likewise never removed by the daemon, since a PC that has not switched may be
+using them. So: switch all PCs first, let them sync, and only then delete notes
+or the old `projects/` copies.
 
 ## Deletes
 
@@ -414,6 +493,13 @@ This means:
 - Removing a whole `memory/` directory (`rm -rf`) is the same as deleting each
   file in it, in both modes: the files are removed from the repo, and from every
   other PC when they pull. Do it only when you mean it.
+- Removing a remote-keyed folder's whole **project folder**
+  (`~/.claude/projects/<hash>`, say because the clone is gone) is not a delete
+  of its notes, which other PCs share. The files' remove events are ignored, and
+  before each commit the daemon restores `remotes/<key>/memory` from HEAD for
+  every remote-keyed folder whose Claude folder is missing, then releases the
+  claim if nothing of its holder is left. (Path mode is unchanged: there the
+  same `rm -rf` deletes the notes.)
 
 ## On-disk layout
 
