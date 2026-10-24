@@ -488,7 +488,7 @@ func keepIncoming(repo *gitwt.Repo, roots Roots, preRev, p string, saved []byte,
 			}
 		}
 	}
-	return true, saved, writeAtomic(fmt.Sprintf("%s.from-remote-%s", wp, randSuffix()), incoming)
+	return true, saved, writeBackup(wp, incoming)
 }
 
 // writeSynced is writeAtomic plus an fsync of the data and of the directory,

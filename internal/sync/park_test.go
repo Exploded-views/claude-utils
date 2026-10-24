@@ -402,3 +402,22 @@ func TestPark_CrashAfterPullParkedPathChangedUpstream(t *testing.T) {
 		t.Errorf("mirror not restored")
 	}
 }
+
+// The same incoming version is kept once, however many times a park sets it aside
+// (a restore that failed halfway and is retried).
+func TestKeepIncoming_DedupsIdenticalBackups(t *testing.T) {
+	f := newPullFixture(t, map[string]string{"clean.md": "a\nb\n"})
+	captureLog(t)
+	const rel = "projects/p1/memory/clean.md"
+	f.writeWork(rel, "incoming\n")
+	for i := 0; i < 3; i++ {
+		kept, final, err := keepIncoming(f.repo, f.roots, "HEAD", rel, []byte("saved\n"), true)
+		if err != nil || !kept || string(final) != "saved\n" {
+			t.Fatalf("keepIncoming = %v, %q, %v", kept, final, err)
+		}
+	}
+	matches, _ := filepath.Glob(filepath.Join(f.repo.Dir, filepath.FromSlash(rel)) + ".from-remote-*")
+	if len(matches) != 1 {
+		t.Errorf("want one backup, got %v", matches)
+	}
+}
