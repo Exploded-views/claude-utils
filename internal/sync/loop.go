@@ -83,10 +83,10 @@ func (l *Loop) Run(ctx context.Context) error {
 	// A park the last run did not finish must be undone before Reconcile
 	// compares the trees: the parked mirror copies differ from the Claude ones.
 	if err := finishParked(repo, roots); err != nil {
-		log.Println("finish parked files:", err)
+		log.Println("finish parked files:", newPathGuard(l.Cfg).Err(err))
 	}
 	if _, err := Reconcile(roots, manifest); err != nil {
-		log.Println("initial reconcile:", err)
+		log.Println("initial reconcile:", newPathGuard(l.Cfg).Err(err))
 	}
 	if err := l.flush(repo, roots, true); err != nil {
 		log.Println("initial flush:", err)
@@ -152,7 +152,7 @@ func (l *Loop) Run(ctx context.Context) error {
 				m = NewManifest()
 			}
 			if _, err := Reconcile(roots, m); err != nil {
-				log.Println("reconcile:", err)
+				log.Println("reconcile:", newPathGuard(l.Cfg).Err(err))
 			}
 			err = l.flush(repo, roots, true)
 			if err != nil {
@@ -203,13 +203,13 @@ func (l *Loop) handleEvent(watcher *fsnotify.Watcher, roots Roots, ev fsnotify.E
 				// Race: file vanished between event and read. Treat as remove.
 				return true, RemoveFromMirror(roots, hash, name)
 			}
-			return false, fmt.Errorf("copy to mirror %s/%s: %w", hash, name, err)
+			return false, newPathGuard(l.Cfg).PathErr("copy to mirror", "projects/"+hash+"/memory/"+name, err)
 		}
 		return true, nil
 
 	case ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0:
 		if err := RemoveFromMirror(roots, hash, name); err != nil {
-			return false, fmt.Errorf("remove from mirror %s/%s: %w", hash, name, err)
+			return false, newPathGuard(l.Cfg).PathErr("remove from mirror", "projects/"+hash+"/memory/"+name, err)
 		}
 		return true, nil
 	}
@@ -224,6 +224,10 @@ func (l *Loop) handleEvent(watcher *fsnotify.Watcher, roots Roots, ev fsnotify.E
 // refs/remotes/origin/<branch> AND we have no unpushed commits, it returns
 // early — skipping the full pull/push churn that dominates idle ticks.
 func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err error) {
+	// Registered first, so it runs last: whatever the cycle returns (including
+	// the restore error below) is stripped of denylisted names.
+	g := newPathGuard(l.Cfg)
+	defer func() { err = g.Err(err) }()
 	// A park an earlier cycle (or a crashed run) did not finish comes first:
 	// nothing may be committed, or parked over, while files are still away.
 	if err := finishParked(repo, roots); err != nil {
@@ -261,12 +265,12 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 			conflictErr = resolveRebaseConflict(repo, l.Branch)
 		} else {
 			// Don't propagate first-time failure (no upstream yet); push will create it.
-			log.Println("pull:", err)
+			log.Println("pull:", g.Err(err))
 		}
 	}
 	postRev, _ := repo.Run("rev-parse", "HEAD")
 	if conflictErr == nil && strings.TrimSpace(preRev) != strings.TrimSpace(postRev) && strings.TrimSpace(preRev) != "" {
-		if err := propagate(repo, roots, strings.TrimSpace(preRev), strings.TrimSpace(postRev), st.skip()); err != nil {
+		if err := propagate(repo, roots, strings.TrimSpace(preRev), strings.TrimSpace(postRev), st.skip(), g); err != nil {
 			return fmt.Errorf("propagate: %w", err)
 		}
 	}
@@ -350,7 +354,7 @@ func remoteAndLocalIdle(repo *gitwt.Repo, branch string) (bool, error) {
 // from the mirror back into Claude's tree. Paths in skip (parked, so the
 // mirror copy is not the user's) are left alone; that test is on the sync-repo
 // path and comes before any mapping to a Claude folder.
-func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string, skip map[string]bool) error {
+func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string, skip map[string]bool, g *pathGuard) error {
 	// -z: "<status>\0<path>\0", or "<status>\0<old>\0<new>\0" for a rename
 	// or copy. Unlike the line format, it never quotes or splits a name.
 	out, err := repo.Run("diff", "--name-status", "-z", "--find-renames", pre+".."+post)
@@ -393,7 +397,7 @@ func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string, skip map[
 			_ = os.Remove(filepath.Join(roots.Claude, hash, "memory", name))
 		default:
 			if err := CopyToClaude(roots, hash, name); err != nil {
-				log.Printf("propagate %s: %v", path, err)
+				log.Printf("propagate %s: %v", g.Path(path), g.Err(err))
 			}
 		}
 	}
@@ -460,7 +464,7 @@ func (l *Loop) rebuildDistilledIndex() {
 		ProjectsDir:  l.Cfg.ClaudeProjectsDir,
 		DistilledDir: dir,
 	}); err != nil {
-		log.Println("rebuild distilled index:", err)
+		log.Println("rebuild distilled index:", newPathGuard(l.Cfg).Err(err))
 	}
 }
 

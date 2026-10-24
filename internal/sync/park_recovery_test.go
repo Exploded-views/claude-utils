@@ -216,7 +216,7 @@ func TestPark_PropagateErrorStillUnparks(t *testing.T) {
 	f.peerPush("peer.md", "p\n")
 
 	old := propagate
-	propagate = func(*gitwt.Repo, Roots, string, string, map[string]bool) error { return errors.New("boom") }
+	propagate = func(*gitwt.Repo, Roots, string, string, map[string]bool, *pathGuard) error { return errors.New("boom") }
 	t.Cleanup(func() { propagate = old })
 
 	err := f.loop.flush(f.repo, f.roots, true)
@@ -303,7 +303,7 @@ func TestPropagate_SkipsParkedRepoPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	post := strings.TrimSpace(mustGit(t, f.repo, "rev-parse", "HEAD"))
-	if err := propagateChanges(f.repo, f.roots, pre, post, map[string]bool{"projects/p1/memory/a.md": true}); err != nil {
+	if err := propagateChanges(f.repo, f.roots, pre, post, map[string]bool{"projects/p1/memory/a.md": true}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := f.claudeCopy("a.md"); got != "a\n" {
