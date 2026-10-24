@@ -318,7 +318,6 @@ func TestCatchUp_CrashBeforeRecordWriteMakesNoBackup(t *testing.T) {
 	}
 }
 
-
 // The backups are written once the propagate and the record write succeeded: a
 // catch-up that fails halfway is retried whole, and must not leave one more
 // backup of the same incoming bytes each time.
