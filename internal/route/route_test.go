@@ -145,10 +145,16 @@ func TestNormalizeRemote(t *testing.T) {
 
 func TestPathRuleAndAmbiguousRemote(t *testing.T) {
 	f := fileOf(
+		Rule{Folder: "-pinned", Repo: "projects"}, // a pin goes before the rules that need a remote
 		Rule{Remote: "github.com/me/*", Repo: "projects"},
-		Rule{Folder: "-pinned", Repo: "projects"},
+		Rule{Folder: "-late", Repo: "projects"},
 	)
-	r := testRouter(t, f, []string{"personal", "projects", "client-a"}, map[string]string{"-amb": "?", "-pinned": "?"})
+	r := testRouter(t, f, []string{"personal", "projects", "client-a"}, map[string]string{"-amb": "?", "-pinned": "?", "-late": "?"})
+	// An unresolved remote denies at once: the folder rule behind it is not
+	// consulted.
+	if d := r.Decide("-late"); d.Repo != "" || d.Reason != ReasonUnresolved {
+		t.Fatalf("unresolved remote fell through: %+v", d)
+	}
 	if d := r.Decide("-amb"); d.Repo != "" || d.Reason != ReasonUnresolved {
 		t.Fatalf("ambiguous folder: %+v", d)
 	}
@@ -299,5 +305,183 @@ func TestOwnsPersonalIsAlwaysFalse(t *testing.T) {
 	r := testRouter(t, fileOf(Rule{Folder: "-a", Repo: "projects"}), []string{"personal", "projects"}, nil)
 	if r.Owns("personal")("-a") || !r.Owns("projects")("-a") || r.Owns("client-a")("-a") {
 		t.Fatal("Owns wrong")
+	}
+}
+
+// gitIn runs git in dir for the fixtures below.
+func gitIn(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	c := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
+	}
+}
+
+func gitEnv(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	t.Setenv("GIT_AUTHOR_NAME", "t")
+	t.Setenv("GIT_AUTHOR_EMAIL", "t@example.com")
+	t.Setenv("GIT_COMMITTER_NAME", "t")
+	t.Setenv("GIT_COMMITTER_EMAIL", "t@example.com")
+}
+
+func clientRepo(t *testing.T, root, remote string) string {
+	t.Helper()
+	dir := filepath.Join(root, "clientrepo")
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, dir, "init", "-q")
+	gitIn(t, dir, "remote", "add", "origin", remote)
+	if err := os.WriteFile(filepath.Join(dir, "sub", "f"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, dir, "add", "-A")
+	gitIn(t, dir, "commit", "-q", "-m", "c")
+	return dir
+}
+
+func broadRouter(root string) *Router {
+	f := fileOf(
+		Rule{Remote: "github.com/client-org/**", Repo: "client-a"},
+		Rule{Path: filepath.ToSlash(root) + "/**", Repo: "projects"},
+	)
+	r := New(f, func(string) bool { return true })
+	r.Logf = func(string, ...any) {}
+	r.SSHHost = func(h string) string { return h }
+	return r
+}
+
+// A linked worktree and a subdirectory of a client checkout belong to the
+// client's repo, not to the broad path rule behind it.
+func TestWorktreeAndSubdirOfClientRepoRouteToClient(t *testing.T) {
+	gitEnv(t)
+	root := t.TempDir()
+	repo := clientRepo(t, root, "git@github.com:Client-Org/app.git")
+	wt := filepath.Join(root, "wt")
+	gitIn(t, repo, "worktree", "add", "-q", wt)
+	r := broadRouter(root)
+	for name, dir := range map[string]string{"top": repo, "subdir": filepath.Join(repo, "sub"), "worktree": wt, "worktree subdir": filepath.Join(wt, "sub")} {
+		if d := r.Decide(escape(dir)); d.Repo != "client-a" {
+			t.Errorf("%s: routed to %q (%s), want client-a", name, d.Repo, d.Reason)
+		}
+	}
+}
+
+// A folder whose remote cannot be found must not be caught by the broad path
+// rule that follows the remote rule.
+func TestUnresolvableRemoteAheadOfBroadPathRuleDenies(t *testing.T) {
+	gitEnv(t)
+	root := t.TempDir()
+	plain := filepath.Join(root, "plain")
+	noOrigin := filepath.Join(root, "noorigin")
+	for _, d := range []string{plain, noOrigin} {
+		if err := os.MkdirAll(d, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitIn(t, noOrigin, "init", "-q")
+	r := broadRouter(root)
+	for name, dir := range map[string]string{"not a repo": plain, "no origin": noOrigin, "absent": filepath.Join(root, "gone")} {
+		if d := r.Decide(escape(dir)); d.Repo != "" || d.Reason != ReasonUnresolved {
+			t.Errorf("%s: %+v, want denied (unresolved)", name, d)
+		}
+	}
+}
+
+func TestInsteadOfAndSSHAliasResolveToRealHost(t *testing.T) {
+	gitEnv(t)
+	root := t.TempDir()
+	repo := clientRepo(t, root, "git@client-alias:Client-Org/app.git")
+	r := broadRouter(root)
+	r.SSHHost = func(h string) string {
+		if h == "client-alias" {
+			return "github.com"
+		}
+		return h
+	}
+	if d := r.Decide(escape(repo)); d.Repo != "client-a" {
+		t.Fatalf("ssh alias: %+v", d)
+	}
+	// url.<base>.insteadOf, applied by git remote get-url.
+	other := filepath.Join(root, "other")
+	if err := os.MkdirAll(other, 0700); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, other, "init", "-q")
+	gitIn(t, other, "config", "url.git@github.com:Client-Org/.insteadOf", "co:")
+	gitIn(t, other, "remote", "add", "origin", "co:thing.git")
+	if d := r.Decide(escape(other)); d.Repo != "client-a" {
+		t.Fatalf("insteadOf: %+v", d)
+	}
+}
+
+func TestRewriteSSHHost(t *testing.T) {
+	look := func(h string) string {
+		if h == "alias" {
+			return "real.example"
+		}
+		return ""
+	}
+	for in, want := range map[string]string{
+		"git@alias:o/r.git":        "git@real.example:o/r.git",
+		"ssh://git@alias:2222/o/r": "ssh://git@real.example:2222/o/r",
+		"https://alias/o/r":        "https://alias/o/r",
+		"git@other:o/r.git":        "git@other:o/r.git",
+	} {
+		if got := rewriteSSHHost(in, look); got != want {
+			t.Errorf("%q -> %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRemotePatternsLowerCased(t *testing.T) {
+	f := fileOf(Rule{Remote: "GitHub.com/Me/*", Repo: "projects"})
+	r := testRouter(t, f, []string{"projects", "personal"}, map[string]string{"-x": "github.com/me/app"})
+	if d := r.Decide("-x"); d.Repo != "projects" {
+		t.Fatalf("mixed-case pattern did not match: %+v", d)
+	}
+}
+
+func TestPathAndFolderGlobsFoldCaseOnCaseInsensitiveHosts(t *testing.T) {
+	old := foldCase
+	defer func() { foldCase = old }()
+	foldCase = true
+	f := fileOf(Rule{Folder: "-Home-Me-App", Repo: "projects"})
+	r := testRouter(t, f, []string{"projects", "personal"}, nil)
+	if d := r.Decide("-home-me-app"); d.Repo != "projects" {
+		t.Fatalf("folded: %+v", d)
+	}
+	foldCase = false
+	r2 := testRouter(t, f, []string{"projects", "personal"}, nil)
+	if d := r2.Decide("-home-me-app"); d.Repo != "" {
+		t.Fatalf("case-sensitive host matched: %+v", d)
+	}
+}
+
+func TestReplaceSwapsTableAndClearsCache(t *testing.T) {
+	r := testRouter(t, fileOf(Rule{Folder: "-a", Repo: "projects"}), []string{"projects", "personal"}, nil)
+	if r.Decide("-a").Repo != "projects" {
+		t.Fatal("setup")
+	}
+	r.Replace(fileOf())
+	if r.Decide("-a").Repo != "" {
+		t.Fatal("old decision survived Replace")
+	}
+}
+
+func TestOwnersFileUsesUniqueTempAndLeavesNone(t *testing.T) {
+	dir := t.TempDir()
+	r := New(fileOf(Rule{Folder: "-w", Repo: "projects"}), func(string) bool { return true })
+	r.StatePath, r.Logf = filepath.Join(dir, "owners.json"), func(string, ...any) {}
+	r.Decide("-w")
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 || entries[0].Name() != "owners.json" {
+		t.Fatalf("dir holds %v", entries)
 	}
 }

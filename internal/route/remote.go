@@ -1,6 +1,7 @@
 package route
 
 import (
+	"context"
 	"errors"
 	"net/url"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Remote resolution, ported from the remote-key work: the escaped folder name
@@ -151,41 +153,80 @@ func walk(root, rest string, fold func(string) string) []string {
 	return out
 }
 
-// gitOrigin reports the origin URL of dir if dir is the top of a plain git
-// checkout (a subdirectory or a linked worktree is deliberately not the repo).
-// ok is false when git could not answer; true with url "" means "no origin".
-func gitOrigin(dir string) (url string, ok bool) {
+// remoteURL is the origin URL of the checkout that contains dir, with the
+// user's url.<base>.insteadOf rewrites applied (git remote get-url). dir may be
+// the top of a checkout, a subdirectory of one, or a linked worktree: all of
+// them read the one config of the containing repository. ok is false when dir
+// is not in a work tree or git could not answer; url "" means no origin.
+func remoteURL(dir string) (url string, ok bool) {
 	git := func(args ...string) (string, error) {
 		c := exec.Command("git", append([]string{"-C", dir}, args...)...)
 		c.Env = append(os.Environ(), "LC_ALL=C", "LANGUAGE=C")
 		out, err := c.Output()
 		return strings.TrimSpace(string(out)), err
 	}
-	top, err := git("rev-parse", "--show-toplevel")
-	if err != nil {
-		var ee *exec.ExitError
-		return "", errors.As(err, &ee) // git ran and said "not a repository"
-	}
-	ti, err1 := os.Stat(top)
-	di, err2 := os.Stat(dir)
-	if err1 != nil || err2 != nil || !os.SameFile(ti, di) {
-		return "", err1 == nil && err2 == nil
-	}
-	gd, err1 := git("rev-parse", "--absolute-git-dir")
-	common, err2 := git("rev-parse", "--path-format=absolute", "--git-common-dir")
-	if err1 != nil || err2 != nil {
+	if in, err := git("rev-parse", "--is-inside-work-tree"); err != nil || in != "true" {
 		return "", false
 	}
-	if filepath.Clean(gd) != filepath.Clean(common) {
-		return "", true // linked worktree
+	// The shared config holds the remote; this also proves a worktree's
+	// common dir resolves.
+	if _, err := git("rev-parse", "--git-common-dir"); err != nil {
+		return "", false
 	}
-	u, err := git("config", "--local", "--get", "remote.origin.url")
+	u, err := git("remote", "get-url", "origin")
 	if err != nil {
 		var ee *exec.ExitError
-		if errors.As(err, &ee) && ee.ExitCode() == 1 {
-			return "", true
+		if errors.As(err, &ee) {
+			return "", true // no such remote
 		}
 		return "", false
 	}
 	return u, true
+}
+
+// sshHostname asks ssh which real host an alias stands for (ssh -G reads the
+// user's ssh config and does not connect). "" when it cannot say.
+func sshHostname(host string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ssh", "-G", host).Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if f := strings.Fields(line); len(f) == 2 && strings.EqualFold(f[0], "hostname") {
+			return f[1]
+		}
+	}
+	return ""
+}
+
+// rewriteSSHHost replaces the host of an ssh or scp-style URL by what lookup
+// says it really is, so an alias from ssh config gives the key of the real host.
+func rewriteSSHHost(raw string, lookup func(string) string) string {
+	if lookup == nil {
+		return raw
+	}
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil || (u.Scheme != "ssh" && u.Scheme != "git+ssh" && u.Scheme != "ssh+git") {
+			return raw
+		}
+		if real := lookup(u.Hostname()); real != "" && real != u.Hostname() {
+			if p := u.Port(); p != "" {
+				u.Host = real + ":" + p
+			} else {
+				u.Host = real
+			}
+			return u.String()
+		}
+		return raw
+	}
+	if m := scpLike.FindStringSubmatchIndex(raw); m != nil && !(len(raw) > 1 && raw[1] == ':' && isLetter(raw[0])) {
+		host := raw[m[2]:m[3]]
+		if real := lookup(host); real != "" && real != host {
+			return raw[:m[2]] + real + raw[m[3]:]
+		}
+	}
+	return raw
 }

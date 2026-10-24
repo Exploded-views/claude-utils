@@ -18,9 +18,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // Repo is one entry of the "repos" map: where its config.json is, and whether
@@ -166,8 +168,12 @@ const (
 
 // Router applies a File on one host.
 type Router struct {
-	f    File
+	cur_ atomic.Pointer[File]
 	have func(repo string) bool
+
+	// SSHHost maps an ssh host alias to the real host name (ssh -G). nil
+	// leaves hosts as written.
+	SSHHost func(host string) string
 
 	// Resolve gives the remote key of a folder's project directory. Tests
 	// replace it; the default reads the git origin of the directory.
@@ -189,10 +195,34 @@ type Router struct {
 
 // New returns a Router. have reports whether this host has the named repo.
 func New(f File, have func(repo string) bool) *Router {
-	r := &Router{f: f, have: have, cache: map[string]Decision{}, logged: map[string]bool{}, Logf: log.Printf}
+	r := &Router{have: have, cache: map[string]Decision{}, logged: map[string]bool{}, Logf: log.Printf}
+	r.cur_.Store(normalized(f))
 	r.Candidates = Candidates
+	r.SSHHost = sshHostname
 	r.Resolve = r.defaultResolve
 	return r
+}
+
+func (r *Router) cur() File { return *r.cur_.Load() }
+
+// normalized returns f with the remote patterns lower-cased, as the remote
+// keys they are matched against are.
+func normalized(f File) *File {
+	routes := make([]Rule, len(f.Routes))
+	copy(routes, f.Routes)
+	for i := range routes {
+		routes[i].Remote = strings.ToLower(routes[i].Remote)
+	}
+	f.Routes = routes
+	return &f
+}
+
+// Replace swaps in a new routing table atomically and drops the cached
+// decisions. The repos a host runs are fixed at start: a rule naming a repo that
+// has no running loop only denies.
+func (r *Router) Replace(f File) {
+	r.cur_.Store(normalized(f))
+	r.Refresh()
 }
 
 // Refresh drops the cached decisions, so changed checkouts and remotes are
@@ -209,8 +239,8 @@ func (r *Router) defaultResolve(folder string) (string, resolution) {
 	case 0:
 		return "", resolutionNone
 	case 1:
-		if u, ok := gitOrigin(c[0]); ok && u != "" {
-			if k, ok := NormalizeRemote(u); ok {
+		if u, ok := remoteURL(c[0]); ok && u != "" {
+			if k, ok := NormalizeRemote(rewriteSSHHost(u, r.SSHHost)); ok {
 				return k, resolutionOK
 			}
 		}
@@ -238,46 +268,44 @@ func (r *Router) Decide(folder string) Decision {
 }
 
 func (r *Router) decide(folder string) Decision {
+	f := r.cur()
 	var key string
 	var res resolution
-	var resolved, unresolvedRule bool
+	var resolved bool
 	var dirs []string
 	var dirsDone bool
-	for i, rule := range r.f.Routes {
+	for i, rule := range f.Routes {
 		match := false
 		switch rule.kind() {
 		case "folder":
-			match = globMatch(rule.Folder, folder)
+			match = globFold(rule.Folder, folder, foldCase)
 		case "path":
 			if !dirsDone {
 				dirs, dirsDone = r.Candidates(folder), true
 			}
-			if len(dirs) == 1 {
-				match = globMatch(expandHome(rule.Path), filepath.ToSlash(dirs[0]))
-			} else {
-				unresolvedRule = true
+			if len(dirs) != 1 {
+				// Cannot tell where the folder is: deny now. A later rule must
+				// not catch what an earlier path or remote rule could not place.
+				return Decision{Rule: i, Reason: ReasonUnresolved}
 			}
+			match = globFold(expandHome(rule.Path), filepath.ToSlash(dirs[0]), foldCase)
 		case "remote":
 			if !resolved {
 				key, res = r.Resolve(folder)
 				resolved = true
 			}
-			if res == resolutionOK {
-				match = globMatch(rule.Remote, key)
-			} else {
-				unresolvedRule = true
+			if res != resolutionOK {
+				return Decision{Rule: i, Reason: ReasonUnresolved}
 			}
+			match = globMatch(rule.Remote, key)
 		}
 		if !match {
 			continue
 		}
-		if _, listed := r.f.Repos[rule.Repo]; !listed || r.have == nil || !r.have(rule.Repo) {
+		if _, listed := f.Repos[rule.Repo]; !listed || r.have == nil || !r.have(rule.Repo) {
 			return Decision{Rule: i, Reason: ReasonRepoMissing}
 		}
 		return Decision{Repo: rule.Repo, Rule: i}
-	}
-	if unresolvedRule {
-		return Decision{Rule: -1, Reason: ReasonUnresolved}
 	}
 	return Decision{Rule: -1, Reason: ReasonNoRoute}
 }
@@ -285,10 +313,12 @@ func (r *Router) decide(folder string) Decision {
 // Owns returns the gate for a repo's loop: true for the folders routed to it.
 // The personal repo owns nothing.
 func (r *Router) Owns(repo string) func(folder string) bool {
-	if repo == r.f.Personal {
-		return func(string) bool { return false }
+	return func(folder string) bool {
+		if repo == r.cur().Personal {
+			return false
+		}
+		return r.Decide(folder).Repo == repo
 	}
-	return func(folder string) bool { return r.Decide(folder).Repo == repo }
 }
 
 func hash8(s string) string {
@@ -315,7 +345,7 @@ func (r *Router) noteLocked(folder string, d Decision) {
 		return // never owned, still not
 	}
 	switch {
-	case had && prev != "" && r.f.Repos[prev].Client && d.Repo != "" && !r.f.Repos[d.Repo].Client:
+	case had && prev != "" && r.cur().Repos[prev].Client && d.Repo != "" && !r.cur().Repos[d.Repo].Client:
 		r.Logf("route: folder %s moved from client repo %q to non-client repo %q; its notes will now sync there, and the old repo keeps a frozen copy", hash8(folder), prev, d.Repo)
 	case had && prev != "" && d.Repo != "":
 		r.Logf("route: folder %s moved from repo %q to repo %q", hash8(folder), prev, d.Repo)
@@ -353,9 +383,14 @@ func (r *Router) saveOwnersLocked() {
 	}
 	b, _ := json.MarshalIndent(r.owners, "", "  ")
 	if err := os.MkdirAll(filepath.Dir(r.StatePath), 0700); err == nil {
-		tmp := r.StatePath + ".tmp"
-		if os.WriteFile(tmp, b, 0600) == nil {
-			_ = os.Rename(tmp, r.StatePath)
+		// A temp file of its own, so two daemons never write the same one.
+		if f, err := os.CreateTemp(filepath.Dir(r.StatePath), ".owners-*.tmp"); err == nil {
+			_, werr := f.Write(b)
+			cerr := f.Close()
+			if werr == nil && cerr == nil && os.Rename(f.Name(), r.StatePath) == nil {
+				return
+			}
+			os.Remove(f.Name())
 		}
 	}
 }
@@ -369,9 +404,9 @@ type Shadow struct{ Rule, By int }
 // pattern's text.
 func (r *Router) Shadowed() []Shadow {
 	var out []Shadow
-	for j, rj := range r.f.Routes {
+	for j, rj := range r.cur().Routes {
 		for i := 0; i < j; i++ {
-			ri := r.f.Routes[i]
+			ri := r.cur().Routes[i]
 			if ri.kind() == rj.kind() && globMatch(ri.pattern(), rj.pattern()) {
 				out = append(out, Shadow{Rule: j, By: i})
 				break
@@ -390,12 +425,12 @@ type Summary struct {
 // Summarize routes every folder and counts the outcome.
 func (r *Router) Summarize(folders []string) Summary {
 	s := Summary{Owned: map[string]int{}}
-	for name := range r.f.Repos {
+	for name := range r.cur().Repos {
 		s.Owned[name] = 0
 	}
 	for _, f := range folders {
 		d := r.Decide(f)
-		if d.Repo == "" || d.Repo == r.f.Personal {
+		if d.Repo == "" || d.Repo == r.cur().Personal {
 			s.Denied++
 			continue
 		}
@@ -415,7 +450,7 @@ func (f File) RepoNames() []string {
 }
 
 // File returns the routes the router applies.
-func (r *Router) File() File { return r.f }
+func (r *Router) File() File { return r.cur() }
 
 func expandHome(p string) string {
 	if p == "~" || strings.HasPrefix(p, "~/") {
@@ -431,13 +466,31 @@ func ExpandHome(p string) string { return filepath.FromSlash(expandHome(p)) }
 
 var globCache sync.Map
 
-// globMatch reports whether name matches pat: "*" matches within one "/"
-// segment, "**" across segments, "?" one non-"/" character.
-func globMatch(pat, name string) bool {
-	if v, ok := globCache.Load(pat); ok {
-		return v.(*regexp.Regexp).MatchString(name)
+// foldCase makes path and folder globs case-insensitive, as the file systems of
+// macOS and Windows are by default.
+var foldCase = runtime.GOOS == "darwin" || runtime.GOOS == "windows"
+
+func globMatch(pat, name string) bool { return globFold(pat, name, false) }
+
+// globFold is globMatch, optionally ignoring case.
+func globFold(pat, name string, fold bool) bool {
+	key := pat
+	if fold {
+		key = "(?i)" + pat
+	}
+	return globRe(key, pat, fold).MatchString(name)
+}
+
+// globRe compiles pat: "*" matches within one "/" segment, "**" across
+// segments, "?" one non-"/" character.
+func globRe(key, pat string, fold bool) *regexp.Regexp {
+	if v, ok := globCache.Load(key); ok {
+		return v.(*regexp.Regexp)
 	}
 	var b strings.Builder
+	if fold {
+		b.WriteString(`(?i)`)
+	}
 	b.WriteString(`^`)
 	for i := 0; i < len(pat); i++ {
 		switch c := pat[i]; c {
@@ -457,8 +510,8 @@ func globMatch(pat, name string) bool {
 	b.WriteString(`$`)
 	re, err := regexp.Compile(b.String())
 	if err != nil {
-		return false
+		re = regexp.MustCompile(`^\x00$`)
 	}
-	globCache.Store(pat, re)
-	return re.MatchString(name)
+	globCache.Store(key, re)
+	return re
 }
