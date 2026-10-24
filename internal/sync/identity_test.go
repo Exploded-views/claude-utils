@@ -43,6 +43,9 @@ func TestNormalizeRemote(t *testing.T) {
 		// An unescaped '/' in a URL password leaves '@' in the path.
 		{"https://alice:pa/ss@github.com/acme/app.git", ""},
 		{"git@github.com:acme/app@v2.git", ""},
+		// An '@' left in the host is the tail of a password that contained one.
+		{"user:p@ss@host:o/r", ""},
+		{"user:p@ss@github.com:acme/app.git", ""},
 		// Reserved Windows device names, with or without an extension.
 		{"git@github.com:acme/con.git", "github.com/acme/_con"},
 		{"git@github.com:acme/aux.txt.git", "github.com/acme/_aux.txt"},
@@ -73,8 +76,8 @@ func TestNormalizeRemote(t *testing.T) {
 }
 
 func TestValidKey(t *testing.T) {
-	good := []string{"github.com/acme/app", "gitlab.example.com/g/sub/app", "h/r", "a.b/c_d/e-f"}
-	bad := []string{"", "path", "github.com", "../../escaped", "a/../b", "a/./b", "/abs/olute", "a//b",
+	good := []string{"github.com/acme/app", "gitlab.example.com/g/sub/app", "h/o/r", "a.b/c_d/e-f"}
+	bad := []string{"", "path", "github.com", "github.com/acme", "h/r", "../../escaped", "a/../b", "a/./b", "/abs/olute", "a//b",
 		"a/b/", "Github.com/acme/app", "a/b c", `a\b/c`, "a/b@c", "a:b/c", "a/..",
 		// Not what NormalizeRemote can produce, and not usable on Windows.
 		"github.com/acme/app.", "a./b", "github.com/acme/...", "github.com/acme/con", "github.com/aux.txt/app",

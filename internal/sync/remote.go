@@ -27,7 +27,7 @@ import (
 // in the sync repo, whatever the local path is. `remotes/` is a sibling of
 // `projects/` rather than a subfolder of it so that the two layouts can never
 // be confused with each other (a path key is exactly one segment deep; a
-// remote key is at least two) and so that older daemons, which only look
+// remote key is at least three) and so that older daemons, which only look
 // inside `projects/`, simply ignore it. Projects with no usable remote keep
 // their path key under `projects/`.
 //
@@ -83,6 +83,11 @@ func NormalizeRemote(raw string) (string, bool) {
 		}
 		host, path = m[1], m[2]
 	}
+	if strings.Contains(host, "@") {
+		// The tail of a password that itself contained '@' (scp syntax:
+		// user:p@ss@host:o/r); the real host is not what we parsed.
+		return "", false
+	}
 	host = sanitizeSegment(strings.ToLower(host))
 	if host == "" {
 		return "", false
@@ -132,13 +137,13 @@ func sanitizeSegment(s string) string {
 }
 
 // validKey reports whether k is acceptable as a repo-side key: what
-// NormalizeRemote can produce. At least two segments, each of [a-z0-9._-]
-// and neither "." nor "..", so a key can never leave remotes/ or collide with
-// a one-segment path key. A segment must also survive sanitizeSegment
+// NormalizeRemote can produce. At least three segments (host, owner, repo),
+// each of [a-z0-9._-] and neither "." nor "..", so a key can never leave
+// remotes/ or collide with a one-segment path key. A segment must also survive sanitizeSegment
 // unchanged, which rules out a trailing dot and the Windows device names.
 func validKey(k string) bool {
 	segs := strings.Split(k, "/")
-	if len(segs) < 2 {
+	if len(segs) < 3 {
 		return false
 	}
 	for _, s := range segs {
