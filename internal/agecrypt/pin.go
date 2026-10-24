@@ -17,9 +17,38 @@ import (
 // the set this host pinned. Anyone with write access to the remote can change
 // that file, so until a person accepts the change nothing is committed or
 // pushed, and nothing is ever encrypted to the new keys.
-var ErrRecipientsUnreviewed = errors.New("the recipients changed upstream and are not reviewed: nothing is committed or pushed (review with `claude-memsync recipients list`, then `recipients accept --yes`)")
+var ErrRecipientsUnreviewed = errors.New("the recipients or a .gitattributes changed upstream and are not reviewed: nothing is committed or pushed (review with `claude-memsync recipients list`, then `recipients accept --yes`)")
 
-const pinFile = "memage-pinned"
+const (
+	pinFile      = "memage-pinned"
+	pinAttrsFile = "memage-pinned-attrs"
+)
+
+// attrsDigest hashes every .gitattributes in the work-tree (tracked or not):
+// a change to any of them is reviewed like a recipients change.
+func attrsDigest(repo *gitwt.Repo) (string, error) {
+	out, err := repo.RunClean("ls-files", "-z", "-c", "-o", "--exclude-standard")
+	if err != nil {
+		return "", err
+	}
+	var names []string
+	for _, p := range strings.Split(out, "\x00") {
+		if p == ".gitattributes" || strings.HasSuffix(p, "/.gitattributes") {
+			names = append(names, p)
+		}
+	}
+	sort.Strings(names)
+	h := sha256.New()
+	for _, p := range names {
+		b, err := os.ReadFile(filepath.Join(repo.Dir, filepath.FromSlash(p)))
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(h, "%s\x00%d\x00", p, len(b))
+		h.Write(b)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
 
 // pinPathFor is the pinned set's file, in the git dir (never committed).
 func pinPathFor(gitCommonDir string) string { return filepath.Join(gitCommonDir, pinFile) }
@@ -65,7 +94,14 @@ func PinCurrent(repo *gitwt.Repo) error {
 	if err := os.WriteFile(tmp, []byte(r.canonText()), 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, pinPathFor(d))
+	if err := os.Rename(tmp, pinPathFor(d)); err != nil {
+		return err
+	}
+	dg, err := attrsDigest(repo)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(d, pinAttrsFile), []byte(dg+"\n"), 0o600)
 }
 
 func readPin(repo *gitwt.Repo) (*Recipients, error) {
@@ -99,7 +135,16 @@ func Unreviewed(repo *gitwt.Repo) (bool, string) {
 	if err != nil {
 		return true, "invalid"
 	}
-	return cur.Fingerprint() != pin.Fingerprint(), cur.Fingerprint()
+	d, derr := gitCommonDir(repo)
+	if derr != nil {
+		return true, "nogitdir"
+	}
+	want, err := os.ReadFile(filepath.Join(d, pinAttrsFile))
+	have, herr := attrsDigest(repo)
+	if err != nil || herr != nil || strings.TrimSpace(string(want)) != have {
+		return true, cur.Fingerprint() + "+attrs:" + have
+	}
+	return cur.Fingerprint() != pin.Fingerprint(), cur.Fingerprint() + "+attrs:" + have
 }
 
 func keyPrint(canon string) string {
@@ -138,6 +183,12 @@ func RecipientsDiff(repo *gitwt.Repo) (added, removed []string, err error) {
 	for _, c := range pin.canon {
 		if !in(cur.canon, c) {
 			removed = append(removed, keyPrint(c))
+		}
+	}
+	if d, err := gitCommonDir(repo); err == nil {
+		want, _ := os.ReadFile(filepath.Join(d, pinAttrsFile))
+		if have, _ := attrsDigest(repo); strings.TrimSpace(string(want)) != have {
+			added = append(added, "(a .gitattributes changed)")
 		}
 	}
 	return added, removed, nil

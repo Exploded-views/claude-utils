@@ -817,7 +817,10 @@ How it works:
   back. Notes use a plain line merge (`--text`) whose conflict markers are
   readable in the work tree; `MEMORY.md` keeps the semantic merge.
 - `.gitattributes`, `.gitignore` and `.age-recipients` (public keys only) stay
-  plaintext. Everything else is encrypted.
+  plaintext, at the repo root only; nested copies are encrypted like any file.
+  Everything else is encrypted. The filter rules are written to
+  `$GIT_DIR/info/attributes`, which outranks every `.gitattributes`, so an
+  upstream or nested `.gitattributes` cannot switch encryption off.
 - Commit messages are `memsync: N files`: no note names, no host name. A neutral
   author is set when git has none configured.
 - Before every push the daemon checks that each blob it would send (outside the
@@ -864,7 +867,11 @@ encrypts only to the pinned set. If a pull brings a different
 `.age-recipients`, the host logs a warning once, `status` shows
 `recipients UNREVIEWED`, and nothing is committed or pushed (pulling continues)
 until a person runs `claude-memsync recipients accept` (it shows the added and
-removed keys as short fingerprints; add `--yes` to accept). A machine that was
+removed keys as short fingerprints; add `--yes` to accept). A changed
+`.gitattributes` anywhere in the repo is held to the same review. Accepting
+re-encrypts everything in HEAD to the new set and commits it, so no blob a newly
+admitted host cannot read is pushed afterwards. Ciphertext a host cannot read is
+never written into the Claude tree. A machine that was
 admitted by another host sees exactly this on its first pull and accepts it.
 
 ### What GitHub (or any host) can still see

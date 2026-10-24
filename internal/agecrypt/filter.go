@@ -22,9 +22,9 @@ const RecipientsFile = ".age-recipients"
 const ReencryptEnv = "MEMAGE_REENCRYPT"
 
 // Filter is git's clean/smudge/textconv filter for age. It is deterministic:
-// the ciphertext for a given plaintext and recipient set is cached, and smudge
-// seeds the cache, so re-cleaning a checked-out file yields the committed blob
-// and the work-tree stays clean after a checkout or rebase.
+// the ciphertext for a given plaintext and pinned recipient set is cached, and
+// an unchanged checked-out file is cleaned back to the indexed blob (decrypt,
+// compare, reuse), so the work-tree stays clean after a checkout or rebase.
 type Filter struct {
 	Dir          string                            // work-tree root (holds .age-recipients)
 	CacheDir     string                            // ciphertext cache, under the git dir
@@ -128,10 +128,14 @@ func (f *Filter) Clean(path string, in []byte) ([]byte, error) {
 	}
 	if os.Getenv(ReencryptEnv) != "1" {
 		// Cache lost: an unchanged file must still give the committed blob.
+		// Reusing the indexed blob keeps an unchanged file unmodified even
+		// across a recipient change (git refuses to rebase over "modified"
+		// files). It is not cached: the blob may predate the pinned set, and
+		// a cache hit would hand it out for new commits. Accept and
+		// `recipients add|remove` re-encrypt HEAD explicitly.
 		if idx, err := f.Indexed(path); err == nil && IsCiphertext(idx) {
 			if ids, err := LoadIdentities(f.IdentityPath); err == nil {
 				if pt, err := Decrypt(idx, ids); err == nil && bytes.Equal(pt, in) {
-					f.cachePut(name, idx)
 					return idx, nil
 				}
 			}
@@ -159,10 +163,27 @@ func (f *Filter) Smudge(path string, in []byte) []byte {
 	if err != nil {
 		return in
 	}
-	if rcpt, err := f.recipients(); err == nil && rcpt.Len() > 0 {
+	// Seed the cache so that re-cleaning the checked-out file yields this very
+	// blob. But only if the blob has as many recipient stanzas as the pinned
+	// set: a blob written under an older (smaller or larger) set must not be
+	// handed back for new commits, or a newly admitted host could not read it.
+	if rcpt, err := f.recipients(); err == nil && rcpt.Len() > 0 && stanzaCount(in) == rcpt.Len() {
 		f.cachePut(cacheName(pt, rcpt.Fingerprint()), in)
 	}
 	return pt
+}
+
+// stanzaCount counts the recipient stanzas of an age header, not counting the
+// random "grease" stanza age may add.
+func stanzaCount(ct []byte) int {
+	hdr, _, _ := bytes.Cut(ct, []byte("\n--- "))
+	n := 0
+	for _, l := range bytes.Split(hdr, []byte("\n")) {
+		if bytes.HasPrefix(l, []byte("-> X25519 ")) || bytes.HasPrefix(l, []byte("-> ssh-")) {
+			n++
+		}
+	}
+	return n
 }
 
 // Textconv shows a blob's plaintext for diff and log.

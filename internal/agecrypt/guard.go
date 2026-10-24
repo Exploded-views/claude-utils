@@ -89,14 +89,18 @@ func PushGuard(repo *gitwt.Repo, branch string) error {
 	if u, _ := Unreviewed(repo); u {
 		return ErrRecipientsUnreviewed
 	}
-	if !repo.HasHead() {
-		return nil
+	// What gets pushed is the branch, not whatever HEAD is.
+	head := "refs/heads/" + branch
+	if _, err := repo.RunClean("rev-parse", "--verify", "--quiet", head); err != nil {
+		return nil // nothing to push
 	}
-	rng := "HEAD"
-	if _, err := repo.Run("rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+branch); err == nil {
-		rng = "refs/remotes/origin/" + branch + "..HEAD"
+	rng := head
+	if _, err := repo.RunClean("rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+branch); err == nil {
+		rng = "refs/remotes/origin/" + branch + ".." + head
 	}
-	out, err := repo.Run("-c", "core.quotePath=true", "log", "-m", "--raw", "--no-abbrev", "--no-renames", "--format=", rng)
+	out, err := repo.RunClean("-c", "core.quotePath=true", "-c", "log.showRoot=true", "-c", "diff.renames=false",
+		"-c", "log.showSignature=false", "-c", "core.fsmonitor=false",
+		"log", "--root", "-m", "--raw", "--no-abbrev", "--no-renames", "--no-notes", "--no-ext-diff", "--no-textconv", "--format=", rng)
 	if err != nil {
 		return err
 	}

@@ -372,3 +372,69 @@ func TestGit_MemoryMdAndNoteMergesThroughRealDrivers(t *testing.T) {
 		t.Errorf("dirty after abort: %s", d)
 	}
 }
+
+func TestGit_AttributesCannotDisableTheFilter(t *testing.T) {
+	gitEnv(t)
+	remote := bareRemote(t)
+	a := newHost(t, remote, true)
+	a.write(t, "n.md", "one\n")
+	a.commit(t, "memsync: 1 files")
+	// An upstream change to the root and a nested .gitattributes, plus nested
+	// copies of the exempt names, which must not be exempt.
+	a.write(t, ".gitattributes", "* -filter -diff\n")
+	a.write(t, "notes/.gitattributes", "* -filter\n")
+	a.write(t, "notes/.gitignore", "secret-ish\n")
+	a.write(t, "notes/.age-recipients", "not a key\n")
+	a.write(t, "notes/leak.md", "PLAINMARK\n")
+	if u, _ := Unreviewed(a.repo); !u {
+		t.Fatal("a changed .gitattributes must block until accepted")
+	}
+	if _, err := a.repo.Run("add", "-A"); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"notes/leak.md", "notes/.gitignore", "notes/.gitattributes", "notes/.age-recipients"} {
+		if b := a.blob(t, ":0", p); !IsCiphertext([]byte(b)) {
+			t.Errorf("%s must be ciphertext in the index", p)
+		}
+	}
+	a.repo.Run("reset", "-q")
+	if err := AcceptRecipients(a.repo); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := Unreviewed(a.repo); u {
+		t.Error("accept must pin the attributes too")
+	}
+}
+
+func TestGit_PushGuardSeesRootCommitDespiteShowRoot(t *testing.T) {
+	gitEnv(t)
+	remote := bareRemote(t)
+	a := newHost(t, remote, true)
+	a.repo.Run("config", "log.showRoot", "false")
+	a.repo.Run("config", "--unset-all", "filter.memage.required")
+	a.repo.Run("config", "--unset-all", "filter.memage.process")
+	a.write(t, "leak.md", "plaintext\n")
+	a.repo.Run("add", "-A")
+	if _, err := a.repo.Commit("root"); err != nil {
+		t.Fatal(err)
+	}
+	if err := PushGuard(a.repo, "main"); err == nil || !strings.Contains(err.Error(), "not age ciphertext") {
+		t.Fatalf("root commit must be checked: %v", err)
+	}
+}
+
+// A GIT_DIR in the environment must not redirect the guard's git calls.
+func TestGit_PushGuardIgnoresRepoEnv(t *testing.T) {
+	gitEnv(t)
+	remote := bareRemote(t)
+	a := newHost(t, remote, true)
+	a.write(t, "n.md", "ok\n")
+	a.commit(t, "memsync: 1 files")
+	other := t.TempDir()
+	exec.Command("git", "init", "-q", other).Run()
+	t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
+	t.Setenv("GIT_WORK_TREE", other)
+	if err := PushGuard(a.repo, "main"); err != nil {
+		t.Fatalf("guard must use the repo it was given: %v", err)
+	}
+}

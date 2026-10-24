@@ -22,13 +22,27 @@ type Opts struct {
 	IdentityPath string // this host's age identity
 }
 
-func quote(p string) string {
+// ShellQuote quotes a path for the POSIX sh that git runs configured commands
+// with (git for Windows bundles one). Backslashes become slashes first, which
+// Windows executables accept, and the path is single-quoted with embedded
+// single quotes escaped, so spaces, $, & and the rest are literal.
+func ShellQuote(p string) string {
 	p = filepath.ToSlash(p)
-	if strings.ContainsAny(p, " \t") {
-		return `"` + p + `"`
-	}
-	return p
+	return "'" + strings.ReplaceAll(p, "'", `'\''`) + "'"
 }
+
+// MergeCommand is the value of merge.<name>.driver. Git expands % sequences in
+// it before the shell sees it, so a literal % in the program path is doubled;
+// the placeholders that follow are left for git.
+func MergeCommand(exe string, args ...string) string {
+	q := strings.ReplaceAll(ShellQuote(exe), "%", "%%")
+	if len(args) > 0 {
+		q += " " + strings.Join(args, " ")
+	}
+	return q + " %O %A %B %L %P"
+}
+
+func quote(p string) string { return ShellQuote(p) }
 
 // Configure sets the repo-local git config encryption needs: the filter
 // (required, so a missing binary fails closed), textconv, the identity path and
@@ -40,14 +54,19 @@ func Configure(repo *gitwt.Repo, o Opts) error {
 		{"diff." + FilterName + ".textconv", quote(o.MemsyncExe) + " age-textconv"},
 		{IdentityConfigKey, filepath.ToSlash(o.IdentityPath)},
 		{"merge.claude-memory-index.name", "claude memory index merge"},
-		{"merge.claude-memory-index.driver", quote(o.MemmergeExe) + " %O %A %B %L %P"},
+		{"merge.claude-memory-index.driver", MergeCommand(o.MemmergeExe)},
 		{"merge.memtext.name", "decrypting text merge"},
-		{"merge.memtext.driver", quote(o.MemmergeExe) + " --text %O %A %B %L %P"},
+		{"merge.memtext.driver", MergeCommand(o.MemmergeExe, "--text")},
 	}
 	for _, e := range kv {
 		if err := repo.ConfigSet(e[0], e[1]); err != nil {
 			return err
 		}
+	}
+	// The rules live in $GIT_DIR/info/attributes, which outranks every
+	// .gitattributes: an upstream or nested one cannot switch the filter off.
+	if err := writeInfoAttributes(repo); err != nil {
+		return err
 	}
 	// A neutral author, so commits do not carry the host's name. Only filled in
 	// when the user has not configured one.
@@ -102,10 +121,26 @@ func Attributes() string {
 # Exempt (stored in the clear): this file, .gitignore and the public recipients.
 * filter=memage diff=memage merge=memtext
 MEMORY.md filter=memage diff=memage merge=claude-memory-index
-.gitattributes !filter !diff !merge
-.gitignore !filter !diff !merge
-.age-recipients !filter !diff merge=union
+/.gitattributes !filter !diff !merge
+/.gitignore !filter !diff !merge
+/.age-recipients !filter !diff merge=union
 `
+}
+
+// writeInfoAttributes writes Attributes() to $GIT_DIR/info/attributes.
+func writeInfoAttributes(repo *gitwt.Repo) error {
+	out, err := repo.Run("rev-parse", "--git-path", "info/attributes")
+	if err != nil {
+		return err
+	}
+	p := strings.TrimSpace(out)
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(repo.Dir, p)
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(p, []byte(Attributes()), 0o600)
 }
 
 // WriteAttributes writes Attributes() into the work-tree at dir.

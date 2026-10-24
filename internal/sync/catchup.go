@@ -169,6 +169,10 @@ func catchUpSkips(repo *gitwt.Repo, roots Roots, rec, head string) (map[string]b
 		if !ok || skip[p] || status == "" {
 			continue
 		}
+		if status[0] != 'D' && undecryptableAt(repo, head, p) {
+			skip[p] = true // never copy ciphertext; a later re-encryption brings the file again
+			continue
+		}
 		curOK, cur := readIfExists(filepath.Join(roots.Claude, hash, "memory", name))
 		recBytes, recOK := blobAt(repo, rec, p)
 		if curOK == recOK && bytes.Equal(cur, recBytes) {
@@ -185,6 +189,16 @@ func catchUpSkips(repo *gitwt.Repo, roots Roots, rec, head string) (map[string]b
 		keep = append(keep, keptCopy{p, filepath.Join(roots.Mirror, hash, "memory", name), incoming})
 	}
 	return skip, keep, nil
+}
+
+// undecryptableAt reports whether p at rev is ciphertext this host cannot read.
+func undecryptableAt(repo *gitwt.Repo, rev, p string) bool {
+	out, err := repo.Run("show", rev+":"+p)
+	if err != nil || !agecrypt.IsCiphertext([]byte(out)) {
+		return false
+	}
+	_, err = agecrypt.PlainReader(repo)([]byte(out))
+	return err != nil
 }
 
 // blobAt is the content of p at rev; false if it does not exist there.

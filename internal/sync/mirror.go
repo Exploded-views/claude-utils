@@ -11,11 +11,13 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/merge"
 )
 
@@ -90,6 +92,12 @@ type SyncReport struct {
 // directly via CopyToMirror / RemoveFromMirror.
 func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 	rep := SyncReport{}
+	pendingCT := 0
+	defer func() {
+		if pendingCT > 0 {
+			log.Printf("reconcile: %d file(s) hold ciphertext this host cannot read; left pending", pendingCT)
+		}
+	}()
 	if manifest == nil {
 		manifest = NewManifest()
 	}
@@ -138,6 +146,12 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 
 			cExists, cBytes := readIfExists(cp)
 			mExists, mBytes := readIfExists(mp)
+			if mExists && agecrypt.IsCiphertext(mBytes) {
+				// Unreadable here: never copy it over, or merge it into, the
+				// Claude tree. It stays pending until it can be decrypted.
+				pendingCT++
+				continue
+			}
 			wasInManifest := manifest.Has(rel)
 
 			switch {
@@ -238,6 +252,11 @@ func CopyToMirror(r Roots, hash, name string) error {
 	return writeAtomic(dst, b)
 }
 
+// ErrCiphertext means a mirror file holds age ciphertext this host could not
+// decrypt. It is never written into the Claude tree, where it would replace a
+// note with unreadable bytes.
+var ErrCiphertext = errors.New("file holds ciphertext this host cannot read; left pending")
+
 // CopyToClaude copies a single mirror-side file back into Claude's tree.
 // Used after a `git pull` brings in remote changes.
 func CopyToClaude(r Roots, hash, name string) error {
@@ -246,6 +265,9 @@ func CopyToClaude(r Roots, hash, name string) error {
 	b, err := os.ReadFile(src)
 	if err != nil {
 		return err
+	}
+	if agecrypt.IsCiphertext(b) {
+		return ErrCiphertext
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0700); err != nil {
 		return err

@@ -382,3 +382,110 @@ func TestAge_ScrubScansPlaintextNotCiphertext(t *testing.T) {
 		t.Errorf("scrub must hold back the secret even when encrypted: %v", files)
 	}
 }
+
+// Review scenario: a host commits under the old recipient set, the owner adds
+// a third host, and the stale commit is pushed after accept. The third host
+// must never get ciphertext in its Claude tree, and must stay keyed.
+func TestAge_StaleWriterCiphertextNeverReachesClaudeTree(t *testing.T) {
+	origin := ageEnv(t)
+	a := newAgeHost(t, origin, "aaa", true)
+	a.edit("seed.md", "seed\n")
+	if err := a.flushRetry(); err != nil {
+		t.Fatal(err)
+	}
+	b := newAgeHost(t, origin, "bbb", false)
+	b.join(a)
+	c := newAgeHost(t, origin, "ccc", false)
+	c.edit("mine.md", "c's own note\n") // c's pre-existing Claude note
+	b.edit("n.md", "from b\n")
+	if _, err := CommitMirror(b.repo, b.loop.Cfg, "x"); err != nil { // under {a,b}
+		t.Fatal(err)
+	}
+	if err := agecrypt.AddRecipient(a.repo, c.rcpt); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.flushRetry(); err != nil {
+		t.Fatal(err)
+	}
+	c.loop.flush(c.repo, c.roots, true) // keyless pull
+	agecrypt.AcceptRecipients(c.repo)
+	if err := c.flushRetry(); err != nil {
+		t.Fatalf("c: %v", err)
+	}
+	b.loop.flush(b.repo, b.roots, true) // pulls the change, unreviewed
+	if err := agecrypt.AcceptRecipients(b.repo); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.flushRetry(); err != nil {
+		t.Fatalf("b: %v", err)
+	}
+	if err := c.flushRetry(); err != nil {
+		t.Fatalf("c after b: %v", err)
+	}
+	if got := c.claude("n.md"); got != "from b\n" {
+		t.Errorf("c's Claude tree has %q, want b's plaintext", got)
+	}
+	if got := c.claude("mine.md"); got != "c's own note\n" {
+		t.Errorf("c's own note changed: %q", got)
+	}
+	if err := agecrypt.CheckKeyed(c.repo); err != nil {
+		t.Errorf("c must not be left keyless: %v", err)
+	}
+}
+
+func TestAge_CiphertextIsNeverWrittenToTheClaudeTree(t *testing.T) {
+	origin := ageEnv(t)
+	a := newAgeHost(t, origin, "aaa", true)
+	a.edit("n.md", "one\n")
+	ct, _ := agecrypt.Encrypt([]byte("x"), mustRecipientsFor(t, a.rcpt))
+	mp := filepath.Join(a.roots.Mirror, "p1", "memory", "n.md")
+	if err := os.WriteFile(mp, ct, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CopyToClaude(a.roots, "p1", "n.md"); !errors.Is(err, ErrCiphertext) {
+		t.Fatalf("CopyToClaude = %v, want ErrCiphertext", err)
+	}
+	os.Remove(filepath.Join(a.roots.Claude, "p1", "memory", "n.md"))
+	if _, err := Reconcile(a.roots, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.claude("n.md"); got != "" {
+		t.Errorf("Reconcile copied ciphertext into the Claude tree: %q", got[:min(len(got), 20)])
+	}
+}
+
+func mustRecipientsFor(t *testing.T, key string) *agecrypt.Recipients {
+	t.Helper()
+	r, err := agecrypt.ParseRecipients([]byte(key + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// keepIncoming must not merge against a base it could not decrypt.
+func TestAge_KeepIncomingSkipsMergeWhenBaseUndecryptable(t *testing.T) {
+	origin := ageEnv(t)
+	a := newAgeHost(t, origin, "aaa", true)
+	a.edit("MEMORY.md", "- [x](x.md) base\n")
+	if err := a.flushRetry(); err != nil {
+		t.Fatal(err)
+	}
+	saved := []byte("- [x](x.md) base\n- [y](y.md) mine\n")
+	a.edit("MEMORY.md", string(saved))
+	rel := "projects/p1/memory/MEMORY.md"
+	incoming := "- [x](x.md) base\n- [z](z.md) theirs\n"
+	os.WriteFile(filepath.Join(a.repo.Dir, rel), []byte(incoming), 0o600)
+	// This host can no longer decrypt HEAD's blob (the base).
+	mustGit(t, a.repo, "config", "memage.identity", filepath.Join(t.TempDir(), "gone"))
+	kept, final, err := keepIncoming(a.repo, a.roots, "HEAD", rel, saved, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !kept || !bytes.Equal(final, saved) {
+		t.Errorf("must keep the backup and the user's version: kept=%v final=%q", kept, final)
+	}
+	if got := a.claude("MEMORY.md"); got != string(saved) {
+		t.Errorf("Claude copy was rewritten by a merge: %q", got)
+	}
+}

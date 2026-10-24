@@ -133,3 +133,21 @@ func TestLoadIdentities_Errors(t *testing.T) {
 		t.Error("junk identity must fail")
 	}
 }
+
+func TestIsCiphertext_RequiresStanzaAndMAC(t *testing.T) {
+	_, rcpt := newIdentity(t, "id")
+	ct, _ := Encrypt([]byte("x"), mustRecipients(t, rcpt))
+	if !IsCiphertext(ct) {
+		t.Fatal("real ciphertext must be detected")
+	}
+	for name, b := range map[string]string{
+		"prefix only":        Header + "\nbogus",
+		"no mac":             Header + "\n-> X25519 abc\nxyz\n",
+		"no stanza":          Header + "\n--- mac\n",
+		"header w/o newline": Header,
+	} {
+		if IsCiphertext([]byte(b)) {
+			t.Errorf("%s must not count as ciphertext", name)
+		}
+	}
+}

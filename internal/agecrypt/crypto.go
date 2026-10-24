@@ -23,8 +23,17 @@ import (
 // Header is the first line of every age file (binary format).
 const Header = "age-encryption.org/v1"
 
-// IsCiphertext reports whether b is an age file.
-func IsCiphertext(b []byte) bool { return bytes.HasPrefix(b, []byte(Header)) }
+// IsCiphertext reports whether b looks like an age file: the version line, a
+// first recipient stanza ("-> ...") and a header MAC line ("--- ..."). A bare
+// prefix is not enough, so a plaintext that merely starts with the version
+// line is not mistaken for ciphertext.
+func IsCiphertext(b []byte) bool {
+	rest, ok := bytes.CutPrefix(b, []byte(Header+"\n"))
+	if !ok || !bytes.HasPrefix(rest, []byte("-> ")) {
+		return false
+	}
+	return bytes.Contains(rest, []byte("\n--- "))
+}
 
 // Recipients is a parsed .age-recipients file.
 type Recipients struct {

@@ -55,7 +55,7 @@ func TestFilterClean_Deterministic(t *testing.T) {
 	}
 }
 
-func TestFilterSmudge_SeedsCache(t *testing.T) {
+func TestFilterSmudgeThenCleanReturnsCommittedBlob(t *testing.T) {
 	fx := newFilterFixture(t)
 	rs, _ := os.ReadFile(filepath.Join(fx.dir, RecipientsFile))
 	r, _ := ParseRecipients(rs)
@@ -175,7 +175,7 @@ func TestServe_ErrorStatusAndLargeContent(t *testing.T) {
 	var in strings.Builder
 	in.WriteString(pkt("git-filter-client\n") + pkt("version=2\n") + flush + pkt("capability=clean\n") + pkt("capability=smudge\n") + flush)
 	// ciphertext-looking content with no indexed blob => error
-	in.WriteString(pkt("command=clean\n") + pkt("pathname=x.md\n") + flush + pkt(Header+"\nbogus") + flush)
+	in.WriteString(pkt("command=clean\n") + pkt("pathname=x.md\n") + flush + pkt(string(foreignCT(t))) + flush)
 	// big plaintext: success, and smudge of the result must round-trip
 	in.WriteString(pkt("command=clean\n") + pkt("pathname=big.md\n") + flush)
 	for i := 0; i < len(big); i += 60000 {
@@ -197,4 +197,15 @@ func TestServe_ErrorStatusAndLargeContent(t *testing.T) {
 		t.Error("the next request must still be served")
 	}
 	_ = io.EOF
+}
+
+// foreignCT is real ciphertext for a key that is not in the fixture.
+func foreignCT(t *testing.T) []byte {
+	t.Helper()
+	_, r := newIdentity(t, "foreign")
+	ct, err := Encrypt([]byte("not ours"), mustRecipients(t, r))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ct
 }

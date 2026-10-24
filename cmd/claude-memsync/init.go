@@ -219,7 +219,7 @@ func bootstrapWith(cfg config.Config, force bool, denylist []byte, enc *encryptS
 	// S:srcclaude-memmerge.exe ("command not found"), silently disabling the
 	// MEMORY.md union merge. Forward slashes work for Windows exe invocation and
 	// survive sh unquoted or quoted.
-	driverCmd := fmt.Sprintf("%s %%O %%A %%B %%L %%P", quoteIfSpaces(filepath.ToSlash(cfg.MergeDriverPath)))
+	driverCmd := agecrypt.MergeCommand(cfg.MergeDriverPath)
 	if err := repo.ConfigSet(fmt.Sprintf("merge.%s.driver", mergeDriverName), driverCmd); err != nil {
 		return err
 	}

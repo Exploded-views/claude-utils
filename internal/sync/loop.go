@@ -437,7 +437,9 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 		noteRecipientsChange(repo, strings.TrimSpace(preRev), strings.TrimSpace(postRev))
 		if err := propagate(repo, roots, strings.TrimSpace(preRev), strings.TrimSpace(postRev), st.skip(), g); err != nil {
 			settled = false
-			return fmt.Errorf("propagate: %w", err)
+			if !errors.Is(err, errPendingCiphertext) { // not a failure: the rest of the cycle goes on
+				return fmt.Errorf("propagate: %w", err)
+			}
 		}
 	}
 	if conflictErr != nil {
@@ -456,6 +458,11 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	}
 	return nil
 }
+
+// errPendingCiphertext is propagateChanges' report that some files hold
+// ciphertext this host cannot read. They were not copied; the synced head is
+// not advanced past them.
+var errPendingCiphertext = errors.New("some files hold ciphertext this host cannot read")
 
 // propagate is propagateChanges; a variable so a test can make it fail.
 var propagate = propagateChanges
@@ -523,6 +530,12 @@ func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string, skip map[
 		return err
 	}
 	fields := strings.Split(out, "\x00")
+	pending := 0
+	defer func() {
+		if pending > 0 {
+			log.Printf("propagate: %d file(s) hold ciphertext this host cannot read; left pending", pending)
+		}
+	}()
 	for i := 0; i < len(fields); {
 		status := fields[i]
 		i++
@@ -557,10 +570,15 @@ func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string, skip map[
 		case 'D':
 			_ = os.Remove(filepath.Join(roots.Claude, hash, "memory", name))
 		default:
-			if err := CopyToClaude(roots, hash, name); err != nil {
+			if err := CopyToClaude(roots, hash, name); errors.Is(err, ErrCiphertext) {
+				pending++
+			} else if err != nil {
 				log.Printf("propagate %s: %v", g.Path(path), g.Err(err))
 			}
 		}
+	}
+	if pending > 0 {
+		return errPendingCiphertext
 	}
 	return nil
 }
