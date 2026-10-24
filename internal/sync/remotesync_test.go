@@ -1486,3 +1486,40 @@ func TestNewRoots_LogsAndCarriesOnWhenTheExcludesCannotBeWritten(t *testing.T) {
 		t.Errorf("want the negation logged, got %q", logs.String())
 	}
 }
+
+// A backup-named file in a Claude folder never reaches the mirror through the
+// watcher in remote mode; in path mode the watcher is what it was on main.
+func TestHandleEvent_BackupNamesAreIgnoredOnlyInRemoteMode(t *testing.T) {
+	gitEnv(t)
+	for _, mode := range []string{"remote", "path"} {
+		t.Run(mode, func(t *testing.T) {
+			a := newMachine(t, "alice")
+			a.cfg.ProjectKey = mode
+			app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+			names := []string{"x.md.local-before-join-abc", "x.md.from-remote-abc"}
+			for _, n := range names {
+				a.write(app, n, "stray\n")
+			}
+			roots, err := NewRoots(a.cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			l := &Loop{Cfg: a.cfg}
+			dir := a.pathDir(app)
+			if mode == "remote" {
+				dir = remoteDir(a.cfg.SyncDir, appKey)
+			}
+			for _, n := range names {
+				ev := fsnotify.Event{Name: filepath.Join(a.claude, a.hash(app), "memory", n), Op: fsnotify.Write}
+				handled, err := l.handleEvent(nil, roots, ev)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, statErr := os.Stat(filepath.Join(dir, n))
+				if copied := statErr == nil; copied == (mode == "remote") || handled == (mode == "remote") {
+					t.Errorf("%s: handled=%v copied=%v", n, handled, copied)
+				}
+			}
+		})
+	}
+}

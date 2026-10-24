@@ -196,7 +196,7 @@ func (l *Loop) handleEvent(watcher *fsnotify.Watcher, roots Roots, ev fsnotify.E
 		return false, nil
 	}
 	hash, name := parts[0], parts[2]
-	if shouldIgnoreFile(name) {
+	if shouldIgnoreFile(name, roots.Remote != nil) {
 		return false, nil
 	}
 	// A folder that has just gained a remote key is joined to the notes under
@@ -422,8 +422,10 @@ func (l *Loop) rebuildDistilledIndex() {
 	}
 }
 
-// shouldIgnoreFile returns true for filenames the daemon should not sync.
-func shouldIgnoreFile(name string) bool {
+// shouldIgnoreFile returns true for filenames the daemon should not sync. In
+// remote mode that includes the local conflict backups (see isBackupName),
+// which the exclude file keeps out of git too; path mode is as it was on main.
+func shouldIgnoreFile(name string, remote bool) bool {
 	if name == "" {
 		return true
 	}
@@ -437,5 +439,5 @@ func shouldIgnoreFile(name string) bool {
 	if strings.HasSuffix(name, ".tmp") || strings.Contains(name, ".tmp.") {
 		return true
 	}
-	return false
+	return remote && isBackupName(name)
 }
