@@ -33,6 +33,7 @@ func runInit(args []string) int {
 	ghHost := flags.String("github-host", "", "git host remotes must use (default github.com); saved to config")
 	tokenFile := flags.String("token-file", "", "file holding a GitHub token for the private-only check (or set MEMSYNC_GITHUB_TOKEN)")
 	force := flags.Bool("force", false, "re-init even if sync-dir already exists")
+	archiveDeletes := flags.Bool("archive-deletes", false, "archive instead of delete: a note removed from a Claude folder moves to archive/ in the repo (sets archiveDeletes in config.json)")
 	denylist := flags.String("denylist", "", "UTF-8 file of regexes (one per line) to install as the denylist before the first commit")
 
 	if err := flags.Parse(args); err != nil {
@@ -74,6 +75,7 @@ func runInit(args []string) int {
 		fmt.Fprintln(os.Stderr, "init refused:", err)
 		return 1
 	}
+	cfg.ArchiveDeletes = *archiveDeletes
 
 	driver, err := config.DiscoverMergeDriver()
 	if err != nil {
@@ -199,7 +201,7 @@ func bootstrapOwned(cfg config.Config, force bool, denylist []byte, owns func(st
 	if err := repo.ConfigSet(fmt.Sprintf("merge.%s.driver", mergeDriverName), driverCmd); err != nil {
 		return err
 	}
-	if err := writeGitattributes(cfg.SyncDir); err != nil {
+	if err := writeGitattributes(cfg.SyncDir, cfg.ArchiveDeletes); err != nil {
 		return fmt.Errorf("write .gitattributes: %w", err)
 	}
 	if err := writeGitignore(cfg.SyncDir); err != nil {
@@ -293,9 +295,36 @@ func tryClone(repo *gitwt.Repo, url string) (bool, error) {
 	return true, nil
 }
 
-func writeGitattributes(syncDir string) error {
+// writeGitattributes makes sure .gitattributes has the lines the daemon needs,
+// keeping whatever the clone already holds (a repo cloned from a peer has the
+// union rule for the archive index already, and a user may have added lines).
+// The index rule is added when archiveDeletes is on: the index is append-only
+// and two hosts appending in the same cycle must merge, not conflict.
+func writeGitattributes(syncDir string, archiveDeletes bool) error {
 	path := filepath.Join(syncDir, gitattributesRel)
-	content := fmt.Sprintf("# Managed by claude-memsync — semantic merge for memory index files.\nMEMORY.md merge=%s\n", mergeDriverName)
+	existing, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	want := []string{fmt.Sprintf("MEMORY.md merge=%s", mergeDriverName)}
+	if archiveDeletes {
+		want = append(want, "archive/INDEX.md merge=union")
+	}
+	content := string(existing)
+	if content == "" {
+		content = "# Managed by claude-memsync — semantic merge for memory index files.\n"
+	} else if !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	have := map[string]bool{}
+	for _, l := range strings.Split(content, "\n") {
+		have[strings.TrimSpace(l)] = true
+	}
+	for _, w := range want {
+		if !have[w] {
+			content += w + "\n"
+		}
+	}
 	return os.WriteFile(path, []byte(content), 0600)
 }
 

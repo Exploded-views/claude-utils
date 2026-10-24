@@ -28,6 +28,8 @@ func main() {
 		os.Exit(runRun(os.Args[2:]))
 	case "distill":
 		os.Exit(runDistill(os.Args[2:]))
+	case "archive":
+		os.Exit(runArchive(os.Args[2:]))
 	case "changes":
 		os.Exit(runChanges(os.Args[2:]))
 	case "install":
@@ -59,6 +61,7 @@ Subcommands:
   repo        repo create <name>: create a private mem-* repo and verify it
   run         Run the sync daemon in the foreground
   distill     Rebuild the distilled-memory catalog index (see --prune, --dry-run)
+  archive     List or search the archive of deleted notes (archive list, archive search <term>)
   changes     List memory files changed in the sync repo since a commit (for hooks)
   install     Install as a system service (Windows Service / systemd unit / launchd plist)
   uninstall   Remove the system service

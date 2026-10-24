@@ -562,6 +562,7 @@ Both options go in `~/.claudesync/config.json`:
 | Key | Default | Meaning |
 |---|---|---|
 | `scrub` | `true` | Scan files before committing. `false` restores the old behavior of committing everything. |
+| `archiveDeletes` | `false` | Archive instead of delete; see [Archive, never delete](#archive-never-delete). |
 | `requireDenylist` | `false` | When `true` and `denylist.txt` does not exist, commit nothing and log why. For setups where "no denylist" means "not configured yet". Ignored when `scrub` is `false`. |
 
 Existing `config.json` files without these keys get the defaults, so scrub is
@@ -748,6 +749,86 @@ This means:
 - First-ever run on a PC has no manifest, so deletes can't be inferred from prior
   state. The daemon takes the safe path: never infer deletes, bring everything
   together. Subsequent runs work normally.
+
+## Archive, never delete
+
+Off by default. With `archiveDeletes` on, the tool never removes a note from a
+memory repo: it moves it. This gives a durable history for people who want one;
+upstream behavior (a delete is a delete) is unchanged when the key is off.
+
+Turn it on with `claude-memsync init --archive-deletes`, or set
+`"archiveDeletes": true` in `config.json` (a bootstrap for a fleet of hosts
+should set it on every host). It is per repo: with [several repos](#several-repos-per-host)
+each repo's own `config.json` decides. A repo's loop only touches the folders it
+owns, so a note deleted from a folder routed to another repo is never seen, and
+never archived, by this one.
+
+What happens:
+
+- **A note deleted from a Claude memory folder** is moved in the repo to
+  `archive/<YYYY-MM-DD>/<folder>/<file>` in the same commit that records the
+  deletion (git shows a move), and one line is appended to `archive/INDEX.md`:
+  date, folder, file, reason (`deleted on a host`) and the archive path. The file name
+  carries the first eight hex digits of the content's SHA-256 before the
+  extension (`note.3f2a9c1b.md`), so identical copies share one path (two hosts
+  archiving the same note make one identical add) and different content never
+  collides or overwrites. The deletion is detected at commit time: a pure
+  rename (a delete plus a 100% identical add) stays a rename and is not
+  archived, while a rename that also edited the note keeps the rename and
+  archives the old content. Two hosts that archive the same note
+  on the same day leave git a conflict that needs no decision (each moved the
+  note to its own hash-named path, which git reads as a rename on both sides,
+  or a rename against a delete). When the daemon's own pull stops on conflicts
+  and **every** conflicted path is of exactly that shape (an `archive/` copy
+  added by either side, or a `projects/<folder>/memory/` note deleted on both),
+  it keeps both copies, drops the note and continues the rebase, logging only a
+  count. Any other conflict, including one extra path, aborts as described
+  under Rebase conflicts. This does not depend on the merge strategy, and
+  ordinary renames and edits merge as they always did.
+- **Other hosts** pulling that commit remove the note from their `~/.claude`
+  copy exactly as for any delete, and never touch `archive/`. The directory is
+  never mirrored into `~/.claude`, and routing, Reconcile, the manifest,
+  `changes` and the distill worklist only read `projects/<folder>/memory/`, so
+  `archive/` is never a Claude folder. The index is merged as a union, so two
+  hosts that archive in the same cycle do not conflict.
+- **An edit on one host against an archive on another** merges without a
+  conflict (git reads the archive as a rename and carries the edit into the
+  copy). After every pull the daemon checks that each archive copy that arrived
+  holds the bytes its hash name promises. If not, it puts the edit back at the
+  note's live path (as `<name>.conflict-<sha8>.<ext>` beside it when that path
+  now holds other text), restores the copy, adds an index line ("edited after
+  archive, restored"), and commits all together, so the note returns to
+  `~/.claude` on every host. If the original text cannot be found, the pull is
+  undone and nothing is pushed.
+- **`distill --prune`** archives a stale catalog entry to
+  `archive/<date>/distilled/` instead of removing it.
+- **MEMORY.md** is an index, not a note: a line deleted from it is index content
+  and is not archived as a file. (Deleting the whole file is archived like any
+  other note.)
+- **A file the scrub holds back** is not archived, and its deletion waits with
+  it (on every cycle, with its index line and union rule), so a note never
+  leaves the tree without its copy.
+- A note created and deleted between two commits was never committed; there is
+  nothing in the repo to keep.
+
+Reading the archive (the tool only reads it):
+
+```
+claude-memsync archive list [--since 2026-10-01]
+claude-memsync archive search <term> [--show]
+```
+
+Symlinks in the archive are never followed, and paths matching the denylist
+are not printed (they are counted instead). `search` matches file names and contents, case-insensitively, and prints the
+matching paths with a count of matching lines. `--show` also prints the lines.
+Archived notes are not injected into sessions; search them on demand. With
+several repos, each repo's archive is listed or searched in turn.
+
+**Purging is not a tool command.** The one exception to "never delete" is a
+deliberate purge, for example a leaked secret in an archived note. That is a git
+history rewrite done by the repo owner by hand (rewrite the history of every
+clone, force-push, then have every host re-clone), and the tool has no command,
+flag or setting that does it.
 
 ## On-disk layout
 

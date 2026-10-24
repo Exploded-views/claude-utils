@@ -43,6 +43,16 @@ func CommitMirror(repo *gitwt.Repo, cfg config.Config, msg string) (bool, error)
 	if err := repo.UnstageFold(denylistRel); err != nil {
 		return false, fmt.Errorf("unstage denylist: %w", err)
 	}
+	// With archiveDeletes, each deleted note gets an archive copy staged beside
+	// its deletion. The scrub below may hold a copy back; finishArchive then
+	// holds the deletion back with it and writes the index only for the rest.
+	var units []archiveUnit
+	if cfg.ArchiveDeletes {
+		var err error
+		if units, err = stageArchiveCopies(repo, cfg); err != nil {
+			return false, fmt.Errorf("archive deletes: %w", err)
+		}
+	}
 	if cfg.Scrub {
 		ok, err := holdBack(repo, cfg)
 		if err != nil {
@@ -51,6 +61,9 @@ func CommitMirror(repo *gitwt.Repo, cfg config.Config, msg string) (bool, error)
 		if !ok {
 			return false, nil
 		}
+	}
+	if err := finishArchive(repo, cfg, units); err != nil {
+		return false, fmt.Errorf("archive deletes: %w", err)
 	}
 	return repo.Commit(msg)
 }

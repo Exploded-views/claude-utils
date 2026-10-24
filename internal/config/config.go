@@ -76,6 +76,12 @@ type Config struct {
 	// means the owner parsed from RemoteURL.
 	GitHubOrg string `json:"githubOrg,omitempty"`
 
+	// ArchiveDeletes makes the daemon archive instead of delete: a note removed
+	// from a Claude memory folder is moved to archive/<date>/<folder>/<file> in
+	// the sync repo, and `distill --prune` archives catalog entries. Default
+	// false (upstream behaviour); `init --archive-deletes` sets it.
+	ArchiveDeletes bool `json:"archiveDeletes"`
+
 	// DebounceMs is how long to wait after a file change before committing.
 	DebounceMs int `json:"debounceMs"`
 

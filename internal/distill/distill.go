@@ -25,6 +25,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/MarimerLLC/claude-utils/internal/archive"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -60,6 +61,10 @@ type Options struct {
 	// catalog. Prune leaves the entries of a rejected folder alone. nil means
 	// every folder.
 	Keep func(folder string) bool
+	// ArchiveRoot, if set, is the sync repo's root: Reconcile then moves a stale
+	// entry to archive/<date>/distilled/ there (and indexes it) instead of
+	// removing it. Empty means remove, as before.
+	ArchiveRoot string
 }
 
 func (o *Options) applyDefaults() {
@@ -207,7 +212,7 @@ func Reconcile(opts Options) (Result, error) {
 			stale = meta[opts.Marker.Key] != opts.Marker.Value
 		}
 		if stale {
-			if err := os.Remove(e.Path); err != nil {
+			if err := retire(opts, e.Path); err != nil {
 				return res, fmt.Errorf("prune %s: %w", e.Path, err)
 			}
 			res.Pruned++
@@ -490,4 +495,28 @@ func dash(s string) string {
 		return "—"
 	}
 	return s
+}
+
+// retire takes a stale entry out of the catalog: archived when opts asks for
+// that, removed otherwise. The archive copy is written and indexed before the
+// entry goes, so a failure leaves the entry where it was.
+func retire(opts Options, path string) error {
+	if opts.ArchiveRoot == "" {
+		return os.Remove(path)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	rel, err := archive.Place(opts.ArchiveRoot, archive.DistilledFolder, filepath.Base(path), content)
+	if err != nil {
+		return err
+	}
+	if err := archive.AppendIndex(opts.ArchiveRoot, archive.Entry{
+		Date: archive.Date(), Folder: archive.DistilledFolder, File: filepath.Base(path),
+		Reason: archive.ReasonPruned, Path: rel,
+	}); err != nil {
+		return err
+	}
+	return os.Remove(path)
 }

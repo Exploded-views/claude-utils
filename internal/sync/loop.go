@@ -385,7 +385,23 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	// The marker names the rebase for the reflog, so the next start knows a
 	// rebase found stopped is ours to abort; it stays while one is.
 	if err := runPull(repo, l.Branch); err != nil {
-		if repo.RebaseInProgress() {
+		if repo.RebaseInProgress() && l.Cfg.ArchiveDeletes {
+			// Two hosts archiving one note conflict in a way that needs no
+			// decision (see archive_resolve.go); anything else stays stopped.
+			n, rerr := resolveArchiveConflicts(repo)
+			if n > 0 {
+				l.logln(resolvedLine(n))
+			}
+			if rerr != nil {
+				l.logln("pull:", g.Err(rerr))
+			}
+			if !repo.RebaseInProgress() && rerr == nil {
+				err = nil
+			}
+		}
+		if err == nil {
+			// resolved: the pull is done
+		} else if repo.RebaseInProgress() {
 			conflictErr = abortRebaseConflict(repo)
 		} else {
 			// Don't propagate first-time failure (no upstream yet); push will create it.
@@ -397,6 +413,20 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 		return pause()
 	}
 	postRev, _ := repo.Run("rev-parse", "HEAD")
+	if conflictErr == nil && l.Cfg.ArchiveDeletes && strings.TrimSpace(preRev) != strings.TrimSpace(postRev) && strings.TrimSpace(preRev) != "" {
+		// An edit that merged into an archive copy is put back (archive_repair.go).
+		n, rerr := repairEditedArchives(repo, l.Cfg, strings.TrimSpace(preRev), strings.TrimSpace(postRev))
+		if rerr != nil {
+			// Never leave a mismatched copy: back to where the cycle began.
+			if _, e := repo.Run("reset", "--hard", strings.TrimSpace(preRev)); e != nil {
+				rerr = errors.Join(rerr, e)
+			}
+			conflictErr = fmt.Errorf("pull: could not restore an edited archived note (%s); the pull was undone, local commits kept, nothing propagated or pushed", g.Err(rerr))
+		} else if n > 0 {
+			l.logln(fmt.Sprintf("pull: restored %d note(s) edited after they were archived (the archive copies are unchanged)", n))
+			postRev, _ = repo.Run("rev-parse", "HEAD")
+		}
+	}
 	if conflictErr == nil && strings.TrimSpace(preRev) != strings.TrimSpace(postRev) && strings.TrimSpace(preRev) != "" {
 		if err := propagate(repo, roots, strings.TrimSpace(preRev), strings.TrimSpace(postRev), st.skip(), g); err != nil {
 			settled = false
