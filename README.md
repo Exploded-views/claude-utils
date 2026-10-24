@@ -125,6 +125,13 @@ After 1.0 the standard SemVer rules kick in (breaking → major, additive → mi
 5. To upgrade your own machine, download the appropriate archive from
    the Release page, extract, and swap the binaries:
 
+   Check the archive against the release's `SHA256SUMS` before
+   extracting it:
+
+   ```sh
+   sha256sum -c --ignore-missing SHA256SUMS   # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
+   ```
+
    ```sh
    claude-memsync stop
    # extract archive, copy bin/* to your install location
