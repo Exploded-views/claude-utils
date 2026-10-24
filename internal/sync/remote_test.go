@@ -1477,6 +1477,99 @@ func TestRemoteKey_StickyKeyOnlyChangesOnPositiveEvidence(t *testing.T) {
 	}
 }
 
+// The recorded directory is gone and the only directory the name decodes to now
+// is a different one (src/my-app moved away, src/my.app appeared). Having no
+// origin says nothing about the project that used to be there, so only a real
+// origin may re-key the folder.
+func TestRemoteKey_StickyKeyIgnoresAForeignCandidateWithoutOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		origin string // of the new candidate; "" means a plain directory
+		want   string
+		dirNow bool // the cache now records the new candidate
+	}{
+		{"plain directory", "", "github.com/acme/app", false},
+		{"checkout without origin", "-", "github.com/acme/app", false},
+		{"checkout with another origin", "git@github.com:acme/other.git", "github.com/acme/other", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gitEnv(t)
+			shared := t.TempDir()
+			a := newMachine(t, "alice", shared)
+			old := mkRepo(t, filepath.Join(a.home, "src", "my-app"), "git@github.com:acme/app.git")
+			hash := a.hash(old)
+			a.write(old, "a.md", "a\n")
+			m, err := NewRemoteMap(shared, a.claude)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := m.Key(hash); got != "github.com/acme/app" {
+				t.Fatalf("initial key = %q", got)
+			}
+			if err := os.RemoveAll(old); err != nil {
+				t.Fatal(err)
+			}
+			repl := filepath.Join(a.home, "src", "my.app")
+			switch tc.origin {
+			case "":
+				mkdirs(t, a.home, "src/my.app")
+			case "-":
+				mkRepo(t, repl, "")
+			default:
+				mkRepo(t, repl, tc.origin)
+			}
+			m.Refresh()
+			if got := m.Key(hash); got != tc.want {
+				t.Errorf("key = %q, want %q", got, tc.want)
+			}
+			c, err := LoadProjectCache(shared)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantDir := old
+			if tc.dirNow {
+				wantDir = repl
+			}
+			if c.Projects[hash].Dir != wantDir {
+				t.Errorf("cached dir = %q, want %q", c.Projects[hash].Dir, wantDir)
+			}
+		})
+	}
+}
+
+// A recorded dir that is missing (an unmounted drive, a moved checkout) is kept
+// through a spell where its name decodes to several directories: it is only
+// ever used after a stat, and clearing it would throw away a hand-pinned dir.
+func TestRemoteKey_AmbiguousDecodeKeepsTheRecordedDir(t *testing.T) {
+	gitEnv(t)
+	shared := t.TempDir()
+	a := newMachine(t, "alice", shared)
+	old := mkRepo(t, filepath.Join(a.home, "src", "my-app"), "git@github.com:acme/one.git")
+	hash := a.hash(old)
+	a.write(old, "a.md", "a\n")
+	m, err := NewRemoteMap(shared, a.claude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(old); err != nil {
+		t.Fatal(err)
+	}
+	mkRepo(t, filepath.Join(a.home, "src", "my.app"), "git@github.com:acme/two.git")
+	mkRepo(t, filepath.Join(a.home, "src", "my", "app"), "git@github.com:acme/three.git")
+	m.Refresh()
+	if got := m.Key(hash); got != "github.com/acme/one" {
+		t.Errorf("key = %q, want the remembered one", got)
+	}
+	c, err := LoadProjectCache(shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := c.Projects[hash]
+	if e.Dir != old || len(e.Candidates) != 2 {
+		t.Errorf("want the old dir kept and 2 candidates, got %+v", e)
+	}
+}
+
 func TestGitOrigin(t *testing.T) {
 	gitEnv(t)
 	// Messages must not depend on the user's language: gitOrigin has to ask

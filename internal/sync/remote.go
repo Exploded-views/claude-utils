@@ -566,6 +566,7 @@ func (m *RemoteMap) resolve(hash string) string {
 		// and fork its notes. Only git saying "no origin" or a different
 		// origin changes the key.
 		key = lastKey(e)
+		recorded := e.Dir
 		dir := e.Dir
 		if dir != "" {
 			if info, err := os.Stat(dir); err != nil || !info.IsDir() {
@@ -593,7 +594,9 @@ func (m *RemoteMap) resolve(hash string) string {
 				if known && len(keys) == 1 && !keys[""] {
 					dir = cands[0]
 				} else {
-					e.Dir = ""
+					// e.Dir stays: it is only used after a stat, and a pinned
+					// dir (or the last good one) is worth keeping through a
+					// spell where the name is ambiguous.
 					e.Candidates = cands
 					if !reflect.DeepEqual(prev.Candidates, cands) {
 						log.Printf("remote keys: %s matches %d directories with different remotes; keeping its previous key (set \"dir\" in %s to choose)",
@@ -602,9 +605,20 @@ func (m *RemoteMap) resolve(hash string) string {
 				}
 			}
 		}
+		k, ok := "", false
 		if dir != "" {
+			k, ok = m.keyOf(dir)
+		}
+		switch {
+		case dir == "":
+		case recorded != "" && dir != recorded && !(ok && k != ""):
+			// The recorded directory is gone and this is a different one that
+			// escapes to the same name. Failing to answer or having no origin
+			// says nothing about the project that used to be at recorded, so
+			// only a real origin may re-key the folder.
+		default:
 			e.Dir = dir
-			if k, ok := m.keyOf(dir); ok {
+			if ok {
 				key = k
 				e.LastKey = k
 				m.fresh[hash] = k != ""
