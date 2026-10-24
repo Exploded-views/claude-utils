@@ -233,6 +233,27 @@ func (m *machine) open(projectDir string) {
 	}
 }
 
+// openMem makes the folder and its memory/ dir, as a project Claude Code has
+// already written auto memory for (even if it is empty now).
+func (m *machine) openMem(projectDir string) {
+	m.t.Helper()
+	if err := os.MkdirAll(filepath.Join(m.claude, m.hash(projectDir), "memory"), 0700); err != nil {
+		m.t.Fatal(err)
+	}
+}
+
+func (m *machine) hasMemDir(projectDir string) bool {
+	_, err := os.Stat(filepath.Join(m.claude, m.hash(projectDir), "memory"))
+	return err == nil
+}
+
+func (m *machine) remove(projectDir, name string) {
+	m.t.Helper()
+	if err := os.Remove(filepath.Join(m.claude, m.hash(projectDir), "memory", name)); err != nil {
+		m.t.Fatal(err)
+	}
+}
+
 func (m *machine) write(projectDir, name, content string) {
 	m.t.Helper()
 	writeMem(m.t, m.claude, m.hash(projectDir), name, content)
@@ -243,8 +264,9 @@ func (m *machine) read(projectDir, name string) (string, bool) {
 	return string(b), err == nil
 }
 
-// sync runs one reconcile pass, then refreshes the per-PC manifest the way
-// the daemon does after a flush.
+// sync runs one reconcile pass, then commits the sync repo and refreshes the
+// per-PC manifest the way the daemon does after a flush. The commit matters:
+// the committed copy is the merge base for the next pass.
 func (m *machine) sync() SyncReport {
 	m.t.Helper()
 	roots, err := NewRoots(m.cfg)
@@ -264,6 +286,21 @@ func (m *machine) sync() SyncReport {
 		m.t.Fatal(err)
 	}
 	if err := nm.Save(m.stateDir()); err != nil {
+		m.t.Fatal(err)
+	}
+	repo := gitwt.New(m.cfg.SyncDir)
+	if err := os.MkdirAll(m.cfg.SyncDir, 0700); err != nil {
+		m.t.Fatal(err)
+	}
+	if !repo.IsRepo() {
+		if err := repo.Init("main"); err != nil {
+			m.t.Fatal(err)
+		}
+	}
+	if err := repo.AddAll(); err != nil {
+		m.t.Fatal(err)
+	}
+	if _, err := repo.Commit("sync"); err != nil {
 		m.t.Fatal(err)
 	}
 	return rep
@@ -291,8 +328,8 @@ func TestRemoteKey_SameRepoAtDifferentPathsSharesMemory(t *testing.T) {
 		t.Error("remote-keyed project must not also be mirrored under its path key")
 	}
 
-	// B has opened the repo (Claude made the folder) but has no memory yet.
-	b.open(appB)
+	// B has written memory for the repo before (its memory/ exists), but is empty.
+	b.openMem(appB)
 	b.sync()
 	if got, ok := b.read(appB, "feedback_a.md"); !ok || got != "note from A\n" {
 		t.Errorf("B did not receive A's memory: %q %v", got, ok)
@@ -367,124 +404,336 @@ func TestRemoteKey_SubdirectoryOfRepoKeepsPathKey(t *testing.T) {
 	}
 }
 
-func TestRemoteKey_WorktreesOfOneRepoUnion(t *testing.T) {
+// addWorktree makes a linked worktree of repo at dir.
+func addWorktree(t *testing.T, repo, dir string) {
+	t.Helper()
+	r := gitwt.New(repo)
+	if _, err := r.Run("commit", "--allow-empty", "-q", "-m", "root"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Run("worktree", "add", "-q", "-b", "feature", dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Current Claude Code keeps one auto-memory folder per repository, shared by
+// all its worktrees; a worktree's own project folder holds transcripts only.
+// So a linked worktree is not keyed by the remote, never receives copies, and
+// never gets a memory/ dir from us.
+func TestRemoteKey_LinkedWorktreeFolderStaysTranscriptOnly(t *testing.T) {
 	gitEnv(t)
 	shared := t.TempDir()
 	a := newMachine(t, "alice", shared)
 	main := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
-	r := gitwt.New(main)
-	if _, err := r.Run("commit", "--allow-empty", "-q", "-m", "root"); err != nil {
-		t.Fatal(err)
-	}
 	wt := filepath.Join(a.home, "src", "app-feature")
-	if _, err := r.Run("worktree", "add", "-q", "-b", "feature", wt); err != nil {
-		t.Fatal(err)
-	}
-
+	addWorktree(t, main, wt)
+	a.open(wt)
 	a.write(main, "MEMORY.md", "# Mem\n\n## Main\nfrom main\n")
 	a.write(main, "only_main.md", "m\n")
-	a.write(wt, "MEMORY.md", "# Mem\n\n## Tree\nfrom worktree\n")
-	a.write(wt, "only_tree.md", "w\n")
 	a.sync()
 
-	for _, d := range []string{main, wt} {
-		for _, f := range []string{"only_main.md", "only_tree.md"} {
+	if a.hasMemDir(wt) {
+		t.Error("the worktree's folder must not get a memory/ dir")
+	}
+	m, err := NewRemoteMap(shared, a.claude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Key(a.hash(wt)); got != "" {
+		t.Errorf("a linked worktree must not be keyed by remote, got %q", got)
+	}
+	if got := m.Key(a.hash(main)); got != "github.com/acme/app" {
+		t.Errorf("main checkout key = %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(shared, "remotes", "github.com", "acme", "app", "memory", "only_main.md")); err != nil {
+		t.Errorf("main checkout's memory should land in the remote-keyed folder: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(shared, "projects", a.hash(wt), "memory", "only_main.md")); err == nil {
+		t.Error("main's notes must not be copied under the worktree's path key")
+	}
+}
+
+// With no worktree copies to fight the real folder, deletes and MEMORY.md
+// pruning in it stick, and a plain edit leaves no conflict backup.
+func TestRemoteKey_LinkedWorktreeDoesNotUndoPruning(t *testing.T) {
+	gitEnv(t)
+	shared := t.TempDir()
+	a := newMachine(t, "alice", shared)
+	main := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	wt := filepath.Join(a.home, "src", "app-wt")
+	addWorktree(t, main, wt)
+	a.open(wt) // transcripts-only folder, as Claude Code creates it
+	a.write(main, "MEMORY.md", "# Mem\n\n## Keep\nkeep me\n\n## Stale\nobsolete note\n")
+	a.write(main, "old_topic.md", "obsolete\n")
+	a.write(main, "topic.md", "v1\n")
+	a.sync()
+
+	// Claude prunes in the real memory folder; the watcher mirrors it.
+	roots, err := NewRoots(a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.write(main, "MEMORY.md", "# Mem\n\n## Keep\nkeep me\n")
+	if err := CopyToMirror(roots, a.hash(main), "MEMORY.md"); err != nil {
+		t.Fatal(err)
+	}
+	a.remove(main, "old_topic.md")
+	if err := RemoveFromMirror(roots, a.hash(main), "old_topic.md"); err != nil {
+		t.Fatal(err)
+	}
+	a.write(main, "topic.md", "v2\n")
+	if err := CopyToMirror(roots, a.hash(main), "topic.md"); err != nil {
+		t.Fatal(err)
+	}
+	rep := a.sync()
+
+	if idx, _ := a.read(main, "MEMORY.md"); strings.Contains(idx, "Stale") {
+		t.Errorf("removed MEMORY.md section resurrected in the live folder:\n%s", idx)
+	}
+	if _, ok := a.read(main, "old_topic.md"); ok {
+		t.Error("deleted topic file resurrected in the live folder")
+	}
+	if len(rep.BackedUp) > 0 {
+		t.Errorf("a plain edit produced conflict backups: %v", rep.BackedUp)
+	}
+	if a.hasMemDir(wt) {
+		t.Error("the worktree's folder must not get a memory/ dir")
+	}
+}
+
+// A folder with no memory/ dir is not a group member: it is not filled in and
+// not given a memory/ dir.
+func TestRemoteKey_FolderWithoutMemoryDirIsNotFilled(t *testing.T) {
+	gitEnv(t)
+	shared := t.TempDir()
+	a := newMachine(t, "alice", shared)
+	b := newMachine(t, "bob", shared)
+	appA := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	appB := mkRepo(t, filepath.Join(b.home, "code", "app"), "git@github.com:acme/app.git")
+	a.write(appA, "note.md", "hi\n")
+	a.sync()
+	b.open(appB)
+	b.sync()
+	if b.hasMemDir(appB) {
+		t.Error("a folder without memory/ must not get one")
+	}
+	b.openMem(appB)
+	b.sync()
+	if got, ok := b.read(appB, "note.md"); !ok || got != "hi\n" {
+		t.Errorf("once memory/ exists the folder is filled in: %q %v", got, ok)
+	}
+}
+
+// twoClones is one PC with two clones of the same remote, each with a memory/
+// dir (each is a real, separate Claude auto-memory folder).
+func twoClones(t *testing.T) (a *machine, c1, c2, repoDir string) {
+	t.Helper()
+	gitEnv(t)
+	shared := t.TempDir()
+	a = newMachine(t, "alice", shared)
+	c1 = mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	c2 = mkRepo(t, filepath.Join(a.home, "src", "app2"), "https://github.com/acme/app.git")
+	a.openMem(c1)
+	a.openMem(c2)
+	return a, c1, c2, filepath.Join(shared, "remotes", "github.com", "acme", "app", "memory")
+}
+
+func noBackups(t *testing.T, repoDir string, rep SyncReport) {
+	t.Helper()
+	if len(rep.BackedUp) > 0 {
+		t.Errorf("unexpected conflict backups: %v", rep.BackedUp)
+	}
+	if m, _ := filepath.Glob(filepath.Join(repoDir, "*.from-remote-*")); len(m) > 0 {
+		t.Errorf("unexpected backup files: %v", m)
+	}
+}
+
+func TestRemoteKey_TwoClonesFirstSyncUnions(t *testing.T) {
+	a, c1, c2, repoDir := twoClones(t)
+	a.write(c1, "MEMORY.md", "# Mem\n\n## One\nfrom one\n")
+	a.write(c1, "only_one.md", "1\n")
+	a.write(c2, "MEMORY.md", "# Mem\n\n## Two\nfrom two\n")
+	a.write(c2, "only_two.md", "2\n")
+	a.sync() // no committed base yet
+
+	for _, d := range []string{c1, c2} {
+		for _, f := range []string{"only_one.md", "only_two.md"} {
 			if _, ok := a.read(d, f); !ok {
 				t.Errorf("%s missing %s after union", filepath.Base(d), f)
 			}
 		}
 		idx, _ := a.read(d, "MEMORY.md")
-		if !strings.Contains(idx, "## Main") || !strings.Contains(idx, "## Tree") {
+		if !strings.Contains(idx, "## One") || !strings.Contains(idx, "## Two") {
 			t.Errorf("%s MEMORY.md not unioned: %q", filepath.Base(d), idx)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(shared, "remotes", "github.com", "acme", "app", "memory", "only_tree.md")); err != nil {
-		t.Errorf("worktree memory should land in the shared repo folder: %v", err)
+	if _, err := os.Stat(filepath.Join(repoDir, "only_two.md")); err != nil {
+		t.Errorf("both clones share the repo folder: %v", err)
 	}
 }
 
-func TestRemoteKey_WorktreeConflictingFileNewestWinsAndBacksUp(t *testing.T) {
-	gitEnv(t)
-	shared := t.TempDir()
-	a := newMachine(t, "alice", shared)
-	main := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
-	r := gitwt.New(main)
-	if _, err := r.Run("commit", "--allow-empty", "-q", "-m", "root"); err != nil {
-		t.Fatal(err)
-	}
-	wt := filepath.Join(a.home, "src", "app-feature")
-	if _, err := r.Run("worktree", "add", "-q", "-b", "feature", wt); err != nil {
-		t.Fatal(err)
-	}
-	a.write(main, "topic.md", "old version\n")
-	a.write(wt, "topic.md", "new version\n")
-	old := filepath.Join(a.claude, a.hash(main), "memory", "topic.md")
-	past := mustTime(t, "2020-01-01T00:00:00Z")
-	if err := os.Chtimes(old, past, past); err != nil {
-		t.Fatal(err)
-	}
-
-	rep := a.sync()
-	if got, _ := a.read(main, "topic.md"); got != "new version\n" {
-		t.Errorf("main = %q, want newest content", got)
-	}
-	if got, _ := a.read(wt, "topic.md"); got != "new version\n" {
-		t.Errorf("worktree = %q, want newest content", got)
-	}
-	if len(rep.BackedUp) == 0 {
-		t.Error("the losing version should be preserved as a .from-remote-* backup")
-	}
-	matches, _ := filepath.Glob(filepath.Join(shared, "remotes", "github.com", "acme", "app", "memory", "topic.md.from-remote-*"))
-	if len(matches) != 1 {
-		t.Fatalf("want one backup, got %v", matches)
-	}
-	if b, _ := os.ReadFile(matches[0]); string(b) != "old version\n" {
-		t.Errorf("backup = %q", b)
-	}
-}
-
-func TestRemoteKey_WorktreeDeleteNeedsAllCopiesGone(t *testing.T) {
-	gitEnv(t)
-	shared := t.TempDir()
-	a := newMachine(t, "alice", shared)
-	main := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
-	r := gitwt.New(main)
-	if _, err := r.Run("commit", "--allow-empty", "-q", "-m", "root"); err != nil {
-		t.Fatal(err)
-	}
-	wt := filepath.Join(a.home, "src", "app-feature")
-	if _, err := r.Run("worktree", "add", "-q", "-b", "feature", wt); err != nil {
-		t.Fatal(err)
-	}
-	a.open(wt)
-	a.write(main, "topic.md", "x\n")
-	a.sync() // converges: both folders and the repo folder hold topic.md
-	repoFile := filepath.Join(shared, "remotes", "github.com", "acme", "app", "memory", "topic.md")
-
-	// Deleted in one worktree only: union wins, the file comes back.
-	if err := os.Remove(filepath.Join(a.claude, a.hash(wt), "memory", "topic.md")); err != nil {
-		t.Fatal(err)
-	}
+// The committed copy is the merge base: the clone that still equals it is
+// stale and takes the edit, with no backup.
+func TestRemoteKey_TwoClonesPlainEditLeavesNoBackup(t *testing.T) {
+	a, c1, c2, repoDir := twoClones(t)
+	a.write(c1, "topic.md", "v1\n")
+	a.write(c1, "MEMORY.md", "# Mem\n\n## A\nalpha\n")
 	a.sync()
-	if _, ok := a.read(wt, "topic.md"); !ok {
-		t.Error("a delete in only one of two folders must not delete the shared file")
-	}
-	if _, err := os.Stat(repoFile); err != nil {
-		t.Errorf("repo copy must survive: %v", err)
+	if got, _ := a.read(c2, "topic.md"); got != "v1\n" {
+		t.Fatalf("c2 should have received the file, got %q", got)
 	}
 
-	// Deleted everywhere: now it is a real delete.
-	for _, d := range []string{main, wt} {
-		if err := os.Remove(filepath.Join(a.claude, a.hash(d), "memory", "topic.md")); err != nil {
-			t.Fatal(err)
-		}
-	}
+	a.write(c1, "topic.md", "v2\n")
+	a.write(c1, "MEMORY.md", "# Mem\n\n## A\nalpha\n\n## B\nbeta\n")
 	rep := a.sync()
-	if _, err := os.Stat(repoFile); err == nil {
-		t.Error("file deleted from every folder should be removed from the repo folder")
+	noBackups(t, repoDir, rep)
+	if got, _ := a.read(c2, "topic.md"); got != "v2\n" {
+		t.Errorf("stale clone should take the edit, got %q", got)
+	}
+	if got, _ := a.read(c2, "MEMORY.md"); !strings.Contains(got, "## B") {
+		t.Errorf("stale clone's MEMORY.md should take the edit, got %q", got)
+	}
+
+	// And the other direction: the later clone edits, the earlier one is stale.
+	a.write(c2, "topic.md", "v3\n")
+	rep = a.sync()
+	noBackups(t, repoDir, rep)
+	if got, _ := a.read(c1, "topic.md"); got != "v3\n" {
+		t.Errorf("c1 = %q, want v3", got)
+	}
+}
+
+func TestRemoteKey_TwoClonesDeletePropagates(t *testing.T) {
+	a, c1, c2, repoDir := twoClones(t)
+	a.write(c1, "topic.md", "x\n")
+	a.write(c1, "keep.md", "k\n")
+	a.sync()
+	a.remove(c1, "topic.md")
+	rep := a.sync()
+	if _, ok := a.read(c2, "topic.md"); ok {
+		t.Error("a delete in one clone must delete the file in the other")
+	}
+	if _, ok := a.read(c1, "topic.md"); ok {
+		t.Error("the deleted file came back in the clone that deleted it")
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, "topic.md")); err == nil {
+		t.Error("delete should propagate to the repo folder")
 	}
 	if len(rep.RemovedFromMirror) != 1 {
 		t.Errorf("RemovedFromMirror = %v", rep.RemovedFromMirror)
+	}
+	if _, ok := a.read(c2, "keep.md"); !ok {
+		t.Error("unrelated file lost")
+	}
+	noBackups(t, repoDir, rep)
+
+	// The same from the second clone, and it stays deleted on a further pass.
+	a.remove(c2, "keep.md")
+	a.sync()
+	a.sync()
+	if _, ok := a.read(c1, "keep.md"); ok {
+		t.Error("delete in the second clone did not reach the first")
+	}
+}
+
+// An edit made since the base beats a delete in the other clone: no data loss.
+func TestRemoteKey_TwoClonesEditBeatsDelete(t *testing.T) {
+	a, c1, c2, repoDir := twoClones(t)
+	a.write(c1, "topic.md", "v1\n")
+	a.sync()
+	a.write(c1, "topic.md", "v2\n")
+	a.remove(c2, "topic.md")
+	rep := a.sync()
+	for _, d := range []string{c1, c2} {
+		if got, _ := a.read(d, "topic.md"); got != "v2\n" {
+			t.Errorf("%s = %q, want the edited file kept", filepath.Base(d), got)
+		}
+	}
+	noBackups(t, repoDir, rep)
+}
+
+func TestRemoteKey_TwoClonesPruningSticks(t *testing.T) {
+	for _, watcher := range []bool{false, true} {
+		name := "reconcile"
+		if watcher {
+			name = "watcher mirrored first"
+		}
+		t.Run(name, func(t *testing.T) {
+			a, c1, c2, repoDir := twoClones(t)
+			a.write(c1, "MEMORY.md", "# Mem\n\n## Keep\nkeep me\n\n## Stale\nobsolete note\n")
+			a.write(c1, "old_topic.md", "obsolete\n")
+			a.sync()
+			if idx, _ := a.read(c2, "MEMORY.md"); !strings.Contains(idx, "Stale") {
+				t.Fatalf("c2 should have the full index first: %q", idx)
+			}
+
+			a.write(c1, "MEMORY.md", "# Mem\n\n## Keep\nkeep me\n")
+			a.remove(c1, "old_topic.md")
+			if watcher {
+				roots, err := NewRoots(a.cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := CopyToMirror(roots, a.hash(c1), "MEMORY.md"); err != nil {
+					t.Fatal(err)
+				}
+				if err := RemoveFromMirror(roots, a.hash(c1), "old_topic.md"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rep := a.sync()
+			for _, d := range []string{c1, c2} {
+				if idx, _ := a.read(d, "MEMORY.md"); strings.Contains(idx, "Stale") || !strings.Contains(idx, "Keep") {
+					t.Errorf("%s: pruned section resurrected or index damaged:\n%s", filepath.Base(d), idx)
+				}
+				if _, ok := a.read(d, "old_topic.md"); ok {
+					t.Errorf("%s: deleted topic file resurrected", filepath.Base(d))
+				}
+			}
+			noBackups(t, repoDir, rep)
+			// Stable on the next pass too.
+			noBackups(t, repoDir, a.sync())
+		})
+	}
+}
+
+// Real divergence (both clones edited since the base) still falls back to the
+// existing rules: MEMORY.md merges, anything else keeps the newest and backs
+// the other up.
+func TestRemoteKey_TwoClonesDivergentEditsMergeOrBackUp(t *testing.T) {
+	a, c1, c2, repoDir := twoClones(t)
+	a.write(c1, "topic.md", "v1\n")
+	a.write(c1, "MEMORY.md", "# Mem\n\n## Base\nbase\n")
+	a.sync()
+
+	a.write(c1, "topic.md", "older edit\n")
+	a.write(c2, "topic.md", "newer edit\n")
+	past := mustTime(t, "2020-01-01T00:00:00Z")
+	if err := os.Chtimes(filepath.Join(a.claude, a.hash(c1), "memory", "topic.md"), past, past); err != nil {
+		t.Fatal(err)
+	}
+	a.write(c1, "MEMORY.md", "# Mem\n\n## Base\nbase\n\n## One\nfrom one\n")
+	a.write(c2, "MEMORY.md", "# Mem\n\n## Base\nbase\n\n## Two\nfrom two\n")
+
+	rep := a.sync()
+	for _, d := range []string{c1, c2} {
+		if got, _ := a.read(d, "topic.md"); got != "newer edit\n" {
+			t.Errorf("%s topic.md = %q, want the newest edit", filepath.Base(d), got)
+		}
+		idx, _ := a.read(d, "MEMORY.md")
+		if !strings.Contains(idx, "## One") || !strings.Contains(idx, "## Two") {
+			t.Errorf("%s MEMORY.md should merge both edits: %q", filepath.Base(d), idx)
+		}
+	}
+	if len(rep.BackedUp) != 1 {
+		t.Errorf("BackedUp = %v, want exactly the losing topic.md", rep.BackedUp)
+	}
+	matches, _ := filepath.Glob(filepath.Join(repoDir, "topic.md.from-remote-*"))
+	if len(matches) != 1 {
+		t.Fatalf("want one backup, got %v", matches)
+	}
+	if b, _ := os.ReadFile(matches[0]); string(b) != "older edit\n" {
+		t.Errorf("backup = %q", b)
 	}
 }
 
@@ -556,6 +805,7 @@ func TestRemoteKey_AmbiguousButSameRemoteResolves(t *testing.T) {
 }
 
 func TestRemoteKey_UnresolvableKeepsPathKey(t *testing.T) {
+	gitEnv(t)
 	// The project directory no longer exists on this machine.
 	shared := t.TempDir()
 	a := newMachine(t, "alice", shared)
@@ -807,15 +1057,8 @@ func TestPropagateChanges_RemoteKeyedPathsReachEveryLocalFolder(t *testing.T) {
 	shared := t.TempDir()
 	a := newMachine(t, "alice", shared)
 	main := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
-	r := gitwt.New(main)
-	if _, err := r.Run("commit", "--allow-empty", "-q", "-m", "root"); err != nil {
-		t.Fatal(err)
-	}
-	wt := filepath.Join(a.home, "src", "app-feature")
-	if _, err := r.Run("worktree", "add", "-q", "-b", "feature", wt); err != nil {
-		t.Fatal(err)
-	}
-	a.open(wt)
+	wt := mkRepo(t, filepath.Join(a.home, "src", "app-clone"), "https://github.com/acme/app.git")
+	a.openMem(wt)
 	a.write(main, "keep.md", "k\n")
 	a.write(main, "old.md", "o\n")
 	a.sync()
@@ -871,15 +1114,8 @@ func TestHandleEvent_RemoteKeyedFileGoesToSharedFolder(t *testing.T) {
 	shared := t.TempDir()
 	a := newMachine(t, "alice", shared)
 	main := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
-	r := gitwt.New(main)
-	if _, err := r.Run("commit", "--allow-empty", "-q", "-m", "root"); err != nil {
-		t.Fatal(err)
-	}
-	wt := filepath.Join(a.home, "src", "app-feature")
-	if _, err := r.Run("worktree", "add", "-q", "-b", "feature", wt); err != nil {
-		t.Fatal(err)
-	}
-	a.open(wt)
+	wt := mkRepo(t, filepath.Join(a.home, "src", "app-clone"), "https://github.com/acme/app.git")
+	a.openMem(wt)
 	a.write(main, "topic.md", "x\n")
 
 	roots, err := NewRoots(a.cfg)

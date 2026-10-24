@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
+	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/merge"
 )
 
@@ -66,8 +67,8 @@ func (r Roots) MirrorMemDir(hash string) string {
 }
 
 // group is one repo-side memory directory and the local project folders that
-// share it: exactly one in path mode, one or more in remote mode (a repo and
-// its worktrees, or two clones).
+// share it: exactly one in path mode, one or more in remote mode (several
+// clones of one remote on this PC, each with a memory/ dir).
 type group struct {
 	mirrorMem string
 	locals    []string // project folder names under Claude
@@ -103,6 +104,12 @@ func (r Roots) groups() ([]group, error) {
 			}
 			if root == r.Claude {
 				local[e.Name()] = true
+				if r.Remote != nil && r.Remote.Key(e.Name()) != "" && !isDir(filepath.Join(r.Claude, e.Name(), "memory")) {
+					// Claude Code reads memory only from the repo's own folder
+					// (a worktree's folder holds transcripts), so a folder
+					// that has no memory/ is not a member and never gets one.
+					continue
+				}
 				add(e.Name(), r.MirrorMemDir(e.Name()))
 			} else {
 				add(e.Name(), filepath.Join(r.Mirror, e.Name(), "memory"))
@@ -202,17 +209,8 @@ type localCopy struct {
 // reconcileGroup applies the Reconcile rules to one repo-side directory and
 // the local folders that map to it. With a single local folder (always the
 // case in path mode) it is the plain two-way rule set documented on
-// Reconcile. With several (a repo and its worktrees in remote mode) the
-// folders are unioned, like MEMORY.md sections:
-//
-//   - a file any folder has is copied to the others and to the mirror
-//   - MEMORY.md versions are all merged together
-//   - other files that differ keep the most recently modified version; every
-//     losing version is preserved as <name>.from-remote-<random> in the mirror
-//   - the mirror copy is deleted only when no folder has the file any more and
-//     the manifest shows at least one folder used to (a delete in just one of
-//     several folders is undone: it cannot tell "deleted" from "never synced
-//     into this worktree")
+// Reconcile. With several (two clones of one remote on this PC, both with a
+// memory/ dir) each file goes through reconcileMulti.
 func reconcileGroup(r Roots, g group, manifest *Manifest, rep *SyncReport) error {
 	if err := os.MkdirAll(g.mirrorMem, 0700); err != nil {
 		return err
@@ -281,6 +279,13 @@ func reconcileGroup(r Roots, g group, manifest *Manifest, rep *SyncReport) error
 			return nil
 		}
 
+		if len(g.locals) > 1 {
+			if err := reconcileMulti(r, mp, mExists, mBytes, locals, present, manifest, toClaude, rep); err != nil {
+				return err
+			}
+			continue
+		}
+
 		switch {
 		case len(present) == 0 && known:
 			// User deleted on this PC. Remove from mirror so the next
@@ -307,7 +312,181 @@ func reconcileGroup(r Roots, g group, manifest *Manifest, rep *SyncReport) error
 	return nil
 }
 
-// reconcilePresent handles a file that at least one local folder has.
+// committedBlob returns the sync repo's committed copy of a mirror file, the
+// last state every member was brought to, for use as a merge base. ok is false
+// when the file is not in HEAD (or the sync dir is not a repo).
+func (r Roots) committedBlob(mirrorPath string) ([]byte, bool) {
+	if r.Remote == nil {
+		return nil, false
+	}
+	rel, err := filepath.Rel(r.Remote.syncDir, mirrorPath)
+	if err != nil {
+		return nil, false
+	}
+	out, err := gitwt.New(r.Remote.syncDir).Run("show", "HEAD:"+filepath.ToSlash(rel))
+	if err != nil {
+		return nil, false
+	}
+	return []byte(out), true
+}
+
+// reconcileMulti reconciles one file across several local folders that share
+// a repo-side copy. A union cannot tell "stale copy" from "new edit" nor
+// "deleted here" from "never received", so it would undo deletes and
+// MEMORY.md pruning. The committed blob is the merge base instead:
+//
+//   - a copy equal to the base is stale and just takes the changed side, with
+//     no backup
+//   - a folder missing a file that its manifest remembers has deleted it; the
+//     delete wins over stale copies, but not over a copy edited since the base
+//     (the edit is restored to the folder that lost it)
+//   - copies that differ from the base in different ways really diverged:
+//     MEMORY.md is merged three-way, anything else keeps the most recently
+//     modified copy and backs the others up as <name>.from-remote-<random>
+//
+// Without a committed base (first sync) it falls back to reconcilePresent's
+// union, and deletes are judged against the mirror copy instead.
+func reconcileMulti(r Roots, mp string, mExists bool, mBytes []byte, locals []localCopy, present []int,
+	manifest *Manifest, toClaude func(localCopy, []byte) error, rep *SyncReport) error {
+
+	name := filepath.Base(mp)
+	var base []byte
+	var haveBase, baseLoaded bool
+	loadBase := func() {
+		if !baseLoaded {
+			baseLoaded = true
+			base, haveBase = r.committedBlob(mp)
+		}
+	}
+
+	lost := false
+	for _, lc := range locals {
+		lost = lost || (!lc.have && manifest.Has(lc.rel))
+	}
+	if lost {
+		loadBase()
+		ref, haveRef := base, haveBase
+		if !haveRef && mExists {
+			ref, haveRef = mBytes, true
+		}
+		edited := false
+		for _, i := range present {
+			edited = edited || (haveRef && !bytes.Equal(locals[i].bytes, ref))
+		}
+		if !edited {
+			for _, i := range present {
+				if err := os.Remove(locals[i].path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+					return fmt.Errorf("remove claude %s: %w", locals[i].path, err)
+				}
+			}
+			if err := os.Remove(mp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("remove mirror %s: %w", mp, err)
+			}
+			rep.RemovedFromMirror = append(rep.RemovedFromMirror, locals[0].rel)
+			return nil
+		}
+	}
+
+	if len(present) == 0 {
+		// Not remembered by any folder → new from another PC.
+		for _, lc := range locals {
+			if err := toClaude(lc, mBytes); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	allSame := !mExists || bytes.Equal(mBytes, locals[present[0]].bytes)
+	for _, i := range present {
+		allSame = allSame && bytes.Equal(locals[i].bytes, locals[present[0]].bytes)
+	}
+	if !allSame {
+		loadBase()
+	}
+	if allSame || !haveBase {
+		return reconcilePresent(name, mp, mExists, mBytes, locals, present, toClaude, rep)
+	}
+
+	// Distinct versions that differ from the base: the changed sides.
+	type side struct {
+		content []byte
+		mtime   time.Time
+		rel     string
+	}
+	var sides []side
+	addSide := func(c []byte, mt time.Time, rel string) {
+		if bytes.Equal(c, base) {
+			return
+		}
+		for k := range sides {
+			if bytes.Equal(sides[k].content, c) {
+				if mt.After(sides[k].mtime) {
+					sides[k].mtime = mt
+				}
+				return
+			}
+		}
+		sides = append(sides, side{c, mt, rel})
+	}
+	for _, i := range present {
+		addSide(locals[i].bytes, locals[i].mtime, locals[i].rel)
+	}
+	if mExists {
+		addSide(mBytes, time.Time{}, "(sync repo)/"+name)
+	}
+
+	var final []byte
+	switch {
+	case len(sides) == 0:
+		final = base
+	case len(sides) == 1:
+		final = sides[0].content
+	case name == "MEMORY.md":
+		merged := string(sides[0].content)
+		for _, s := range sides[1:] {
+			merged, _ = merge.Merge(string(base), merged, string(s.content))
+		}
+		final = []byte(merged)
+		rep.Merged = append(rep.Merged, locals[present[0]].rel)
+	default:
+		w := 0
+		for k := range sides {
+			if sides[k].mtime.After(sides[w].mtime) {
+				w = k
+			}
+		}
+		final = sides[w].content
+		for k, s := range sides {
+			if k == w {
+				continue
+			}
+			if err := writeAtomic(fmt.Sprintf("%s.from-remote-%s", mp, randSuffix()), s.content); err != nil {
+				return err
+			}
+			rep.BackedUp = append(rep.BackedUp, s.rel)
+		}
+	}
+
+	if !mExists || !bytes.Equal(mBytes, final) {
+		if err := writeAtomic(mp, final); err != nil {
+			return fmt.Errorf("write mirror %s: %w", mp, err)
+		}
+		rep.CopiedToMirror = append(rep.CopiedToMirror, locals[present[0]].rel)
+	}
+	for _, lc := range locals {
+		if lc.have && bytes.Equal(lc.bytes, final) {
+			continue
+		}
+		if err := toClaude(lc, final); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// reconcilePresent handles a file that at least one local folder has, by
+// union (no merge base known).
 func reconcilePresent(name, mp string, mExists bool, mBytes []byte, locals []localCopy, present []int,
 	toClaude func(localCopy, []byte) error, rep *SyncReport) error {
 

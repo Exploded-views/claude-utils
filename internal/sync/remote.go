@@ -198,6 +198,12 @@ func walkCandidates(root, rest string) []string {
 	return out
 }
 
+// isDir reports whether p is an existing directory.
+func isDir(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && info.IsDir()
+}
+
 // isDirEntry reports whether e is a directory, following symlinks.
 func isDirEntry(parent string, e fs.DirEntry) bool {
 	if e.IsDir() {
@@ -246,7 +252,9 @@ func gitOrigin(dir string) (url string, ok bool) {
 	if !ok1 || !ok2 {
 		return "", false
 	}
-	_, _ = gitDir, common
+	if gitDir != common {
+		return "", true // linked worktree
+	}
 	cfg, err := r.Run("config", "--local", "--get", "remote.origin.url")
 	if err != nil {
 		var ee *exec.ExitError
@@ -390,16 +398,20 @@ func (m *RemoteMap) Key(hash string) string {
 	if k, ok := m.keys[hash]; ok {
 		return k
 	}
+	if !isDir(filepath.Join(m.claudeRoot, hash)) {
+		return "" // not a project folder on this PC (e.g. a hash from another PC's push)
+	}
 	k := m.resolve(hash)
 	m.save()
 	return k
 }
 
-// Members lists the known project folders stored under key, sorted.
+// Members lists the known project folders stored under key that have a
+// memory/ dir, sorted. A folder without one is never filled in.
 func (m *RemoteMap) Members(key string) []string {
 	var out []string
 	for h, k := range m.keys {
-		if k == key {
+		if k == key && isDir(filepath.Join(m.claudeRoot, h, "memory")) {
 			out = append(out, h)
 		}
 	}
