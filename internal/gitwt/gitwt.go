@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/proc"
 )
@@ -307,16 +308,55 @@ func (r *Repo) MergeInProgress() bool {
 
 // gitPathExists reports whether name exists in the git directory.
 func (r *Repo) gitPathExists(name string) bool {
+	_, err := os.Stat(r.gitPath(name))
+	return err == nil
+}
+
+// gitPath is the absolute path of name in the git directory; "" if git cannot
+// say.
+func (r *Repo) gitPath(name string) string {
 	out, err := r.Run("rev-parse", "--git-path", name)
 	p := strings.TrimSpace(out)
 	if err != nil || p == "" {
-		return false
+		return ""
 	}
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(r.Dir, p) // relative to the -C directory
 	}
-	_, err = os.Stat(p)
-	return err == nil
+	return p
+}
+
+// HeadDetached reports whether HEAD is not on a branch, as in the middle of a
+// rebase or after checking out a commit.
+func (r *Repo) HeadDetached() bool {
+	_, err := r.Run("symbolic-ref", "-q", "HEAD")
+	return err != nil
+}
+
+// StoppedOp is a rebase or merge left unfinished: the commit HEAD was at when
+// it started (the orig-head of a rebase, ORIG_HEAD of a merge) and when its
+// state was last written.
+type StoppedOp struct {
+	StartHead string
+	Modified  time.Time
+}
+
+// StoppedOps lists the rebase and the merge in progress, if any.
+func (r *Repo) StoppedOps() []StoppedOp {
+	var ops []StoppedOp
+	for _, c := range []struct{ state, head string }{
+		{"rebase-merge", "rebase-merge/orig-head"},
+		{"rebase-apply", "rebase-apply/orig-head"},
+		{"MERGE_HEAD", "ORIG_HEAD"},
+	} {
+		info, err := os.Stat(r.gitPath(c.state))
+		if err != nil {
+			continue
+		}
+		b, _ := os.ReadFile(r.gitPath(c.head))
+		ops = append(ops, StoppedOp{StartHead: strings.TrimSpace(string(b)), Modified: info.ModTime()})
+	}
+	return ops
 }
 
 // HasUnmerged reports whether the index holds unmerged (conflicted) entries.

@@ -1,10 +1,14 @@
 package sync
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
 
 // noMarkersAnywhere fails if the conflicted note holds conflict markers in the
@@ -26,14 +30,15 @@ func noMarkersAnywhere(t *testing.T, f *pullFixture) {
 	}
 }
 
-// markDaemonPull is what the daemon writes before its own pull: the marker
-// that says a stopped rebase or merge is the daemon's to abort.
+// markDaemonPull is what the daemon writes before its own pull: the marker,
+// holding HEAD, that says a rebase or merge begun from that commit after it is
+// the daemon's to abort. Call it before the operation starts.
 func markDaemonPull(t *testing.T, f *pullFixture) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(f.repo.Dir, ".state"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(f.repo.Dir, ".state", "pull-running"), nil, 0600); err != nil {
+	if err := markPull(f.repo, f.head()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -50,10 +55,10 @@ func crashedMerge(t *testing.T) *pullFixture {
 	}
 	f.peerPush("clean.md", "a\npeer\n")
 	mustGit(t, f.repo, "fetch", "-q", "origin")
+	markDaemonPull(t, f)
 	if _, err := f.repo.Run("merge", "--no-edit", "origin/main"); err == nil {
 		t.Fatal("expected a conflicted merge")
 	}
-	markDaemonPull(t, f)
 	return f
 }
 
@@ -68,6 +73,7 @@ func crashedRebase(t *testing.T) *pullFixture {
 		t.Fatal(err)
 	}
 	f.peerPush("clean.md", "a\npeer\n")
+	markDaemonPull(t, f)
 	if err := f.repo.Pull("main"); err == nil {
 		t.Fatal("expected the pull to stop on a conflict")
 	}
@@ -77,7 +83,6 @@ func crashedRebase(t *testing.T) *pullFixture {
 	if parkedOnDisk(f) {
 		t.Fatal("nothing should be parked")
 	}
-	markDaemonPull(t, f)
 	return f
 }
 
@@ -287,5 +292,202 @@ func TestPullMarker_ClearedAfterCycles(t *testing.T) {
 	}
 	if pullMarked(f.repo) {
 		t.Error("marker left after an aborted conflict")
+	}
+}
+
+// A rebase the user starts by hand after the daemon's cycle began (the check at
+// the start of a cycle passed) is not recorded as synced, and not aborted. Once
+// the user finishes, catch-up propagates the commits that were below the
+// mid-rebase HEAD, so the next Reconcile does not push the stale Claude copy
+// over the peer's edit.
+func TestInterrupted_HandRebaseDuringCycleKeepsPeerEdit(t *testing.T) {
+	f := newPullFixture(t, map[string]string{"clean.md": "a\nb\n", "other.md": "o\n"})
+	captureLog(t)
+	f.loop.pullTick(f.repo, f.roots)
+	f.peerPush("clean.md", "a\npeer\n")
+	f.peerPush("other.md", "o\npeer edit\n")
+	f.editLocal("clean.md", "a\nlocal\n")
+	f.loop.pullTick(f.repo, f.roots) // conflict, aborted, local commit kept
+	if inProgress(f) {
+		t.Fatal("daemon left its rebase")
+	}
+
+	// Cycle starts (check passes), then the user runs the documented pull.
+	f.loop.startCycle(f.repo, f.roots)
+	t.Setenv("GIT_EDITOR", "true")
+	if _, err := f.repo.Run("pull", "--rebase", "--autostash", "origin", "main"); err == nil {
+		t.Fatal("expected the user's pull to stop")
+	}
+	before := f.syncedHead()
+	if err := f.loop.flush(f.repo, f.roots, true); err != nil {
+		t.Errorf("racing flush: %v", err)
+	}
+	if !f.repo.RebaseInProgress() {
+		t.Fatal("the user's rebase was aborted by the daemon")
+	}
+	if rec := f.syncedHead(); rec != before {
+		t.Errorf("record moved to %s while the rebase was stopped", rec)
+	}
+	// User finishes the resolution, daemon carries on.
+	writeRepoFile(t, f.repo, "projects/p1/memory/clean.md", "a\nboth\n")
+	mustGit(t, f.repo, "add", "projects/p1/memory/clean.md")
+	mustGit(t, f.repo, "rebase", "--continue")
+	f.loop.pullTick(f.repo, f.roots)
+	f.loop.pullTick(f.repo, f.roots)
+	if got := f.originFile("other.md"); got != "o\npeer edit\n" {
+		t.Errorf("origin other.md = %q: the peer's edit was reverted", got)
+	}
+	if got, _ := f.claudeCopy("other.md"); got != "o\npeer edit\n" {
+		t.Errorf("Claude other.md = %q", got)
+	}
+}
+
+// The record is not written while a rebase or merge is stopped or HEAD is
+// detached.
+func TestRecordHead_WritesNothingMidOperation(t *testing.T) {
+	cases := map[string]func(t *testing.T) *pullFixture{
+		"rebase": func(t *testing.T) *pullFixture { return userRebase(t) },
+		"merge":  func(t *testing.T) *pullFixture { return crashedMerge(t) },
+		"detached": func(t *testing.T) *pullFixture {
+			f := newPullFixture(t, map[string]string{"clean.md": "a\nb\n"})
+			captureLog(t)
+			mustGit(t, f.repo, "checkout", "-q", "--detach")
+			return f
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := setup(t)
+			if err := os.Remove(syncedHeadPath(f.repo)); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			if err := recordHead(f.repo); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(syncedHeadPath(f.repo)); err == nil {
+				t.Errorf("record written: %q", f.syncedHead())
+			}
+		})
+	}
+}
+
+// A rebase the user starts after the cycle's first check, before the pull, ends
+// the cycle: nothing is parked or reset, nothing is pulled or pushed, no record.
+func TestFlush_RebaseStartedBeforePullEndsCycle(t *testing.T) {
+	f := newPullFixture(t, map[string]string{"clean.md": "a\nb\n"})
+	logs := captureLog(t)
+	f.loop.pullTick(f.repo, f.roots)
+	f.editLocal("clean.md", "a\nlocal\n")
+	if _, err := CommitMirror(f.repo, f.loop.Cfg, "c"); err != nil {
+		t.Fatal(err)
+	}
+	f.peerPush("clean.md", "a\npeer\n")
+	f.writeWork("projects/p1/memory/new.md", "uncommitted\n") // a pull would park it
+	tip := strings.TrimSpace(mustGit(t, f.repo, "ls-remote", "origin", "refs/heads/main"))
+	beforePullCheck = func(r *gitwt.Repo) {
+		t.Setenv("GIT_EDITOR", "true")
+		if _, err := r.Run("pull", "--rebase", "origin", "main"); err == nil {
+			t.Error("expected the user's pull to stop")
+		}
+	}
+	t.Cleanup(func() { beforePullCheck = func(*gitwt.Repo) {} })
+	if err := recordHead(f.repo); err != nil { // the commit above is reflected in ~/.claude
+		t.Fatal(err)
+	}
+	rec := f.syncedHead()
+	logs.Reset()
+	if err := f.loop.flush(f.repo, f.roots, false); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if !f.repo.RebaseInProgress() {
+		t.Fatal("the user's rebase was aborted")
+	}
+	if parkedOnDisk(f) {
+		t.Error("parked around a user's rebase")
+	}
+	if got, _ := f.workFile("projects/p1/memory/new.md"); got != "uncommitted\n" {
+		t.Errorf("work-tree file touched: %q", got)
+	}
+	if pullMarked(f.repo) {
+		t.Error("pull marker written")
+	}
+	if f.syncedHead() != rec {
+		t.Error("record moved")
+	}
+	if now := strings.TrimSpace(mustGit(t, f.repo, "ls-remote", "origin", "refs/heads/main")); now != tip {
+		t.Error("origin moved")
+	}
+	if !strings.Contains(logs.String(), "in progress in the sync repo") {
+		t.Errorf("not logged: %s", logs)
+	}
+}
+
+// The rebase check that follows a failed pull aborts only a rebase that pull
+// started. One that was there before it is left alone, and so is its state.
+func TestAbortRebaseConflict_LeavesPreexistingRebase(t *testing.T) {
+	f := userRebase(t)   // the user's rebase, no marker
+	markDaemonPull(t, f) // a pull marked afterwards: the rebase predates it
+	err := abortRebaseConflict(f.repo)
+	if !errors.Is(err, errHandResolving) {
+		t.Errorf("want errHandResolving, got %v", err)
+	}
+	if !f.repo.RebaseInProgress() {
+		t.Error("the rebase that predates the pull was aborted")
+	}
+}
+
+func TestAbortRebaseConflict_AbortsItsOwnRebase(t *testing.T) {
+	f := crashedRebase(t)
+	err := abortRebaseConflict(f.repo)
+	if err == nil || errors.Is(err, errHandResolving) || !strings.Contains(err.Error(), "rebase aborted") {
+		t.Errorf("got %v", err)
+	}
+	if f.repo.RebaseInProgress() {
+		t.Error("the pull's own rebase was left")
+	}
+}
+
+// A marker left by a crash that did not leave a rebase (the pull had finished,
+// or died before it started one) does not claim a rebase the user starts later,
+// and the cycle removes it.
+func TestInterrupted_StaleMarkerDoesNotClaimLaterRebase(t *testing.T) {
+	// HEAD has moved since the marker was written.
+	t.Run("head moved", func(t *testing.T) {
+		f := newPullFixture(t, map[string]string{"clean.md": "a\nb\n"})
+		captureLog(t)
+		markDaemonPull(t, f)
+		f.editLocal("clean.md", "a\nlocal\n")
+		if _, err := CommitMirror(f.repo, f.loop.Cfg, "c"); err != nil {
+			t.Fatal(err)
+		}
+		f.peerPush("clean.md", "a\npeer\n")
+		t.Setenv("GIT_EDITOR", "true")
+		if err := f.repo.Pull("main"); err == nil || !f.repo.RebaseInProgress() {
+			t.Fatal("setup: want a stopped rebase")
+		}
+		requireUserRebaseSurvives(t, f)
+	})
+	// HEAD is the marker's, but the rebase began before the marker was written.
+	t.Run("rebase predates the marker", func(t *testing.T) {
+		f := userRebase(t)
+		markDaemonPull(t, f)
+		later := time.Now().Add(time.Minute)
+		if err := os.Chtimes(pullMarkerPath(f.repo), later, later); err != nil {
+			t.Fatal(err)
+		}
+		requireUserRebaseSurvives(t, f)
+	})
+}
+
+func requireUserRebaseSurvives(t *testing.T, f *pullFixture) {
+	t.Helper()
+	logs := captureLog(t)
+	f.loop.pullTick(f.repo, f.roots)
+	f.restart()
+	if !f.repo.RebaseInProgress() {
+		t.Errorf("the user's rebase was aborted:\n%s", logs)
+	}
+	if pullMarked(f.repo) {
+		t.Error("the stale marker was kept")
 	}
 }

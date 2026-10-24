@@ -321,6 +321,14 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 			}
 		}
 	}()
+	// The check in takeRecovery ran at the start of the cycle, which may have
+	// been long ago: the user may have started a rebase since. Staging or
+	// committing in the middle of it would corrupt it.
+	if handResolving(repo) {
+		settled = false
+		log.Println(errHandResolving)
+		return nil
+	}
 	if includeLocal {
 		_, err := CommitMirror(repo, l.Cfg, fmt.Sprintf("auto: %s @ %s", l.Hostname, time.Now().UTC().Format(time.RFC3339)))
 		if err != nil {
@@ -342,6 +350,13 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 			err = errors.Join(err, fmt.Errorf("restore held-back files: %w", ferr))
 		}
 	}()
+	// Once more right before the pull, ahead of the park, which resets files.
+	beforePullCheck(repo)
+	if handResolving(repo) {
+		settled = false
+		log.Println(errHandResolving)
+		return nil
+	}
 	st, err := parkUncommitted(repo)
 	if err != nil {
 		return fmt.Errorf("park held-back files: %w", err)
@@ -349,8 +364,8 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	preRev, _ := repo.Run("rev-parse", "HEAD")
 	var conflictErr error
 	// The marker tells the next start that a rebase found stopped is ours to
-	// abort; it stays while one is.
-	if err := markPull(repo); err != nil {
+	// abort, if it began from this HEAD after the marker; it stays while one is.
+	if err := markPull(repo, strings.TrimSpace(preRev)); err != nil {
 		return fmt.Errorf("mark pull: %w", err)
 	}
 	if err := repo.Pull(l.Branch); err != nil {
@@ -362,6 +377,12 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 		}
 	}
 	clearPullMark(repo)
+	if errors.Is(conflictErr, errHandResolving) {
+		settled = false
+		log.Println(errHandResolving)
+		conflictErr = nil
+		return nil
+	}
 	postRev, _ := repo.Run("rev-parse", "HEAD")
 	if conflictErr == nil && strings.TrimSpace(preRev) != strings.TrimSpace(postRev) && strings.TrimSpace(preRev) != "" {
 		if err := propagate(repo, roots, strings.TrimSpace(preRev), strings.TrimSpace(postRev), st.skip(), g); err != nil {
@@ -382,6 +403,10 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 // propagate is propagateChanges; a variable so a test can make it fail.
 var propagate = propagateChanges
 
+// beforePullCheck runs just before the check for a rebase or merge ahead of the
+// pull; a variable so a test can start one there.
+var beforePullCheck = func(*gitwt.Repo) {}
+
 // abortRebaseConflict deals with a `pull --rebase` that stopped on a conflict
 // (both PCs edited the same lines of a committed file). It aborts the rebase, so
 // the work-tree never holds conflict markers for propagateChanges to copy into
@@ -390,7 +415,14 @@ var propagate = propagateChanges
 // until the user resolves it (see "Rebase conflicts" in the docs). The error is
 // the cycle's one log line; it gives the count only, as the paths may match the
 // denylist.
+//
+// Only a rebase this pull started is aborted (see stoppedByMarkedPull). One the
+// user started in the meantime makes the pull fail without touching it; that
+// is errHandResolving.
 func abortRebaseConflict(repo *gitwt.Repo) error {
+	if !stoppedByMarkedPull(repo) {
+		return errHandResolving
+	}
 	conflicted, _ := repo.UnmergedPaths()
 	n := len(conflicted)
 	if err := repo.RebaseAbort(); err != nil {

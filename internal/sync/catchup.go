@@ -42,10 +42,13 @@ func loadSyncedHead(repo *gitwt.Repo) (string, error) {
 	return strings.TrimSpace(string(b)), err
 }
 
-// recordHead writes HEAD as the last propagated commit, atomically.
+// recordHead writes HEAD as the last propagated commit, atomically. It writes
+// nothing while a rebase or merge is stopped or HEAD is detached: HEAD is then
+// somewhere in the middle of the user's resolution, and recording it would make
+// the commits below it look propagated when they were never copied to ~/.claude.
 func recordHead(repo *gitwt.Repo) error {
 	head := headRev(repo)
-	if head == "" {
+	if head == "" || handResolving(repo) || repo.HeadDetached() {
 		return nil
 	}
 	return writeSynced(syncedHeadPath(repo), []byte(head+"\n"))
