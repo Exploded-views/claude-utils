@@ -61,10 +61,14 @@ func routedHost(t *testing.T, repos []string, personal string, routes []map[stri
 			t.Fatal(err)
 		}
 		cfgs[name] = cfg
-		entries[name] = cfg.Path()
+		kind := "project"
+		if name == personal {
+			kind = "personal"
+		}
+		entries[name] = map[string]any{"config": cfg.Path(), "kind": kind}
 	}
 	for _, name := range extraRepos { // named in routes.json, absent on this host
-		entries[name] = map[string]any{"config": filepath.Join(home, ".claudesync.d", name, "config.json"), "client": true}
+		entries[name] = map[string]any{"config": filepath.Join(home, ".claudesync.d", name, "config.json"), "kind": "client"}
 	}
 	rj := map[string]any{"repos": entries, "routes": routes, "default": "deny"}
 	if personal != "" {
@@ -273,7 +277,7 @@ func TestRouted_ReloadSwapsTableAndKeepsOldOnBadFile(t *testing.T) {
 	if set.Router.Decide("-a").Repo != "projects" || set.Router.Decide("-b").Repo != "" {
 		t.Fatal("setup")
 	}
-	good := `{"repos":{"personal":"` + cfgs["personal"].Path() + `","projects":"` + cfgs["projects"].Path() + `"},"personal":"personal","routes":[{"folder":"-b","repo":"projects"}]}`
+	good := `{"repos":{"personal":{"config":"` + cfgs["personal"].Path() + `","kind":"personal"},"projects":{"config":"` + cfgs["projects"].Path() + `","kind":"project"}},"personal":"personal","routes":[{"folder":"-b","repo":"projects"}]}`
 	if err := os.WriteFile(set.Path, []byte(good), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +404,7 @@ func TestFailClosed_DistillWithExplicitConfigStillDropsClientFolders(t *testing.
 	set, _ := loadRouted(os.Getenv(routesEnv))
 	f := set.Router.File()
 	r := f.Repos["client-a"]
-	r.Client = true
+	r.Kind = "client"
 	f.Repos["client-a"] = r
 	b, _ := json.Marshal(f)
 	if err := os.WriteFile(os.Getenv(routesEnv), b, 0600); err != nil {
@@ -450,5 +454,83 @@ func TestFailClosed_StatusAndStopRefuseUnusableRoutes(t *testing.T) {
 	}
 	if handled, code := routedStatus(); !handled || code != 1 {
 		t.Errorf("status: handled=%v exit %d, want a refusal", handled, code)
+	}
+}
+
+func TestRouted_RemoteNameMustAgreeWithKind(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "a"}, "personal", nil)
+	a := cfgs["a"]
+	for remote, wantErr := range map[string]bool{
+		"git@github.com:org/mem-client-x.git": true, // kind is project
+		"git@github.com:org/mem-orch-x.git":   true,
+		"git@github.com:org/mem-project-x":    false,
+	} {
+		a.RemoteURL = remote
+		if err := config.Save(a); err != nil {
+			t.Fatal(err)
+		}
+		_, err := loadRouted(os.Getenv(routesEnv))
+		if (err != nil) != wantErr {
+			t.Errorf("remote %s: err=%v, wantErr=%v", remote, err, wantErr)
+		}
+	}
+	// The matching kinds load.
+	for remote, kind := range map[string]string{"git@github.com:org/mem-client-x.git": "client", "git@github.com:org/mem-orch-x.git": "orch"} {
+		a.RemoteURL = remote
+		if err := config.Save(a); err != nil {
+			t.Fatal(err)
+		}
+		set, _ := loadRouted(os.Getenv(routesEnv)) // still project: refused
+		if set != nil {
+			t.Fatalf("%s: loaded with the wrong kind", remote)
+		}
+		b, _ := os.ReadFile(os.Getenv(routesEnv))
+		var m map[string]any
+		_ = json.Unmarshal(b, &m)
+		m["repos"].(map[string]any)["a"].(map[string]any)["kind"] = kind
+		nb, _ := json.Marshal(m)
+		if err := os.WriteFile(os.Getenv(routesEnv), nb, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadRouted(os.Getenv(routesEnv)); err != nil {
+			t.Errorf("%s as %s: %v", remote, kind, err)
+		}
+	}
+}
+
+func TestRouted_ClientAndOrchFoldersNeverInDistillWorklist(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "projects", "client-a", "orch-a"}, "personal", []map[string]string{
+		{"folder": "-own", "repo": "projects"},
+		{"folder": "-client", "repo": "client-a"},
+		{"folder": "-orch", "repo": "orch-a"},
+	})
+	b, _ := os.ReadFile(os.Getenv(routesEnv))
+	var m map[string]any
+	_ = json.Unmarshal(b, &m)
+	repos := m["repos"].(map[string]any)
+	repos["client-a"].(map[string]any)["kind"] = "client"
+	repos["orch-a"].(map[string]any)["kind"] = "orch"
+	nb, _ := json.Marshal(m)
+	if err := os.WriteFile(os.Getenv(routesEnv), nb, 0600); err != nil {
+		t.Fatal(err)
+	}
+	claude := cfgs["personal"].ClaudeProjectsDir
+	for f, n := range map[string]string{"-own": "own-note", "-client": "client-note", "-orch": "orch-note"} {
+		writeSource(t, claude, f, n)
+	}
+	code, out := captureStdout(t, func() int { return runDistill(nil) })
+	if code != 0 || !strings.Contains(out, "own-note") || strings.Contains(out, "client-note") || strings.Contains(out, "orch-note") {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+}
+
+func TestRouted_UnflaggedRepoRefused(t *testing.T) {
+	routedHost(t, []string{"personal"}, "personal", nil)
+	p := os.Getenv(routesEnv)
+	if err := os.WriteFile(p, []byte(`{"repos":{"personal":"/some/config.json"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadRouted(p); err == nil || !strings.Contains(err.Error(), "kind") {
+		t.Fatalf("err = %v, want a message naming kind", err)
 	}
 }

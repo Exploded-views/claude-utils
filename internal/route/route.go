@@ -25,19 +25,38 @@ import (
 	"sync/atomic"
 )
 
-// Repo is one entry of the "repos" map: where its config.json is, and whether
-// it is a client repo (moves of folders out of it are logged). In JSON it is
-// either the config path as a string or {"config": "...", "client": true}.
+// Repo kinds. Every repo must say what it is: the client filter on the
+// distill worklist is an allow list of kinds, never "not marked client".
+const (
+	KindPersonal = "personal"
+	KindProject  = "project"
+	KindInfra    = "infra"
+	KindClient   = "client"
+	KindOrch     = "orch"
+)
+
+var validKinds = map[string]bool{KindPersonal: true, KindProject: true, KindInfra: true, KindClient: true, KindOrch: true}
+
+// Repo is one entry of the "repos" map: where its config.json is, and what
+// kind of repo it is. The JSON form is {"config": "...", "kind": "project"}; a
+// bare string is refused, as it would leave the kind unsaid.
 type Repo struct {
 	Config string `json:"config"`
-	Client bool   `json:"client,omitempty"`
+	Kind   string `json:"kind"`
+}
+
+// IsClient reports a repo holding a client's notes: kind client or orch.
+func (r Repo) IsClient() bool { return r.Kind == KindClient || r.Kind == KindOrch }
+
+// feedsCatalog reports the kinds whose notes may enter the personal catalog.
+func (r Repo) feedsCatalog() bool {
+	return r.Kind == KindPersonal || r.Kind == KindProject || r.Kind == KindInfra
 }
 
 func (r *Repo) UnmarshalJSON(b []byte) error {
 	var s string
 	if json.Unmarshal(b, &s) == nil {
-		*r = Repo{Config: s}
-		return nil
+		return fmt.Errorf(`repo %q: write it as {"config": %q, "kind": "personal|project|infra|client|orch"}; a bare path does not say what the repo is`, s, s)
 	}
 	type plain Repo
 	var p plain
@@ -116,12 +135,21 @@ func Load(path string) (File, error) {
 }
 
 func (f File) validate() error {
+	for name, r := range f.Repos {
+		if !validKinds[r.Kind] {
+			return fmt.Errorf("repo %q: kind must be one of personal, project, infra, client, orch (got %q)", name, r.Kind)
+		}
+	}
 	if f.Default != "" && f.Default != "deny" {
 		return fmt.Errorf(`default must be "deny", not %q`, f.Default)
 	}
 	if f.Personal != "" {
-		if _, ok := f.Repos[f.Personal]; !ok {
+		pr, ok := f.Repos[f.Personal]
+		if !ok {
 			return fmt.Errorf("personal repo %q is not in repos", f.Personal)
+		}
+		if pr.Kind != KindPersonal {
+			return fmt.Errorf("personal repo %q must have kind %q", f.Personal, KindPersonal)
 		}
 	}
 	for i, r := range f.Routes {
@@ -169,7 +197,12 @@ const (
 // Router applies a File on one host.
 type Router struct {
 	cur_ atomic.Pointer[File]
-	have func(repo string) bool
+	gen  atomic.Uint64 // bumped on every Replace and Refresh
+
+	// afterCompute, if set, runs between computing a decision and storing it
+	// (a test seam for the race with Replace).
+	afterCompute func()
+	have         func(repo string) bool
 
 	// SSHHost maps an ssh host alias to the real host name (ssh -G). nil
 	// leaves hosts as written.
@@ -221,14 +254,18 @@ func normalized(f File) *File {
 // decisions. The repos a host runs are fixed at start: a rule naming a repo that
 // has no running loop only denies.
 func (r *Router) Replace(f File) {
+	r.mu.Lock()
 	r.cur_.Store(normalized(f))
-	r.Refresh()
+	r.gen.Add(1)
+	r.cache = map[string]Decision{}
+	r.mu.Unlock()
 }
 
 // Refresh drops the cached decisions, so changed checkouts and remotes are
 // seen. The daemon calls it on its pull tick.
 func (r *Router) Refresh() {
 	r.mu.Lock()
+	r.gen.Add(1)
 	r.cache = map[string]Decision{}
 	r.mu.Unlock()
 }
@@ -258,11 +295,19 @@ func (r *Router) Decide(folder string) Decision {
 	}
 	r.mu.Unlock()
 
+	gen := r.gen.Load()
 	d := r.decide(folder)
+	if r.afterCompute != nil {
+		r.afterCompute()
+	}
 
 	r.mu.Lock()
-	r.cache[folder] = d
-	r.noteLocked(folder, d)
+	// The table changed while this was computed: the answer stands for this
+	// call only, and is neither cached nor recorded as an owner.
+	if r.gen.Load() == gen {
+		r.cache[folder] = d
+		r.noteLocked(folder, d)
+	}
 	r.mu.Unlock()
 	return d
 }
@@ -345,7 +390,7 @@ func (r *Router) noteLocked(folder string, d Decision) {
 		return // never owned, still not
 	}
 	switch {
-	case had && prev != "" && r.cur().Repos[prev].Client && d.Repo != "" && !r.cur().Repos[d.Repo].Client:
+	case had && prev != "" && r.cur().Repos[prev].IsClient() && d.Repo != "" && !r.cur().Repos[d.Repo].IsClient():
 		r.Logf("route: folder %s moved from client repo %q to non-client repo %q; its notes will now sync there, and the old repo keeps a frozen copy", hash8(folder), prev, d.Repo)
 	case had && prev != "" && d.Repo != "":
 		r.Logf("route: folder %s moved from repo %q to repo %q", hash8(folder), prev, d.Repo)
@@ -520,5 +565,5 @@ func globRe(key, pat string, fold bool) *regexp.Regexp {
 // repo: the only folders whose notes may feed the personal catalog.
 func (r *Router) NonClient(folder string) bool {
 	d := r.Decide(folder)
-	return d.Repo != "" && !r.cur().Repos[d.Repo].Client
+	return d.Repo != "" && r.cur().Repos[d.Repo].feedsCatalog()
 }

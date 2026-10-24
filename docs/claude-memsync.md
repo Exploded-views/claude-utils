@@ -818,22 +818,22 @@ Then write `~/.config/claude-memsync/routes.json` (or `$XDG_CONFIG_HOME/claude-m
 ```json
 {
   "repos": {
-    "personal": "~/.claudesync.d/personal/config.json",
-    "projects": "~/.claudesync.d/projects/config.json",
-    "client-a": { "config": "~/.claudesync.d/client-<name>/config.json", "client": true }
+    "personal": { "config": "~/.claudesync.d/personal/config.json",        "kind": "personal" },
+    "projects": { "config": "~/.claudesync.d/projects/config.json",        "kind": "project" },
+    "client-a": { "config": "~/.claudesync.d/client-<name>/config.json",   "kind": "client" }
   },
   "personal": "personal",
   "routes": [
-    { "remote": "github.com/<client-org>/**",     "repo": "client-a" },
+    { "folder": "-home-<you>-scratch",            "repo": "projects" },
     { "path":   "~/clients/<name>/**",             "repo": "client-a" },
-    { "remote": "github.com/<you>/*",             "repo": "projects" },
-    { "folder": "-home-<you>-scratch",            "repo": "projects" }
+    { "remote": "github.com/<client-org>/**",     "repo": "client-a" },
+    { "remote": "github.com/<you>/*",             "repo": "projects" }
   ],
   "default": "deny"
 }
 ```
 
-- `repos` names the repos this host may have, by their `config.json`. A string is the config path; the object form adds `"client": true`, which only affects logging (below).
+- `repos` names the repos this host may have, by their `config.json`, and each says what it is with `kind`: `personal`, `project`, `infra`, `client` or `orch`. A bare path string is refused, and so is a missing or unknown kind. The kind is checked against the repo's remote: a remote named `mem-client-*` must be kind `client`, and `mem-orch-*` must be `orch`, or the routes file does not load. The `personal` repo must have kind `personal`. Only folders routed to a `personal`, `project` or `infra` repo may feed the distilled catalog's worklist; `client` and `orch` never do.
 - `personal` names the repo that owns no folders. It syncs its work-tree and nothing from `~/.claude/projects`, so it is the home of the distilled catalog. No route may name it.
 - `routes` is an ordered list, **first match wins**. Each rule has exactly one matcher:
   - `folder`: Claude's escaped folder name (every character that is not a letter or digit becomes `-`), or a glob over it.
@@ -848,7 +848,9 @@ A folder is denied, which means no repo reads, mirrors or writes it, when:
 
 - no rule matches;
 - the first matching rule names a repo this host does not have (not in `repos`, or its `config.json` is missing). It does **not** fall through to a later, broader rule. Keep the rules of a client on every host: a host that left the client simply removes the `repos` entry and the client's folders stay denied;
-- a `path` or `remote` rule needs the project directory and it cannot be found (the project is not checked out here), has several candidates (the escaping is lossy, so `src/my-app` and `src/my.app` look alike), or has no usable `origin`. Pin such a folder with a `folder` rule.
+- a `path` or `remote` rule needs the project directory and it cannot be found (the project is not checked out here), has several candidates (the escaping is lossy, so `src/my-app` and `src/my.app` look alike), or has no usable `origin`. The folder is denied **at that rule**; the rules behind it are not tried. Pin such a folder with a `folder` rule placed **before** the path and remote rules.
+
+Order the rules accordingly: `folder` pins first, then `path` rules, then `remote` rules. A rule that cannot place a folder denies it on the spot, so that a client folder whose remote cannot be read is never caught by a broad own-repo rule further down; a pin or a path rule that is placed after a remote rule is therefore never reached for such a folder. A project directory resolves to the origin of the checkout that contains it, so a subdirectory or a linked worktree of a client checkout is the client's. The remote is read with `git remote get-url origin` (so `url.<base>.insteadOf` applies) and ssh host aliases are resolved with `ssh -G`; inherited `GIT_*` environment variables are ignored.
 
 Each denied folder is logged once, by a short hash of its name and the reason, never by name or note contents. Keep rules for your own repos narrow (`github.com/<you>/*`, never `*`): a client's folder can only reach an own repo through an own rule.
 
@@ -858,7 +860,7 @@ Rules are read once, at start; the denial decisions are re-checked on each pull 
 
 Each loop only touches the folders routed to its repo, in every place it handles Claude folders: the start-up and periodic reconcile, the file watcher, the copy of pulled files into `~/.claude`, the catch-up after a manual `git pull`, restores of held-back files, and the manifest of deletes. A note that repo A pulls into `~/.claude` is therefore never seen as new by repo B.
 
-Editing a route moves a folder. The new repo treats the folder's files as Claude-only and copies them in; the old repo stops touching the folder and its copy stays frozen in git until you `git rm` it by hand. Because the old repo's manifest forgets the folder, a later move back restores that repo's files instead of deleting them. A move from a repo marked `"client": true` to one that is not is logged (`folder <hash> moved from client repo ...`). Each host remembers the previous owners in `owners.json` next to `routes.json`.
+Editing a route moves a folder. The new repo treats the folder's files as Claude-only and copies them in; the old repo stops touching the folder and its copy stays frozen in git until you `git rm` it by hand. Because the old repo's manifest forgets the folder, a later move back restores that repo's files instead of deleting them. A move from a `client` or `orch` repo to one of another kind is logged (`folder <hash> moved from client repo ...`). Each host remembers the previous owners in `owners.json` next to `routes.json`.
 
 ### Service, PID and lock
 

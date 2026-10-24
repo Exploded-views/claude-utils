@@ -161,7 +161,7 @@ func walk(root, rest string, fold func(string) string) []string {
 func remoteURL(dir string) (url string, ok bool) {
 	git := func(args ...string) (string, error) {
 		c := exec.Command("git", append([]string{"-C", dir}, args...)...)
-		c.Env = append(os.Environ(), "LC_ALL=C", "LANGUAGE=C")
+		c.Env = append(cleanGitEnv(os.Environ()), "LC_ALL=C", "LANGUAGE=C")
 		out, err := c.Output()
 		return strings.TrimSpace(string(out)), err
 	}
@@ -187,9 +187,12 @@ func remoteURL(dir string) (url string, ok bool) {
 // sshHostname asks ssh which real host an alias stands for (ssh -G reads the
 // user's ssh config and does not connect). "" when it cannot say.
 func sshHostname(host string) string {
+	if host == "" || strings.HasPrefix(host, "-") {
+		return "" // would be read as an ssh option
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "ssh", "-G", host).Output()
+	out, err := exec.CommandContext(ctx, "ssh", "-G", "--", host).Output()
 	if err != nil {
 		return ""
 	}
@@ -229,4 +232,18 @@ func rewriteSSHHost(raw string, lookup func(string) string) string {
 		}
 	}
 	return raw
+}
+
+// cleanGitEnv drops the inherited GIT_* variables (GIT_DIR, GIT_WORK_TREE,
+// GIT_CONFIG_*, ...): they can point git at another repository or config than
+// the project directory's own, and so at another remote.
+func cleanGitEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if strings.HasPrefix(strings.ToUpper(kv), "GIT_") && !strings.HasPrefix(strings.ToUpper(kv), "GIT_EXEC_PATH=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }

@@ -111,6 +111,9 @@ func loadRouted(path string) (*routedSet, error) {
 		cfg, err := config.Load(cp)
 		switch {
 		case err == nil:
+			if err := checkKindAgainstRemote(name, f.Repos[name].Kind, cfg.RemoteURL); err != nil {
+				return nil, err
+			}
 			s.Cfgs[name] = cfg
 		case errors.Is(err, fs.ErrNotExist):
 			s.Missing = append(s.Missing, name)
@@ -130,6 +133,23 @@ func loadRouted(path string) (*routedSet, error) {
 	s.Router = route.New(f, func(repo string) bool { _, ok := s.Cfgs[repo]; return ok })
 	s.Router.StatePath = filepath.Join(filepath.Dir(path), "owners.json")
 	return s, nil
+}
+
+// checkKindAgainstRemote refuses a repo whose remote is named like a client or
+// orchestrator repo (mem-client-*, mem-orch-*) but whose kind says otherwise:
+// that mistake would let a client's notes into the personal catalog.
+func checkKindAgainstRemote(name, kind, remote string) error {
+	base := strings.TrimSuffix(strings.TrimRight(remote, "/"), ".git")
+	if i := strings.LastIndexAny(base, "/:\\"); i >= 0 {
+		base = base[i+1:]
+	}
+	base = strings.ToLower(base)
+	for prefix, want := range map[string]string{"mem-client-": route.KindClient, "mem-orch-": route.KindOrch} {
+		if strings.HasPrefix(base, prefix) && kind != want {
+			return fmt.Errorf("repo %q: its remote is named %s... so its kind must be %q, not %q", name, prefix, want, kind)
+		}
+	}
+	return nil
 }
 
 // repoForSyncDir names the repo of routes.json whose config.json lives in dir.

@@ -35,9 +35,9 @@ func testRouter(t *testing.T, f File, have []string, remotes map[string]string) 
 func fileOf(routes ...Rule) File {
 	return File{
 		Repos: map[string]Repo{
-			"personal": {Config: "/x/personal/config.json"},
-			"projects": {Config: "/x/projects/config.json"},
-			"client-a": {Config: "/x/client-a/config.json", Client: true},
+			"personal": {Config: "/x/personal/config.json", Kind: KindPersonal},
+			"projects": {Config: "/x/projects/config.json", Kind: KindProject},
+			"client-a": {Config: "/x/client-a/config.json", Kind: KindClient},
 		},
 		Personal: "personal",
 		Routes:   routes,
@@ -194,6 +194,7 @@ func TestRemoteFromGitOrigin(t *testing.T) {
 	}
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	t.Setenv("HOME", t.TempDir())
 	dir := filepath.Join(t.TempDir(), "proj")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
@@ -267,11 +268,15 @@ func TestLoadValidation(t *testing.T) {
 		return p
 	}
 	bad := map[string]string{
-		"two matchers":   `{"repos":{"a":"/c"},"routes":[{"folder":"x","remote":"y","repo":"a"}]}`,
-		"no matcher":     `{"repos":{"a":"/c"},"routes":[{"repo":"a"}]}`,
-		"allow default":  `{"repos":{"a":"/c"},"default":"allow"}`,
-		"personal route": `{"repos":{"a":"/c"},"personal":"a","routes":[{"folder":"x","repo":"a"}]}`,
-		"junk":           `{`,
+		"two matchers":     `{"repos":{"a":{"config":"/c","kind":"project"}},"routes":[{"folder":"x","remote":"y","repo":"a"}]}`,
+		"no matcher":       `{"repos":{"a":{"config":"/c","kind":"project"}},"routes":[{"repo":"a"}]}`,
+		"allow default":    `{"repos":{"a":{"config":"/c","kind":"project"}},"default":"allow"}`,
+		"personal route":   `{"repos":{"a":{"config":"/c","kind":"project"}},"personal":"a","routes":[{"folder":"x","repo":"a"}]}`,
+		"junk":             `{`,
+		"bare string repo": `{"repos":{"a":"/c"}}`,
+		"no kind":          `{"repos":{"a":{"config":"/c"}}}`,
+		"unknown kind":     `{"repos":{"a":{"config":"/c","kind":"clinet"}}}`,
+		"personal kind":    `{"repos":{"a":{"config":"/c","kind":"project"}},"personal":"a"}`,
 	}
 	for name, s := range bad {
 		if _, err := Load(write(s)); err == nil {
@@ -280,11 +285,11 @@ func TestLoadValidation(t *testing.T) {
 	}
 	// "unknown repo" is about the repos map; a rule naming a repo not present
 	// on this host is fine at load time only if it appears in repos.
-	f, err := Load(write(`{"repos":{"a":"/c","b":{"config":"/d","client":true}},"routes":[{"folder":"x","repo":"b"}],"default":"deny"}`))
+	f, err := Load(write(`{"repos":{"a":{"config":"/c","kind":"project"},"b":{"config":"/d","kind":"client"}},"routes":[{"folder":"x","repo":"b"}],"default":"deny"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !f.Repos["b"].Client || f.Repos["a"].Config != "/c" {
+	if !f.Repos["b"].IsClient() || f.Repos["a"].IsClient() || f.Repos["a"].Config != "/c" {
 		t.Fatalf("%+v", f.Repos)
 	}
 }
@@ -324,6 +329,7 @@ func gitEnv(t *testing.T) {
 	}
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("GIT_AUTHOR_NAME", "t")
 	t.Setenv("GIT_AUTHOR_EMAIL", "t@example.com")
 	t.Setenv("GIT_COMMITTER_NAME", "t")
@@ -491,5 +497,63 @@ func TestNonClient(t *testing.T) {
 	r := testRouter(t, f, []string{"personal", "projects", "client-a"}, nil)
 	if !r.NonClient("-p") || r.NonClient("-c") || r.NonClient("-zz") {
 		t.Fatal("NonClient wrong")
+	}
+}
+
+func TestNonClientIsAllowListOfKinds(t *testing.T) {
+	for kind, want := range map[string]bool{KindPersonal: true, KindProject: true, KindInfra: true, KindClient: false, KindOrch: false} {
+		f := File{Repos: map[string]Repo{"r": {Config: "/c", Kind: kind}}, Routes: []Rule{{Folder: "-a", Repo: "r"}}}
+		r := New(f, func(string) bool { return true })
+		r.Logf = func(string, ...any) {}
+		if got := r.NonClient("-a"); got != want {
+			t.Errorf("kind %s: NonClient=%v want %v", kind, got, want)
+		}
+	}
+	// A repo with no kind (a table built by hand) is never non-client.
+	f := File{Repos: map[string]Repo{"r": {Config: "/c"}}, Routes: []Rule{{Folder: "-a", Repo: "r"}}}
+	r := New(f, func(string) bool { return true })
+	r.Logf = func(string, ...any) {}
+	if r.NonClient("-a") {
+		t.Error("an unclassified repo counted as non-client")
+	}
+}
+
+// A decision computed against the old table must not be cached after the
+// table was replaced.
+func TestDecideDoesNotCacheAcrossReplace(t *testing.T) {
+	r := testRouter(t, fileOf(Rule{Folder: "-a", Repo: "projects"}), []string{"projects", "personal"}, nil)
+	swapped := false
+	r.afterCompute = func() {
+		if !swapped {
+			swapped = true
+			r.Replace(fileOf())
+		}
+	}
+	if d := r.Decide("-a"); d.Repo != "projects" {
+		t.Fatalf("setup: %+v", d)
+	}
+	if d := r.Decide("-a"); d.Repo != "" {
+		t.Fatalf("stale decision cached after Replace: %+v", d)
+	}
+}
+
+func TestSSHHostRefusesOptionLookingHosts(t *testing.T) {
+	if got := sshHostname("-oProxyCommand=touch /tmp/x"); got != "" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// Inherited GIT_* variables must not steer remote resolution.
+func TestRemoteResolutionIgnoresInheritedGitEnv(t *testing.T) {
+	gitEnv(t)
+	root := t.TempDir()
+	repo := clientRepo(t, root, "git@github.com:Client-Org/app.git")
+	t.Setenv("GIT_DIR", filepath.Join(root, "nowhere"))
+	t.Setenv("GIT_WORK_TREE", root)
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "remote.origin.url")
+	t.Setenv("GIT_CONFIG_VALUE_0", "git@github.com:me/mine.git")
+	if d := broadRouter(root).Decide(escape(repo)); d.Repo != "client-a" {
+		t.Fatalf("env steered resolution: %+v", d)
 	}
 }
