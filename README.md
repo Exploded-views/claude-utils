@@ -122,15 +122,15 @@ After 1.0 the standard SemVer rules kick in (breaking → major, additive → mi
    gh release view v0.1.8     # confirms the assets are attached
    ```
 
-5. To upgrade your own machine, download the appropriate archive from
-   the Release page, extract, and swap the binaries:
-
-   Check the archive against the release's `SHA256SUMS` before
-   extracting it:
+5. To upgrade your own machine, download the appropriate archive and
+   `SHA256SUMS` from the Release page. In the download directory, check
+   the archive before extracting it:
 
    ```sh
    sha256sum -c --ignore-missing SHA256SUMS   # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
    ```
+
+   Then extract it and swap the binaries:
 
    ```sh
    claude-memsync stop
@@ -164,6 +164,11 @@ recovery paths:
 The same `workflow_run` invocation works for retroactively building
 archives for any tag that doesn't yet have a Release, or for any
 Release whose previous build run failed.
+
+The upload never overwrites an asset that is already attached, so a
+published archive and its `SHA256SUMS` never change under a tag. If a
+failed run left some assets behind, delete them first
+(`gh release delete-asset v0.1.8 <name>`), then dispatch again.
 
 ### Building locally without a release
 
