@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/distill"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
+	"github.com/MarimerLLC/claude-utils/internal/merge"
 )
 
 // Loop is the long-running daemon body. It watches the Claude memory tree,
@@ -256,7 +258,7 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) error {
 			}
 		}
 	}
-	if err := unpark(roots, held, upstream); err != nil {
+	if err := unpark(repo, roots, held, upstream, strings.TrimSpace(preRev)); err != nil {
 		return fmt.Errorf("restore held-back files: %w", err)
 	}
 
@@ -312,7 +314,7 @@ func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string, skip map[
 		if strings.HasPrefix(status, "R") && len(fields) >= 3 {
 			oldPath := fields[1]
 			path = fields[2]
-			if hash, name, ok := splitMirrorPath(oldPath); ok {
+			if hash, name, ok := splitMirrorPath(oldPath); ok && !skip[oldPath] {
 				_ = os.Remove(filepath.Join(roots.Claude, hash, "memory", name))
 			}
 		} else {
@@ -335,7 +337,9 @@ func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string, skip map[
 }
 
 // parkUncommitted resets every uncommitted memory file in the mirror to HEAD
-// (removing it if HEAD lacks it) and returns the set of paths it touched.
+// (removing it if HEAD lacks it) and returns the set of paths it touched. Only
+// projects/<hash>/memory/<file> paths are parked: they are the ones with an
+// authoritative Claude copy to refill from.
 func parkUncommitted(repo *gitwt.Repo) (map[string]bool, error) {
 	out, err := repo.Run("status", "--porcelain", "-z", "--no-renames", "--untracked-files=all", "--", "projects")
 	if err != nil {
@@ -380,20 +384,26 @@ func parkUncommitted(repo *gitwt.Repo) (map[string]bool, error) {
 
 // unpark makes the mirror copy of each parked path match the Claude copy
 // again, so the next CommitMirror re-checks the user's version. If the pull
-// changed a parked path, the incoming version is kept beside it as a
-// .from-remote-* backup (as Reconcile does), since committing the user's
-// version later would otherwise silently revert it.
-func unpark(roots Roots, held, upstream map[string]bool) error {
+// changed a parked path, committing the user's version later would silently
+// revert the incoming change, so it is kept: a MEMORY.md is merged with the
+// incoming version (3-way, against the version at preRev) and written to both
+// trees; anything else, or a MEMORY.md whose merge conflicts, is kept beside
+// the mirror copy as a .from-remote-* backup, as Reconcile does.
+//
+// Nothing here is needed for correctness after a crash between park and
+// unpark: the Claude copy is never written before the merge step, so the
+// next startup's Reconcile and flush re-mirror it.
+func unpark(repo *gitwt.Repo, roots Roots, held, upstream map[string]bool, preRev string) error {
+	backedUp := 0
 	for p := range held {
 		hash, name, _ := splitMirrorPath(p)
-		mp := filepath.Join(roots.Mirror, hash, "memory", name)
 		if upstream[p] {
-			if b, err := os.ReadFile(mp); err == nil {
-				backup := fmt.Sprintf("%s.from-remote-%s", mp, randSuffix())
-				if err := writeAtomic(backup, b); err != nil {
-					return err
-				}
-				log.Printf("scrub: a held-back file changed upstream; incoming copy kept as %s", filepath.Base(backup))
+			kept, err := keepIncoming(repo, roots, p, preRev)
+			if err != nil {
+				return err
+			}
+			if kept {
+				backedUp++
 			}
 		}
 		err := CopyToMirror(roots, hash, name)
@@ -404,7 +414,34 @@ func unpark(roots Roots, held, upstream map[string]bool) error {
 			return err
 		}
 	}
+	if backedUp > 0 {
+		// Count only: the path may itself match the denylist.
+		log.Printf("scrub: %d held-back file(s) changed upstream; incoming copies kept as .from-remote-*", backedUp)
+	}
 	return nil
+}
+
+// keepIncoming preserves the pulled version of parked path p (still in the
+// mirror at this point). It returns true when a backup file was written.
+func keepIncoming(repo *gitwt.Repo, roots Roots, p, preRev string) (bool, error) {
+	hash, name, _ := splitMirrorPath(p)
+	mp := filepath.Join(roots.Mirror, hash, "memory", name)
+	cp := filepath.Join(roots.Claude, hash, "memory", name)
+	incoming, err := os.ReadFile(mp)
+	if err != nil {
+		return false, nil // deleted upstream: the user's version stands
+	}
+	local, err := os.ReadFile(cp)
+	if err != nil || bytes.Equal(local, incoming) {
+		return false, nil
+	}
+	if name == "MEMORY.md" {
+		base, _ := repo.Run("show", preRev+":"+p) // "" when it did not exist
+		if merged, conflict := merge.Merge(base, string(local), string(incoming)); !conflict {
+			return false, writeAtomic(cp, []byte(merged))
+		}
+	}
+	return true, writeAtomic(fmt.Sprintf("%s.from-remote-%s", mp, randSuffix()), incoming)
 }
 
 // splitMirrorPath converts a path of the form "projects/<hash>/memory/<file>"
