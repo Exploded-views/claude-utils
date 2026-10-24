@@ -18,10 +18,10 @@ const defaultChangesLimit = 20
 // hooks that want to tell a running session its notes moved. It is read-only:
 // it never fetches, commits or touches ~/.claude.
 func runChanges(args []string) int {
-	return changesCmd(os.Stdout, os.Stderr, args)
+	return changesCmd(os.Stdin, os.Stdout, os.Stderr, args)
 }
 
-func changesCmd(stdout, stderr io.Writer, args []string) int {
+func changesCmd(stdin io.Reader, stdout, stderr io.Writer, args []string) int {
 	flags := flag.NewFlagSet("changes", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	cfgPath := flags.String("config", "", "path to config.json (default: ~/.claudesync/config.json)")
@@ -31,8 +31,20 @@ func changesCmd(stdout, stderr io.Writer, args []string) int {
 	asJSON := flags.Bool("json", false, "print JSON instead of text")
 	limit := flags.Int("limit", defaultChangesLimit, "list at most N changes, then \"...N more\" (0 = no limit)")
 	update := flags.Bool("update-marker", false, "with --marker, rewrite the file to the current HEAD afterwards (a missing or stale marker only records the baseline)")
+	hook := flags.Bool("hook", false, "run as a Claude Code hook: read its JSON from stdin, keep a per-session marker, print additionalContext JSON")
+	hookCleanup := flags.Bool("hook-cleanup", false, "run as a SessionEnd hook: delete this session's --hook marker")
 	if err := flags.Parse(args); err != nil {
+		if hookRequested(args) {
+			return 0 // a hook must never block a prompt
+		}
 		return 2
+	}
+	if *hook || *hookCleanup {
+		if flagsSet(flags, "since", "marker", "update-marker", "json") || (*hook && *hookCleanup) || *limit < 0 {
+			fmt.Fprintln(stderr, "changes: --hook and --hook-cleanup take only --config, --project and --limit, and are mutually exclusive")
+			return 0
+		}
+		return changesHook(stdin, stdout, stderr, *cfgPath, *project, *limit, *hookCleanup)
 	}
 	if (*since == "") == (*marker == "") {
 		fmt.Fprintln(stderr, "changes: exactly one of --since and --marker is required")
@@ -81,4 +93,27 @@ func changesCmd(stdout, stderr io.Writer, args []string) int {
 	}
 	fmt.Fprint(stdout, res.Text())
 	return 0
+}
+
+// hookRequested reports whether args ask for hook mode, for the case where
+// they did not even parse.
+func hookRequested(args []string) bool {
+	for _, a := range args {
+		if a == "--hook" || a == "-hook" || a == "--hook-cleanup" || a == "-hook-cleanup" {
+			return true
+		}
+	}
+	return false
+}
+
+func flagsSet(flags *flag.FlagSet, names ...string) bool {
+	set := false
+	flags.Visit(func(f *flag.Flag) {
+		for _, n := range names {
+			if f.Name == n {
+				set = true
+			}
+		}
+	})
+	return set
 }

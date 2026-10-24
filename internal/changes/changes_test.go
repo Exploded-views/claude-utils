@@ -519,10 +519,10 @@ func TestMarker_ResetWhenUnresolvable(t *testing.T) {
 func TestMarker_WrittenAtomically(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "new", "markers")
 	path := filepath.Join(dir, "seen")
-	if err := writeMarker(path, "abc"); err != nil {
+	if err := WriteMarker(path, "abc"); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeMarker(path, "def"); err != nil {
+	if err := WriteMarker(path, "def"); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(path); string(b) != "def\n" {

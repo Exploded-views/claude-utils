@@ -64,7 +64,7 @@ func changesRepo(t *testing.T) (cfgPath, base string) {
 func TestChangesCmd_JSON(t *testing.T) {
 	cfgPath, base := changesRepo(t)
 	var out, errb bytes.Buffer
-	code := changesCmd(&out, &errb, []string{"--config", cfgPath, "--since", base, "--json", "--project", "/home/alice/src/app"})
+	code := changesCmd(nil, &out, &errb, []string{"--config", cfgPath, "--since", base, "--json", "--project", "/home/alice/src/app"})
 	if code != 0 {
 		t.Fatalf("exit %d, stderr: %s", code, errb.String())
 	}
@@ -90,7 +90,7 @@ func TestChangesCmd_JSON(t *testing.T) {
 func TestChangesCmd_Text(t *testing.T) {
 	cfgPath, base := changesRepo(t)
 	var out, errb bytes.Buffer
-	if code := changesCmd(&out, &errb, []string{"--config", cfgPath, "--since", base}); code != 0 {
+	if code := changesCmd(nil, &out, &errb, []string{"--config", cfgPath, "--since", base}); code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
 	if !strings.Contains(out.String(), "b.md") || !strings.Contains(out.String(), "2 memory files changed") {
@@ -101,7 +101,7 @@ func TestChangesCmd_Text(t *testing.T) {
 func TestChangesCmd_Limit(t *testing.T) {
 	cfgPath, base := changesRepo(t)
 	var out, errb bytes.Buffer
-	if code := changesCmd(&out, &errb, []string{"--config", cfgPath, "--since", base, "--limit", "1"}); code != 0 {
+	if code := changesCmd(nil, &out, &errb, []string{"--config", cfgPath, "--since", base, "--limit", "1"}); code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
 	if !strings.Contains(out.String(), "b.md") || strings.Contains(out.String(), "c.md") || !strings.Contains(out.String(), "...1 more") {
@@ -121,7 +121,7 @@ func TestChangesCmd_Usage(t *testing.T) {
 	}
 	for _, args := range cases {
 		var out, errb bytes.Buffer
-		if code := changesCmd(&out, &errb, args); code == 0 {
+		if code := changesCmd(nil, &out, &errb, args); code == 0 {
 			t.Errorf("%v: want non-zero exit", args)
 		}
 	}
@@ -133,7 +133,7 @@ func TestChangesCmd_MarkerRoundTrip(t *testing.T) {
 	args := []string{"--config", cfgPath, "--marker", marker, "--update-marker", "--json"}
 
 	var out, errb bytes.Buffer
-	if code := changesCmd(&out, &errb, args); code != 0 {
+	if code := changesCmd(nil, &out, &errb, args); code != 0 {
 		t.Fatalf("first run exit %d: %s", code, errb.String())
 	}
 	var r struct{ Total int }
@@ -154,10 +154,10 @@ func TestChangesCmd_BadSinceWithUpdateMarkerIsAnError(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(wd) })
 	var out, errb bytes.Buffer
-	if code := changesCmd(&out, &errb, []string{"--config", cfgPath, "--since", "HEAD~5", "--update-marker"}); code == 0 {
+	if code := changesCmd(nil, &out, &errb, []string{"--config", cfgPath, "--since", "HEAD~5", "--update-marker"}); code == 0 {
 		t.Error("want a usage error")
 	}
-	if code := changesCmd(&out, &errb, []string{"--config", cfgPath, "--since", "HEAD~5"}); code != 1 {
+	if code := changesCmd(nil, &out, &errb, []string{"--config", cfgPath, "--since", "HEAD~5"}); code != 1 {
 		t.Errorf("bad revision: exit %d, want 1", code)
 	}
 	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
@@ -173,7 +173,7 @@ func TestChangesCmd_MarkerReset(t *testing.T) {
 	}
 	args := []string{"--config", cfgPath, "--marker", marker, "--update-marker", "--json"}
 	var out, errb bytes.Buffer
-	if code := changesCmd(&out, &errb, args); code != 0 {
+	if code := changesCmd(nil, &out, &errb, args); code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
 	var r struct {
@@ -192,7 +192,7 @@ func TestChangesCmd_MarkerReset(t *testing.T) {
 	}
 	out.Reset()
 	errb.Reset()
-	if code := changesCmd(&out, &errb, []string{"--config", cfgPath, "--marker", marker}); code != 1 {
+	if code := changesCmd(nil, &out, &errb, []string{"--config", cfgPath, "--marker", marker}); code != 1 {
 		t.Errorf("exit %d, want 1", code)
 	}
 }

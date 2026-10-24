@@ -46,6 +46,12 @@ type Options struct {
 	// A marker whose commit no longer exists is reset the same way and the
 	// result has Reset set.
 	UpdateMarker bool
+
+	// DeferMarker leaves the final marker rewrite to the caller (WriteMarker),
+	// for callers that must not advance it until the report was delivered.
+	// A marker that has to be created or reset is still written by Compute,
+	// since nothing is reported then.
+	DeferMarker bool
 }
 
 // Change is one memory file that differs between Since and HEAD.
@@ -117,7 +123,7 @@ func Compute(opts Options) (Result, error) {
 		// baseline.
 		res.Since = head
 		res.Reset = opts.Marker != "" && markerExists(opts.Marker)
-		return res, writeMarker(opts.Marker, head)
+		return res, WriteMarker(opts.Marker, head)
 	}
 	res.Since = since
 
@@ -141,8 +147,8 @@ func Compute(opts Options) (Result, error) {
 	if res.Changes == nil {
 		res.Changes = []Change{}
 	}
-	if opts.UpdateMarker {
-		if err := writeMarker(opts.Marker, head); err != nil {
+	if opts.UpdateMarker && !opts.DeferMarker {
+		if err := WriteMarker(opts.Marker, head); err != nil {
 			return res, err
 		}
 	}
@@ -221,9 +227,9 @@ func revParse(repo *gitwt.Repo, rev string) (string, bool) {
 	return strings.TrimSpace(out), true
 }
 
-// writeMarker replaces the marker atomically: a half-written marker would
+// WriteMarker replaces the marker atomically: a half-written marker would
 // make the next run fail, so write a temp file beside it and rename.
-func writeMarker(path, sha string) (err error) {
+func WriteMarker(path, sha string) (err error) {
 	defer func() {
 		if err != nil {
 			err = fmt.Errorf("write marker: %w", err)
