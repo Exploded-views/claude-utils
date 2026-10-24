@@ -127,7 +127,7 @@ and SSH keys. None require root.
 | `claude-memsync stop` | Stop the running daemon. |
 | `claude-memsync status` | Print `running (pid N)` or `stopped`. |
 | `claude-memsync run` | Run in the foreground (for debugging). |
-| `claude-memsync changes --since <rev-or-marker>` | List memory files changed in the sync repo since a point (`--project`, `--json`, `--limit`, `--update-marker`). See [Telling a running session what changed](#telling-a-running-session-what-changed). |
+| `claude-memsync changes --since <rev>` or `--marker <file>` | List memory files changed in the sync repo since a point (`--project`, `--json`, `--limit`, `--update-marker`, `--hook`). See [Telling a running session what changed](#telling-a-running-session-what-changed). |
 | `claude-memsync distill` | Rebuild the distilled-memory catalog index (`--prune`, `--dry-run`). See [distilling-memories.md](distilling-memories.md). |
 | `claude-memsync version` | Print version. |
 
@@ -191,7 +191,9 @@ pushes a note while a session is open for hours, that session never sees it.
 `claude-memsync changes` lets a hook say so:
 
 ```sh
-claude-memsync changes --since <git-sha-or-marker> [--project <dir>] [--json] [--limit N] [--update-marker]
+claude-memsync changes (--since <rev> | --marker <file>) [--project <dir>] [--json] [--limit N] [--update-marker]
+claude-memsync changes --hook            # for UserPromptSubmit / SessionStart hooks
+claude-memsync changes --hook-cleanup    # for SessionEnd hooks
 ```
 
 It compares the sync repo's current `HEAD` with an earlier point and lists the
@@ -201,11 +203,14 @@ already pulled or committed itself.
 
 | Flag | Meaning |
 |---|---|
-| `--since` | Required. Any git revision (full or abbreviated SHA, branch, `HEAD~3`), or the path of a **marker file** whose first line is a revision. |
+| `--since` | A git revision (full or abbreviated SHA, branch, `HEAD~3`). A revision that doesn't resolve is an error (exit 1). Exactly one of `--since` and `--marker` is required. |
+| `--marker` | The path of a **marker file** whose first line is the base commit. |
+| `--update-marker` | Only valid with `--marker`. Rewrites the marker to the current `HEAD` afterwards (atomically, mode `0600`). A marker that doesn't exist yet is created and nothing is reported: that call just sets the baseline. A marker whose commit is gone (garbage-collected after a rebase, or the repo was re-cloned) is reset the same way: nothing is reported, `"reset": true` is set in the JSON, one warning line goes to stderr, and the exit code is 0. Without `--update-marker` an unresolvable marker is an error. |
 | `--project` | Only this project: a project directory (`/home/alice/src/app`) or Claude's folder name for it (`-home-alice-src-app`). |
 | `--json` | Print JSON instead of text. |
 | `--limit` | List at most N changes (default 20), then `...N more`. `0` lifts the cap. |
-| `--update-marker` | When `--since` is a marker file, rewrite it to the current `HEAD` afterwards. A marker that doesn't exist yet is created and nothing is reported: that call just sets the baseline. |
+| `--hook` | Hook mode, see [Hook mode](#hook-mode). Takes only `--config`, `--project` and `--limit`. |
+| `--hook-cleanup` | For `SessionEnd`: delete this session's hook marker. |
 | `--config` | Path to `config.json` (default `~/.claudesync/config.json`). |
 
 Text output:
@@ -224,6 +229,8 @@ With `--json`:
   "since": "91be0aa4...",
   "total": 2,
   "more": 0,
+  "busy": false,
+  "reset": false,
   "changes": [
     {
       "status": "changed",
@@ -238,43 +245,35 @@ With `--json`:
 
 `status` is `added`, `changed` or `deleted`; `local` is where Claude Code reads
 the file on this PC. Only files directly under a project's `memory/` folder are
-reported. Edits this PC made itself are included, since they are commits in the
-same history. The command exits non-zero (with a message on stderr) when
-`--since` doesn't resolve or the repo has no commits; a hook should treat that
-as "nothing to say".
+reported, and a rename shows up as a delete plus an add. File and project names
+with unprintable characters (a newline, say) are shown quoted in the text
+output. Only names and paths are ever printed, never note contents.
 
-### Example hook
+The command exits non-zero (with a message on stderr) when `--since` or a
+marker doesn't resolve (unless it is reset, see above) or the repo has no
+commits. While the sync repo is in the middle of a rebase, merge or
+cherry-pick, the report is empty with `"busy": true`, the marker is not moved,
+and the exit code is 0.
 
-This hook keeps one marker per Claude Code session and, on each prompt, adds
-the notes that changed since the previous prompt to the model's context. Save it as
-`~/.claude/hooks/memsync-changes.sh` and `chmod +x` it. It needs `jq`; on
-Windows run it under Git Bash.
+### Hook mode
 
-```sh
-#!/bin/sh
-input=$(cat)
-sid=$(printf '%s' "$input" | jq -r '.session_id')
-cwd=$(printf '%s' "$input" | jq -r '.cwd')
-event=$(printf '%s' "$input" | jq -r '.hook_event_name')
-marker="${TMPDIR:-/tmp}/claude-memsync-seen-$sid"
+`--hook` is built for Claude Code hooks, so no `jq` or shell script is needed.
+It reads the hook's JSON from stdin (`session_id`, `cwd`, `hook_event_name`)
+and behaves like `--marker --update-marker` with a per-session marker at
+`<sync dir>/.state/hook-markers/<session_id>`; session ids outside
+`[A-Za-z0-9_-]+` are ignored silently. `--project` defaults to the hook's
+`cwd` unless you pass it. When something changed it prints
 
-# First call in a session only records the baseline; later calls report
-# what changed since the previous call, then move the marker forward.
-out=$(claude-memsync changes --since "$marker" --update-marker \
-        --project "$cwd" --json 2>/dev/null) || exit 0
-printf '%s' "$out" | jq -e '.total > 0' >/dev/null || exit 0
-
-printf '%s' "$out" | jq --arg event "$event" '{
-  hookSpecificOutput: {
-    hookEventName: $event,
-    additionalContext: (
-      "Memory notes changed since you last looked (read a file if it matters):\n"
-      + ([.changes[] | "- \(.status): \(.local)"] | join("\n"))
-      + (if .more > 0 then "\n...\(.more) more" else "" end)
-    )
-  }
-}'
+```json
+{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"added /home/alice/.claude/projects/-home-alice-src-app/memory/feedback_tests.md\nchanged /home/alice/.claude/projects/-home-alice-src-app/memory/MEMORY.md"}}
 ```
+
+with one `status path` line per change (and `… and N more` past `--limit`),
+and nothing at all when nothing changed. The marker only moves after that
+output was written. The first call in a session just records the baseline.
+Any error exits 0, prints nothing on stdout and writes one line to stderr, so
+the hook can never block a prompt. `--hook-cleanup` deletes the session's
+marker.
 
 Register it in `~/.claude/settings.json` (or a plugin's `hooks/hooks.json`,
 which has the same shape):
@@ -283,26 +282,34 @@ which has the same shape):
 {
   "hooks": {
     "UserPromptSubmit": [
-      { "hooks": [ { "type": "command", "command": "~/.claude/hooks/memsync-changes.sh" } ] }
+      { "hooks": [ { "type": "command", "command": "claude-memsync changes --hook" } ] }
     ],
     "SessionStart": [
-      { "hooks": [ { "type": "command", "command": "~/.claude/hooks/memsync-changes.sh" } ] }
+      { "hooks": [ { "type": "command", "command": "claude-memsync changes --hook" } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "claude-memsync changes --hook-cleanup" } ] }
     ]
   }
 }
 ```
 
-Notes:
+`UserPromptSubmit` alone is enough for the "long-running session" case.
+Adding `SessionStart` sets the baseline as soon as the session opens, so the
+first prompt reports anything that arrived in between. `SessionEnd` just tidies
+up the marker file.
 
-- `UserPromptSubmit` alone is enough for the "long-running session" case.
-  Adding `SessionStart` sets the baseline as soon as the session opens, so the
-  first prompt reports anything that arrived in between.
-- To hear about changes since the **last session** in a project rather than
-  since the last prompt, key the marker on the project instead of the session
-  (for example `marker=$HOME/.claudesync/.state/seen-$(printf '%s' "$cwd" | tr -c '[:alnum:]' '-')`).
-- `--project` expects the project directory. If your sessions often run from a
-  subdirectory, `cwd` won't match Claude's folder name for the project; omit
-  `--project` to see every project's changes.
+### Limits
+
+- This PC's own edits are reported too: they are commits in the same history.
+- `--project` matches path-keyed folder names only. A directory is turned into
+  Claude's folder name by the rule as currently understood (every
+  non-alphanumeric character becomes `-`), so very long or non-ASCII paths may
+  not match. If your sessions run from a subdirectory, `cwd` won't match the
+  project's folder name; pass `--project` explicitly.
+- There is a brief window between the daemon's pull and its copy into
+  `~/.claude`: a change can be reported before the file at `local` has been
+  updated.
 
 ## Deletes
 
