@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -13,6 +14,9 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
+
+// stderr is where init prints warnings; tests replace it.
+var stderr io.Writer = os.Stderr
 
 const (
 	defaultBranch    = "main"
@@ -79,8 +83,15 @@ func resolveProjectKey(flagVal string, force bool, cfg config.Config) (string, e
 		return "", fmt.Errorf("--project-key must be %q or %q, got %q", config.ProjectKeyPath, config.ProjectKeyRemote, flagVal)
 	}
 	if force {
-		if old, err := config.Load(cfg.Path()); err == nil {
+		old, err := config.Load(cfg.Path())
+		if err == nil {
 			return old.ProjectKey, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			// A broken config would otherwise silently turn a remote-keyed
+			// setup back into a path-keyed one.
+			fmt.Fprintf(stderr, "init: warning: cannot load the existing config %s (%v); using projectKey %q. Pass --project-key to choose.\n",
+				cfg.Path(), err, config.ProjectKeyPath)
 		}
 	}
 	return config.ProjectKeyPath, nil

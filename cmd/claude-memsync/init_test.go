@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
@@ -43,5 +46,42 @@ func TestResolveProjectKey(t *testing.T) {
 	cfg.SyncDir = filepath.Join(dir, "elsewhere")
 	if got, err := resolveProjectKey("", true, cfg); err != nil || got != "path" {
 		t.Errorf("no config to keep = %q, %v", got, err)
+	}
+}
+
+// With --force an existing config that cannot be loaded cannot supply the
+// projectKey to keep. The fallback must be announced, not applied silently.
+func TestResolveProjectKey_WarnsWhenTheExistingConfigCannotBeLoaded(t *testing.T) {
+	var out bytes.Buffer
+	old := stderr
+	stderr = &out
+	defer func() { stderr = old }()
+
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.SyncDir = dir
+
+	// No config at all is a fresh init: nothing to warn about.
+	if got, err := resolveProjectKey("", true, cfg); err != nil || got != "path" || out.Len() != 0 {
+		t.Errorf("missing config: %q, %v, warning %q", got, err, out.String())
+	}
+
+	if err := os.WriteFile(cfg.Path(), []byte(`{"projectKey": "remote",`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveProjectKey("", true, cfg)
+	if err != nil || got != "path" {
+		t.Errorf("unloadable config: %q, %v", got, err)
+	}
+	for _, want := range []string{"warning", cfg.Path(), `"path"`} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("warning %q should mention %s", out.String(), want)
+		}
+	}
+
+	// An explicit flag needs no fallback and says nothing.
+	out.Reset()
+	if got, _ := resolveProjectKey("remote", true, cfg); got != "remote" || out.Len() != 0 {
+		t.Errorf("flag: %q, warning %q", got, out.String())
 	}
 }
