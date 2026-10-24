@@ -28,6 +28,10 @@ func runInit(args []string) int {
 	remote := flags.String("remote", "", "git remote URL to sync against (e.g. git@github.com:user/claude-memories.git)")
 	syncDir := flags.String("sync-dir", "", "override sync work-tree (default: ~/.claudesync)")
 	claudeDir := flags.String("claude-dir", "", "override Claude projects directory (default: ~/.claude/projects)")
+	privateOnly := flags.Bool("private-only", false, "enforce private mem-* repos only (name allowlist + GitHub visibility checks); saved to config")
+	apiURL := flags.String("github-api-url", "", "GitHub API base URL (GitHub Enterprise); saved to config")
+	ghHost := flags.String("github-host", "", "git host remotes must use (default github.com); saved to config")
+	tokenFile := flags.String("token-file", "", "file holding a GitHub token for the private-only check (or set MEMSYNC_GITHUB_TOKEN)")
 	force := flags.Bool("force", false, "re-init even if sync-dir already exists")
 	denylist := flags.String("denylist", "", "UTF-8 file of regexes (one per line) to install as the denylist before the first commit")
 
@@ -59,6 +63,17 @@ func runInit(args []string) int {
 		cfg.ClaudeProjectsDir = *claudeDir
 	}
 	cfg.RemoteURL = *remote
+	cfg.GitHubTokenFile = *tokenFile
+	cfg.PrivateOnly = *privateOnly
+	cfg.GitHubAPIURL = *apiURL
+	cfg.GitHubHost = *ghHost
+
+	// Private-only guarantee: prove the remote is a private mem-* repo
+	// before anything is cloned, committed or pushed. Fails closed.
+	if err := guardRemote(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, "init refused:", err)
+		return 1
+	}
 
 	driver, err := config.DiscoverMergeDriver()
 	if err != nil {
@@ -125,6 +140,14 @@ func bootstrap(cfg config.Config, force bool, denylist []byte) error {
 		}
 		if err := repo.SetRemote(cfg.RemoteURL); err != nil {
 			return fmt.Errorf("add remote: %w", err)
+		}
+	}
+
+	// Private-only: git must push where we verified, not where an
+	// insteadOf rule sends it. Nothing has been committed or pushed yet.
+	if cfg.PrivateOnly {
+		if err := checkPushURL(cfg, cfg.SyncDir); err != nil {
+			return err
 		}
 	}
 

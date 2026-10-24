@@ -26,6 +26,7 @@ type program struct {
 	cancel     context.CancelFunc
 	done       chan struct{}
 	loopErr    error
+	loop       *syncpkg.Loop // set by Start; tests inspect it
 }
 
 func (p *program) Start(s service.Service) error {
@@ -33,12 +34,16 @@ func (p *program) Start(s service.Service) error {
 	if err != nil {
 		return fmt.Errorf("load config %s: %w", p.configPath, err)
 	}
+	if err := daemonGuard(cfg, log.Printf); err != nil {
+		return fmt.Errorf("private-only check failed, refusing to sync: %w", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
 	p.done = make(chan struct{})
+	loop := &syncpkg.Loop{Cfg: cfg, PushAllowed: pushWatch(cfg, log.Printf)}
+	p.loop = loop
 	go func() {
 		defer close(p.done)
-		loop := &syncpkg.Loop{Cfg: cfg}
 		p.loopErr = loop.Run(ctx)
 	}()
 	return nil
@@ -177,6 +182,9 @@ func runStatus(args []string) int {
 	fmt.Println(st)
 	if cfg, err := loadDistillConfig(""); err == nil {
 		if line := pausedLine(cfg); line != "" {
+			fmt.Println(line)
+		}
+		if line := visibilityLine(cfg); line != "" {
 			fmt.Println(line)
 		}
 	}

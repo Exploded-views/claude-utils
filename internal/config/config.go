@@ -46,6 +46,36 @@ type Config struct {
 	// is false.
 	RequireDenylist bool `json:"requireDenylist"`
 
+	// PrivateOnly turns on the private-only guard: the mem-* name allowlist
+	// and GitHub visibility checks at init and daemon start. Default false,
+	// which leaves behavior exactly as without the guard.
+	PrivateOnly bool `json:"privateOnly,omitempty"`
+
+	// GitHubTokenEnv names the env var holding a GitHub API token used only
+	// for the private-only visibility check (default MEMSYNC_GITHUB_TOKEN).
+	GitHubTokenEnv string `json:"githubTokenEnv,omitempty"`
+
+	// GitHubTokenFile is a file holding that token; it wins over the env
+	// var. The token itself is never stored in config.json.
+	GitHubTokenFile string `json:"githubTokenFile,omitempty"`
+
+	// GitHubAPIURL overrides the API base URL (GitHub Enterprise, tests).
+	GitHubAPIURL string `json:"githubApiUrl,omitempty"`
+
+	// GitHubHost is the git host remotes must use (default github.com, or
+	// the host of githubApiUrl). Set it for GitHub Enterprise.
+	GitHubHost string `json:"githubHost,omitempty"`
+
+	// RecheckMaxFailures and RecheckMaxAgeHours bound how long the daemon
+	// keeps pushing without a successful visibility check (defaults 24 and
+	// 24). Past either, pushing stops until a check succeeds.
+	RecheckMaxFailures int `json:"recheckMaxFailures,omitempty"`
+	RecheckMaxAgeHours int `json:"recheckMaxAgeHours,omitempty"`
+
+	// GitHubOrg is the org `doctor` lists when --org is not given. Empty
+	// means the owner parsed from RemoteURL.
+	GitHubOrg string `json:"githubOrg,omitempty"`
+
 	// DebounceMs is how long to wait after a file change before committing.
 	DebounceMs int `json:"debounceMs"`
 
