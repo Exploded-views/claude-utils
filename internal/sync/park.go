@@ -190,9 +190,8 @@ func loadPark(repo *gitwt.Repo) (*parkState, error) {
 // the error returned.
 //
 // For a path the pull changed (preRev..HEAD), the incoming version is kept
-// first (keepIncoming). Then the parked version is restored: for a memory
-// file, by refilling the mirror from the Claude copy, which is authoritative;
-// for any other path, from the saved bytes.
+// first (keepIncoming). Then the parked version is restored from the saved
+// bytes, for every path alike.
 func finishParked(repo *gitwt.Repo, roots Roots) error {
 	st, err := loadPark(repo)
 	if err != nil || st == nil {
@@ -243,8 +242,8 @@ func finishParked(repo *gitwt.Repo, roots Roots) error {
 	return os.RemoveAll(parkBytesDir(repo))
 }
 
-// restoreParked puts one parked path back. It reports whether a
-// .from-remote-* backup of an incoming version was written.
+// restoreParked puts one parked path back, from its saved bytes. It reports
+// whether a .from-remote-* backup of an incoming version was written.
 func restoreParked(repo *gitwt.Repo, roots Roots, preRev string, e parkedPath, changedUpstream bool) (bool, error) {
 	var saved []byte
 	if e.Kind == parkFile {
@@ -254,20 +253,13 @@ func restoreParked(repo *gitwt.Repo, roots Roots, preRev string, e parkedPath, c
 		}
 		saved = b
 	}
-	hash, name, isMemory := splitMirrorPath(e.Path)
+	final := saved
 	kept := false
 	if changedUpstream {
 		var err error
-		if kept, err = keepIncoming(repo, roots, preRev, e.Path, saved, e.Kind == parkFile); err != nil {
+		if kept, final, err = keepIncoming(repo, roots, preRev, e.Path, saved, e.Kind == parkFile); err != nil {
 			return kept, err
 		}
-	}
-	if isMemory {
-		err := CopyToMirror(roots, hash, name)
-		if errors.Is(err, fs.ErrNotExist) {
-			err = RemoveFromMirror(roots, hash, name)
-		}
-		return kept, err
 	}
 	dst := filepath.Join(repo.Dir, filepath.FromSlash(e.Path))
 	if e.Kind == parkDeleted {
@@ -279,43 +271,41 @@ func restoreParked(repo *gitwt.Repo, roots Roots, preRev string, e parkedPath, c
 	if err := os.MkdirAll(filepath.Dir(dst), 0700); err != nil {
 		return kept, err
 	}
-	return kept, writeAtomic(dst, saved)
+	return kept, writeAtomic(dst, final)
 }
 
 // keepIncoming preserves the pulled version of parked path p (it is in the
-// work-tree now). It returns true when a backup file was written.
+// work-tree now). It returns true when a backup file was written, and the bytes
+// the work-tree file is to end up with: the saved bytes, or for a MEMORY.md
+// that merged cleanly, the merge.
 //
-// The user's version of a memory file is its Claude copy; of any other path,
-// the parked bytes. A MEMORY.md is merged 3-way with the incoming version
-// (against the version at preRev) and the result written to the Claude copy.
-// Anything else, or a MEMORY.md whose merge conflicts, keeps the incoming
-// version beside the work-tree file as .from-remote-*, as Reconcile does.
-func keepIncoming(repo *gitwt.Repo, roots Roots, preRev, p string, saved []byte, existed bool) (bool, error) {
+// The user's version of every path is the saved bytes, a memory file included:
+// whatever the Claude copy holds now is for a watcher event or Reconcile to
+// sync later. A MEMORY.md is merged 3-way with the incoming version (against
+// the version at preRev), but only if its Claude copy still equals the saved
+// bytes; then the merge is written to the Claude copy too. Anything else, a
+// MEMORY.md whose merge conflicts or whose Claude copy has moved on, or a
+// parked deletion, keeps the incoming version beside the work-tree file as
+// .from-remote-*, as Reconcile does.
+func keepIncoming(repo *gitwt.Repo, roots Roots, preRev, p string, saved []byte, existed bool) (bool, []byte, error) {
 	wp := filepath.Join(repo.Dir, filepath.FromSlash(p))
 	incoming, err := os.ReadFile(wp)
 	if err != nil {
-		return false, nil // deleted upstream: the user's version stands
+		return false, saved, nil // deleted upstream: the user's version stands
 	}
-	hash, name, isMemory := splitMirrorPath(p)
-	local, present := saved, existed
-	if isMemory {
+	if existed && bytes.Equal(saved, incoming) {
+		return false, saved, nil
+	}
+	if hash, name, ok := splitMirrorPath(p); ok && name == "MEMORY.md" && existed {
 		cp := filepath.Join(roots.Claude, hash, "memory", name)
-		b, err := os.ReadFile(cp)
-		if err != nil {
-			return false, nil // no Claude copy: the user's version is its absence
-		}
-		local, present = b, true
-		if name == "MEMORY.md" && !bytes.Equal(local, incoming) {
+		if cur, err := os.ReadFile(cp); err == nil && bytes.Equal(cur, saved) {
 			base, _ := repo.Run("show", preRev+":"+p) // "" when it did not exist
-			if merged, conflict := merge.Merge(base, string(local), string(incoming)); !conflict {
-				return false, writeAtomic(cp, []byte(merged))
+			if merged, conflict := merge.Merge(base, string(saved), string(incoming)); !conflict {
+				return false, []byte(merged), writeAtomic(cp, []byte(merged))
 			}
 		}
 	}
-	if present && bytes.Equal(local, incoming) {
-		return false, nil
-	}
-	return true, writeAtomic(fmt.Sprintf("%s.from-remote-%s", wp, randSuffix()), incoming)
+	return true, saved, writeAtomic(fmt.Sprintf("%s.from-remote-%s", wp, randSuffix()), incoming)
 }
 
 // writeSynced is writeAtomic plus an fsync of the data and of the directory,
