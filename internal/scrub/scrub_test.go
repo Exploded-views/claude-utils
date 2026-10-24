@@ -288,3 +288,101 @@ func TestDenylist_EmptyMatchingPatternHoldsBackEverything(t *testing.T) {
 		}
 	}
 }
+
+// hasRule reports whether Scan(in) includes rule.
+func hasRule(s *Scanner, in, rule string) bool {
+	for _, r := range s.Scan([]byte(in)) {
+		if r == rule {
+			return true
+		}
+	}
+	return false
+}
+
+func TestScan_URLCredentialsTable(t *testing.T) {
+	pw := "s3cr3tPw9x"
+	cases := []struct {
+		name  string
+		in    string
+		match bool
+	}{
+		{"user and password", "postgres://" + "svc" + ":" + pw + "@db:5432/app", true},
+		{"empty username", "redis://" + ":" + pw + "@cache:6379", true},
+		{"dollar in password", "https://" + "svc:" + "ab$cd" + "1234@example.com", true},
+		{"star in password", "https://" + "svc:" + "ab*cd" + "1234@example.com", true},
+		{"quote in password", "https://" + "svc:" + "ab'cd" + "1234@example.com", true},
+		{"brace inside password", "https://" + "svc:" + "ab{cd" + "1234@example.com", true},
+		{"env placeholder", "https://svc:" + "${DB_PASS}" + "@example.com", false},
+		{"env placeholder no user", "redis://:" + "${REDIS_PW}" + "@cache", false},
+		{"angle placeholder", "https://svc:" + "<password>" + "@example.com", false},
+		{"angle placeholder no user", "redis://:" + "<pw-here>" + "@cache", false},
+		{"mustache placeholder", "https://svc:" + "{{PASS}}" + "@example.com", false},
+		{"stars", "https://svc:" + strings.Repeat("*", 8) + "@example.com", false},
+		{"stars no user", "redis://:" + strings.Repeat("*", 5) + "@cache", false},
+		{"dummy word", "https://svc:changeme@example.com", false},
+		{"dummy word no user", "redis://:changeme@cache", false},
+		{"dummy word upper", "https://svc:CHANGEME@example.com", false},
+		{"placeholder prefix only", "https://svc:" + "${A}" + pw + "@example.com", true},
+		{"no userinfo", "https://example.com:8080/x@y", false},
+		{"user only", "ssh://git@github.com/org/repo.git", false},
+	}
+	s := New(nil)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := hasRule(s, c.in, "url-credentials"); got != c.match {
+				t.Errorf("url-credentials = %v, want %v", got, c.match)
+			}
+		})
+	}
+}
+
+// A token directly after "_" (a word character) must still match.
+func TestScan_TokenAfterUnderscoreTable(t *testing.T) {
+	cases := []struct {
+		name, tok, rule string
+	}{
+		{"anthropic", rep("sk-ant-api03-", 30, "a"), "anthropic-api-key"},
+		{"slack", rep("xoxb-", 20, "1"), "slack-token"},
+		{"aws access key", rep("AKIA", 16, "A"), "aws-access-key"},
+		{"jwt", rep("eyJ", 12, "a") + "." + rep("eyJ", 12, "b") + "." + rep("", 16, "c"), "jwt"},
+	}
+	s := New(nil)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for _, prefix := range []string{"", "NAME_", "name=", " ", `"`} {
+				if !hasRule(s, prefix+c.tok, c.rule) {
+					t.Errorf("%s not matched after %q", c.rule, prefix)
+				}
+			}
+			// Glued to a letter or digit it is part of some other word.
+			for _, prefix := range []string{"x", "7"} {
+				if hasRule(s, prefix+c.tok, c.rule) {
+					t.Errorf("%s matched after %q", c.rule, prefix)
+				}
+			}
+		})
+	}
+}
+
+func TestScan_CredentialAssignmentPlaceholders(t *testing.T) {
+	body := strings.Repeat("v", 20)
+	cases := []struct {
+		in    string
+		match bool
+	}{
+		{`password: "<` + body + `>"`, false},
+		{`password: "$` + body + `"`, false},
+		{`password: "${` + body + `}"`, false},
+		{`api_key: "{{` + body + `}}"`, false},
+		{`api_key: '<` + body + `>'`, false},
+		{`password: "` + body + `"`, true},
+		{`password: "a<` + body + `"`, true}, // not at the start
+		{`password: "a$` + body + `"`, true},
+	}
+	s := New(nil)
+	for _, c := range cases {
+		if got := hasRule(s, c.in, "credential-assignment"); got != c.match {
+			t.Errorf("credential-assignment(%q) = %v, want %v", c.in, got, c.match)
+		}
+	}
+}

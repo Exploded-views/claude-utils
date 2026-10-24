@@ -39,7 +39,7 @@ const tokenStart = `(?:^|[^A-Za-z0-9])`
 var builtin = []rule{
 	{name: "private-key", re: regexp.MustCompile(`-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----`)},
 	{name: "github-token", re: regexp.MustCompile(tokenStart + `(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})`)},
-	{name: "anthropic-api-key", re: regexp.MustCompile(`\bsk-ant-[A-Za-z0-9_-]{20,}`)},
+	{name: "anthropic-api-key", re: regexp.MustCompile(tokenStart + `sk-ant-[A-Za-z0-9_-]{20,}`)},
 	// Hyphens are only allowed after the sk-proj-, sk-svcacct- and sk-admin-
 	// prefixes, so kebab-case prose that happens to start with "sk-" is not
 	// flagged.
@@ -47,23 +47,25 @@ var builtin = []rule{
 	{name: "stripe-key", re: regexp.MustCompile(tokenStart + `[sr]k_live_[A-Za-z0-9]{16,}`)},
 	{name: "google-api-key", re: regexp.MustCompile(tokenStart + `AIza[0-9A-Za-z_-]{35}`)},
 	{name: "gitlab-token", re: regexp.MustCompile(tokenStart + `glpat-[A-Za-z0-9_-]{20,}`)},
-	{name: "slack-token", re: regexp.MustCompile(`\bxox[abdoprs]-[A-Za-z0-9-]{10,}`)},
-	{name: "aws-access-key", re: regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`)},
-	{name: "jwt", re: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`)},
+	{name: "slack-token", re: regexp.MustCompile(tokenStart + `xox[abdoprs]-[A-Za-z0-9-]{10,}`)},
+	{name: "aws-access-key", re: regexp.MustCompile(tokenStart + `(?:AKIA|ASIA)[0-9A-Z]{16}\b`)},
+	{name: "jwt", re: regexp.MustCompile(tokenStart + `eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`)},
 	// A 40-character value after aws_secret_access_key. A value starting with
 	// "<" or "$" is a placeholder.
 	{name: "aws-secret-key", re: regexp.MustCompile(`(?i)aws_secret_access_key["']?\s*[:=]\s*["']?[^\s<$"']\S{39}`)},
-	// scheme://user:password@host. Placeholders (user:password@, <...>, ${...},
-	// {{...}}) are excluded: the character class rejects the brackets, and
-	// accept rejects the usual dummy words.
-	{name: "url-credentials", re: regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://([^\s:/@<>{}$*"']+):([^\s:/@<>{}$*"']{4,})@`), accept: realURLPassword},
+	// scheme://[user]:password@host. The username may be empty (redis://:pw@host).
+	// The password class admits the bracket and shell characters placeholders
+	// are made of, so accept can see the whole value and reject a placeholder
+	// (${...}, <...>, {{...}}, ***, or a dummy word).
+	{name: "url-credentials", re: regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://([^\s:/@<>{}$*"']*):([^\s:/@"]{4,})@`), accept: realURLPassword},
 	// password/token/secret/api_key assigned a quoted value of 16+ characters
 	// with no whitespace. The name may carry only a few suffixes (_key,
 	// _value, ...): "tokenizer", "secretName" and "token_type" hold ordinary
 	// config words that are long enough to look like secrets. Unquoted values
 	// are ignored: prose like "the token is rotated weekly" is far more common
-	// than an unquoted secret.
-	{name: "credential-assignment", re: regexp.MustCompile(`(?i)(?:password|passwd|token|secret|api[_-]?key)(?:[_-]?(?:access[_-]?key|key|value|string|str|data))?["']?\s*[:=]\s*["'][^"'\s]{16,}["']`)},
+	// than an unquoted secret. A value starting with "<", "$" or "{" is a
+	// placeholder (<token>, ${TOKEN}, {{ token }}).
+	{name: "credential-assignment", re: regexp.MustCompile(`(?i)(?:password|passwd|token|secret|api[_-]?key)(?:[_-]?(?:access[_-]?key|key|value|string|str|data))?["']?\s*[:=]\s*["']([^"'\s]{16,})["']`), accept: realCredentialValue},
 }
 
 // placeholderPasswords are the dummy passwords documentation uses.
@@ -74,10 +76,21 @@ var placeholderPasswords = map[string]bool{
 	"xxxx": true, "xxxxx": true, "xxxxxx": true, "xxxxxxxx": true,
 }
 
+// placeholderValue matches a value that is wholly a template placeholder:
+// ${NAME}, <name>, {{name}} or a run of asterisks.
+var placeholderValue = regexp.MustCompile(`^(?:\$\{[^}]*\}|<[^>]*>|\{\{.*\}\}|\*+)$`)
+
 // realURLPassword reports whether sub[2], the password in a URL's userinfo,
 // is not an obvious placeholder.
 func realURLPassword(sub [][]byte) bool {
-	return !placeholderPasswords[strings.ToLower(string(sub[2]))]
+	pw := sub[2]
+	return !placeholderValue.Match(pw) && !placeholderPasswords[strings.ToLower(string(pw))]
+}
+
+// realCredentialValue reports whether sub[1], a quoted credential value, does
+// not start like a placeholder.
+func realCredentialValue(sub [][]byte) bool {
+	return len(sub[1]) > 0 && strings.IndexByte("<${", sub[1][0]) < 0
 }
 
 // DenylistPattern is one user-supplied regex and the line it came from.
