@@ -9,15 +9,22 @@ import (
 // that looks like a credential (secret scanners would flag the repo itself).
 func rep(prefix string, n int, ch string) string { return prefix + strings.Repeat(ch, n) }
 
+// keyHeader builds a "-----BEGIN <kind> PRIVATE KEY-----" line by
+// concatenation, so this file holds no complete header for a secret scanner to
+// flag.
+func keyHeader(kind string) string {
+	return "-----BEGIN " + kind + "PRIVATE" + " KEY-----"
+}
+
 func TestScan_Rules(t *testing.T) {
 	cases := []struct {
 		name    string
 		content string
 		want    string // expected rule name
 	}{
-		{"rsa key", "notes\n-----BEGIN RSA PRIVATE KEY-----\nabc\n", "private-key"},
-		{"openssh key", "-----BEGIN OPENSSH PRIVATE KEY-----\n", "private-key"},
-		{"plain key", "-----BEGIN PRIVATE KEY-----\n", "private-key"},
+		{"rsa key", "notes\n" + keyHeader("RSA ") + "\nabc\n", "private-key"},
+		{"openssh key", keyHeader("OPENSSH ") + "\n", "private-key"},
+		{"plain key", keyHeader("") + "\n", "private-key"},
 		{"ghp", "token is " + rep("ghp_", 36, "a"), "github-token"},
 		{"gho", rep("gho_", 36, "B"), "github-token"},
 		{"ghu", rep("ghu_", 36, "1"), "github-token"},
