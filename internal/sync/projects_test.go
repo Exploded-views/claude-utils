@@ -321,6 +321,94 @@ func TestRemoteMap_FailedSaveIsRetried(t *testing.T) {
 	}
 }
 
+// A claim is released only when nothing is left of its holder: the Claude
+// folder, the recorded checkout and any directory the name decodes to.
+func TestRemoteMap_ClaimIsReleasedOnlyWhenEverythingOfTheHolderIsGone(t *testing.T) {
+	gitEnv(t)
+	for _, c := range []struct {
+		name         string
+		keepFolder   bool // the Claude project folder still exists
+		keepCheckout bool // the recorded checkout still exists
+		keepDecoded  bool // another directory escapes to the same name
+		released     bool
+	}{
+		{"everything gone", false, false, false, true},
+		{"claude folder still there", true, false, false, false},
+		{"checkout still there", false, true, false, false},
+		{"name still decodes to a directory", false, false, true, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a := newMachine(t, "alice")
+			old := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+			a.write(old, "n.md", "1\n")
+			a.remoteMap() // old claims the key and records its dir
+			if c.keepDecoded {
+				// The recorded dir is gone but the name still decodes to old.
+				e := ProjectEntry{Dir: filepath.Join(a.home, "elsewhere", "app"), LastKey: appKey}
+				ca, _ := LoadProjectCache(a.cfg.SyncDir)
+				ca.Projects[a.hash(old)] = e
+				if err := ca.Save(a.cfg.SyncDir); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !c.keepFolder {
+				if err := os.RemoveAll(filepath.Join(a.claude, a.hash(old))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !c.keepCheckout && !c.keepDecoded {
+				if err := os.RemoveAll(old); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			fresh := mkRepo(t, filepath.Join(a.home, "work", "app"), "git@github.com:acme/app.git")
+			a.open(fresh)
+			captureLog(t)
+			rm := a.remoteMap()
+			got := rm.Key(a.hash(fresh))
+			if c.released && got != appKey {
+				t.Errorf("fresh clone key = %q, want it to take over %q", got, appKey)
+			}
+			if !c.released && got != "" {
+				t.Errorf("fresh clone key = %q, want its path key: the claim must not move by itself", got)
+			}
+			ca, _ := LoadProjectCache(a.cfg.SyncDir)
+			_, kept := ca.Projects[a.hash(old)]
+			if kept == c.released {
+				t.Errorf("old holder's cache entry kept = %v, released = %v", kept, c.released)
+			}
+		})
+	}
+}
+
+// When the holder's Claude folder exists but its checkout is gone, the refusal
+// says so and gives the edit that moves the claim by hand.
+func TestRemoteMap_RefusalSaysTheHoldersCheckoutIsGoneAndHowToMoveTheClaim(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	old := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(old, "n.md", "1\n")
+	a.remoteMap()
+	if err := os.RemoveAll(old); err != nil {
+		t.Fatal(err)
+	}
+	fresh := mkRepo(t, filepath.Join(a.home, "work", "app"), "git@github.com:acme/app.git")
+	a.open(fresh)
+	logs := captureLog(t)
+	a.remoteMap()
+	out := logs.String()
+	for _, want := range []string{a.hash(fresh), a.hash(old), "checkout is gone", ".state/projects.json",
+		`"key": "path"`, `"key": "` + appKey + `"`, "stop the daemon"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("refusal log lacks %q: %q", want, out)
+		}
+	}
+	if strings.Contains(out, a.home) {
+		t.Errorf("the log leaks a path: %q", out)
+	}
+}
+
 func TestRemoteMap_AmbiguousButSameRemoteResolves(t *testing.T) {
 	gitEnv(t)
 	a := newMachine(t, "alice")
@@ -791,5 +879,23 @@ func TestLoadProjectCache_MissingIsEmpty(t *testing.T) {
 	c, err := LoadProjectCache(t.TempDir())
 	if err != nil || len(c.Projects) != 0 {
 		t.Errorf("got %+v, %v", c, err)
+	}
+}
+
+// Once the holder's checkout and Claude folder are both gone, a re-clone
+// elsewhere gets the key rather than its path key forever.
+func TestRemoteSync_StaleClaimIsReleasedWhenHolderIsGone(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	old := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(old, "n.md", "1\n")
+	a.sync()
+	_ = os.RemoveAll(old)
+	_ = os.RemoveAll(filepath.Join(a.claude, a.hash(old)))
+
+	fresh := mkRepo(t, filepath.Join(a.home, "work", "app"), "git@github.com:acme/app.git")
+	a.open(fresh)
+	if got := a.remoteMap().Key(a.hash(fresh)); got != appKey {
+		t.Errorf("re-clone key = %q, want %q", got, appKey)
 	}
 }

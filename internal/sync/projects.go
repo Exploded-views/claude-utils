@@ -138,6 +138,8 @@ type RemoteMap struct {
 	failed map[string]bool   // folders already logged as unresolvable, by folder name
 	denied map[string]bool   // folders already logged as refused a key, by folder name
 	dirty  bool              // cache changed since it was last saved
+
+	vanished map[string]string // key -> folder whose claim was just released
 }
 
 // NewRemoteMap loads the per-PC cache and resolves every project folder.
@@ -147,7 +149,7 @@ func NewRemoteMap(syncDir, claudeRoot string) (*RemoteMap, error) {
 		return nil, err
 	}
 	m := &RemoteMap{syncDir: syncDir, claudeRoot: claudeRoot, Lookup: gitOrigin, Why: gitFailure, cache: c,
-		keys: map[string]string{}, owner: map[string]string{}, warned: map[string]bool{}, failed: map[string]bool{}, denied: map[string]bool{}}
+		keys: map[string]string{}, owner: map[string]string{}, warned: map[string]bool{}, failed: map[string]bool{}, denied: map[string]bool{}, vanished: map[string]string{}}
 	m.Refresh()
 	return m, nil
 }
@@ -165,7 +167,12 @@ func (m *RemoteMap) Refresh() {
 	}
 	sort.Strings(held)
 	for _, h := range held {
-		if k := lastKey(m.cache.Projects[h]); k != "" {
+		e := m.cache.Projects[h]
+		if k := lastKey(e); k != "" {
+			if m.staleClaim(h, e) {
+				m.release(h, k)
+				continue
+			}
 			if _, taken := m.owner[k]; !taken {
 				m.owner[k] = h
 			}
@@ -181,6 +188,36 @@ func (m *RemoteMap) Refresh() {
 		}
 	}
 	m.save()
+}
+
+// staleClaim reports whether nothing is left of the folder holding a claim: its
+// Claude folder and its recorded checkout are both gone (not merely
+// unreachable: only "does not exist" counts), and no directory still decodes
+// from its name. Anything less, say a Claude folder that is still there, keeps
+// the claim; it is then moved by hand (see claim).
+func (m *RemoteMap) staleClaim(hash string, e ProjectEntry) bool {
+	if !gone(filepath.Join(m.claudeRoot, hash)) {
+		return false
+	}
+	if e.Dir != "" && !gone(e.Dir) {
+		return false
+	}
+	return len(Candidates(hash)) == 0
+}
+
+// gone reports whether p does not exist (as opposed to being unreadable).
+func gone(p string) bool {
+	_, err := os.Lstat(p)
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+// release drops a stale claim and its cache entry. The key is remembered in
+// vanished until the daemon has restored its notes (see Vanished).
+func (m *RemoteMap) release(hash, key string) {
+	delete(m.cache.Projects, hash)
+	m.dirty = true
+	m.vanished[key] = hash
+	logFolder(hash, "claim on remotes/%s released: its Claude folder and checkout are gone", key)
 }
 
 // Key returns the repo-side key for a project folder, or "" for the path
@@ -266,8 +303,15 @@ func (m *RemoteMap) claim(hash, want string) string {
 	if h, taken := m.owner[want]; taken && h != hash {
 		if !m.denied[hash] {
 			m.denied[hash] = true
-			logFolder(hash, "would be stored as remotes/%s, which %s already holds on this PC; keeping its path key",
-				want, h)
+			if e := m.cache.Projects[h]; e.Dir != "" && gone(e.Dir) {
+				logFolder(hash, "would be stored as remotes/%s, which %s holds on this PC, but that folder's checkout is gone; "+
+					"a claim never moves by itself. To move it, stop the daemon and in .state/projects.json set \"key\": \"path\" on %s "+
+					"and \"key\": \"%s\" on %s; keeping the path key meanwhile",
+					want, h, h, want, hash)
+			} else {
+				logFolder(hash, "would be stored as remotes/%s, which %s already holds on this PC; keeping its path key",
+					want, h)
+			}
 		}
 		return ""
 	}
