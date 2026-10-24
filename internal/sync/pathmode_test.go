@@ -407,7 +407,7 @@ func TestPropagateChanges_PathModeMatchesMain(t *testing.T) {
 	}
 	rewrite("proj1", "edit.md", "after\n")                                                 // M
 	rewrite("proj1", "new.md", "new\n")                                                    // A
-	rewrite("proj1", "notes.from-remote-team.md", "team note v2\n")                       // M of a backup-like name
+	rewrite("proj1", "notes.from-remote-team.md", "team note v2\n")                        // M of a backup-like name
 	rewrite("proj2", "added-elsewhere.md", "x\n")                                          // A in another project
 	if err := os.Remove(filepath.Join(mirror, "proj1", "memory", "drop.md")); err != nil { // D
 		t.Fatal(err)
