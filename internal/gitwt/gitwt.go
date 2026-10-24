@@ -338,6 +338,19 @@ func (r *Repo) MergeAbort() error {
 	return err
 }
 
+// IsAncestor reports whether commit a is an ancestor of (or the same as) b.
+func (r *Repo) IsAncestor(a, b string) (bool, error) {
+	_, err := r.Run("merge-base", "--is-ancestor", a, b)
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil // exit 1 = not an ancestor
+	}
+	return false, err
+}
+
 // UnmergedPaths lists the paths with unresolved conflicts.
 func (r *Repo) UnmergedPaths() ([]string, error) {
 	out, err := r.Run("diff", "--name-only", "--diff-filter=U", "-z")

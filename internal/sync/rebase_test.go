@@ -91,35 +91,40 @@ func TestRebaseConflict_ModifyDeleteAborts(t *testing.T) {
 	}
 }
 
-// The documented resolution works: after the abort, `git pull --rebase` in the
-// sync dir, fix the file, `git add`, `git rebase --continue`; the next cycle
-// pushes the result and pulls the rest.
+// The documented resolution works: after the abort, `git pull --rebase
+// --autostash` in the sync dir, fix the file, `git add`, `git rebase
+// --continue`; the next cycle (pullTick, as the daemon runs it) pushes the
+// result, and the peer's other edits, which the manual pull brought in, reach
+// the Claude tree instead of being reverted by the stale copies.
 func TestRebaseConflict_ManualResolutionThenNextCycleSyncs(t *testing.T) {
 	f := newPullFixture(t, map[string]string{"clean.md": "a\nb\n"})
 	captureLog(t)
-	t.Setenv("GIT_EDITOR", "true")
+	f.loop.pullTick(f.repo, f.roots)
 	f.editLocal("clean.md", "a\nlocal\n")
 	f.peerPush("clean.md", "a\npeer\n")
 	f.peerPush("peer1.md", "peer one\n")
-	if err := f.loop.flush(f.repo, f.roots, true); err == nil {
-		t.Fatal("want the conflict error")
+	f.loop.pullTick(f.repo, f.roots)
+	if f.originFile("clean.md") != "a\npeer\n" {
+		t.Fatal("origin should still hold the peer's version while the conflict stands")
 	}
 
 	// The user's steps from the docs, with the daemon stopped.
-	if _, err := f.repo.Run("pull", "--rebase", "origin", "main"); err == nil {
-		t.Fatal("expected the pull to stop on the conflict again")
-	}
-	writeRepoFile(t, f.repo, "projects/p1/memory/clean.md", "a\nboth\n")
-	mustGit(t, f.repo, "add", "projects/p1/memory/clean.md")
-	mustGit(t, f.repo, "rebase", "--continue")
+	resolveByHand(t, f, map[string]string{"clean.md": "a\nboth\n"})
 
-	if err := f.loop.flush(f.repo, f.roots, true); err != nil {
-		t.Fatalf("flush after the resolution: %v", err)
-	}
+	f.loop.pullTick(f.repo, f.roots)
 	if !f.originHas("projects/p1/memory/clean.md") {
 		t.Error("resolved note never pushed")
 	}
-	if show := mustGit(t, f.repo, "show", "origin/main:projects/p1/memory/clean.md"); show != "a\nboth\n" {
-		t.Errorf("origin has %q", show)
+	if got := f.originFile("clean.md"); got != "a\nboth\n" {
+		t.Errorf("origin has %q", got)
+	}
+	if got := f.originFile("peer1.md"); got != "peer one\n" {
+		t.Errorf("peer's note lost on origin: %q", got)
+	}
+	if got, _ := f.claudeCopy("peer1.md"); got != "peer one\n" {
+		t.Errorf("peer's note never reached the Claude tree: %q", got)
+	}
+	if got, _ := f.claudeCopy("clean.md"); got != "a\nboth\n" {
+		t.Errorf("Claude copy = %q", got)
 	}
 }

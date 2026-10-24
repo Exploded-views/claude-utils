@@ -154,13 +154,17 @@ func (l *Loop) Run(ctx context.Context) error {
 }
 
 // recoverLeftovers undoes what a crash or an earlier failed cycle left: a
-// stopped rebase or merge, then an unfinished park.
+// stopped rebase or merge, then an unfinished park. Last, it copies into the
+// Claude tree whatever moved the sync repo's HEAD outside a cycle (catchUp).
 func (l *Loop) recoverLeftovers(repo *gitwt.Repo, roots Roots) error {
 	if err := abortInterrupted(repo); err != nil {
 		return fmt.Errorf("abort interrupted rebase or merge: %w", err)
 	}
 	if err := finishParked(repo, roots); err != nil {
 		return fmt.Errorf("finish earlier park: %w", err)
+	}
+	if err := l.catchUp(repo, roots); err != nil {
+		return fmt.Errorf("catch up with the sync repo: %w", err)
 	}
 	return nil
 }
@@ -290,6 +294,16 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	if err := l.takeRecovery(repo, roots); err != nil {
 		return err
 	}
+	// The cycle's HEAD is recorded once it is reflected in the Claude tree
+	// (see catchUp). A propagate that failed leaves the older record.
+	settled := true
+	defer func() {
+		if settled {
+			if rerr := recordHead(repo); rerr != nil {
+				log.Println("record synced head:", g.Err(rerr))
+			}
+		}
+	}()
 	if includeLocal {
 		_, err := CommitMirror(repo, l.Cfg, fmt.Sprintf("auto: %s @ %s", l.Hostname, time.Now().UTC().Format(time.RFC3339)))
 		if err != nil {
@@ -328,6 +342,7 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	postRev, _ := repo.Run("rev-parse", "HEAD")
 	if conflictErr == nil && strings.TrimSpace(preRev) != strings.TrimSpace(postRev) && strings.TrimSpace(preRev) != "" {
 		if err := propagate(repo, roots, strings.TrimSpace(preRev), strings.TrimSpace(postRev), st.skip(), g); err != nil {
+			settled = false
 			return fmt.Errorf("propagate: %w", err)
 		}
 	}
