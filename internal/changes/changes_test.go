@@ -381,7 +381,7 @@ func TestResult_JSONShape(t *testing.T) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"head", "since", "total", "more", "changes"} {
+	for _, k := range []string{"head", "since", "total", "more", "busy", "reset", "changes"} {
 		if _, ok := m[k]; !ok {
 			t.Errorf("JSON missing %q: %s", k, b)
 		}
@@ -568,5 +568,54 @@ func TestOutput_NeverContainsNoteContent(t *testing.T) {
 	b, _ := json.Marshal(r)
 	if r.Total != 2 || strings.Contains(r.Text(), secret) || strings.Contains(string(b), secret) {
 		t.Errorf("note content leaked (total %d):\n%s\n%s", r.Total, r.Text(), b)
+	}
+}
+
+// While the daemon's pull --rebase has stopped on a conflict, HEAD points at a
+// half-built history; report nothing and leave the marker alone.
+func TestCompute_BusyDuringRebase(t *testing.T) {
+	f := newFixture(t)
+	base := f.commit(map[string]string{mem(appHash, "a.md"): "a\n"})
+	marker := filepath.Join(t.TempDir(), "seen")
+	if err := os.WriteFile(marker, []byte(base+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) error { _, err := f.repo.Run(args...); return err }
+	if err := run("checkout", "-q", "-b", "side"); err != nil {
+		t.Fatal(err)
+	}
+	f.commit(map[string]string{mem(appHash, "a.md"): "side\n"})
+	if err := run("checkout", "-q", "main"); err != nil {
+		t.Fatal(err)
+	}
+	f.commit(map[string]string{mem(appHash, "a.md"): "main\n"})
+	if err := run("checkout", "-q", "side"); err != nil {
+		t.Fatal(err)
+	}
+	if err := run("rebase", "main"); err == nil {
+		t.Fatal("rebase should have stopped on a conflict")
+	}
+
+	o := Options{SyncDir: f.repo.Dir, ClaudeDir: f.claude, Marker: marker, UpdateMarker: true, Limit: 20}
+	r, err := Compute(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Busy || r.Total != 0 || len(r.Changes) != 0 {
+		t.Errorf("want an empty busy result: %+v", r)
+	}
+	if b, _ := os.ReadFile(marker); strings.TrimSpace(string(b)) != base {
+		t.Errorf("marker moved to %q while busy", b)
+	}
+	if b, _ := json.Marshal(r); !strings.Contains(string(b), `"busy":true`) {
+		t.Errorf("JSON should say busy: %s", b)
+	}
+
+	// Once the rebase is abandoned the repo is reported on again.
+	if err := run("rebase", "--abort"); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := Compute(o); err != nil || r.Busy {
+		t.Errorf("after abort: %+v %v", r, err)
 	}
 }

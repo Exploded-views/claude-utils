@@ -60,6 +60,7 @@ type Change struct {
 type Result struct {
 	Head    string   `json:"head"`    // current HEAD of the sync repo
 	Since   string   `json:"since"`   // the commit Since or Marker resolved to
+	Busy    bool     `json:"busy"`    // the repo is mid-rebase/merge; nothing was reported
 	Reset   bool     `json:"reset"`   // the marker named a lost commit and was reset to Head
 	Total   int      `json:"total"`   // number of changed files
 	More    int      `json:"more"`    // changes not listed because of Limit
@@ -85,6 +86,11 @@ func Compute(opts Options) (Result, error) {
 	}
 	if opts.UpdateMarker && opts.Marker == "" {
 		return res, errors.New("--update-marker needs --marker")
+	}
+
+	if busy(repo) {
+		res.Busy = true
+		return res, nil
 	}
 
 	since, err := resolveSince(repo, opts)
@@ -170,6 +176,25 @@ func resolveSince(repo *gitwt.Repo, opts Options) (string, error) {
 func markerExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// busy reports whether the daemon's pull --rebase (or a merge or cherry-pick)
+// is stopped half-way, when HEAD is not a meaningful point to diff against.
+func busy(repo *gitwt.Repo) bool {
+	for _, name := range []string{"rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD"} {
+		out, err := repo.Run("rev-parse", "--git-path", name)
+		if err != nil {
+			continue
+		}
+		p := strings.TrimSpace(out)
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(repo.Dir, p)
+		}
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // revParse resolves rev to a full commit SHA.
@@ -283,6 +308,10 @@ func (r Result) Text() string {
 		return s
 	}
 	var b strings.Builder
+	if r.Busy {
+		b.WriteString("sync repo is busy (rebase or merge in progress); nothing reported\n")
+		return b.String()
+	}
 	if r.Total == 0 {
 		fmt.Fprintf(&b, "no memory changes since %s (head %s)\n", short(r.Since), short(r.Head))
 		return b.String()
