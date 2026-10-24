@@ -234,3 +234,39 @@ func TestScan_MoreRulesCleanContent(t *testing.T) {
 		}
 	}
 }
+
+func TestParseDenylist_UTF8BOM(t *testing.T) {
+	// Without stripping, the BOM would be part of line 1's pattern and the
+	// pattern would never match at the start of a file's content.
+	d, err := ParseDenylist(strings.NewReader("\xef\xbb\xbfproject-nightjar\nwidget\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d) != 2 {
+		t.Fatalf("got %d patterns, want 2", len(d))
+	}
+	if got := New(d).Scan([]byte("about project-nightjar")); len(got) != 1 || got[0] != "denylist:1" {
+		t.Errorf("got %v, want [denylist:1]", got)
+	}
+	// A BOM before a comment must not turn the comment into a pattern.
+	d, err = ParseDenylist(strings.NewReader("\xef\xbb\xbf# header\nwidget\n"))
+	if err != nil || len(d) != 1 {
+		t.Errorf("BOM + comment: %d patterns, err %v; want 1, nil", len(d), err)
+	}
+}
+
+func TestParseDenylist_RejectsUTF16(t *testing.T) {
+	utf16le := "\xff\xfe" + "w\x00i\x00d\x00g\x00e\x00t\x00\n\x00"
+	utf16be := "\xfe\xff" + "\x00w\x00i\x00d\x00g\x00e\x00t\x00\n"
+	noBOM := "w\x00i\x00d\x00g\x00e\x00t\x00\n\x00"
+	for name, src := range map[string]string{"le bom": utf16le, "be bom": utf16be, "no bom, NULs": noBOM, "NUL late": "ok\nwid\x00get\n"} {
+		_, err := ParseDenylist(strings.NewReader(src))
+		if err == nil {
+			t.Errorf("%s: want error", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "UTF-8") {
+			t.Errorf("%s: error should say the file must be UTF-8: %v", name, err)
+		}
+	}
+}

@@ -12,6 +12,8 @@ package scrub
 
 import (
 	"bufio"
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -85,12 +87,24 @@ type DenylistPattern struct {
 }
 
 // ParseDenylist reads one case-insensitive regex per line. Blank lines and
-// lines starting with "#" are skipped. A bad pattern is an error naming the
-// line (not the pattern: it may itself be sensitive); callers should treat
-// that as "cannot vouch for anything" rather than skipping the line.
+// lines starting with "#" are skipped. A leading UTF-8 BOM is ignored (Windows
+// editors add one). UTF-16 input, which editors on Windows also produce, would
+// parse as garbage patterns that match nothing, so it is an error. A bad
+// pattern is an error naming the line (not the pattern: it may itself be
+// sensitive); callers should treat any error as "cannot vouch for anything"
+// rather than skipping the line.
 func ParseDenylist(r io.Reader) ([]DenylistPattern, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	if bytes.HasPrefix(data, []byte{0xff, 0xfe}) || bytes.HasPrefix(data, []byte{0xfe, 0xff}) || bytes.IndexByte(data, 0) >= 0 {
+		return nil, errors.New("denylist is not UTF-8 (looks like UTF-16 or binary); re-save the file as UTF-8")
+	}
+	data = bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf})
+
 	var out []DenylistPattern
-	sc := bufio.NewScanner(r)
+	sc := bufio.NewScanner(bytes.NewReader(data))
 	n := 0
 	for sc.Scan() {
 		n++

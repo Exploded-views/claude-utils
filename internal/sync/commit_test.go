@@ -300,6 +300,24 @@ func TestCommitMirror_InvalidDenylistFailsClosed(t *testing.T) {
 	}
 }
 
+func TestCommitMirror_UTF16DenylistFailsClosed(t *testing.T) {
+	repo, cfg := commitFixture(t)
+	writeRepoFile(t, repo, "denylist.txt", "\xff\xfew\x00i\x00d\x00g\x00e\x00t\x00\n\x00")
+	writeRepoFile(t, repo, "projects/p1/memory/a.md", "harmless\n")
+
+	logs := captureLog(t)
+	committed, err := CommitMirror(repo, cfg, "auto: test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committed {
+		t.Error("a UTF-16 denylist must commit nothing")
+	}
+	if !strings.Contains(logs.String(), "UTF-8") {
+		t.Errorf("log should say the file must be UTF-8, got %q", logs.String())
+	}
+}
+
 func TestCommitMirror_UnbornBranch(t *testing.T) {
 	// The first commit on a fresh `init` has no HEAD to diff against.
 	repo, cfg := commitFixture(t)
