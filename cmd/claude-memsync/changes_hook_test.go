@@ -640,3 +640,39 @@ func TestHook_NoDenylistListsEverything(t *testing.T) {
 		t.Errorf("exit %d stdout %q stderr %q", code, out, errs)
 	}
 }
+
+// A held-back path that a peer changed: the daemon kept the local copy and
+// saved the incoming version beside the mirror copy. The report says so
+// instead of pointing at a file that does not hold the peer's text.
+func TestHook_LocalCopyKeptIsAnnotated(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	cfg, _ := loadDistillConfig(cfgPath)
+	ignoreState(t, cfg.SyncDir)
+	in := hookJSON("sess-kept", "/home/alice/src/app", "UserPromptSubmit")
+	runHook(t, in, "--config", cfgPath, "--hook")
+	addNotes(t, cfgPath, map[string]string{
+		"-home-alice-src-app/memory/held.md":   "from the peer",
+		"-home-alice-src-app/memory/copied.md": "copied",
+	})
+	mem := filepath.Join(cfg.ClaudeProjectsDir, "-home-alice-src-app", "memory")
+	if err := os.MkdirAll(mem, 0700); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(mem, "held.md"), []byte("my local edit"), 0600)
+	os.WriteFile(filepath.Join(mem, "copied.md"), []byte("copied"), 0600)
+
+	_, out, _ := runHook(t, in, "--config", cfgPath, "--hook")
+	var reply hookReply
+	if err := json.Unmarshal([]byte(out), &reply); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	want := "(local copy kept; the incoming version was saved next to the mirror copy as .from-remote-*)"
+	for _, l := range strings.Split(reply.HookSpecificOutput.AdditionalContext, "\n")[1:] {
+		if strings.HasSuffix(l, "copied.md") == false && strings.Contains(l, "copied.md") {
+			t.Errorf("copied.md carries a note: %q", l)
+		}
+	}
+	if !strings.Contains(reply.HookSpecificOutput.AdditionalContext, "held.md "+want) {
+		t.Errorf("held.md not annotated: %q", reply.HookSpecificOutput.AdditionalContext)
+	}
+}

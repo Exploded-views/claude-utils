@@ -90,6 +90,7 @@ func changesCmd(stdin io.Reader, stdout, stderr io.Writer, args []string) (code 
 		Upper:        upper,
 		Hide:         hide,
 		HideAll:      hideAll,
+		CompareLocal: true,
 		ClaudeDir:    cfg.ClaudeProjectsDir,
 		Since:        *since,
 		Marker:       *marker,

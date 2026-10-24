@@ -80,6 +80,7 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, project str
 		Upper:        syncedUpper(cfg.SyncDir),
 		Hide:         hide,
 		HideAll:      hideAll,
+		CompareLocal: true,
 		Project:      project,
 		Limit:        limit,
 		UpdateMarker: true,
@@ -97,7 +98,7 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, project str
 	if res.Total > 0 || res.Hidden > 0 {
 		lines := []string{hookFraming}
 		for _, c := range res.Changes {
-			lines = append(lines, c.Status+" "+c.Display())
+			lines = append(lines, c.Status+" "+c.Describe())
 		}
 		if res.More > 0 {
 			lines = append(lines, fmt.Sprintf("… and %d more", res.More))

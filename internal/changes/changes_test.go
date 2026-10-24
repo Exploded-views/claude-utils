@@ -867,3 +867,69 @@ func TestCompute_HideDropsBeforeTheLimit(t *testing.T) {
 		t.Errorf("HideAll: %+v / %s", r, r.Text())
 	}
 }
+
+// A change whose local copy is not the committed bytes was skipped by the
+// daemon (held back or edited since): the line says so.
+func TestCompute_LocalCopyKeptIsFlagged(t *testing.T) {
+	f := newFixture(t)
+	base := f.commit(map[string]string{mem(appHash, "gone.md"): "g\n"})
+	f.commit(map[string]string{
+		mem(appHash, "same.md"):    "same\n",
+		mem(appHash, "kept.md"):    "from the peer\n",
+		mem(appHash, "missing.md"): "m\n",
+		mem(appHash, "gone.md"):    "",
+	})
+	write := func(name, body string) {
+		p := filepath.Join(f.claude, appHash, "memory", name)
+		if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("same.md", "same\n")
+	write("kept.md", "mine\n")
+	write("gone.md", "left behind\n") // deleted upstream: nothing to compare
+
+	o := f.opts(base)
+	o.CompareLocal = true
+	r, err := Compute(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, c := range r.Changes {
+		got[c.File] = c.LocalKept
+	}
+	want := map[string]bool{"same.md": false, "kept.md": true, "missing.md": false, "gone.md": false}
+	if len(got) != len(want) {
+		t.Fatalf("changes: %v", got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s: LocalKept = %v, want %v", k, got[k], v)
+		}
+	}
+	if line := find(r, "kept.md").Describe(); !strings.HasSuffix(line, localKeptNote) || !strings.HasPrefix(line, filepath.Join(f.claude, appHash, "memory", "kept.md")) {
+		t.Errorf("Describe = %q", line)
+	}
+	if line := find(r, "same.md").Describe(); strings.Contains(line, "kept") {
+		t.Errorf("Describe = %q", line)
+	}
+
+	// Off by default.
+	o.CompareLocal = false
+	if r, _ := Compute(o); find(r, "kept.md").LocalKept {
+		t.Error("compared without CompareLocal")
+	}
+
+	// The bytes are those at the upper bound, not at HEAD.
+	mid := f.head()
+	f.commit(map[string]string{mem(appHash, "kept.md"): "mine\n"})
+	o.CompareLocal = true
+	o.Upper = mid
+	if r, _ := Compute(o); !find(r, "kept.md").LocalKept {
+		t.Error("compared with HEAD instead of the upper bound")
+	}
+}

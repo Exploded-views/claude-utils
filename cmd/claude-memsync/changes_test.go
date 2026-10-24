@@ -293,3 +293,27 @@ func TestChangesCmd_DenylistHidesNames(t *testing.T) {
 		t.Errorf("fail closed: stdout %s stderr %s", out.String(), errb.String())
 	}
 }
+
+func TestChangesCmd_LocalCopyKeptIsAnnotated(t *testing.T) {
+	cfgPath, base := changesRepo(t)
+	cfg, _ := loadDistillConfig(cfgPath)
+	mem := filepath.Join(cfg.ClaudeProjectsDir, "-home-alice-src-app", "memory")
+	os.MkdirAll(mem, 0700)
+	os.WriteFile(filepath.Join(mem, "b.md"), []byte("b.md"), 0600) // same bytes as the repo's
+	os.WriteFile(filepath.Join(mem, "c.md"), []byte("my edit"), 0600)
+	var out, errb bytes.Buffer
+	if code := changesCmd(strings.NewReader(""), &out, &errb, []string{"--config", cfgPath, "--since", base}); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	for _, l := range strings.Split(out.String(), "\n") {
+		kept := strings.Contains(l, "(local copy kept; the incoming version was saved next to the mirror copy as .from-remote-*)")
+		if kept != strings.Contains(l, "c.md") {
+			t.Errorf("line %q (kept=%v)", l, kept)
+		}
+	}
+	out.Reset()
+	changesCmd(strings.NewReader(""), &out, &errb, []string{"--config", cfgPath, "--since", base, "--json"})
+	if !strings.Contains(out.String(), `"localKept": true`) {
+		t.Errorf("json: %s", out.String())
+	}
+}

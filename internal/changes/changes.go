@@ -8,6 +8,7 @@
 package changes
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -48,6 +49,10 @@ type Options struct {
 	Hide    func(Change) bool
 	HideAll bool
 
+	// CompareLocal sets Change.LocalKept on each listed change whose local
+	// copy differs from the committed bytes. It costs one git process for all.
+	CompareLocal bool
+
 	// Limit caps how many changes are listed; the rest are only counted.
 	// Zero means no cap.
 	Limit int
@@ -74,6 +79,22 @@ type Change struct {
 	File    string `json:"file"`    // file name inside the project's memory dir
 	Path    string `json:"path"`    // path inside the sync repo
 	Local   string `json:"local"`   // where Claude Code reads (or read) the file
+
+	// LocalKept is set when the local copy exists and is not the committed
+	// version: the daemon skipped the file (held back, or edited since), and
+	// the incoming version was saved as .from-remote-* beside the mirror copy.
+	LocalKept bool `json:"localKept,omitempty"`
+}
+
+// localKeptNote is appended to the line of a change whose local copy was kept.
+const localKeptNote = "(local copy kept; the incoming version was saved next to the mirror copy as .from-remote-*)"
+
+// Describe is Display plus the note for a kept local copy.
+func (c Change) Describe() string {
+	if c.LocalKept {
+		return c.Display() + " " + localKeptNote
+	}
+	return c.Display()
 }
 
 // Display returns Local for printing. Names come from the sync repo, so one
@@ -204,12 +225,44 @@ func Compute(opts Options) (Result, error) {
 	if res.Changes == nil {
 		res.Changes = []Change{}
 	}
+	if opts.CompareLocal {
+		markLocalKept(repo, head, res.Changes)
+	}
 	if opts.UpdateMarker && !opts.DeferMarker {
 		if err := AdvanceMarker(repo, opts.Marker, head); err != nil {
 			return res, err
 		}
 	}
 	return res, nil
+}
+
+// markLocalKept sets LocalKept on the non-deleted changes whose local file
+// differs from the blob at commit. All blobs come from one `git cat-file
+// --batch`. It is best effort: on an error nothing is flagged.
+func markLocalKept(repo *gitwt.Repo, commit string, list []Change) {
+	var idx []int
+	var specs []string
+	var local [][]byte
+	for i, c := range list {
+		// A newline in a name would split the batch request.
+		if c.Status == "deleted" || strings.ContainsAny(c.Path, "\n") {
+			continue
+		}
+		b, err := os.ReadFile(c.Local)
+		if err != nil {
+			continue
+		}
+		idx = append(idx, i)
+		specs = append(specs, commit+":"+c.Path)
+		local = append(local, b)
+	}
+	blobs, err := repo.BlobContents(specs)
+	if err != nil {
+		return
+	}
+	for k, i := range idx {
+		list[i].LocalKept = !bytes.Equal(blobs[k], local[k])
+	}
 }
 
 // resolveSince turns opts.Since or opts.Marker into a commit SHA. An empty SHA
@@ -443,7 +496,7 @@ func (r Result) Text() string {
 	}
 	fmt.Fprintf(&b, "%d memory %s changed since %s (head %s)\n", r.Total, noun, short(r.Since), short(r.Head))
 	for _, c := range r.Changes {
-		fmt.Fprintf(&b, "  %-7s  %s\n", c.Status, c.Display())
+		fmt.Fprintf(&b, "  %-7s  %s\n", c.Status, c.Describe())
 	}
 	if r.More > 0 {
 		fmt.Fprintf(&b, "  ...%d more\n", r.More)
