@@ -176,12 +176,84 @@ commits.
   `~/.claude/history.jsonl`, `~/.claude/settings.json`, etc.
 - `~/.claudesync/config.json` — per-PC (paths embed your machine layout)
 - `~/.claudesync/.state/manifest.json` — per-PC (delete-detection state)
+- `~/.claudesync/denylist.txt` — per-PC (your [denylist](#secret-scrub-and-denylist))
 - `~/.claudesync/daemon.pid` — runtime state
 - `~/.claudesync/distilled/DISTILLED.md` — derived index, regenerated per-PC
   (the distilled `<slug>.md` entry files themselves **are** synced)
 
 If you want any of the additional `~/.claude/` content synced, that's a future
 enhancement.
+
+## Secret scrub and denylist
+
+A private remote is still a bad home for credentials, and git history is
+forever. Before each commit the daemon scans every added or modified file in
+the mirror. A file that looks like it holds a secret, or matches your denylist,
+is **left out of the commit**. It stays in `~/.claude/projects/...` and in the
+mirror work-tree untouched; the daemon just doesn't commit it. Everything else
+in the same cycle commits normally, and the held-back file is checked again on
+the next cycle, so it syncs as soon as it no longer matches.
+
+Built-in rules:
+
+| Rule name | Matches |
+|---|---|
+| `private-key` | a `-----BEGIN ... PRIVATE KEY-----` header |
+| `github-token` | `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` tokens and `github_pat_` tokens |
+| `anthropic-api-key` | `sk-ant-...` |
+| `openai-api-key` | `sk-...` and `sk-proj-...` |
+| `slack-token` | `xox?-...` tokens |
+| `aws-access-key` | `AKIA...` / `ASIA...` access key IDs |
+| `jwt` | three dot-separated base64url segments starting `eyJ` |
+| `credential-assignment` | `password`, `token`, `secret` or `api_key` (case-insensitive, with any suffix such as `_value`) assigned a quoted value of 16 or more characters, with `=` or `:` |
+
+The rules are deliberately conservative about prose, but they will sometimes
+flag a harmless note. A false positive costs you one file that doesn't sync
+until you reword it.
+
+The daemon logs the **file name and rule name only**, never the matched text:
+
+```
+scrub: holding back projects/-home-alice-src-app/memory/notes.md (rule: github-token)
+```
+
+Deletions are not scanned. If a file you edited was already committed in a
+clean version and the new version is held back, the repo keeps the old
+version.
+
+### Denylist
+
+For things no pattern list can know about (client names, internal hostnames),
+create `~/.claudesync/denylist.txt` next to `config.json`: one regular
+expression per line, matched case-insensitively against the file contents.
+Blank lines and lines starting with `#` are ignored. Syntax is Go's
+[RE2](https://github.com/google/re2/wiki/Syntax).
+
+```
+# anything mentioning these is not for the shared repo
+acme-corp\.internal
+\bproject nightjar\b
+```
+
+A hit is logged as `denylist:<line number>`. The pattern text is never
+logged. The file is per-PC, never committed (the daemon refuses to stage it
+even if your `.gitignore` predates it) and read on every cycle, so edits take
+effect without a restart.
+
+If the denylist has an invalid regular expression the daemon commits nothing
+until it is fixed, and logs the line number.
+
+### Configuration
+
+Both options go in `~/.claudesync/config.json`:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `scrub` | `true` | Scan files before committing. `false` restores the old behavior of committing everything. |
+| `requireDenylist` | `false` | When `true` and `denylist.txt` does not exist, commit nothing and log why. For setups where "no denylist" means "not configured yet". Ignored when `scrub` is `false`. |
+
+Existing `config.json` files without these keys get the defaults, so scrub is
+on after an upgrade, `requireDenylist` is off, and no denylist is needed.
 
 ## Deletes
 
@@ -212,6 +284,7 @@ This means:
 
 ~/.claudesync/                            # owned by the daemon
     ├── config.json                       # per-PC (gitignored)
+    ├── denylist.txt                      # per-PC, optional (gitignored)
     ├── daemon.pid                        # per-PC (gitignored)
     ├── .git/                             # the sync repo
     ├── .gitattributes                    # MEMORY.md merge=claude-memory-index
