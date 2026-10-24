@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -153,26 +154,67 @@ func validKey(k string) bool {
 
 var windowsDrive = regexp.MustCompile(`^([A-Za-z])--(.+)$`)
 
+// candidateRoots says where Candidates starts walking and how names compare.
+// The zero value resolves nothing; defaultCandidateRoots is the real thing.
+type candidateRoots struct {
+	Unix  string                     // directory a "-home-..." name is resolved under
+	Drive func(letter string) string // root of a "C--..." name's drive
+	Fold  func(string) string        // name normalisation for matching
+}
+
+func defaultCandidateRoots() candidateRoots {
+	return candidateRoots{
+		Unix:  string(filepath.Separator),
+		Drive: func(letter string) string { return letter + `:\` },
+		Fold:  foldFor(runtime.GOOS),
+	}
+}
+
+// foldFor returns the name normalisation to use on goos: lower-casing where the
+// file system is case-insensitive by default (Windows, macOS), none elsewhere.
+func foldFor(goos string) func(string) string {
+	if goos == "windows" || goos == "darwin" {
+		return strings.ToLower
+	}
+	return func(s string) string { return s }
+}
+
 // Candidates returns every existing directory whose escaped path equals the
 // given project folder name. Usually that is exactly one. The escaping is
 // lossy, so it can be several (src/my-app, src/my.app and src/my/app all
 // escape alike) or none (the project was deleted or lives on another
 // machine). Results are sorted.
 func Candidates(escaped string) []string {
+	return candidatesIn(escaped, defaultCandidateRoots())
+}
+
+func candidatesIn(escaped string, env candidateRoots) []string {
 	escaped = EscapeProjectPath(escaped) // tolerate '_' etc. kept by other versions
 	if m := windowsDrive.FindStringSubmatch(escaped); m != nil {
-		return walkCandidates(m[1]+`:\`, m[2])
+		if env.Drive == nil {
+			return nil
+		}
+		return walkCandidatesFold(env.Drive(m[1]), m[2], env.Fold)
 	}
-	if strings.HasPrefix(escaped, "-") && len(escaped) > 1 {
-		return walkCandidates(string(filepath.Separator), escaped[1:])
+	if strings.HasPrefix(escaped, "-") && len(escaped) > 1 && env.Unix != "" {
+		return walkCandidatesFold(env.Unix, escaped[1:], env.Fold)
 	}
 	return nil
 }
 
 // walkCandidates finds the directories below root whose path, escaped,
-// equals rest. It only descends into entries that can still match, so the
-// cost is proportional to the siblings along the one real path.
+// equals rest, comparing names exactly as the host OS would.
 func walkCandidates(root, rest string) []string {
+	return walkCandidatesFold(root, rest, defaultCandidateRoots().Fold)
+}
+
+// walkCandidatesFold is walkCandidates with names compared after fold. It only
+// descends into entries that can still match, so the cost is proportional to
+// the siblings along the one real path.
+func walkCandidatesFold(root, rest string, fold func(string) string) []string {
+	if fold == nil {
+		fold = func(s string) string { return s }
+	}
 	var out []string
 	var walk func(dir, rest string)
 	walk = func(dir, rest string) {
@@ -181,19 +223,22 @@ func walkCandidates(root, rest string) []string {
 			return
 		}
 		for _, e := range entries {
+			n := fold(EscapeProjectPath(e.Name()))
+			full := n == rest
+			if !full && !(strings.HasPrefix(rest, n+"-") && len(rest) > len(n)+1) {
+				continue // cheap name test first; only then stat a symlink
+			}
 			if !isDirEntry(dir, e) {
 				continue
 			}
-			n := EscapeProjectPath(e.Name())
-			switch {
-			case n == rest:
+			if full {
 				out = append(out, filepath.Join(dir, e.Name()))
-			case strings.HasPrefix(rest, n+"-") && len(rest) > len(n)+1:
+			} else {
 				walk(filepath.Join(dir, e.Name()), rest[len(n)+1:])
 			}
 		}
 	}
-	walk(root, rest)
+	walk(root, fold(rest))
 	sort.Strings(out)
 	return out
 }

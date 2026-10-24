@@ -154,6 +154,52 @@ func TestWalkCandidates_FollowsSymlinkedDirs(t *testing.T) {
 	}
 }
 
+// Windows and macOS file systems are case-insensitive by default, so the
+// folder name Claude derived from the path as typed can differ in case from
+// the entry on disk.
+func TestWalkCandidates_FoldsCaseWhereTheFileSystemDoes(t *testing.T) {
+	root := t.TempDir()
+	mkdirs(t, root, "Src/App", "src/Other")
+	for goos, want := range map[string]int{"linux": 0, "windows": 1, "darwin": 1} {
+		got := walkCandidatesFold(root, "src-app", foldFor(goos))
+		if len(got) != want {
+			t.Errorf("%s: walkCandidatesFold = %v, want %d match(es)", goos, got, want)
+		}
+	}
+	// Same-named siblings that differ only in case are all candidates.
+	mkdirs(t, root, "SRC/app")
+	if got := walkCandidatesFold(root, "src-app", foldFor("windows")); len(got) != 2 {
+		t.Errorf("got %v, want both Src/App and SRC/app", got)
+	}
+}
+
+// The "C--" drive branch of Candidates, driven through an injected drive root
+// so it runs on Linux.
+func TestCandidatesIn_WindowsDriveBranch(t *testing.T) {
+	root := t.TempDir()
+	dir := mkdirs(t, root, "Src/Foo.Bar")[0]
+	env := candidateRoots{
+		Drive: func(letter string) string {
+			if letter != "C" {
+				t.Errorf("drive letter = %q", letter)
+			}
+			return root
+		},
+		Fold: foldFor("windows"),
+	}
+	got := candidatesIn(`C--src-foo-bar`, env)
+	if len(got) != 1 || got[0] != dir {
+		t.Errorf("candidatesIn = %v, want [%s]", got, dir)
+	}
+	if got := candidatesIn(`C--nothing-here`, env); len(got) != 0 {
+		t.Errorf("got %v", got)
+	}
+	// A drive name needs a drive root; without one nothing resolves.
+	if got := candidatesIn(`C--src-foo-bar`, candidateRoots{}); got != nil {
+		t.Errorf("got %v", got)
+	}
+}
+
 func TestCandidates_FromFilesystemRoot(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix-style absolute path")
@@ -965,6 +1011,43 @@ func TestGitOrigin(t *testing.T) {
 		if url != c.url || ok != c.ok {
 			t.Errorf("%s: gitOrigin = %q,%v want %q,%v", c.name, url, ok, c.url, c.ok)
 		}
+	}
+}
+
+// A projects/<hash> folder that came from another PC's push has no project
+// folder here: it must not be resolved or cached.
+func TestRemoteKey_ForeignHashIsNotResolvedOrCached(t *testing.T) {
+	gitEnv(t)
+	shared := t.TempDir()
+	a := newMachine(t, "alice", shared)
+	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(app, "a.md", "a\n")
+	a.sync()
+
+	roots, err := NewRoots(a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots.Remote.Lookup = func(dir string) (string, bool) {
+		t.Errorf("Lookup(%q) for a folder that is not under this PC's projects", dir)
+		return "", false
+	}
+	if got := roots.Remote.Key("-home-bob-src-app"); got != "" {
+		t.Errorf("Key = %q, want the path key", got)
+	}
+	if got := roots.Remote.Members(""); len(got) != 0 {
+		t.Errorf("foreign hash became a member: %v", got)
+	}
+	c, err := LoadProjectCache(shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.Projects["-home-bob-src-app"]; ok {
+		t.Error("foreign hash written to the cache")
+	}
+	// propagateChanges resolves keys for pulled projects/<hash>/ paths too.
+	if got := propagationTargets(roots, "projects/-home-bob-src-app/memory/x.md"); len(got) != 1 {
+		t.Errorf("a foreign path-keyed file still propagates by its own name, got %v", got)
 	}
 }
 
