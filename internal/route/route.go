@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Repo kinds. Every repo must say what it is: the client filter on the
@@ -82,7 +83,30 @@ type Rule struct {
 	Folder string `json:"folder,omitempty"`
 	Path   string `json:"path,omitempty"`
 	Remote string `json:"remote,omitempty"`
-	Repo   string `json:"repo"`
+	// Aliases are further remote keys (globs, like Remote) that match this
+	// rule too. They are only for remote rules: after a rename or transfer of
+	// the repo, list the old or the new name here.
+	Aliases []string `json:"aliases,omitempty"`
+	Repo    string   `json:"repo"`
+}
+
+// matchesRemote reports whether the remote key matches the rule's pattern or
+// one of its aliases.
+func (r Rule) matchesRemote(key string) bool {
+	if globMatch(r.Remote, key) {
+		return true
+	}
+	for _, a := range r.Aliases {
+		if globMatch(a, key) {
+			return true
+		}
+	}
+	return false
+}
+
+// sig identifies a rule's content, to tell an edited rule from an old one.
+func (r Rule) sig() string {
+	return r.kind() + "\x00" + r.pattern() + "\x00" + strings.Join(r.Aliases, "\x01") + "\x00" + r.Repo
 }
 
 func (r Rule) kind() string {
@@ -115,6 +139,20 @@ type File struct {
 	Routes   []Rule `json:"routes"`
 	// Default must be "deny" (or empty): the only policy there is.
 	Default string `json:"default,omitempty"`
+	// RenameGraceDays is how long a folder whose remote was renamed keeps
+	// routing to its recorded repo through its root commits, while no rule
+	// matches the new name. nil means DefaultRenameGraceDays; 0 denies at once.
+	RenameGraceDays *int `json:"renameGraceDays,omitempty"`
+}
+
+// DefaultRenameGraceDays is the grace period when routes.json does not say.
+const DefaultRenameGraceDays = 30
+
+func (f File) graceDays() int {
+	if f.RenameGraceDays == nil {
+		return DefaultRenameGraceDays
+	}
+	return *f.RenameGraceDays
 }
 
 // Load reads and validates routes.json. A rule may name a repo that is not in
@@ -152,7 +190,18 @@ func (f File) validate() error {
 			return fmt.Errorf("personal repo %q must have kind %q", f.Personal, KindPersonal)
 		}
 	}
+	if f.RenameGraceDays != nil && *f.RenameGraceDays < 0 {
+		return fmt.Errorf("renameGraceDays must not be negative")
+	}
 	for i, r := range f.Routes {
+		if len(r.Aliases) > 0 && r.Remote == "" {
+			return fmt.Errorf("route %d: aliases belong to remote rules only", i)
+		}
+		for _, a := range r.Aliases {
+			if strings.TrimSpace(a) == "" {
+				return fmt.Errorf("route %d: an alias is empty", i)
+			}
+		}
 		n := 0
 		for _, s := range []string{r.Folder, r.Path, r.Remote} {
 			if s != "" {
@@ -177,6 +226,16 @@ const (
 	ReasonNoRoute     = "no route matches"
 	ReasonUnresolved  = "remote or path could not be resolved"
 	ReasonRepoMissing = "route names a repo this host does not have"
+
+	// ReasonRemoteChanged: the folder's remote was renamed or moved and the
+	// new name routes to a different repo than the folder was recorded in.
+	ReasonRemoteChanged = "remote changed repos"
+	// ReasonRenameExpired: a renamed remote kept routing through its root
+	// commits for the grace period, and no alias was added in time.
+	ReasonRenameExpired = "renamed remote: grace period over, add an alias"
+
+	// NoteRenamed marks a folder still routed by its root commits.
+	NoteRenamed = "renamed remote: add an alias"
 )
 
 // Decision is the outcome for one folder. Repo is "" when it is denied.
@@ -184,6 +243,10 @@ type Decision struct {
 	Repo   string
 	Rule   int // index of the matching rule, -1 when none matched
 	Reason string
+	// Note is NoteRenamed when the folder is routed by root commits only.
+	Note string
+	// GraceEnds is when a NoteRenamed folder is denied unless an alias is added.
+	GraceEnds time.Time
 }
 
 type resolution int
@@ -219,6 +282,14 @@ type Router struct {
 	// move between repos can be logged.
 	StatePath string
 
+	// Roots gives the root commits (sorted) of a folder's checkout; ok is false
+	// when they cannot be told (no checkout, ambiguous, shallow clone).
+	Roots func(folder string) (roots []string, ok bool)
+	// Now is the clock (default time.Now).
+	Now func() time.Time
+
+	ids map[string]identity // per-folder record, see identity.go
+
 	mu     sync.Mutex
 	cache  map[string]Decision
 	logged map[string]bool
@@ -233,6 +304,8 @@ func New(f File, have func(repo string) bool) *Router {
 	r.Candidates = Candidates
 	r.SSHHost = sshHostname
 	r.Resolve = r.defaultResolve
+	r.Roots = r.defaultRoots
+	r.Now = time.Now
 	return r
 }
 
@@ -245,6 +318,13 @@ func normalized(f File) *File {
 	copy(routes, f.Routes)
 	for i := range routes {
 		routes[i].Remote = strings.ToLower(routes[i].Remote)
+		if len(routes[i].Aliases) > 0 {
+			al := make([]string, len(routes[i].Aliases))
+			for j, a := range routes[i].Aliases {
+				al[j] = strings.ToLower(strings.TrimSpace(a))
+			}
+			routes[i].Aliases = al
+		}
 	}
 	f.Routes = routes
 	return &f
@@ -297,7 +377,8 @@ func (r *Router) Decide(folder string) Decision {
 
 	for {
 		gen := r.gen.Load()
-		d := r.decide(folder)
+		d, key, keyOK := r.decide(folder)
+		roots, rootsOK := r.rootsIfNeeded(folder, d, key, keyOK)
 		if r.afterCompute != nil {
 			r.afterCompute()
 		}
@@ -308,6 +389,7 @@ func (r *Router) Decide(folder string) Decision {
 			r.mu.Unlock()
 			continue
 		}
+		d = r.identityLocked(folder, d, key, keyOK, roots, rootsOK)
 		r.cache[folder] = d
 		r.noteLocked(folder, d)
 		r.mu.Unlock()
@@ -315,7 +397,7 @@ func (r *Router) Decide(folder string) Decision {
 	}
 }
 
-func (r *Router) decide(folder string) Decision {
+func (r *Router) decide(folder string) (Decision, string, bool) {
 	f := r.cur()
 	var key string
 	var res resolution
@@ -334,7 +416,7 @@ func (r *Router) decide(folder string) Decision {
 			if len(dirs) != 1 {
 				// Cannot tell where the folder is: deny now. A later rule must
 				// not catch what an earlier path or remote rule could not place.
-				return Decision{Rule: i, Reason: ReasonUnresolved}
+				return Decision{Rule: i, Reason: ReasonUnresolved}, "", false
 			}
 			match = globFold(expandHome(rule.Path), filepath.ToSlash(dirs[0]), foldCase)
 		case "remote":
@@ -343,19 +425,19 @@ func (r *Router) decide(folder string) Decision {
 				resolved = true
 			}
 			if res != resolutionOK {
-				return Decision{Rule: i, Reason: ReasonUnresolved}
+				return Decision{Rule: i, Reason: ReasonUnresolved}, "", false
 			}
-			match = globMatch(rule.Remote, key)
+			match = rule.matchesRemote(key)
 		}
 		if !match {
 			continue
 		}
 		if _, listed := f.Repos[rule.Repo]; !listed || r.have == nil || !r.have(rule.Repo) {
-			return Decision{Rule: i, Reason: ReasonRepoMissing}
+			return Decision{Rule: i, Reason: ReasonRepoMissing}, key, res == resolutionOK
 		}
-		return Decision{Repo: rule.Repo, Rule: i}
+		return Decision{Repo: rule.Repo, Rule: i}, key, res == resolutionOK
 	}
-	return Decision{Rule: -1, Reason: ReasonNoRoute}
+	return Decision{Rule: -1, Reason: ReasonNoRoute}, key, res == resolutionOK
 }
 
 // Owns returns the gate for a repo's loop: true for the folders routed to it.
@@ -383,6 +465,11 @@ func (r *Router) noteLocked(folder string, d Decision) {
 			r.logged[k] = true
 			r.Logf("route: folder %s denied: %s", hash8(folder), d.Reason)
 		}
+	}
+	if d.Reason == ReasonRemoteChanged {
+		// Held: the owner record stays, so the move is logged if the user's
+		// route edit later accepts it.
+		return
 	}
 	r.loadOwnersLocked()
 	prev, had := r.owners[folder]
@@ -468,6 +555,18 @@ func (r *Router) Shadowed() []Shadow {
 type Summary struct {
 	Owned  map[string]int
 	Denied int
+	// Renamed lists the folders routed by root commits only (hash, days left);
+	// Changed lists the denied folders whose remote moved to another repo, and
+	// Expired those whose grace period ran out (both by hash).
+	Renamed []RenamedFolder
+	Changed []string
+	Expired []string
+}
+
+// RenamedFolder is a folder kept by its root commits until GraceEnds.
+type RenamedFolder struct {
+	Hash     string
+	DaysLeft int
 }
 
 // Summarize routes every folder and counts the outcome.
@@ -478,6 +577,18 @@ func (r *Router) Summarize(folders []string) Summary {
 	}
 	for _, f := range folders {
 		d := r.Decide(f)
+		switch {
+		case d.Reason == ReasonRemoteChanged:
+			s.Changed = append(s.Changed, hash8(f))
+		case d.Reason == ReasonRenameExpired:
+			s.Expired = append(s.Expired, hash8(f))
+		case d.Note == NoteRenamed:
+			left := int((d.GraceEnds.Sub(r.Now()) + 24*time.Hour - 1) / (24 * time.Hour))
+			if left < 0 {
+				left = 0
+			}
+			s.Renamed = append(s.Renamed, RenamedFolder{Hash: hash8(f), DaysLeft: left})
+		}
 		if d.Repo == "" || d.Repo == r.cur().Personal {
 			s.Denied++
 			continue

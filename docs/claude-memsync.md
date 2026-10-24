@@ -856,6 +856,24 @@ Each denied folder is logged once, by a short hash of its name and the reason, n
 
 Rules are read once, at start; the denial decisions are re-checked on each pull tick, so a new checkout or a changed `origin` is noticed. Restart the daemon after editing `routes.json`.
 
+### Renamed or transferred repos
+
+Renaming a repo, or transferring it to another owner (`github.com/<old-owner>/<repo>` becomes `github.com/<new-owner>/<repo>`), changes the remote key a `remote` rule matches. Handle it by adding the old or the new name as an alias of the rule:
+
+```json
+{ "remote": "github.com/<new-owner>/<repo>", "aliases": ["github.com/<old-owner>/<repo>"], "repo": "projects" }
+```
+
+`aliases` (remote rules only, lowercased, globs like `remote`) match exactly as the main pattern does. Restart the daemon after editing.
+
+As a safety net, when a folder is first routed by a remote rule the daemon also records the checkout's root commit(s) (`git rev-list --max-parents=0 HEAD`) and the remote key in `identity.json` next to `owners.json`. If the remote key of that same folder later changes:
+
+- the new key still routes to the same repo: the record is updated and nothing else happens;
+- the new key matches no rule and the root commits are the recorded ones: the folder keeps routing to its recorded repo, `status` shows `renamed remote: add an alias` with the days left, and a line (folder hash only) is logged once. After `renameGraceDays` (a number in `routes.json`, default 30, `0` denies at once) the folder is denied. Adding the alias ends the state;
+- the new key routes to a **different** repo: the folder is never moved by itself. It is denied and `status` shows `remote changed repos` until you edit `routes.json` (the edit is the consent; an old rule that was already there is not).
+
+The fallback only returns a folder to the repo it was already recorded in, so it never moves a folder into a client or orchestrator repo, or out of one. It needs a record for that folder: a new folder that shares a root commit (a fork, a second clone) gets none. A shallow clone has no usable root commit, so it is recorded without one and is denied after a rename as before. A repo with several roots (merged histories) matches only when the whole sorted set equals the recorded one.
+
 ### How the repos stay apart
 
 Each loop only touches the folders routed to its repo, in every place it handles Claude folders: the start-up and periodic reconcile, the file watcher, the copy of pulled files into `~/.claude`, the catch-up after a manual `git pull`, restores of held-back files, and the manifest of deletes. A note that repo A pulls into `~/.claude` is therefore never seen as new by repo B.

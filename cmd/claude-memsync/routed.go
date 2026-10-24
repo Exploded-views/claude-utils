@@ -398,6 +398,15 @@ func (s *routedSet) statusLines() []string {
 		}
 	}
 	lines = append(lines, fmt.Sprintf("  denied: %d %s", sum.Denied, plural(sum.Denied, "folder", "folders")))
+	for _, rf := range sum.Renamed {
+		lines = append(lines, fmt.Sprintf("  renamed remote: add an alias (folder %s is routed by its root commits for %d more %s)", rf.Hash, rf.DaysLeft, plural(rf.DaysLeft, "day", "days")))
+	}
+	for _, h := range sum.Expired {
+		lines = append(lines, fmt.Sprintf("  renamed remote: folder %s is denied, the grace period is over; add an alias", h))
+	}
+	for _, h := range sum.Changed {
+		lines = append(lines, fmt.Sprintf("  remote changed repos: folder %s is denied until routes.json is edited", h))
+	}
 	for _, sh := range s.Router.Shadowed() {
 		lines = append(lines, fmt.Sprintf("  shadowed: rule %d is never reached first (rule %d matches the same folders)", sh.Rule, sh.By))
 	}
