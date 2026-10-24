@@ -36,8 +36,9 @@ type Config struct {
 	DistilledDir string `json:"distilledDir,omitempty"`
 
 	// Scrub holds back, at commit time, any memory file that looks like it
-	// holds a secret or matches the denylist (default: true). A held-back file
-	// stays in the work-tree and is re-checked on the next cycle.
+	// holds a secret or matches the denylist (default: true). The Claude copy
+	// of a held-back file is never touched; the mirror copy is re-checked on
+	// the next cycle (and parked around each pull).
 	Scrub bool `json:"scrub"`
 
 	// RequireDenylist makes the daemon commit nothing while the denylist file

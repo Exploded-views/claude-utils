@@ -270,3 +270,21 @@ func TestParseDenylist_RejectsUTF16(t *testing.T) {
 		}
 	}
 }
+
+// Documented behavior: a pattern that can match the empty string matches
+// everything, contents and paths alike.
+func TestDenylist_EmptyMatchingPatternHoldsBackEverything(t *testing.T) {
+	for _, pat := range []string{".*", "a*", "foo|", "^"} {
+		d, err := ParseDenylist(strings.NewReader(pat + "\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := New(d)
+		if got := s.Scan([]byte("harmless")); len(got) != 1 {
+			t.Errorf("%q: content not held back: %v", pat, got)
+		}
+		if !s.MatchesPath("projects/p1/memory/x.md") {
+			t.Errorf("%q: path not held back", pat)
+		}
+	}
+}

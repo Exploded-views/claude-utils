@@ -120,7 +120,7 @@ and SSH keys. None require root.
 
 | Command | What it does |
 |---|---|
-| `claude-memsync init --remote <url>` | One-time bootstrap. |
+| `claude-memsync init --remote <url> [--denylist <file>]` | One-time bootstrap. `--denylist` installs a [denylist](#denylist) before the first commit. |
 | `claude-memsync install` | Register for auto-start at next logon. |
 | `claude-memsync uninstall` | Remove the auto-start hook. |
 | `claude-memsync start` | Start the daemon now. |
@@ -188,24 +188,55 @@ enhancement.
 
 A private remote is still a bad home for credentials, and git history is
 forever. Before each commit the daemon scans every added or modified file in
-the mirror. A file that looks like it holds a secret, or matches your denylist,
-is **left out of the commit**. It stays in `~/.claude/projects/...` and in the
-mirror work-tree untouched; the daemon just doesn't commit it. Everything else
+the mirror. A file that looks like it holds a secret, or whose contents or
+file name match your denylist, is **left out of the commit**. Everything else
 in the same cycle commits normally, and the held-back file is checked again on
 the next cycle, so it syncs as soon as it no longer matches.
+
+Your copy under `~/.claude/projects/...` is the authoritative one and is never
+changed or deleted because a file is held back. The mirror copy is not left
+alone, though. A held-back file would otherwise sit modified in the mirror
+work-tree and collide with `git pull --rebase --autostash` when a peer touches
+the same file. So each cycle, before pulling, the daemon **parks** every
+uncommitted memory file in the mirror: it resets the mirror copy to the last
+committed version (or removes it if it was never committed), pulls, skips the
+parked files when copying pulled changes back into `~/.claude`, and then
+refills the mirror from your copy. In practice:
+
+- A held-back file is briefly absent from, or reverted in, the mirror
+  work-tree (`~/.claudesync/projects/...`) during each pull. Don't edit there.
+- If the pull brought in a peer's change to a parked file, that change is not
+  copied over your version. For `MEMORY.md` it is merged with your copy (the
+  same section-level merge as everywhere else); if the merge conflicts, or for
+  any other file, the peer's version is kept as `<name>.from-remote-<id>` in
+  the mirror, so committing your version later doesn't silently revert it.
+- If the peer deleted a parked file or renamed it, your copy stays.
+- If the daemon dies mid-cycle your copy is untouched, and the next start
+  re-mirrors it.
+- Files outside `projects/<hash>/memory/` (such as the `distilled/` catalog)
+  have no separate authoritative copy and are not parked.
 
 Built-in rules:
 
 | Rule name | Matches |
 |---|---|
 | `private-key` | a `-----BEGIN ... PRIVATE KEY-----` header |
-| `github-token` | `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` tokens and `github_pat_` tokens |
+| `github-token` | `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` tokens and `github_pat_` tokens, also directly after `_` (for example `MY_TOKEN_ghp_...`) |
 | `anthropic-api-key` | `sk-ant-...` |
-| `openai-api-key` | `sk-...` and `sk-proj-...` |
+| `openai-api-key` | `sk-...`, `sk-proj-...`, `sk-svcacct-...` and `sk-admin-...` |
+| `stripe-key` | `sk_live_...` and `rk_live_...` (live keys only; `sk_test_` is not flagged) |
+| `google-api-key` | `AIza` followed by 35 characters |
+| `gitlab-token` | `glpat-...` personal access tokens |
 | `slack-token` | `xox?-...` tokens |
 | `aws-access-key` | `AKIA...` / `ASIA...` access key IDs |
+| `aws-secret-key` | `aws_secret_access_key` set to a 40-character value (a value starting with `<` or `$` is treated as a placeholder) |
 | `jwt` | three dot-separated base64url segments starting `eyJ` |
-| `credential-assignment` | `password`, `token`, `secret` or `api_key` (case-insensitive, with any suffix such as `_value`) assigned a quoted value of 16 or more characters, with `=` or `:` |
+| `url-credentials` | `scheme://user:password@host`. Obvious placeholders are skipped: `user:password@`, `:pass@`, `:changeme@`, `<...>`, `${...}` and `{{...}}` |
+| `credential-assignment` | `password`, `passwd`, `token`, `secret` or `api_key` (case-insensitive), optionally followed by only `_key`, `_access_key`, `_value`, `_string`, `_str` or `_data`, assigned a quoted value of 16 or more characters without whitespace, with `=` or `:`. So `client_secret: "..."` and `"api_key": "..."` match, but `tokenizer`, `secretName` and `token_type` do not |
+
+Not covered: unquoted assignments, other vendors' keys, and anything without a
+recognizable prefix. These rules are a safety net for accidents, not a
+guarantee: use the denylist for anything specific to you.
 
 The rules are deliberately conservative about prose, but they will sometimes
 flag a harmless note. A false positive costs you one file that doesn't sync
@@ -225,8 +256,9 @@ version.
 
 For things no pattern list can know about (client names, internal hostnames),
 create `~/.claudesync/denylist.txt` next to `config.json`: one regular
-expression per line, matched case-insensitively against the file contents.
-Blank lines and lines starting with `#` are ignored. Syntax is Go's
+expression per line, matched case-insensitively against each file's contents
+**and its path** (for example `projects/<hash>/memory/notes.md`). Blank lines
+and lines starting with `#` are ignored. Syntax is Go's
 [RE2](https://github.com/google/re2/wiki/Syntax).
 
 ```
@@ -235,10 +267,33 @@ acme-corp\.internal
 \bproject nightjar\b
 ```
 
-A hit is logged as `denylist:<line number>`. The pattern text is never
-logged. The file is per-PC, never committed (the daemon refuses to stage it
-even if your `.gitignore` predates it) and read on every cycle, so edits take
-effect without a restart.
+You can install one when setting up a PC: `claude-memsync init --remote <url>
+--denylist <file>` validates the file and copies it into place before the
+first commit, so the initial push is already scrubbed.
+
+A content hit is logged as `denylist:<line number>`. The pattern text is never
+logged. A file whose **name** matches is held back even if its contents are
+clean, and because the name may itself be what you wanted kept private, it is
+not logged either; you will see a count instead:
+
+```
+scrub: <held back: path matches denylist> (2)
+```
+
+The file is per-PC, never committed (the daemon refuses to stage it, in any
+letter case, even if your `.gitignore` predates it) and read on every cycle, so
+edits take effect without a restart.
+
+**Warning: a pattern that matches the empty string holds back every file.**
+That includes a line that is only `.*`, `a*`, `(x|)` or `^`; a stray
+`|` at the end of an alternation does it too, and so does a path match, since
+every path contains the empty string. Nothing will commit until the line is
+fixed. If nothing is syncing, check the denylist first.
+
+The file must be UTF-8. A leading byte-order mark is ignored. A UTF-16 file
+(Notepad's "Unicode" option, PowerShell's `>` redirect on older versions)
+cannot be read as patterns, so the daemon commits nothing and logs that the
+file must be saved as UTF-8.
 
 If the denylist has an invalid regular expression the daemon commits nothing
 until it is fixed, and logs the line number.
