@@ -1104,6 +1104,54 @@ func TestRemoteKey_CorruptCacheIsQuarantined(t *testing.T) {
 	}
 }
 
+// After switching to remote mode, a folder's old projects/<hash>/memory copy
+// stays in the repo and stops being updated; the daemon says so at startup.
+func TestRoots_LogSupersededMirrorCopies(t *testing.T) {
+	gitEnv(t)
+	shared := t.TempDir()
+	a := newMachine(t, "alice", shared)
+	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	fresh := mkRepo(t, filepath.Join(a.home, "src", "fresh"), "git@github.com:acme/fresh.git")
+	plain := mkdirs(t, a.home, "notes")[0]
+	for _, d := range []string{app, fresh, plain} {
+		a.write(d, "n.md", "x\n")
+	}
+	// Left over from path mode: app and the plain folder have an old copy.
+	for _, d := range []string{app, plain} {
+		if err := os.MkdirAll(filepath.Join(shared, "projects", a.hash(d), "memory"), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	roots, err := NewRoots(a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+	roots.LogSuperseded()
+
+	out := logs.String()
+	if n := strings.Count(strings.TrimSpace(out), "\n") + 1; n != 1 || !strings.Contains(out, a.hash(app)) {
+		t.Errorf("want one line for the switched folder, got %d in %q", n, out)
+	}
+	if !strings.Contains(out, "no longer updated") || !strings.Contains(out, "github.com/acme/app") {
+		t.Errorf("message should say the copy is no longer updated and where it went: %q", out)
+	}
+	for _, d := range []string{fresh, plain} {
+		if strings.Contains(out, a.hash(d)) {
+			t.Errorf("%s has nothing superseded in the repo but was logged: %q", filepath.Base(d), out)
+		}
+	}
+	// Path mode has nothing to say.
+	logs.Reset()
+	Roots{Claude: a.claude, Mirror: filepath.Join(shared, "projects")}.LogSuperseded()
+	if logs.Len() != 0 {
+		t.Errorf("path mode logged %q", logs.String())
+	}
+}
+
 func TestLoadProjectCache_MissingIsEmpty(t *testing.T) {
 	c, err := LoadProjectCache(t.TempDir())
 	if err != nil || len(c.Projects) != 0 {

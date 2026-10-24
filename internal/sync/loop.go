@@ -53,6 +53,7 @@ func (l *Loop) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("resolve project keys: %w", err)
 	}
+	roots.LogSuperseded()
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {

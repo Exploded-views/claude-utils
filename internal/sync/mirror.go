@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -53,6 +54,28 @@ func NewRoots(cfg config.Config) (Roots, error) {
 		r.Remote = m
 	}
 	return r, nil
+}
+
+// LogSuperseded logs, once per remote-keyed project folder, that a copy under
+// projects/<hash>/memory is still in the sync repo but is no longer updated:
+// the folder was path-keyed before projectKey was switched to remote. Nothing
+// is migrated or removed; that stays a manual step once every PC has switched.
+func (r Roots) LogSuperseded() {
+	if r.Remote == nil {
+		return
+	}
+	hashes := make([]string, 0, len(r.Remote.keys))
+	for h := range r.Remote.keys {
+		hashes = append(hashes, h)
+	}
+	sort.Strings(hashes)
+	for _, h := range hashes {
+		key := r.Remote.keys[h]
+		if key != "" && isDir(filepath.Join(r.Mirror, h, "memory")) {
+			log.Printf("remote keys: %s is now stored as remotes/%s; its old copy projects/%s/memory in the sync repo is no longer updated",
+				h, key, h)
+		}
+	}
 }
 
 // MirrorMemDir returns the repo-side memory directory for the local project

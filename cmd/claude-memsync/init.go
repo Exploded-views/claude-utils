@@ -27,6 +27,7 @@ func runInit(args []string) int {
 	syncDir := flags.String("sync-dir", "", "override sync work-tree (default: ~/.claudesync)")
 	claudeDir := flags.String("claude-dir", "", "override Claude projects directory (default: ~/.claude/projects)")
 	force := flags.Bool("force", false, "re-init even if sync-dir already exists")
+	projectKey := flags.String("project-key", "", `how projects are identified in the sync repo: "path" (default) or "remote" (by git origin; see docs). With --force, an existing config's setting is kept unless this is given`)
 
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -45,6 +46,12 @@ func runInit(args []string) int {
 		cfg.ClaudeProjectsDir = *claudeDir
 	}
 	cfg.RemoteURL = *remote
+	pk, err := resolveProjectKey(*projectKey, *force, cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "init:", err)
+		return 2
+	}
+	cfg.ProjectKey = pk
 
 	driver, err := config.DiscoverMergeDriver()
 	if err != nil {
@@ -58,6 +65,25 @@ func runInit(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// resolveProjectKey picks the projectKey to write: the --project-key flag if
+// given, else (with --force) the one in the existing config, else "path".
+// cfg.SyncDir must already be set.
+func resolveProjectKey(flagVal string, force bool, cfg config.Config) (string, error) {
+	switch flagVal {
+	case config.ProjectKeyPath, config.ProjectKeyRemote:
+		return flagVal, nil
+	case "":
+	default:
+		return "", fmt.Errorf("--project-key must be %q or %q, got %q", config.ProjectKeyPath, config.ProjectKeyRemote, flagVal)
+	}
+	if force {
+		if old, err := config.Load(cfg.Path()); err == nil {
+			return old.ProjectKey, nil
+		}
+	}
+	return config.ProjectKeyPath, nil
 }
 
 func bootstrap(cfg config.Config, force bool) error {
@@ -174,6 +200,7 @@ func bootstrap(cfg config.Config, force bool) error {
 	fmt.Fprintln(os.Stderr, "  claude projects: ", cfg.ClaudeProjectsDir)
 	fmt.Fprintln(os.Stderr, "  distilled:       ", cfg.DistilledPath())
 	fmt.Fprintln(os.Stderr, "  remote:          ", cfg.RemoteURL)
+	fmt.Fprintln(os.Stderr, "  project key:     ", cfg.ProjectKey)
 	fmt.Fprintln(os.Stderr, "  merge driver:    ", cfg.MergeDriverPath)
 	printDistillPermissionHint(cfg)
 	return nil
