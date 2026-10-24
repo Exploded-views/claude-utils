@@ -310,10 +310,17 @@ edited by hand:
   `remotes/`.
 - `lastKey` and `candidates` are written by the daemon and informational.
 
-The cache is read at startup (restart the daemon after editing it). The daemon
-writes it atomically; if it can't be parsed anyway (a bad hand edit), the
-daemon logs the error, renames it to `projects.json.corrupt-<unix time>` and
-carries on with an empty cache, which it rebuilds. Only project folders that
+**Stop the daemon before editing `projects.json`.** The cache is read at
+startup, and the daemon rewrites the file whenever resolution changes, so an
+edit made while it runs can be overwritten; start the daemon again afterwards.
+The daemon writes the file atomically. A leading UTF-8 byte order mark (added by
+some Windows editors) is ignored. If the file can't be parsed (a bad hand
+edit) or its `version` is not one this build knows (a missing `version` is
+accepted), the daemon logs the reason, renames it to
+`projects.json.corrupt-<unix time>` and carries on with an empty cache, which it
+rebuilds. If it can't be read at all (permission denied, or a directory in its
+place) the daemon logs that, carries on with an empty in-memory cache and never
+writes the file, so fix the file and restart. Only project folders that
 exist under this PC's `~/.claude/projects` are resolved or cached; the hashes
 of projects other PCs pushed under `projects/` are not.
 

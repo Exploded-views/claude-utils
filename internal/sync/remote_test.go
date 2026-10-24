@@ -1831,6 +1831,141 @@ func TestRoots_LogSupersededMirrorCopies(t *testing.T) {
 	}
 }
 
+// A hand-edited cache saved with a UTF-8 BOM (PowerShell 5 Set-Content
+// -Encoding UTF8, older Notepad) is valid JSON to the user and must be read,
+// not set aside.
+func TestLoadProjectCache_StripsUTF8BOM(t *testing.T) {
+	dir := t.TempDir()
+	p := ProjectCachePath(dir)
+	_ = os.MkdirAll(filepath.Dir(p), 0700)
+	if err := os.WriteFile(p, []byte("\xef\xbb\xbf{\"version\":1,\"projects\":{\"-x\":{\"key\":\"path\"}}}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadProjectCache(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Projects["-x"].Key != "path" {
+		t.Errorf("hand edit with a BOM discarded; cache = %+v", c.Projects)
+	}
+}
+
+func TestLoadProjectCache_UnknownVersionIsSetAside(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		aside      bool
+	}{
+		{"newer version", `{"version":2,"projects":{"-x":{"key":"path"}}}`, true},
+		{"negative version", `{"version":-1,"projects":{}}`, true},
+		{"current version", `{"version":1,"projects":{"-x":{"key":"path"}}}`, false},
+		// A hand-written file is unlikely to carry the field.
+		{"no version", `{"projects":{"-x":{"key":"path"}}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			p := ProjectCachePath(dir)
+			if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(tc.body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			c, err := LoadProjectCache(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			matches, _ := filepath.Glob(p + ".corrupt-*")
+			if tc.aside {
+				if len(matches) != 1 || len(c.Projects) != 0 {
+					t.Errorf("want the file set aside and an empty cache: %v %v", matches, c.Projects)
+				}
+				return
+			}
+			if len(matches) != 0 || c.Projects["-x"].Key != "path" {
+				t.Errorf("want the file used: %v %v", matches, c.Projects)
+			}
+		})
+	}
+}
+
+// A cache that cannot be read for a reason other than not existing (a
+// directory in its place, no permission) is not the daemon's to replace: it
+// carries on with an empty in-memory cache and never writes the file.
+func TestLoadProjectCache_UnreadableIsNotFatalAndNotOverwritten(t *testing.T) {
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+
+	t.Run("directory in place of the file", func(t *testing.T) {
+		dir := t.TempDir()
+		p := ProjectCachePath(dir)
+		if err := os.MkdirAll(filepath.Join(p, "keep"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		c, err := LoadProjectCache(dir)
+		if err != nil {
+			t.Fatalf("a read error must not be fatal: %v", err)
+		}
+		c.Projects["-x"] = ProjectEntry{Key: "path"}
+		if err := c.Save(dir); err != nil {
+			t.Errorf("Save = %v, want a quiet no-op", err)
+		}
+		if info, err := os.Stat(p); err != nil || !info.IsDir() {
+			t.Errorf("the unreadable path was replaced: %v %v", info, err)
+		}
+	})
+
+	t.Run("permission denied", func(t *testing.T) {
+		if runtime.GOOS == "windows" || os.Getuid() == 0 {
+			t.Skip("cannot make a file unreadable here")
+		}
+		dir := t.TempDir()
+		p := ProjectCachePath(dir)
+		if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+			t.Fatal(err)
+		}
+		const body = `{"version":1,"projects":{"-x":{"key":"path"}}}`
+		if err := os.WriteFile(p, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, 0); err != nil {
+			t.Fatal(err)
+		}
+		logs.Reset()
+		c, err := LoadProjectCache(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(logs.String(), "projects.json") {
+			t.Errorf("the read error should be logged: %q", logs.String())
+		}
+		if err := c.Save(dir); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := os.ReadFile(p); string(b) != body {
+			t.Errorf("the file was overwritten: %q", b)
+		}
+	})
+}
+
+func TestRemoteKey_UnreadableCacheDoesNotStopTheDaemon(t *testing.T) {
+	gitEnv(t)
+	shared := t.TempDir()
+	a := newMachine(t, "alice", shared)
+	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(app, "a.md", "a\n")
+	if err := os.MkdirAll(filepath.Join(ProjectCachePath(shared), "dir"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	a.sync() // fails the test if NewRoots errors
+	if _, err := os.Stat(filepath.Join(shared, "remotes", "github.com", "acme", "app", "memory", "a.md")); err != nil {
+		t.Errorf("keys still resolve without the cache file: %v", err)
+	}
+}
+
 func TestLoadProjectCache_MissingIsEmpty(t *testing.T) {
 	c, err := LoadProjectCache(t.TempDir())
 	if err != nil || len(c.Projects) != 0 {

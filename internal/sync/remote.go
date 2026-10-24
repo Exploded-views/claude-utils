@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -372,10 +373,13 @@ type ProjectEntry struct {
 }
 
 // ProjectCache maps Claude project folder names to what the daemon worked out
-// about them. It lives in .state/, which is git-ignored, so it is per-PC.
+// about them. It lives in .state/, which is git-ignored, so it is per-PC. Stop
+// the daemon before editing the file: it rewrites it as resolution changes.
 type ProjectCache struct {
 	Version  int                     `json:"version"`
 	Projects map[string]ProjectEntry `json:"projects"`
+
+	readOnly bool // the file could not be read: never write over it
 }
 
 const projectCacheVersion = 1
@@ -386,20 +390,34 @@ func ProjectCachePath(syncDir string) string {
 }
 
 // LoadProjectCache reads the cache. A missing file yields an empty cache. A
-// file that does not parse is renamed to projects.json.corrupt-<unix time> and
-// also yields an empty cache: the cache only records what can be re-derived,
-// so a torn or hand-mangled file must never stop the daemon.
+// file that does not parse, or carries a version this build does not know, is
+// renamed to projects.json.corrupt-<unix time> and also yields an empty cache:
+// the cache only records what can be re-derived, so a torn, hand-mangled or
+// newer file must never stop the daemon. A UTF-8 byte order mark, which some
+// Windows editors add, is ignored. Any other read error (permission denied, a
+// directory in the file's place) is logged and gives an empty in-memory cache
+// that is never saved, so the file is left as it is.
+//
+// The daemon rewrites the file whenever resolution changes, so stop it before
+// editing the file by hand.
 func LoadProjectCache(syncDir string) (*ProjectCache, error) {
 	c := &ProjectCache{Version: projectCacheVersion, Projects: map[string]ProjectEntry{}}
-	b, err := os.ReadFile(ProjectCachePath(syncDir))
+	p := ProjectCachePath(syncDir)
+	b, err := os.ReadFile(p)
 	if errors.Is(err, fs.ErrNotExist) {
 		return c, nil
 	}
 	if err != nil {
-		return nil, err
+		log.Printf("remote keys: %v; carrying on with an empty cache and leaving the file alone", err)
+		c.readOnly = true
+		return c, nil
 	}
-	if err := json.Unmarshal(b, c); err != nil {
-		p := ProjectCachePath(syncDir)
+	b = bytes.TrimPrefix(b, []byte("\xef\xbb\xbf"))
+	err = json.Unmarshal(b, c)
+	if err == nil && c.Version != 0 && c.Version != projectCacheVersion {
+		err = fmt.Errorf("unknown version %d", c.Version)
+	}
+	if err != nil {
 		aside := fmt.Sprintf("%s.corrupt-%d", p, time.Now().Unix())
 		log.Printf("remote keys: %s: %v; moving it to %s and starting with an empty cache", p, err, aside)
 		if err := os.Rename(p, aside); err != nil {
@@ -415,6 +433,9 @@ func LoadProjectCache(syncDir string) (*ProjectCache, error) {
 
 // Save writes the cache as pretty-printed JSON, atomically.
 func (c *ProjectCache) Save(syncDir string) error {
+	if c.readOnly {
+		return nil
+	}
 	c.Version = projectCacheVersion
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
