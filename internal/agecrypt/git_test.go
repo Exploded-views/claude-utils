@@ -452,6 +452,7 @@ func TestGit_RotationSameSizeEditBackIsReadableByNewKeyOnly(t *testing.T) {
 	}
 	a.write(t, "x.md", "p1\n")
 	a.commit(t, "memsync: 1 files")
+	oldRev := a.revHead(t)
 	if err := RemoveRecipient(a.repo, k); err != nil {
 		t.Fatal(err)
 	}
@@ -463,6 +464,12 @@ func TestGit_RotationSameSizeEditBackIsReadableByNewKeyOnly(t *testing.T) {
 	}
 	a.write(t, "x.md", "p2\n")
 	a.commit(t, "memsync: 1 files")
+	if _, err := a.repo.Run("checkout", oldRev, "--", "x.md"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.repo.Run("checkout", "HEAD", "--", "x.md"); err != nil {
+		t.Fatal(err)
+	}
 	a.write(t, "x.md", "p1\n") // edit back to the old plaintext
 	a.commit(t, "memsync: 1 files")
 	blob := []byte(a.blob(t, "HEAD", "x.md"))
@@ -481,4 +488,12 @@ func TestGit_RotationSameSizeEditBackIsReadableByNewKeyOnly(t *testing.T) {
 	if d := a.dirty(t); d != "" {
 		t.Errorf("dirty after re-checkout: %s", d)
 	}
+}
+
+func (h *host) revHead(t *testing.T) string {
+	out, err := h.repo.Run("rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(out)
 }
