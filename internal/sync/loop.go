@@ -26,7 +26,14 @@ type Loop struct {
 	Branch   string
 	Hostname string
 	OnFlush  func(localChanges bool, err error) // optional, for tests/observability
+
+	// recovered is the outcome of a recoverLeftovers the cycle already ran
+	// before flush, so flush does not repeat it: a path whose restore keeps
+	// failing is counted once per cycle.
+	recovered *recovery
 }
+
+type recovery struct{ err error }
 
 // Run blocks until ctx is canceled. Returns the first fatal error or nil
 // when ctx ends. Recoverable errors (transient git failures) are logged.
@@ -80,18 +87,13 @@ func (l *Loop) Run(ctx context.Context) error {
 		log.Println("load manifest (continuing without delete detection):", err)
 		manifest = NewManifest()
 	}
-	// A rebase or merge a crash left stopped holds conflict markers: abort it
-	// before anything is staged. Then a park the last run did not finish must
-	// be undone before Reconcile compares the trees: the parked mirror copies
-	// differ from the Claude ones.
-	if err := abortInterrupted(repo); err != nil {
-		log.Println("abort interrupted rebase or merge:", newPathGuard(l.Cfg).Err(err))
-	}
-	if err := finishParked(repo, roots); err != nil {
-		log.Println("finish parked files:", newPathGuard(l.Cfg).Err(err))
-	}
-	if _, err := Reconcile(roots, manifest); err != nil {
-		log.Println("initial reconcile:", newPathGuard(l.Cfg).Err(err))
+	// What a crash left behind is undone before Reconcile compares the trees: a
+	// stopped rebase or merge holds conflict markers, and the parked mirror
+	// copies of an unfinished park differ from the Claude ones.
+	if l.startCycle(repo, roots) {
+		if _, err := Reconcile(roots, manifest); err != nil {
+			log.Println("initial reconcile:", newPathGuard(l.Cfg).Err(err))
+		}
 	}
 	if err := l.flush(repo, roots, true); err != nil {
 		log.Println("initial flush:", err)
@@ -146,29 +148,75 @@ func (l *Loop) Run(ctx context.Context) error {
 			if pendingLocal {
 				continue // debounce will handle it
 			}
-			// Safety net: re-walk the Claude tree to catch any watcher events
-			// missed by races (e.g., a new project dir and memory file created
-			// in rapid succession before the new dir's watcher was registered).
-			// Using the on-disk manifest also lets us propagate deletes the
-			// watcher missed.
-			m, err := LoadManifest(l.Cfg.SyncDir)
-			if err != nil {
-				log.Println("load manifest:", err)
-				m = NewManifest()
-			}
-			if _, err := Reconcile(roots, m); err != nil {
-				log.Println("reconcile:", newPathGuard(l.Cfg).Err(err))
-			}
-			err = l.flush(repo, roots, true)
-			if err != nil {
-				log.Println("flush (pull):", err)
-			}
-			l.refreshManifest(roots)
-			l.rebuildDistilledIndex()
-			if l.OnFlush != nil {
-				l.OnFlush(false, err)
-			}
+			l.pullTick(repo, roots)
 		}
+	}
+}
+
+// recoverLeftovers undoes what a crash or an earlier failed cycle left: a
+// stopped rebase or merge, then an unfinished park.
+func (l *Loop) recoverLeftovers(repo *gitwt.Repo, roots Roots) error {
+	if err := abortInterrupted(repo); err != nil {
+		return fmt.Errorf("abort interrupted rebase or merge: %w", err)
+	}
+	if err := finishParked(repo, roots); err != nil {
+		return fmt.Errorf("finish earlier park: %w", err)
+	}
+	return nil
+}
+
+// takeRecovery is recoverLeftovers for flush, unless the cycle already ran it.
+func (l *Loop) takeRecovery(repo *gitwt.Repo, roots Roots) error {
+	if r := l.recovered; r != nil {
+		l.recovered = nil
+		return r.err
+	}
+	return l.recoverLeftovers(repo, roots)
+}
+
+// startCycle runs recoverLeftovers ahead of a Reconcile and keeps the result
+// for the flush that follows. It reports whether Reconcile may run: not while
+// a park is unfinished (the parked mirror copies are not the user's, and
+// Reconcile would merge them into the Claude tree), nor while a rebase or
+// merge is still stopped.
+func (l *Loop) startCycle(repo *gitwt.Repo, roots Roots) bool {
+	err := l.recoverLeftovers(repo, roots)
+	l.recovered = &recovery{err}
+	if err != nil {
+		log.Println("recover earlier cycle:", newPathGuard(l.Cfg).Err(err))
+	}
+	if parkedExists(repo) || repo.RebaseInProgress() || repo.MergeInProgress() {
+		log.Println("reconcile skipped: held-back files are still parked or a rebase/merge is unresolved; retrying next cycle")
+		return false
+	}
+	return true
+}
+
+// pullTick is the periodic cycle: re-walk the Claude tree, then flush.
+func (l *Loop) pullTick(repo *gitwt.Repo, roots Roots) {
+	// Safety net: re-walk the Claude tree to catch any watcher events
+	// missed by races (e.g., a new project dir and memory file created
+	// in rapid succession before the new dir's watcher was registered).
+	// Using the on-disk manifest also lets us propagate deletes the
+	// watcher missed.
+	m, err := LoadManifest(l.Cfg.SyncDir)
+	if err != nil {
+		log.Println("load manifest:", err)
+		m = NewManifest()
+	}
+	if l.startCycle(repo, roots) {
+		if _, err := Reconcile(roots, m); err != nil {
+			log.Println("reconcile:", newPathGuard(l.Cfg).Err(err))
+		}
+	}
+	err = l.flush(repo, roots, true)
+	if err != nil {
+		log.Println("flush (pull):", err)
+	}
+	l.refreshManifest(roots)
+	l.rebuildDistilledIndex()
+	if l.OnFlush != nil {
+		l.OnFlush(false, err)
 	}
 }
 
@@ -233,15 +281,11 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	// the restore error below) is stripped of denylisted names.
 	g := newPathGuard(l.Cfg)
 	defer func() { err = g.Err(err) }()
-	// A rebase or merge a crash left stopped holds conflict markers: it goes
-	// before anything is staged, whether or not anything is parked.
-	if err := abortInterrupted(repo); err != nil {
-		return fmt.Errorf("abort interrupted rebase or merge: %w", err)
-	}
-	// A park an earlier cycle (or a crashed run) did not finish comes first:
-	// nothing may be committed, or parked over, while files are still away.
-	if err := finishParked(repo, roots); err != nil {
-		return fmt.Errorf("finish earlier park: %w", err)
+	// A stopped rebase or merge goes first, before anything is staged, and then
+	// a park an earlier cycle (or a crashed run) did not finish: nothing may be
+	// committed, or parked over, while files are still away.
+	if err := l.takeRecovery(repo, roots); err != nil {
+		return err
 	}
 	if includeLocal {
 		_, err := CommitMirror(repo, l.Cfg, fmt.Sprintf("auto: %s @ %s", l.Hostname, time.Now().UTC().Format(time.RFC3339)))

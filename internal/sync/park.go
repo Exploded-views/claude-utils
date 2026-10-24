@@ -170,6 +170,13 @@ var errBrokenPark = errors.New("unusable parked state")
 // tolerated before its bytes are set aside.
 const maxRestoreFailures = 3
 
+// parkedExists reports whether a parked.json is on disk, i.e. a park is
+// unfinished.
+func parkedExists(repo *gitwt.Repo) bool {
+	_, err := os.Stat(parkStatePath(repo))
+	return err == nil
+}
+
 // loadPark reads parked.json; (nil, nil) when there is none.
 func loadPark(repo *gitwt.Repo) (*parkState, error) {
 	b, err := os.ReadFile(parkStatePath(repo))

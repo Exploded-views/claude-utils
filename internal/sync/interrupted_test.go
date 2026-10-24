@@ -61,7 +61,7 @@ func crashedRebase(t *testing.T) *pullFixture {
 	if !f.repo.RebaseInProgress() {
 		t.Fatal("expected a stopped rebase")
 	}
-	if parkedExists(f) {
+	if parkedOnDisk(f) {
 		t.Fatal("nothing should be parked")
 	}
 	return f

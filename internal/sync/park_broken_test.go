@@ -45,7 +45,7 @@ func TestPark_CorruptStateIsMovedAsideAndSyncContinues(t *testing.T) {
 	if !f.originHas("projects/p1/memory/fresh.md") {
 		t.Error("a clean new note never reached origin")
 	}
-	if parkedExists(f) {
+	if parkedOnDisk(f) {
 		t.Error("the broken parked.json is still in place")
 	}
 	b := brokenDirs(f)
@@ -77,8 +77,8 @@ func TestPark_InvalidStateIsMovedAside(t *testing.T) {
 			if err := f.loop.flush(f.repo, f.roots, true); err != nil {
 				t.Fatal(err)
 			}
-			if parkedExists(f) || len(brokenDirs(f)) != 1 {
-				t.Errorf("state not moved aside: exists=%v broken=%v", parkedExists(f), brokenDirs(f))
+			if parkedOnDisk(f) || len(brokenDirs(f)) != 1 {
+				t.Errorf("state not moved aside: exists=%v broken=%v", parkedOnDisk(f), brokenDirs(f))
 			}
 		})
 	}
@@ -118,7 +118,7 @@ func TestPark_RepeatedRestoreFailureIsSetAside(t *testing.T) {
 	if err := f.loop.flush(f.repo, f.roots, true); err != nil {
 		t.Fatalf("cycle 3: %v", err)
 	}
-	if parkedExists(f) {
+	if parkedOnDisk(f) {
 		t.Error("the stuck path is still recorded")
 	}
 	b := brokenDirs(f)

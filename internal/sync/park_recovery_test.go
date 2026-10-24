@@ -25,10 +25,7 @@ func (f *pullFixture) workFile(rel string) (string, bool) {
 	return string(b), err == nil
 }
 
-func parkedExists(f *pullFixture) bool {
-	_, err := os.Stat(parkStatePath(f.repo))
-	return err == nil
-}
+func parkedOnDisk(f *pullFixture) bool { return parkedExists(f.repo) }
 
 // A crash after the pull but before the unpark leaves the pulled tree with
 // the held-back files reset to HEAD. The next start finishes the unpark before
@@ -74,7 +71,7 @@ func TestPark_CrashAfterPullBeforeUnpark(t *testing.T) {
 	if got, _ := f.claudeCopy("MEMORY.md"); strings.Contains(got, "## Old") {
 		t.Errorf("crash recovery resurrected a section the user removed from MEMORY.md")
 	}
-	if parkedExists(f) {
+	if parkedOnDisk(f) {
 		t.Error("parked state left behind")
 	}
 }
@@ -126,7 +123,7 @@ func TestPark_RunFinishesLeftoverBeforeReconcile(t *testing.T) {
 	if got, _ := f.claudeCopy("MEMORY.md"); strings.Contains(got, "## Old") {
 		t.Errorf("restart resurrected a section the user removed from MEMORY.md")
 	}
-	if parkedExists(f) {
+	if parkedOnDisk(f) {
 		t.Error("parked state left behind")
 	}
 }
@@ -149,7 +146,7 @@ func TestPark_CrashBetweenStateAndReset(t *testing.T) {
 	if st == nil || len(st.Paths) != 3 {
 		t.Fatalf("want 3 parked paths, got %+v", st)
 	}
-	if !parkedExists(f) {
+	if !parkedOnDisk(f) {
 		t.Fatal("savePark must write parked.json before the tree is touched")
 	}
 	// Crash with the tree only partly reset: one file is already gone.
@@ -170,7 +167,7 @@ func TestPark_CrashBetweenStateAndReset(t *testing.T) {
 	if m, _ := os.ReadFile(filepath.Join(f.roots.Mirror, "p1", "memory", "note.md")); string(m) != noteLocal {
 		t.Errorf("mirror note not refilled from the Claude copy")
 	}
-	if parkedExists(f) {
+	if parkedOnDisk(f) {
 		t.Error("parked state left behind")
 	}
 }
@@ -230,7 +227,7 @@ func TestPark_PropagateErrorStillUnparks(t *testing.T) {
 	if got, _ := f.workFile(distilledRel); got != entryLocal {
 		t.Errorf("distilled entry not restored after the error: %q", redact(got))
 	}
-	if parkedExists(f) {
+	if parkedOnDisk(f) {
 		t.Error("parked state left behind")
 	}
 	if st, _ := f.repo.Run("stash", "list"); st != "" {
@@ -286,7 +283,7 @@ func TestPark_UnparkTriesEveryPath(t *testing.T) {
 	if got, _ := f.workFile("aaa/first.md"); got != "first\n" {
 		t.Errorf("retry did not restore: %q", got)
 	}
-	if parkedExists(f) {
+	if parkedOnDisk(f) {
 		t.Error("parked state left behind")
 	}
 }
