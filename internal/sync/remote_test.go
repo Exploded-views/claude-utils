@@ -617,6 +617,107 @@ func TestRemoteKey_InvalidCacheKeyOverrideIsRejected(t *testing.T) {
 	}
 }
 
+// Deleting a checkout must not flip its key back to the path key and fork its
+// notes into projects/<hash>/.
+func TestRemoteKey_DeletedCheckoutKeepsItsKey(t *testing.T) {
+	gitEnv(t)
+	shared := t.TempDir()
+	a := newMachine(t, "alice", shared)
+	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(app, "a.md", "a\n")
+	a.sync()
+	if err := os.RemoveAll(app); err != nil {
+		t.Fatal(err)
+	}
+	a.write(app, "b.md", "b\n") // the notes keep changing after the checkout is gone
+	a.sync()
+	if _, err := os.Stat(filepath.Join(shared, "projects", a.hash(app))); err == nil {
+		t.Error("deleted checkout re-keyed to path: notes duplicated under projects/<hash>/")
+	}
+	if _, err := os.Stat(filepath.Join(shared, "remotes", "github.com", "acme", "app", "memory", "b.md")); err != nil {
+		t.Errorf("deleted checkout should keep its remote key: %v", err)
+	}
+}
+
+// Only positive evidence re-keys a folder: git ran and said there is no origin
+// (or a different one). Anything that stops git answering keeps the last key.
+func TestRemoteKey_StickyKeyOnlyChangesOnPositiveEvidence(t *testing.T) {
+	gitEnv(t)
+	shared := t.TempDir()
+	a := newMachine(t, "alice", shared)
+	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(app, "a.md", "a\n")
+	hash := a.hash(app)
+
+	m, err := NewRemoteMap(shared, a.claude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Key(hash); got != "github.com/acme/app" {
+		t.Fatalf("initial key = %q", got)
+	}
+	steps := []struct {
+		name string
+		url  string
+		ok   bool
+		want string
+	}{
+		{"git error (dubious ownership, not installed, ...)", "", false, "github.com/acme/app"},
+		{"git error again", "", false, "github.com/acme/app"},
+		{"different origin", "git@github.com:acme/other.git", true, "github.com/acme/other"},
+		{"git error after the change", "", false, "github.com/acme/other"},
+		{"git says there is no origin", "", true, ""},
+	}
+	for _, st := range steps {
+		m.Lookup = func(string) (string, bool) { return st.url, st.ok }
+		m.Refresh()
+		if got := m.Key(hash); got != st.want {
+			t.Errorf("%s: key = %q, want %q", st.name, got, st.want)
+		}
+	}
+
+	// The last key survives a restart: it lives in the cache, not in memory.
+	m.Lookup = func(string) (string, bool) { return "git@github.com:acme/app.git", true }
+	m.Refresh()
+	m2, err := NewRemoteMap(shared, a.claude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2.Lookup = func(string) (string, bool) { return "", false }
+	m2.Refresh()
+	if got := m2.Key(hash); got != "github.com/acme/app" {
+		t.Errorf("after restart with git failing, key = %q", got)
+	}
+}
+
+func TestGitOrigin(t *testing.T) {
+	gitEnv(t)
+	root := t.TempDir()
+	withOrigin := mkRepo(t, filepath.Join(root, "with"), "git@github.com:acme/app.git")
+	noOrigin := mkRepo(t, filepath.Join(root, "without"), "")
+	sub := mkdirs(t, withOrigin, "pkg")[0]
+	plain := mkdirs(t, root, "plain")[0]
+
+	cases := []struct {
+		name string
+		dir  string
+		url  string
+		ok   bool
+	}{
+		{"checkout with origin", withOrigin, "git@github.com:acme/app.git", true},
+		{"checkout without origin", noOrigin, "", true},
+		{"subdirectory of a checkout", sub, "", true},
+		{"not a repository", plain, "", true},
+		{"missing directory", filepath.Join(root, "gone"), "", false},
+	}
+	for _, c := range cases {
+		url, ok := gitOrigin(c.dir)
+		if url != c.url || ok != c.ok {
+			t.Errorf("%s: gitOrigin = %q,%v want %q,%v", c.name, url, ok, c.url, c.ok)
+		}
+	}
+}
+
 func TestRemoteKey_CacheRecordsResolvedDirAndSurvivesRestart(t *testing.T) {
 	gitEnv(t)
 	shared := t.TempDir()

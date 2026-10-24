@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -209,26 +210,63 @@ func isDirEntry(parent string, e fs.DirEntry) bool {
 	return false
 }
 
-// gitOrigin returns the origin URL of dir if dir is the top of a git
-// work-tree (a plain clone or a linked worktree), else "". A subdirectory of a
-// repo is deliberately not treated as the repo: two different subprojects
-// would otherwise share one memory folder.
-func gitOrigin(dir string) string {
+// gitOrigin reports the origin URL of dir if dir is the top of a plain git
+// checkout. A subdirectory of a repo is deliberately not treated as the repo
+// (two subprojects would otherwise share one memory folder), and neither is a
+// linked worktree: current Claude Code keeps one auto-memory folder per
+// repository, shared by all its worktrees, so a worktree's own project folder
+// only holds transcripts.
+//
+// ok is false when the answer could not be determined (directory missing, git
+// not installed, dubious ownership, any other git failure). Only when git ran
+// and said "no origin", "not a repository" or the like is it true with url "".
+func gitOrigin(dir string) (url string, ok bool) {
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return "", false
+	}
 	r := gitwt.New(dir)
-	top, err := r.Run("rev-parse", "--show-toplevel")
+	out, err := r.Run("rev-parse", "--show-toplevel", "--git-dir", "--git-common-dir")
 	if err != nil {
-		return ""
+		return "", strings.Contains(err.Error(), "not a git repository")
 	}
-	ti, err1 := os.Stat(strings.TrimSpace(top))
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 3 {
+		return "", false
+	}
+	ti, err1 := os.Stat(strings.TrimSpace(lines[0]))
 	di, err2 := os.Stat(dir)
-	if err1 != nil || err2 != nil || !os.SameFile(ti, di) {
-		return ""
+	if err1 != nil || err2 != nil {
+		return "", false
 	}
-	out, err := r.Run("config", "--local", "--get", "remote.origin.url")
+	if !os.SameFile(ti, di) {
+		return "", true
+	}
+	gitDir, ok1 := resolveGitPath(dir, lines[1])
+	common, ok2 := resolveGitPath(dir, lines[2])
+	if !ok1 || !ok2 {
+		return "", false
+	}
+	_, _ = gitDir, common
+	cfg, err := r.Run("config", "--local", "--get", "remote.origin.url")
 	if err != nil {
-		return ""
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() == 1 {
+			return "", true // git config's "no such key"
+		}
+		return "", false
 	}
-	return strings.TrimSpace(out)
+	return strings.TrimSpace(cfg), true
+}
+
+// resolveGitPath makes a path printed by git rev-parse (relative to dir
+// unless absolute) comparable.
+func resolveGitPath(dir, p string) (string, bool) {
+	p = strings.TrimSpace(p)
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(dir, p)
+	}
+	p, err := filepath.EvalSymlinks(p)
+	return p, err == nil
 }
 
 // ProjectEntry is one project's record in the per-PC cache. All fields are
@@ -237,11 +275,14 @@ func gitOrigin(dir string) string {
 //   - Dir pins the local directory this folder name stands for.
 //   - Key overrides the repo-side key outright (a value like
 //     "github.com/acme/app"), or "path" to force the path key.
+//   - LastKey is the key the daemon last resolved for this folder. It is
+//     kept while the directory is gone or git cannot answer.
 //   - Candidates is written by the daemon when the folder name decodes to
 //     several directories; set Dir to the right one.
 type ProjectEntry struct {
 	Dir        string   `json:"dir,omitempty"`
 	Key        string   `json:"key,omitempty"`
+	LastKey    string   `json:"lastKey,omitempty"`
 	Candidates []string `json:"candidates,omitempty"`
 }
 
@@ -306,9 +347,9 @@ func (c *ProjectCache) Save(syncDir string) error {
 type RemoteMap struct {
 	syncDir    string
 	claudeRoot string
-	// Lookup returns the origin URL for a project directory, or "" if it has
-	// none. Replaceable in tests.
-	Lookup func(dir string) string
+	// Lookup returns the origin URL for a project directory, "" if it has
+	// none, and false if git could not tell. Replaceable in tests.
+	Lookup func(dir string) (url string, ok bool)
 
 	cache  *ProjectCache
 	keys   map[string]string // folder name -> key; "" means path key
@@ -371,9 +412,20 @@ func (m *RemoteMap) MemoryDir(key string) string {
 	return filepath.Join(m.syncDir, remotesDir, filepath.FromSlash(key), "memory")
 }
 
-func (m *RemoteMap) keyOf(dir string) string {
-	if k, ok := NormalizeRemote(m.Lookup(dir)); ok {
-		return k
+// keyOf resolves dir's key; ok is false if git could not tell.
+func (m *RemoteMap) keyOf(dir string) (key string, ok bool) {
+	url, ok := m.Lookup(dir)
+	if !ok {
+		return "", false
+	}
+	k, _ := NormalizeRemote(url)
+	return k, true
+}
+
+// lastKey is the key to keep using when nothing positive is known.
+func lastKey(e ProjectEntry) string {
+	if validKey(e.LastKey) {
+		return e.LastKey
 	}
 	return ""
 }
@@ -398,6 +450,11 @@ func (m *RemoteMap) resolve(hash string) string {
 	case override != "":
 		key = override
 	default:
+		// Keys are sticky: a deleted checkout, an unmounted drive or a git
+		// that will not answer must not flip a folder back to its path key
+		// and fork its notes. Only git saying "no origin" or a different
+		// origin changes the key.
+		key = lastKey(e)
 		dir := e.Dir
 		if dir != "" {
 			if info, err := os.Stat(dir); err != nil || !info.IsDir() {
@@ -406,7 +463,6 @@ func (m *RemoteMap) resolve(hash string) string {
 		}
 		e.Candidates = nil
 		if dir == "" {
-			e.Dir = ""
 			cands := Candidates(hash)
 			switch len(cands) {
 			case 0:
@@ -417,15 +473,19 @@ func (m *RemoteMap) resolve(hash string) string {
 				// on the remote it does not matter which one we pick;
 				// otherwise guess nothing and let the user choose.
 				keys := map[string]bool{}
+				known := true
 				for _, c := range cands {
-					keys[m.keyOf(c)] = true
+					k, ok := m.keyOf(c)
+					known = known && ok
+					keys[k] = true
 				}
-				if len(keys) == 1 && !keys[""] {
+				if known && len(keys) == 1 && !keys[""] {
 					dir = cands[0]
 				} else {
+					e.Dir = ""
 					e.Candidates = cands
 					if !reflect.DeepEqual(prev.Candidates, cands) {
-						log.Printf("remote keys: %s matches %d directories with different remotes; keeping its path key (set \"dir\" in %s to choose)",
+						log.Printf("remote keys: %s matches %d directories with different remotes; keeping its previous key (set \"dir\" in %s to choose)",
 							hash, len(cands), ProjectCachePath(m.syncDir))
 					}
 				}
@@ -433,7 +493,10 @@ func (m *RemoteMap) resolve(hash string) string {
 		}
 		if dir != "" {
 			e.Dir = dir
-			key = m.keyOf(dir)
+			if k, ok := m.keyOf(dir); ok {
+				key = k
+				e.LastKey = k
+			}
 		}
 	}
 
