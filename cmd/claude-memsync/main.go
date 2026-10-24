@@ -24,6 +24,8 @@ func main() {
 		os.Exit(runRun(os.Args[2:]))
 	case "distill":
 		os.Exit(runDistill(os.Args[2:]))
+	case "changes":
+		os.Exit(runChanges(os.Args[2:]))
 	case "install":
 		os.Exit(runInstall(os.Args[2:]))
 	case "uninstall":
@@ -51,6 +53,7 @@ Subcommands:
   init        Bootstrap the local sync repo against a remote
   run         Run the sync daemon in the foreground
   distill     Rebuild the distilled-memory catalog index (see --prune, --dry-run)
+  changes     List memory files changed in the sync repo since a commit (for hooks)
   install     Install as a system service (Windows Service / systemd unit / launchd plist)
   uninstall   Remove the system service
   start       Start the system service
