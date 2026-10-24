@@ -132,6 +132,7 @@ and SSH keys. None require root.
 | `claude-memsync stop` | Stop the running daemon. |
 | `claude-memsync status` | Print `running (pid N)` or `stopped`. |
 | `claude-memsync run` | Run in the foreground (for debugging). |
+| `claude-memsync changes --since <rev>` or `--marker <file>` | List memory files changed in the sync repo since a point (`--project`, `--json`, `--limit`, `--update-marker`, `--hook`). See [Telling a running session what changed](#telling-a-running-session-what-changed). |
 | `claude-memsync distill` | Rebuild the distilled-memory catalog index (`--prune`, `--dry-run`). See [distilling-memories.md](distilling-memories.md). |
 | `claude-memsync version` | Print version. |
 
@@ -565,6 +566,139 @@ Both options go in `~/.claudesync/config.json`:
 
 Existing `config.json` files without these keys get the defaults, so scrub is
 on after an upgrade, `requireDenylist` is off, and no denylist is needed.
+
+## Telling a running session what changed
+
+Claude Code reads a project's memory when a session starts. If another PC
+pushes a note while a session is open for hours, that session never sees it.
+`claude-memsync changes` lets a hook say so:
+
+```sh
+claude-memsync changes (--since <rev> | --marker <file>) [--project <dir>] [--json] [--limit N] [--update-marker]
+claude-memsync changes --hook            # for UserPromptSubmit / SessionStart hooks
+```
+
+It compares the sync repo's current `HEAD` with an earlier point and lists the
+memory files that were added, changed or deleted in between. It only reads the
+repo; it never fetches (the daemon does that), so it reflects what this PC has
+already pulled or committed itself.
+
+| Flag | Meaning |
+|---|---|
+| `--since` | A git revision (full or abbreviated SHA, branch, `HEAD~3`). A revision that doesn't resolve is an error (exit 1). Exactly one of `--since` and `--marker` is required. |
+| `--marker` | The path of a **marker file** whose first line is the base commit. |
+| `--update-marker` | Only valid with `--marker`. Rewrites the marker to the current `HEAD` afterwards (atomically, mode `0600`). A marker that doesn't exist yet is created and nothing is reported: that call just sets the baseline. An empty marker (say, one made with `touch`), or one whose commit is gone (garbage-collected after a rebase, or the repo was re-cloned), is reset the same way: nothing is reported, `"reset": true` is set in the JSON, one warning line goes to stderr, and the exit code is 0. Without `--update-marker` an unresolvable marker is an error. A file whose first line is not a commit id (7 to 64 hex digits) is not a marker: it is never overwritten, and the command fails with `marker <path> does not contain a commit id` (exit 1). The marker is never moved backwards: if `HEAD` is an ancestor of the commit it already names (the repo was reset to an older commit), it is left alone. |
+| `--project` | Only this project: a project directory (`/home/alice/src/app`) or Claude's folder name for it (`-home-alice-src-app`). |
+| `--json` | Print JSON instead of text. |
+| `--limit` | List at most N changes (default 20), then `...N more`. `0` lifts the cap. |
+| `--hook` | Hook mode, see [Hook mode](#hook-mode). Takes only `--config`, `--project` and `--limit`. |
+| `--config` | Path to `config.json` (default `~/.claudesync/config.json`). |
+
+Text output:
+
+```
+2 memory files changed since 91be0aa (head 3f2a9c1)
+  changed  /home/alice/.claude/projects/-home-alice-src-app/memory/MEMORY.md
+  added    /home/alice/.claude/projects/-home-alice-src-app/memory/feedback_tests.md
+```
+
+With `--json`:
+
+```json
+{
+  "head": "3f2a9c1e...",
+  "since": "91be0aa4...",
+  "total": 2,
+  "more": 0,
+  "busy": false,
+  "reset": false,
+  "changes": [
+    {
+      "status": "changed",
+      "project": "-home-alice-src-app",
+      "file": "MEMORY.md",
+      "path": "projects/-home-alice-src-app/memory/MEMORY.md",
+      "local": "/home/alice/.claude/projects/-home-alice-src-app/memory/MEMORY.md"
+    }
+  ]
+}
+```
+
+`status` is `added`, `changed` or `deleted`; `local` is where Claude Code reads
+the file on this PC. Only files directly under a project's `memory/` folder are
+reported, and a rename shows up as a delete plus an add. File and project names
+with unprintable characters (a newline, say) are shown quoted in the text
+output. Only names and paths are ever printed, never note contents.
+
+The command exits non-zero (with a message on stderr, never the marker file's content) when `--since` or a
+marker doesn't resolve (unless it is reset, see above) or the repo has no
+commits. While the sync repo is in the middle of a rebase, merge or
+cherry-pick, the report is empty with `"busy": true`, the marker is not moved,
+and the exit code is 0.
+
+### Hook mode
+
+`--hook` is built for Claude Code hooks, so no `jq` or shell script is needed.
+It reads the hook's JSON from stdin (`session_id`, `cwd`, `hook_event_name`)
+and behaves like `--marker --update-marker` with a per-session marker at
+`<sync dir>/.state/hook-markers/<session_id>`; session ids outside
+`[A-Za-z0-9_-]+` are ignored silently. `--project` defaults to
+`$CLAUDE_PROJECT_DIR` (the directory Claude Code was started in), then to the
+hook's `cwd`, unless you pass it; the `cwd` follows Claude's `cd`, so it is
+only the fallback. When something changed it prints
+
+```json
+{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"Memory notes changed on another machine since you last looked (read a file before relying on it):\nadded /home/alice/.claude/projects/-home-alice-src-app/memory/feedback_tests.md\nchanged /home/alice/.claude/projects/-home-alice-src-app/memory/MEMORY.md"}}
+```
+
+with that framing line, then one `status path` line per change (and `… and N more` past `--limit`),
+and nothing at all when nothing changed. The marker only moves after that
+output was written, and never backwards. The first call in a session just
+records the baseline. Any error exits 0 and writes one line to stderr, and so
+does a panic, so the hook can never block a prompt. On an error before the
+report is printed, nothing goes to stdout; if the marker write fails after the
+report was printed, the next prompt repeats the report.
+
+Markers are kept, not deleted when a session ends: a session resumed with the
+same id needs its marker to report what changed while it was closed. Instead,
+each `--hook` run deletes the markers under `.state/hook-markers/` that were
+last written more than 30 days ago (never the current session's).
+
+Register it in `~/.claude/settings.json` (or a plugin's `hooks/hooks.json`,
+which has the same shape):
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "claude-memsync changes --hook", "timeout": 10 } ] }
+    ],
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "claude-memsync changes --hook", "timeout": 10 } ] }
+    ]
+  }
+}
+```
+
+`UserPromptSubmit` alone is enough for the "long-running session" case.
+Adding `SessionStart` sets the baseline as soon as the session opens, so the
+first prompt reports anything that arrived in between. The `timeout` (seconds)
+keeps a stuck `git` from holding up the prompt.
+
+### Limits
+
+- This PC's own edits are reported too: they are commits in the same history.
+- `--project` matches path-keyed folder names only. A directory is turned into
+  Claude's folder name by the rule as currently understood (every
+  non-alphanumeric character becomes `-`), so very long or non-ASCII paths may
+  not match. In hook mode the project comes from `$CLAUDE_PROJECT_DIR`, which
+  stays at the directory Claude was started in; if that is not set the hook's
+  `cwd` is used, and `cwd` follows Claude's `cd`, so after a `cd` into a
+  subdirectory it won't match the project's folder name. Pass `--project`
+  explicitly if that bites.
+- There is a brief window between the daemon's pull and its copy into
+  `~/.claude`: a change can be reported before the file at `local` has been
+  updated.
 
 ## Deletes
 
