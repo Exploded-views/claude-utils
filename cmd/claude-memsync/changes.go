@@ -140,8 +140,11 @@ func denylistFilter(cfg config.Config, stderr io.Writer) (hide func(changes.Chan
 		return nil, true
 	}
 	sc := scrub.New(deny)
+	// The repo path only, the same path the daemon's commit-time check sees:
+	// the local path also carries the ~/.claude prefix, and a pattern that
+	// happens to match the home directory would hide every change.
 	return func(c changes.Change) bool {
-		return sc.MatchesPath(c.Path) || sc.MatchesPath(c.Local)
+		return sc.MatchesPath(c.Path)
 	}, false
 }
 
