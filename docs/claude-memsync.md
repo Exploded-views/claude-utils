@@ -325,6 +325,8 @@ edited by hand:
 - `leftAt` is written by the daemon: for each repo directory the folder used to
   be stored in, the sync repo's HEAD commit when it left. See
   [Changing a folder's key](#changing-a-folders-key).
+- `joinPending` is written by the daemon while a folder that gained a key waits
+  for its join. See [Joining a key](#joining-a-key).
 
 **Stop the daemon before editing `projects.json`.** The cache is read at
 startup, and the daemon rewrites the file whenever resolution changes, so an
@@ -425,8 +427,40 @@ directory again, a file that only the repo has is imported into Claude **only if
 `git diff leftAt..HEAD` shows it changed since** the folder left. Anything else
 is indistinguishable from a note that was deleted on this PC while the folder
 was elsewhere (the old copy is not updated while a folder is stored under
-another key), so importing it would bring the delete back. When git cannot say
-(the commit is gone, git fails) nothing is imported and the daemon logs why.
+another key), so importing it would bring the delete back. This holds in both
+directions: a folder that comes back to a `remotes/<key>/` directory, and a PC
+that is switched back from `remote` to `path` (its folders' old
+`projects/<hash>/` copies hold the notes as they were when the folder left, so
+a note deleted in `remote` mode does not come back). A folder that has no
+`leftAt` entry, which is every folder of a PC that never used `remote`, imports
+whatever it finds, as it always did.
+
+Three details:
+
+- If the sync repo had no commit when the folder left, the anchor is empty and
+  everything in the directory counts as new: nothing could have been deleted
+  before the first commit.
+- When git cannot say what changed (the anchor commit is gone, say because it
+  was garbage collected, or git fails) the anchor is unknown: nothing that only
+  the repo has is imported for that directory, and the daemon logs why, once.
+  Remove the folder's `leftAt` entry in `.state/projects.json` (daemon stopped)
+  to import them anyway.
+- The entry for a `remotes/<key>/` directory is dropped when the folder has
+  re-joined that key, unless the join held back a file that only the repo had;
+  then it stays, so that file is not mistaken for a note from another PC later.
+  The entry for a `projects/<hash>/` directory stays until you remove it: it
+  costs one `git diff` per pass and only ever holds back unchanged leftovers.
+
+The same resurrection happens when a repo's **origin URL changes** (a rename or
+a transfer) and the PCs pick the change up at different times. The key is
+derived from the URL, so a PC that has updated its `origin` moves to the new
+`remotes/<new key>/` while one that has not stays on `remotes/<old key>/`, and
+they see none of each other's changes. A note deleted on one of them is
+deleted in its directory only; when the other updates its `origin` and joins
+the new key, the join cannot tell its copy from a new note and pushes it back.
+So update `origin` on every PC that shares the project at about the same time,
+let them sync, and delete no notes in between. The old `remotes/<old key>/`
+directory is never removed by the daemon.
 
 The daemon never removes such a leftover from the repo. A `projects/<hash>/`
 copy may be the live notes of a PC that is still on `path`, and removing it
