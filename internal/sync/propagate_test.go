@@ -27,7 +27,7 @@ func TestPropagate_UnusualNames(t *testing.T) {
 	for name, want := range map[string]string{
 		"new note.md":  "spaced\n",
 		"café.md":      "accent\n",
-		"日本語.md":      "cjk\n",
+		"日本語.md":       "cjk\n",
 		"renamed é.md": body,
 	} {
 		if got, ok := f.claudeCopy(name); !ok || got != want {
