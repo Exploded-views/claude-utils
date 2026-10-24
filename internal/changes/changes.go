@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
@@ -54,6 +55,20 @@ type Change struct {
 	File    string `json:"file"`    // file name inside the project's memory dir
 	Path    string `json:"path"`    // path inside the sync repo
 	Local   string `json:"local"`   // where Claude Code reads (or read) the file
+}
+
+// Display returns Local for printing. Names come from the sync repo, so one
+// with a newline or other unprintable character could forge extra lines in a
+// prompt; such a path is quoted instead.
+func (c Change) Display() string {
+	for _, name := range []string{c.Project, c.File, c.Local} {
+		for _, r := range name {
+			if !strconv.IsPrint(r) {
+				return strconv.Quote(c.Local)
+			}
+		}
+	}
+	return c.Local
 }
 
 // Result is what Compute returns and what --json prints.
@@ -322,7 +337,7 @@ func (r Result) Text() string {
 	}
 	fmt.Fprintf(&b, "%d memory %s changed since %s (head %s)\n", r.Total, noun, short(r.Since), short(r.Head))
 	for _, c := range r.Changes {
-		fmt.Fprintf(&b, "  %-7s  %s\n", c.Status, c.Local)
+		fmt.Fprintf(&b, "  %-7s  %s\n", c.Status, c.Display())
 	}
 	if r.More > 0 {
 		fmt.Fprintf(&b, "  ...%d more\n", r.More)
