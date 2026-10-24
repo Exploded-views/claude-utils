@@ -893,7 +893,7 @@ In `routes.json`:
 }
 ```
 
-`remote` is the repo's name on the remote (default: the basename of its config's remote URL); relations use it. `client` (optional, client and orch repos) names the client; default: the part of the repo name after `mem-client-` or `mem-orch-`. `relatedRoot` defaults to a `related` dir beside the registry and must not lie inside any sync dir or `~/.claude`.
+`remote` is the repo's name on the remote (default: the basename of its config's remote URL); relations use it. `client` (optional, client and orch repos only) names the client; default: the part of the repo name after `mem-client-` or `mem-orch-`. A declared value must equal that or be a `<client>-` prefix of it. `relatedRoot` defaults to a `related` dir beside the registry and must neither lie inside nor contain any sync dir, the registry or `~/.claude` (symlinks are resolved).
 
 The registry file is `related.json` in the registry repo: `[{"repo": "mem-project-<a>", "related": [{"repo": "mem-project-<b>", "mode": "read"}]}]`.
 
@@ -907,7 +907,11 @@ claude-memsync related context --project <dir>                    # the session 
 
 `relate` and `unrelate` edit the registry and commit it there (the registry's own daemon pushes it).
 
-**read** (the default idea): a fetch-only clone at `<relatedRoot>/<repo>`, fetched from the URL in `relatedRemotes` (in practice a read-only deploy key's ssh alias) on the daemon's pull interval and at `related sync`. It is never mirrored into `~/.claude`, never watched, and has no push path: the clone is a separate type with no Push, and its push URL is disabled. If the clone is encrypted (`.age-recipients`) and this host cannot decrypt it, it is listed as "not readable on this host" and skipped.
+**read** (the default idea): a fetch-only copy at `<relatedRoot>/<repo>`, fetched from the URL in `relatedRemotes` (in practice a read-only deploy key's ssh alias) on the daemon's pull interval and at `related sync`. The URL must name the related repo (its last path segment, lower-cased, without `.git`), and a later fetch refuses a URL that differs from the one the copy was made from. The copy is never mirrored into `~/.claude`, never watched, and has no push path: it is a separate type with no Push, and its push URL is disabled. Nothing fetched is ever checked out: objects live in a bare store (`<relatedRoot>/.bare/<repo>.git`) and the readable files are written straight from the stored blobs, so no filter, hook or attribute that arrives with the content runs on this host. Each fetch has a deadline (`relatedFetchTimeoutSec`, default 60), never prompts (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode=yes`), and a failed one is shown as "stale since <time of the last good fetch>" in `related` and in the session context.
+
+If the copy is encrypted (`.age-recipients`) and this host cannot decrypt it, it is listed as "not readable on this host" and skipped. The ciphertext is still fetched and kept (the recipients file is only known after the fetch); it is never shown or indexed.
+
+**Trust.** The registry is shared, so an edge in it does nothing on a host until that host accepts it. Accepted edges (ends and mode) are pinned in `related-accepted.json` beside `routes.json`, never synced. `relate` on a host accepts its own edge; `related accept` shows what is new, changed or gone, and `related accept --yes` pins it. Unaccepted edges are listed as ignored.
 
 **join**: nothing is automated. `related sync` prints the steps for making this host a full member (the normal `init`, a `repos` entry, a route).
 
@@ -919,7 +923,7 @@ claude-memsync related context --project <dir>                    # the session 
 - No edge to or from a `mem-client-*` repo from anything else, and none between different clients.
 - `mem-orch-all` may read `mem-orch-<client>`, and nothing else; never join. Every other orch edge is refused.
 
-**Session context.** Put `claude-memsync related context --project "$CLAUDE_PROJECT_DIR"` in a SessionStart hook. It prints, for the repo that owns the project, one entry per read relation: the repo name, note count, read-only path and the headings of its `MEMORY.md` (never note bodies), within `--per-relation` (default 2000) and `--total` (default 6000) characters. It prints nothing for a project without relations and never fails the session. `changes --hook` also lists, under a "related, read-only repos" label, the paths that changed in those clones since the session last looked. Allow `Read(<relatedRoot>/**)` and nothing wider.
+**Session context.** Put `claude-memsync related context --project "$CLAUDE_PROJECT_DIR"` in a SessionStart hook. It prints, for the repo that owns the project, one entry per read relation: the repo name, note count, read-only path and the headings of its `MEMORY.md` (never note bodies), within `--per-relation` (default 2000) and `--total` (default 6000) characters. Headings and changed paths that match the owning repo's denylist are counted, never printed. It prints nothing for a project without relations and never fails the session. `changes --hook` also lists, under a "related, read-only repos" label, the paths that changed in those clones since the session last looked. Allow `Read(<relatedRoot>/**)` and nothing wider.
 
 ## Limitations / known issues
 

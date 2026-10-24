@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/related"
 	"github.com/MarimerLLC/claude-utils/internal/route"
@@ -29,8 +30,24 @@ var relatedOpener related.Opener = related.PlainOpener{}
 type relCtx struct {
 	set     *routedSet
 	reg     *related.Registry
+	acc     *related.Accepted
 	checker related.Checker
 	root    string
+	timeout time.Duration
+	stderr  io.Writer
+}
+
+// acceptedPath is this host's pin of the registry edges it trusts.
+func acceptedPath(routesPath string) string {
+	return filepath.Join(filepath.Dir(routesPath), "related-accepted.json")
+}
+
+// active splits the registry: the edges the policy allows and this host has
+// accepted, the allowed ones still waiting for an accept, and the refused ones.
+func (rc *relCtx) active() (ok, pending []related.Edge, refused []related.Refusal) {
+	allowed, refused := rc.reg.Active(rc.checker)
+	ok, pending = rc.acc.Split(allowed)
+	return ok, pending, refused
 }
 
 // remoteName is the repo name relations use for the routes.json entry key:
@@ -91,7 +108,15 @@ func loadRelCtx(routesFlag string) (*relCtx, error) {
 	if err != nil {
 		return nil, err
 	}
-	rc := &relCtx{set: set, reg: reg, checker: related.Checker{Lookup: set.lookupNode, Visible: relatedVisibility}}
+	acc, err := related.LoadAccepted(acceptedPath(path))
+	if err != nil {
+		return nil, fmt.Errorf("related-accepted.json: %w", err)
+	}
+	rc := &relCtx{set: set, reg: reg, acc: acc, stderr: io.Discard,
+		checker: related.Checker{Lookup: set.lookupNode, Visible: relatedVisibility}}
+	if n := set.File.RelatedFetchTimeoutSec; n > 0 {
+		rc.timeout = time.Duration(n) * time.Second
+	}
 	rc.root = route.ExpandHome(set.File.RelatedRoot)
 	if rc.root == "" {
 		rc.root = filepath.Join(filepath.Dir(filepath.Clean(regDir)), "related")
@@ -103,9 +128,10 @@ func loadRelCtx(routesFlag string) (*relCtx, error) {
 }
 
 // checkRoot keeps the related root out of every tree the daemon mirrors or
-// watches: a read clone must never be inside a sync dir or ~/.claude.
+// watches: it may neither lie inside a sync dir, the registry or ~/.claude, nor
+// contain one. Both sides are resolved through symlinks first.
 func (rc *relCtx) checkRoot() error {
-	root, err := filepath.Abs(rc.root)
+	root, err := resolvePath(rc.root)
 	if err != nil {
 		return err
 	}
@@ -123,7 +149,7 @@ func (rc *relCtx) checkRoot() error {
 		if g == "" {
 			continue
 		}
-		ga, err := filepath.Abs(g)
+		ga, err := resolvePath(g)
 		if err != nil {
 			continue
 		}
@@ -132,6 +158,28 @@ func (rc *relCtx) checkRoot() error {
 		}
 	}
 	return nil
+}
+
+// resolvePath makes p absolute and resolves symlinks in its longest existing
+// prefix, so a path that does not exist yet still compares truthfully.
+func resolvePath(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	rest := ""
+	cur := abs
+	for {
+		if r, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(r, rest), nil
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return abs, nil
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+	}
 }
 
 // inside reports whether p is dir or below it.
@@ -189,7 +237,12 @@ func relateCmd(stdout, stderr io.Writer, args []string) int {
 		fmt.Fprintln(stderr, "relate:", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "%s -> %s (%s) recorded in the registry\n", pos[0], pos[1], mode)
+	rc.acc.Add(related.Edge{From: pos[0], To: pos[1], Mode: mode})
+	if err := rc.acc.Save(); err != nil {
+		fmt.Fprintln(stderr, "relate:", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s -> %s (%s) recorded in the registry and accepted on this host\n", pos[0], pos[1], mode)
 	return 0
 }
 
@@ -220,6 +273,8 @@ func unrelateCmd(stdout, stderr io.Writer, args []string) int {
 		fmt.Fprintln(stderr, "unrelate:", err)
 		return 1
 	}
+	rc.acc.Remove(pos[0], pos[1])
+	_ = rc.acc.Save()
 	fmt.Fprintf(stdout, "%s -> %s removed from the registry (a fetched clone stays until you delete it)\n", pos[0], pos[1])
 	return 0
 }
@@ -233,6 +288,8 @@ func relatedCmd(stdout, stderr io.Writer, args []string) int {
 			return relatedSyncCmd(stdout, stderr, args[1:])
 		case "context":
 			return relatedContextCmd(stdout, stderr, args[1:])
+		case "accept":
+			return relatedAcceptCmd(stdout, stderr, args[1:])
 		}
 	}
 	fs := flag.NewFlagSet("related", flag.ContinueOnError)
@@ -248,8 +305,15 @@ func relatedCmd(stdout, stderr io.Writer, args []string) int {
 		fmt.Fprintln(stderr, "related:", err)
 		return 1
 	}
-	edges, refused := rc.reg.Active(rc.checker)
+	edges, pending, refused := rc.active()
 	n := 0
+	for _, e := range pending {
+		if len(pos) == 1 && e.From != pos[0] {
+			continue
+		}
+		n++
+		fmt.Fprintf(stdout, "%s -> %s (%s): %s\n", e.From, e.To, e.Mode, pendingNote)
+	}
 	for _, e := range edges {
 		if len(pos) == 1 && e.From != pos[0] {
 			continue
@@ -263,7 +327,7 @@ func relatedCmd(stdout, stderr io.Writer, args []string) int {
 		}
 		fmt.Fprintf(stdout, "%s -> %s (%s): refused, ignored: %v\n", r.Edge.From, r.Edge.To, r.Edge.Mode, r.Err)
 	}
-	if n == 0 && len(refused) == 0 {
+	if n == 0 && len(refused) == 0 && len(pending) == 0 {
 		fmt.Fprintln(stdout, "no relations")
 	}
 	return 0
@@ -277,12 +341,15 @@ func (rc *relCtx) stateNote(e related.Edge) string {
 	if e.Mode == related.ModeJoin {
 		return ": join needed"
 	}
-	c, err := related.NewReadClone(rc.root, e.To, rc.set.File.RelatedRemotes[e.To])
+	c, err := related.NewReadClone(rc.root, e.To, "")
 	switch {
 	case err != nil || !c.Exists():
 		return ": not fetched"
 	case !relatedOpener.Readable(c.Dir()):
 		return ": not readable on this host"
+	}
+	if since, stale := c.Stale(); stale {
+		return ": read-only clone at " + c.Dir() + ", stale since " + since
 	}
 	return ": read-only clone at " + c.Dir()
 }
@@ -293,22 +360,30 @@ func joinSteps(e related.Edge) string {
 		e.From, e.To, e.To, e.To)
 }
 
-// localEdges are the active edges whose owner this host has.
-func (rc *relCtx) localEdges() (edges []related.Edge, refused []related.Refusal) {
-	ok, refused := rc.reg.Active(rc.checker)
+const pendingNote = "in the registry but not accepted on this host, ignored (see: claude-memsync related accept)"
+
+// localEdges are the accepted edges whose owner this host has; the pending
+// and refused ones are returned for the status lines.
+func (rc *relCtx) localEdges() (edges []related.Edge, pending []related.Edge, refused []related.Refusal) {
+	ok, pending, refused := rc.active()
 	for _, e := range ok {
 		if _, mine := rc.set.localKey(e.From); mine {
 			edges = append(edges, e)
 		}
 	}
-	return edges, refused
+	return edges, pending, refused
 }
 
 // syncRelated fetches the read clones of every read relation of a repo this
 // host has, and reports the state of each line.
 func (rc *relCtx) syncRelated() []string {
-	edges, refused := rc.localEdges()
+	edges, pending, refused := rc.localEdges()
 	var lines []string
+	for _, e := range pending {
+		if _, mine := rc.set.localKey(e.From); mine {
+			lines = append(lines, fmt.Sprintf("%s -> %s (%s): %s", e.From, e.To, e.Mode, pendingNote))
+		}
+	}
 	for _, r := range refused {
 		lines = append(lines, fmt.Sprintf("%s -> %s: refused, ignored: %v", r.Edge.From, r.Edge.To, r.Err))
 	}
@@ -334,12 +409,16 @@ func (rc *relCtx) syncRelated() []string {
 			continue
 		}
 		c, err := related.NewReadClone(rc.root, e.To, url)
-		if err == nil {
-			err = c.Fetch()
+		if err != nil {
+			lines = append(lines, fmt.Sprintf("%s: refused: %v", e.To, err))
+			continue
 		}
+		c.Timeout = rc.timeout
+		err = c.Fetch()
 		switch {
 		case err != nil:
-			lines = append(lines, fmt.Sprintf("%s: fetch failed: %v", e.To, err))
+			since, _ := c.Stale()
+			lines = append(lines, fmt.Sprintf("%s: fetch failed: %v; stale since %s", e.To, err, since))
 		case !relatedOpener.Readable(c.Dir()):
 			lines = append(lines, fmt.Sprintf("%s: not readable on this host (encrypted, this host cannot decrypt it)", e.To))
 		default:
@@ -407,7 +486,8 @@ func (rc *relCtx) owningRepoRemote(project string) (string, bool) {
 // readBlocks gives the read clones of the active read relations of owner.
 // Relations that cannot be shown carry a Skipped reason.
 func (rc *relCtx) readBlocks(owner string) []related.Block {
-	ok, _ := rc.reg.Active(rc.checker)
+	ok, _, _ := rc.active()
+	hide := rc.hider(owner)
 	var out []related.Block
 	for _, e := range ok {
 		if e.From != owner || e.Mode != related.ModeRead {
@@ -428,8 +508,18 @@ func (rc *relCtx) readBlocks(owner string) []related.Block {
 			if ix, err := related.BuildIndex(c.Dir(), relatedOpener); err != nil {
 				bl.Skipped = "not readable on this host"
 			} else {
+				kept := ix.Headings[:0:0]
+				for _, h := range ix.Headings {
+					if hide(h) {
+						ix.Hidden++
+					} else {
+						kept = append(kept, h)
+					}
+				}
+				ix.Headings = kept
 				bl.Index = ix
 			}
+			bl.Stale, _ = c.Stale()
 		}
 		out = append(out, bl)
 	}
@@ -464,6 +554,7 @@ func relatedContextCmd(stdout, stderr io.Writer, args []string) int {
 	if err != nil {
 		return quiet(err)
 	}
+	rc.stderr = stderr
 	owner, ok := rc.owningRepoRemote(*project)
 	if !ok {
 		return 0
@@ -486,7 +577,8 @@ func relatedHookLines(routesFlag, project, session string, limit int) (lines []s
 	}
 	type pending struct{ marker, head string }
 	var moves []pending
-	shown := 0
+	shown, hidden := 0, 0
+	hide := rc.hider(owner)
 	for _, bl := range rc.readBlocks(owner) {
 		if bl.Skipped != "" {
 			continue
@@ -508,6 +600,10 @@ func relatedHookLines(routesFlag, project, session string, limit int) (lines []s
 			continue
 		}
 		for _, f := range changed {
+			if hide(f.Path) {
+				hidden++
+				continue
+			}
 			if limit > 0 && shown >= limit {
 				lines = append(lines, "… more changes in related repos not listed")
 				goto done
@@ -517,6 +613,9 @@ func relatedHookLines(routesFlag, project, session string, limit int) (lines []s
 		}
 	}
 done:
+	if hidden > 0 {
+		lines = append(lines, fmt.Sprintf("%d changed file(s) in related repos whose name matches your denylist are not listed", hidden))
+	}
 	return lines, func() {
 		for _, m := range moves {
 			if os.MkdirAll(filepath.Dir(m.marker), 0700) == nil {
@@ -533,4 +632,72 @@ func quoteIfUnprintable(s string) string {
 		}
 	}
 	return s
+}
+
+// hider is the owning repo's denylist applied to a piece of text (a heading
+// or a path): true means "count it, never print it". A denylist that cannot be
+// read hides everything.
+func (rc *relCtx) hider(owner string) func(string) bool {
+	key, ok := rc.set.localKey(owner)
+	if !ok {
+		return func(string) bool { return false }
+	}
+	sc, hideAll := denylistScanner(rc.set.Cfgs[key], rc.stderr)
+	switch {
+	case hideAll:
+		return func(string) bool { return true }
+	case sc == nil:
+		return func(string) bool { return false }
+	}
+	return func(text string) bool { return sc.MatchesPath(text) || len(sc.Scan([]byte(text))) > 0 }
+}
+
+func relatedAcceptCmd(stdout, stderr io.Writer, args []string) int {
+	fs := flag.NewFlagSet("related accept", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	routesFlag := fs.String("routes", "", "path to routes.json")
+	yes := fs.Bool("yes", false, "pin the changes shown")
+	if fs.Parse(args) != nil {
+		return 2
+	}
+	rc, err := loadRelCtx(*routesFlag)
+	if err != nil {
+		fmt.Fprintln(stderr, "related accept:", err)
+		return 1
+	}
+	allowed, _ := rc.reg.Active(rc.checker)
+	_, pending := rc.acc.Split(allowed)
+	gone := rc.acc.Gone(allowed)
+	if len(pending) == 0 && len(gone) == 0 {
+		fmt.Fprintln(stdout, "nothing to accept: the registry matches what this host has accepted")
+		return 0
+	}
+	for _, e := range pending {
+		old := ""
+		for _, p := range rc.acc.Edges {
+			if p.From == e.From && p.To == e.To {
+				old = fmt.Sprintf(" (was %s)", p.Mode)
+			}
+		}
+		fmt.Fprintf(stdout, "+ %s -> %s (%s)%s\n", e.From, e.To, e.Mode, old)
+	}
+	for _, e := range gone {
+		fmt.Fprintf(stdout, "- %s -> %s (%s) no longer in the registry\n", e.From, e.To, e.Mode)
+	}
+	if !*yes {
+		fmt.Fprintln(stdout, "nothing changed; run again with --yes to accept these on this host")
+		return 0
+	}
+	for _, e := range pending {
+		rc.acc.Add(e)
+	}
+	for _, e := range gone {
+		rc.acc.Remove(e.From, e.To)
+	}
+	if err := rc.acc.Save(); err != nil {
+		fmt.Fprintln(stderr, "related accept:", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, "accepted")
+	return 0
 }

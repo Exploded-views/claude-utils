@@ -106,6 +106,14 @@ func (c Checker) node(name string) (Node, error) {
 				n.Kind = e.Kind
 			}
 			if e.Client != "" {
+				if n.Kind != kindClient && n.Kind != kindOrch {
+					return n, fmt.Errorf("%s: a client name is only allowed on client and orch repos", name)
+				}
+				// A declared client may only restate what the name says: the
+				// whole derived client or a "<client>-" prefix of it.
+				if e.Client != n.Client && !strings.HasPrefix(n.Client, e.Client+"-") {
+					return n, fmt.Errorf("%s: client %q does not match the repo name (%q)", name, e.Client, n.Client)
+				}
 				n.Client = e.Client
 			}
 		}
@@ -162,7 +170,7 @@ func (c Checker) Check(from, to string, mode Mode) error {
 		switch {
 		case a.Kind != b.Kind:
 			return fmt.Errorf("%s -> %s: a client repo relates only to repos of the same client, never to a %s repo", from, to, otherKind(a, b))
-		case a.Client == "" || a.Client != b.Client:
+		case !sameClient(a, b):
 			return fmt.Errorf("%s -> %s: client repos of different clients never relate", from, to)
 		}
 	}
@@ -171,6 +179,9 @@ func (c Checker) Check(from, to string, mode Mode) error {
 	}
 	return nil
 }
+
+// sameClient: both ends name the same, non-empty client.
+func sameClient(a, b Node) bool { return a.Client != "" && a.Client == b.Client }
 
 func otherKind(a, b Node) string {
 	if a.Kind == kindClient {

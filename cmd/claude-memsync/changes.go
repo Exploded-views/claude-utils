@@ -127,6 +127,22 @@ func changesCmd(stdin io.Reader, stdout, stderr io.Writer, args []string) (code 
 // A file that exists but cannot be read or parsed hides every name (hideAll)
 // and costs one line on stderr: it cannot vouch for any of them.
 func denylistFilter(cfg config.Config, stderr io.Writer) (hide func(changes.Change) bool, hideAll bool) {
+	sc, hideAll := denylistScanner(cfg, stderr)
+	if sc == nil {
+		return nil, hideAll
+	}
+	// The repo path only, the same path the daemon's commit-time check sees:
+	// the local path also carries the ~/.claude prefix, and a pattern that
+	// happens to match the home directory would hide every change.
+	return func(c changes.Change) bool {
+		return sc.MatchesPath(c.Path)
+	}, false
+}
+
+// denylistScanner loads the repo's denylist. A nil scanner with hideAll false
+// means there is no denylist; with hideAll true it could not be read and the
+// caller must list nothing.
+func denylistScanner(cfg config.Config, stderr io.Writer) (sc *scrub.Scanner, hideAll bool) {
 	f, err := os.Open(cfg.DenylistPath())
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, false
@@ -140,13 +156,7 @@ func denylistFilter(cfg config.Config, stderr io.Writer) (hide func(changes.Chan
 		fmt.Fprintf(stderr, "changes: cannot use denylist %s (%v); listing no file names\n", cfg.DenylistPath(), err)
 		return nil, true
 	}
-	sc := scrub.New(deny)
-	// The repo path only, the same path the daemon's commit-time check sees:
-	// the local path also carries the ~/.claude prefix, and a pattern that
-	// happens to match the home directory would hide every change.
-	return func(c changes.Change) bool {
-		return sc.MatchesPath(c.Path)
-	}, false
+	return scrub.New(deny), false
 }
 
 // syncedUpper is the commit the daemon last copied into ~/.claude, for use as

@@ -43,6 +43,7 @@ func (PlainOpener) ReadFile(p string) ([]byte, error) { return os.ReadFile(p) }
 type Index struct {
 	Notes    int
 	Headings []string
+	Hidden   int // headings the caller's denylist removed (counted, never shown)
 }
 
 // maxHeading caps one heading's length.
@@ -121,6 +122,7 @@ type Block struct {
 	Path    string // read-only local path
 	Index   Index
 	Skipped string // non-empty: why there is no index ("not readable on this host", ...)
+	Stale   string // non-empty: the last fetch failed; the time of the last good one
 }
 
 // Budgets caps the context, in characters (runes).
@@ -173,8 +175,14 @@ func renderBlock(bl Block, max int) string {
 		fmt.Fprintf(&s, "- %s: %s", bl.Repo, bl.Skipped)
 	default:
 		fmt.Fprintf(&s, "- %s, %d %s, read-only at %s", bl.Repo, bl.Index.Notes, plural(bl.Index.Notes), bl.Path)
+		if bl.Stale != "" {
+			fmt.Fprintf(&s, ", stale since %s", bl.Stale)
+		}
 		for _, h := range bl.Index.Headings {
 			s.WriteString("\n    " + h)
+		}
+		if bl.Index.Hidden > 0 {
+			fmt.Fprintf(&s, "\n    (%d heading(s) hidden by your denylist)", bl.Index.Hidden)
 		}
 	}
 	return truncate(s.String(), max)

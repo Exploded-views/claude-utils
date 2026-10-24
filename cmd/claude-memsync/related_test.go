@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
@@ -29,7 +30,11 @@ func newRelHost(t *testing.T, own map[string][2]string, remotes map[string]strin
 	for k := range own {
 		keys = append(keys, k)
 	}
-	cfgs := routedHost(t, keys, "", []map[string]string{{"folder": "-proj-x", "repo": firstKey(own)}})
+	routes := []map[string]string{{"folder": "-proj-x", "repo": firstKey(own)}}
+	for k := range own {
+		routes = append(routes, map[string]string{"folder": "-owner-" + k, "repo": k})
+	}
+	cfgs := routedHost(t, keys, "", routes)
 	home, _ := os.UserHomeDir()
 	p := os.Getenv(routesEnv)
 	var rj map[string]any
@@ -64,7 +69,7 @@ func firstKey(m map[string][2]string) string {
 	return best
 }
 
-func bareRemote(t *testing.T, files map[string]string) string {
+func bareRemote(t *testing.T, name string, files map[string]string) string {
 	t.Helper()
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
@@ -73,7 +78,7 @@ func bareRemote(t *testing.T, files map[string]string) string {
 	t.Setenv("GIT_COMMITTER_NAME", "t")
 	t.Setenv("GIT_COMMITTER_EMAIL", "t@example.com")
 	root := t.TempDir()
-	bare := filepath.Join(root, "r.git")
+	bare := filepath.Join(root, name+".git")
 	if _, err := gitwt.New(root).Run("init", "--bare", "-b", "main", bare); err != nil {
 		t.Fatal(err)
 	}
@@ -195,8 +200,8 @@ func TestRelate_ClientFieldAllowsSameClient(t *testing.T) {
 	b, _ := os.ReadFile(p)
 	json.Unmarshal(b, &rj)
 	repos := rj["repos"].(map[string]any)
-	repos["w"].(map[string]any)["client"] = "acme"
-	repos["p"].(map[string]any)["client"] = "acme"
+	repos["w"].(map[string]any)["client"] = "a"
+	repos["p"].(map[string]any)["client"] = "a"
 	b, _ = json.Marshal(rj)
 	os.WriteFile(p, b, 0600)
 	if code, _, errs := relate("mem-client-a-web", "mem-client-a-api", "--read"); code != 0 {
@@ -226,7 +231,7 @@ func TestRelated_HandEditedRegistryIsEnforcedAtLoad(t *testing.T) {
 }
 
 func TestRelatedSync_ReadCloneNotMirroredNotWatchedNotPushed(t *testing.T) {
-	bare := bareRemote(t, map[string]string{"projects/p/memory/MEMORY.md": "# Notes\n", "projects/p/memory/n.md": "BODY"})
+	bare := bareRemote(t, "mem-project-b", map[string]string{"projects/p/memory/MEMORY.md": "# Notes\n", "projects/p/memory/n.md": "BODY"})
 	h := newRelHost(t, map[string][2]string{"a": {"mem-project-a", "project"}}, map[string]string{"mem-project-b": bare})
 	if code, _, errs := relate("mem-project-a", "mem-project-b", "--read"); code != 0 {
 		t.Fatal(errs)
@@ -275,7 +280,14 @@ func TestRelatedSync_ReadCloneNotMirroredNotWatchedNotPushed(t *testing.T) {
 
 func TestRelatedRoot_InsideSyncDirOrClaudeIsRefused(t *testing.T) {
 	h := newRelHost(t, map[string][2]string{"a": {"mem-project-a", "project"}}, nil)
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(h.cfgs["a"].SyncDir, link); err != nil {
+		t.Skip("no symlinks")
+	}
 	for _, bad := range []string{
+		filepath.Join(link, "related"),         // a symlink into a sync dir
+		filepath.Join(h.home, ".claudesync.d"), // contains the sync dirs
+		h.home,                                 // contains everything
 		filepath.Join(h.cfgs["a"].SyncDir, "related"),
 		filepath.Join(h.home, ".claude", "projects", "related"),
 		h.cfgs["a"].ClaudeProjectsDir,
@@ -306,7 +318,7 @@ func TestRelatedSync_JoinPrintsStepsAndFetchesNothing(t *testing.T) {
 }
 
 func TestRelatedSync_MissingURLAndFetchFailureAreReported(t *testing.T) {
-	newRelHost(t, map[string][2]string{"a": {"mem-project-a", "project"}}, map[string]string{"mem-project-c": filepath.Join(t.TempDir(), "nope.git")})
+	newRelHost(t, map[string][2]string{"a": {"mem-project-a", "project"}}, map[string]string{"mem-project-c": filepath.Join(t.TempDir(), "mem-project-c.git")})
 	relate("mem-project-a", "mem-project-b", "--read")
 	relate("mem-project-a", "mem-project-c", "--read")
 	_, out, _ := run(func(o, e *bytes.Buffer) int { return relatedSyncCmd(o, e, nil) })
@@ -326,11 +338,11 @@ func TestContext_IndexAndBudgets(t *testing.T) {
 	for i := 0; i < 60; i++ {
 		heads.WriteString("# Heading " + strings.Repeat("h", 30) + "\n")
 	}
-	bare := bareRemote(t, map[string]string{
+	bare := bareRemote(t, "mem-project-b", map[string]string{
 		"projects/p/memory/MEMORY.md": heads.String() + "- [n](n.md) — BODYHOOK\n",
 		"projects/p/memory/n.md":      "SECRETBODY", "projects/p/memory/m.md": "SECRETBODY",
 	})
-	bare2 := bareRemote(t, map[string]string{"MEMORY.md": "# Second\n", "x.md": "y"})
+	bare2 := bareRemote(t, "mem-project-c", map[string]string{"MEMORY.md": "# Second\n", "x.md": "y"})
 	h := newRelHost(t, map[string][2]string{"a": {"mem-project-a", "project"}},
 		map[string]string{"mem-project-b": bare, "mem-project-c": bare2})
 	relate("mem-project-a", "mem-project-b", "--read")
@@ -371,7 +383,7 @@ func TestContext_IndexAndBudgets(t *testing.T) {
 }
 
 func TestContext_EncryptedCloneNotReadable(t *testing.T) {
-	bare := bareRemote(t, map[string]string{related.EncryptedMarker: "age1abc\n", "MEMORY.md": "# CIPHERTEXT-HEADING\n", "n.md": "x"})
+	bare := bareRemote(t, "mem-project-b", map[string]string{related.EncryptedMarker: "age1abc\n", "MEMORY.md": "# CIPHERTEXT-HEADING\n", "n.md": "x"})
 	h := newRelHost(t, map[string][2]string{"a": {"mem-project-a", "project"}}, map[string]string{"mem-project-b": bare})
 	relate("mem-project-a", "mem-project-b", "--read")
 	_, out, _ := run(func(o, e *bytes.Buffer) int { return relatedSyncCmd(o, e, nil) })
@@ -401,7 +413,7 @@ func (allowOpener) Readable(string) bool              { return true }
 func (allowOpener) ReadFile(p string) ([]byte, error) { return os.ReadFile(p) }
 
 func TestHook_ListsChangesInRelatedReadClones(t *testing.T) {
-	bare := bareRemote(t, map[string]string{"projects/p/memory/n.md": "one"})
+	bare := bareRemote(t, "mem-project-b", map[string]string{"projects/p/memory/n.md": "one"})
 	h := newRelHost(t, map[string][2]string{"a": {"mem-project-a", "project"}}, map[string]string{"mem-project-b": bare})
 	relate("mem-project-a", "mem-project-b", "--read")
 	run(func(o, e *bytes.Buffer) int { return relatedSyncCmd(o, e, nil) })
@@ -438,5 +450,217 @@ func TestHook_ListsChangesInRelatedReadClones(t *testing.T) {
 	// Reported once.
 	if _, out, _ := hook(); out != "" {
 		t.Fatalf("repeated: %q", out)
+	}
+}
+
+// ---- review round 2 ----
+
+func syncOut() string {
+	_, out, _ := run(func(o, e *bytes.Buffer) int { return relatedSyncCmd(o, e, nil) })
+	return out
+}
+
+func TestRelatedSync_URLMustNameTheRepo(t *testing.T) {
+	other := bareRemote(t, "mem-client-x", map[string]string{"a.md": "secret"})
+	h := newRelHost(t, map[string][2]string{"a": {"mem-project-a", "project"}}, map[string]string{"mem-project-b": other})
+	if code, _, errs := relate("mem-project-a", "mem-project-b", "--read"); code != 0 {
+		t.Fatal(errs)
+	}
+	out := syncOut()
+	if !strings.Contains(out, "mem-project-b: refused") {
+		t.Fatalf("a project relation with a client URL was not refused:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(h.root, "mem-project-b")); err == nil {
+		t.Fatal("fetched")
+	}
+}
+
+// Two owners on one host: the other owner's relations never appear.
+func TestOwnerFilter_ContextAndHook(t *testing.T) {
+	bb := bareRemote(t, "mem-project-b", map[string]string{"MEMORY.md": "# B-HEADING\n", "n.md": "x"})
+	bc := bareRemote(t, "mem-project-c", map[string]string{"MEMORY.md": "# C-HEADING\n", "n.md": "x"})
+	h := newRelHost(t, map[string][2]string{"p": {"mem-project-p", "project"}, "q": {"mem-project-q", "project"}},
+		map[string]string{"mem-project-b": bb, "mem-project-c": bc})
+	relate("mem-project-p", "mem-project-b", "--read")
+	relate("mem-project-q", "mem-project-c", "--read")
+	syncOut()
+	_, ctxQ, _ := contextFor("/owner/q")
+	if !strings.Contains(ctxQ, "mem-project-c") || strings.Contains(ctxQ, "mem-project-b") || strings.Contains(ctxQ, "B-HEADING") {
+		t.Fatalf("Q's context:\n%s", ctxQ)
+	}
+	_, ctxP, _ := contextFor("/owner/p")
+	if !strings.Contains(ctxP, "mem-project-b") || strings.Contains(ctxP, "mem-project-c") {
+		t.Fatalf("P's context:\n%s", ctxP)
+	}
+	hook := func(proj string) string {
+		_, out, _ := runHook(t, hookJSON("s-"+strings.ReplaceAll(proj, "/", ""), proj, "UserPromptSubmit"), "--hook", "--project", proj)
+		return out
+	}
+	hook("/owner/q")
+	pushToBare(t, bb, map[string]string{"new-b.md": "x"})
+	pushToBare(t, bc, map[string]string{"new-c.md": "x"})
+	syncOut()
+	out := hook("/owner/q")
+	if !strings.Contains(out, "new-c.md") || strings.Contains(out, "new-b.md") || strings.Contains(out, "mem-project-b") {
+		t.Fatalf("Q's hook output:\n%s", out)
+	}
+	_ = h
+}
+
+func TestSync_OnlyFetchesForReposThisHostHas(t *testing.T) {
+	bare := bareRemote(t, "mem-project-b", map[string]string{"a.md": "x"})
+	h := newRelHost(t, map[string][2]string{"a": {"mem-project-a", "project"}}, map[string]string{"mem-project-b": bare})
+	relate("mem-project-zzz", "mem-project-b", "--read") // an edge of a repo this host does not have
+	syncOut()
+	if _, err := os.Stat(filepath.Join(h.root, "mem-project-b")); err == nil {
+		t.Fatal("fetched for a repo this host does not have")
+	}
+}
+
+func TestJoinedRelationHasNoReadClone(t *testing.T) {
+	bare := bareRemote(t, "mem-project-j", map[string]string{"MEMORY.md": "# J\n", "a.md": "x"})
+	h := newRelHost(t, map[string][2]string{"a": {"mem-project-a", "project"}, "j": {"mem-project-j", "project"}}, map[string]string{"mem-project-j": bare})
+	relate("mem-project-a", "mem-project-j", "--read")
+	out := syncOut()
+	if !strings.Contains(out, "mem-project-j: already joined") {
+		t.Fatalf("sync:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(h.root, "mem-project-j")); err == nil {
+		t.Fatal("cloned a joined repo")
+	}
+	if _, ctx, _ := contextFor("/owner/a"); ctx != "" {
+		t.Fatalf("a joined repo is already in ~/.claude; context should be empty:\n%s", ctx)
+	}
+}
+
+func TestAccept_RegistryEdgesNeedALocalAccept(t *testing.T) {
+	bare := bareRemote(t, "mem-project-b", map[string]string{"MEMORY.md": "# B\n", "n.md": "x"})
+	h := newRelHost(t, map[string][2]string{"a": {"mem-project-a", "project"}}, map[string]string{"mem-project-b": bare})
+	// Another machine's edge arrives through the registry repo.
+	body := `[{"repo":"mem-project-a","related":[{"repo":"mem-project-b","mode":"read"}]}]`
+	os.WriteFile(filepath.Join(h.cfgs["registry"].SyncDir, related.FileName), []byte(body), 0600)
+	_, list, _ := relatedC()
+	if !strings.Contains(list, "not accepted on this host") {
+		t.Fatalf("list:\n%s", list)
+	}
+	if out := syncOut(); !strings.Contains(out, "not accepted") {
+		t.Fatalf("sync:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(h.root, "mem-project-b")); err == nil {
+		t.Fatal("an unaccepted edge was fetched")
+	}
+	if _, ctx, _ := contextFor("/owner/a"); ctx != "" {
+		t.Fatalf("an unaccepted edge reached the context:\n%s", ctx)
+	}
+	accept := func(args ...string) string {
+		_, out, _ := run(func(o, e *bytes.Buffer) int { return relatedAcceptCmd(o, e, args) })
+		return out
+	}
+	if out := accept(); !strings.Contains(out, "+ mem-project-a -> mem-project-b (read)") || !strings.Contains(out, "--yes") {
+		t.Fatalf("diff:\n%s", out)
+	}
+	if out := syncOut(); strings.Contains(out, "fetched") {
+		t.Fatal("showing the diff accepted it")
+	}
+	accept("--yes")
+	if out := syncOut(); !strings.Contains(out, "mem-project-b: fetched") {
+		t.Fatalf("after accept:\n%s", out)
+	}
+	if out := accept(); !strings.Contains(out, "nothing to accept") {
+		t.Fatalf("second accept:\n%s", out)
+	}
+	// A mode change is a new edge to accept; a removed one is shown.
+	os.WriteFile(filepath.Join(h.cfgs["registry"].SyncDir, related.FileName),
+		[]byte(`[{"repo":"mem-project-a","related":[{"repo":"mem-project-b","mode":"join"}]}]`), 0600)
+	if out := accept(); !strings.Contains(out, "(join) (was read)") {
+		t.Fatalf("mode change:\n%s", out)
+	}
+	os.WriteFile(filepath.Join(h.cfgs["registry"].SyncDir, related.FileName), []byte(`[]`), 0600)
+	if out := accept(); !strings.Contains(out, "- mem-project-a -> mem-project-b (read) no longer in the registry") {
+		t.Fatalf("removed:\n%s", out)
+	}
+	accept("--yes")
+	if out := accept(); !strings.Contains(out, "nothing to accept") {
+		t.Fatalf("pin not pruned:\n%s", out)
+	}
+}
+
+func TestDenylist_HidesRelatedHeadingsAndHookPaths(t *testing.T) {
+	bare := bareRemote(t, "mem-project-b", map[string]string{"MEMORY.md": "# Public plan\n# ACME pricing\n", "n.md": "x"})
+	h := newRelHost(t, map[string][2]string{"a": {"mem-project-a", "project"}}, map[string]string{"mem-project-b": bare})
+	os.WriteFile(h.cfgs["a"].DenylistPath(), []byte("acme\n"), 0600)
+	relate("mem-project-a", "mem-project-b", "--read")
+	syncOut()
+	_, ctx, _ := contextFor("/owner/a")
+	if strings.Contains(strings.ToLower(ctx), "acme") || !strings.Contains(ctx, "# Public plan") || !strings.Contains(ctx, "1 heading(s) hidden") {
+		t.Fatalf("context:\n%s", ctx)
+	}
+	hook := func() string {
+		_, out, _ := runHook(t, hookJSON("sd", "/owner/a", "UserPromptSubmit"), "--hook", "--project", "/owner/a")
+		return out
+	}
+	hook()
+	pushToBare(t, bare, map[string]string{"acme-note.md": "x", "fine.md": "x"})
+	syncOut()
+	out := hook()
+	if strings.Contains(strings.ToLower(out), "acme") || !strings.Contains(out, "fine.md") || !strings.Contains(out, "1 changed file(s) in related repos") {
+		t.Fatalf("hook:\n%s", out)
+	}
+	// An unreadable denylist hides everything.
+	os.WriteFile(h.cfgs["a"].DenylistPath(), []byte("(\n"), 0600)
+	_, ctx, _ = contextFor("/owner/a")
+	if strings.Contains(ctx, "Public plan") {
+		t.Fatalf("headings printed with an unusable denylist:\n%s", ctx)
+	}
+}
+
+func TestStale_FailedFetchIsShownAndSyncFlagClears(t *testing.T) {
+	bare := bareRemote(t, "mem-project-b", map[string]string{"MEMORY.md": "# B\n", "n.md": "x"})
+	h := newRelHost(t, map[string][2]string{"a": {"mem-project-a", "project"}}, map[string]string{"mem-project-b": bare})
+	relate("mem-project-a", "mem-project-b", "--read")
+	syncOut()
+	os.RemoveAll(bare)
+	out := syncOut()
+	if !strings.Contains(out, "fetch failed") || !strings.Contains(out, "stale since 20") {
+		t.Fatalf("sync:\n%s", out)
+	}
+	_, ctx, _ := contextFor("/owner/a")
+	if !strings.Contains(ctx, ", stale since 20") {
+		t.Fatalf("context:\n%s", ctx)
+	}
+	if _, list, _ := relatedC(); !strings.Contains(list, "stale since 20") {
+		t.Fatalf("list:\n%s", list)
+	}
+	_ = h
+}
+
+func TestBackgroundSync_TimeoutClearsTheGuard(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "fakessh")
+	os.WriteFile(script, []byte("#!/bin/sh\nexec sleep 30\n"), 0700)
+	t.Setenv("GIT_SSH_COMMAND", script)
+	h := newRelHost(t, map[string][2]string{"a": {"mem-project-a", "project"}},
+		map[string]string{"mem-project-b": "git@alias:org/mem-project-b.git"})
+	p := os.Getenv(routesEnv)
+	var rj map[string]any
+	b, _ := os.ReadFile(p)
+	json.Unmarshal(b, &rj)
+	rj["relatedFetchTimeoutSec"] = 1
+	b, _ = json.Marshal(rj)
+	os.WriteFile(p, b, 0600)
+	relate("mem-project-a", "mem-project-b", "--read")
+	set, err := loadRouted(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set.syncRelatedInBackground()
+	deadline := time.Now().Add(20 * time.Second)
+	for relatedSyncing.Load() && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if relatedSyncing.Load() {
+		t.Fatal("a hung fetch kept the guard set")
+	}
+	if _, err := os.Stat(filepath.Join(h.root, ".state", "failed", "mem-project-b")); err != nil {
+		t.Fatal("timeout not recorded as stale")
 	}
 }
