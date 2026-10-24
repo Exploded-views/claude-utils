@@ -249,10 +249,117 @@ func TestCatchUp_RewrittenHistoryOnlyTouchesUnchangedFiles(t *testing.T) {
 	} else if got, _ := os.ReadFile(b[0]); string(got) != "m\nrewritten\n" {
 		t.Errorf("backup = %q", got)
 	}
-	if !strings.Contains(logs.String(), "rewritten") {
+	if !strings.Contains(logs.String(), "history was rewritten") {
 		t.Errorf("want the rewrite logged:\n%s", logs)
 	}
 	if f.syncedHead() != f.head() {
 		t.Errorf("record %q, HEAD %q", f.syncedHead(), f.head())
 	}
+}
+
+// A change of yours that was never committed (the Claude copy no longer equals
+// the record's version) is not overwritten by a peer's edit that the hand-run
+// pull brought in, even when HEAD simply moved forward.
+func TestCatchUp_ChangedClaudeCopyKeptAndBackedUp(t *testing.T) {
+	f := newPullFixture(t, map[string]string{"mine.md": "m\n", "other.md": "o\n"})
+	captureLog(t)
+	f.loop.pullTick(f.repo, f.roots)
+	f.peerPush("mine.md", "m\npeer\n")
+	f.peerPush("other.md", "o\npeer edit\n")
+	mustGit(t, f.repo, "pull", "-q", "--rebase", "origin", "main")
+	writeMem(t, f.roots.Claude, "p1", "mine.md", "m\nuser edit\n")
+
+	f.loop.startCycle(f.repo, f.roots)
+	if got, _ := f.claudeCopy("mine.md"); got != "m\nuser edit\n" {
+		t.Errorf("user's edit overwritten: %q", got)
+	}
+	if got, _ := f.claudeCopy("other.md"); got != "o\npeer edit\n" {
+		t.Errorf("other.md = %q", got)
+	}
+	if b := f.backups("mine.md"); len(b) != 1 {
+		t.Errorf("want one backup of the incoming mine.md, got %v", b)
+	}
+}
+
+// docsFixture is the documented conflict with a held-back tracked file that is
+// modified in the work-tree. PC A's cycle stops on a conflict in clean.md (and
+// parks and restores held.md around the pull). peerHeld says whether the peer
+// also changed held.md.
+func docsFixture(t *testing.T, peerHeld bool) *pullFixture {
+	t.Helper()
+	f := newPullFixture(t, map[string]string{"clean.md": "a\nb\n", "held.md": "h\n"})
+	captureLog(t)
+	f.loop.pullTick(f.repo, f.roots)
+	f.editLocal("held.md", "h\nmine "+fakeSecret()+"\n")
+	f.editLocal("clean.md", "a\nlocal\n")
+	f.peerPush("clean.md", "a\npeer\n")
+	f.peerPush("other.md", "o\npeer edit\n")
+	if peerHeld {
+		f.peerPush("held.md", "h\npeer\n")
+	}
+	f.loop.pullTick(f.repo, f.roots)
+	if dirty, _ := f.repo.DirtyPaths(""); !strings.Contains(strings.Join(dirty, " "), "held.md") {
+		t.Fatal("held.md should be left modified in the work-tree")
+	}
+	return f
+}
+
+func (f *pullFixture) requireDocsOutcome(peerHeld bool) {
+	f.t.Helper()
+	if got := f.originFile("clean.md"); got != "a\nboth\n" {
+		f.t.Errorf("origin clean.md = %q", got)
+	}
+	if got := f.originFile("other.md"); got != "o\npeer edit\n" {
+		f.t.Errorf("origin other.md = %q", got)
+	}
+	if got, _ := f.claudeCopy("other.md"); got != "o\npeer edit\n" {
+		f.t.Errorf("Claude other.md = %q", got)
+	}
+	if got, _ := f.claudeCopy("clean.md"); got != "a\nboth\n" {
+		f.t.Errorf("Claude clean.md = %q", got)
+	}
+	if got, _ := f.claudeCopy("held.md"); got != "h\nmine "+fakeSecret()+"\n" {
+		f.t.Errorf("Claude held.md = %q", redact(got))
+	}
+	want := "h\n"
+	if peerHeld {
+		want = "h\npeer\n"
+	}
+	if got := f.originFile("held.md"); got != want {
+		f.t.Errorf("origin held.md = %q", redact(got))
+	}
+	if stash, _ := f.repo.Run("stash", "list"); stash != "" {
+		f.t.Errorf("stash left behind: %q", stash)
+	}
+	if f.repo.HasUnmerged() || inProgress(f) {
+		f.t.Error("the work-tree is still mid-resolution")
+	}
+}
+
+// The documented commands (pull --rebase --autostash, add, rebase --continue)
+// stop on the conflict although a held-back tracked file is modified, finish,
+// and give the held-back file back.
+func TestDocs_ResolutionWithModifiedHeldBackFile(t *testing.T) {
+	f := docsFixture(t, false)
+	resolveByHand(t, f, map[string]string{"clean.md": "a\nboth\n"})
+	if stash, _ := f.repo.Run("stash", "list"); stash != "" {
+		t.Errorf("autostash not applied: %q", stash)
+	}
+	f.restart()
+	f.requireDocsOutcome(false)
+}
+
+// When the peer changed the held-back file too, applying the autostash
+// conflicts. The documented way out: the ~/.claude copy is yours, so drop the
+// conflicted work-tree copy and the stash.
+func TestDocs_ResolutionWithAutostashConflict(t *testing.T) {
+	f := docsFixture(t, true)
+	resolveByHand(t, f, map[string]string{"clean.md": "a\nboth\n"})
+	if !f.repo.HasUnmerged() {
+		t.Fatal("expected the autostash apply to conflict")
+	}
+	mustGit(t, f.repo, "checkout", "HEAD", "--", "projects/p1/memory/held.md")
+	mustGit(t, f.repo, "stash", "drop")
+	f.restart()
+	f.requireDocsOutcome(true)
 }

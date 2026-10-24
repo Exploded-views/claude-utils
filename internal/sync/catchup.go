@@ -56,13 +56,12 @@ func recordHead(repo *gitwt.Repo) error {
 //
 //   - No record (the first run after an upgrade): the record is set to HEAD and
 //     nothing else happens.
-//   - HEAD descends from the record: propagateChanges(record, HEAD), as for a
-//     pull. A path that is dirty in the work-tree (held back, parked) is the
-//     user's version and is skipped.
-//   - HEAD does not descend from it (history was rewritten, by a rebase done by
-//     hand): the diff between the two is propagated anyway, but only for a file
-//     whose Claude copy still equals the record's version; for any other the
-//     incoming version is kept as .from-remote-* in the mirror.
+//   - Otherwise propagateChanges(record, HEAD) runs as for a pull, whether HEAD
+//     descends from the record or not (history rewritten by a rebase done by
+//     hand; that is logged). A path that is dirty in the work-tree (held back,
+//     parked) is skipped, and so is one whose Claude copy no longer equals the
+//     record's version: it holds a change of yours that was never committed.
+//     The incoming version of that one is kept as .from-remote-* in the mirror.
 func (l *Loop) catchUp(repo *gitwt.Repo, roots Roots) error {
 	head := headRev(repo)
 	if head == "" {
@@ -82,42 +81,44 @@ func (l *Loop) catchUp(repo *gitwt.Repo, roots Roots) error {
 		log.Println("synced head record names an unknown commit; starting over from HEAD")
 		return recordHead(repo)
 	}
-	dirty, err := repo.DirtyPaths("")
-	if err != nil {
-		return err
-	}
-	skip := map[string]bool{}
-	for _, p := range dirty {
-		skip[p] = true
-	}
-	g := newPathGuard(l.Cfg)
 	descends, err := repo.IsAncestor(rec, head)
 	if err != nil {
 		return err
 	}
-	if descends {
-		err = propagate(repo, roots, rec, head, skip, g)
-	} else {
-		var kept int
-		kept, err = propagateRewritten(repo, roots, rec, head, skip, g)
-		// Count only: a path may itself match the denylist.
-		log.Printf("sync repo history was rewritten outside the daemon; propagated its changes to files you have not changed since (%d kept as .from-remote-*)", kept)
+	if !descends {
+		log.Println("sync repo history was rewritten outside the daemon; propagating the difference for files you have not changed since")
 	}
+	skip, kept, err := catchUpSkips(repo, roots, rec, head)
 	if err != nil {
+		return err
+	}
+	if kept > 0 {
+		// Count only: a path may itself match the denylist.
+		log.Printf("catch-up: %d file(s) changed in ~/.claude since the last sync; incoming copies kept as .from-remote-*", kept)
+	}
+	if err := propagate(repo, roots, rec, head, skip, newPathGuard(l.Cfg)); err != nil {
 		return err
 	}
 	return recordHead(repo)
 }
 
-// propagateRewritten is propagateChanges for a HEAD that does not descend from
-// rec. A path is copied to (or deleted from) the Claude tree only if the Claude
-// copy still equals the version at rec; otherwise the version at head is kept
-// beside the mirror file as .from-remote-*, and the Claude copy stands. It
-// returns how many were kept.
-func propagateRewritten(repo *gitwt.Repo, roots Roots, rec, head string, skip map[string]bool, g *pathGuard) (int, error) {
+// catchUpSkips is the set of paths in rec..head that catchUp must not copy
+// into the Claude tree: those dirty in the work-tree, and those whose Claude
+// copy differs from the version at rec. For the latter the version at head is
+// written beside the mirror file as .from-remote-* (nothing, for a deletion).
+// It returns how many were kept.
+func catchUpSkips(repo *gitwt.Repo, roots Roots, rec, head string) (map[string]bool, int, error) {
+	skip := map[string]bool{}
+	dirty, err := repo.DirtyPaths("")
+	if err != nil {
+		return nil, 0, err
+	}
+	for _, p := range dirty {
+		skip[p] = true
+	}
 	out, err := repo.Run("diff", "--name-status", "-z", "--no-renames", rec, head)
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
 	kept := 0
 	fields := strings.Split(out, "\x00")
@@ -127,29 +128,23 @@ func propagateRewritten(repo *gitwt.Repo, roots Roots, rec, head string, skip ma
 		if !ok || skip[p] || status == "" {
 			continue
 		}
-		cp := filepath.Join(roots.Claude, hash, "memory", name)
 		recBytes, recOK := blobAt(repo, rec, p)
-		curOK, cur := readIfExists(cp)
-		unchanged := curOK == recOK && bytes.Equal(cur, recBytes)
-		switch {
-		case status[0] == 'D':
-			if unchanged && curOK {
-				_ = os.Remove(cp)
-			}
-		case unchanged:
-			if err := CopyToClaude(roots, hash, name); err != nil {
-				log.Printf("propagate %s: %v", g.Path(p), g.Err(err))
-			}
-		default:
-			incoming, _ := blobAt(repo, head, p)
-			backup := fmt.Sprintf("%s.from-remote-%s", filepath.Join(roots.Mirror, hash, "memory", name), randSuffix())
-			if err := writeAtomic(backup, incoming); err != nil {
-				return kept, g.PathErr("back up incoming", p, err)
-			}
-			kept++
+		curOK, cur := readIfExists(filepath.Join(roots.Claude, hash, "memory", name))
+		if curOK == recOK && bytes.Equal(cur, recBytes) {
+			continue
 		}
+		skip[p] = true
+		if status[0] == 'D' {
+			continue
+		}
+		incoming, _ := blobAt(repo, head, p)
+		backup := fmt.Sprintf("%s.from-remote-%s", filepath.Join(roots.Mirror, hash, "memory", name), randSuffix())
+		if err := writeAtomic(backup, incoming); err != nil {
+			return nil, kept, err
+		}
+		kept++
 	}
-	return kept, nil
+	return skip, kept, nil
 }
 
 // blobAt is the content of p at rev; false if it does not exist there.
