@@ -43,8 +43,9 @@ type Options struct {
 	// UpdateMarker rewrites Marker to the current HEAD once the report is
 	// built; it is only valid with Marker. A marker file that does not exist
 	// yet is created and nothing is reported: that run only sets the baseline.
-	// A marker whose commit no longer exists is reset the same way and the
-	// result has Reset set.
+	// An empty marker, or one holding a commit id that no longer exists, is
+	// reset the same way and the result has Reset set. A file with anything
+	// else in it is not a marker and is never overwritten.
 	UpdateMarker bool
 
 	// DeferMarker leaves the final marker rewrite to the caller (WriteMarker),
@@ -148,7 +149,7 @@ func Compute(opts Options) (Result, error) {
 		res.Changes = []Change{}
 	}
 	if opts.UpdateMarker && !opts.DeferMarker {
-		if err := WriteMarker(opts.Marker, head); err != nil {
+		if err := AdvanceMarker(repo, opts.Marker, head); err != nil {
 			return res, err
 		}
 	}
@@ -179,10 +180,17 @@ func resolveSince(repo *gitwt.Repo, opts Options) (string, error) {
 	case err != nil:
 		return "", fmt.Errorf("read marker: %w", err)
 	}
-	line, _, _ := strings.Cut(string(b), "\n")
-	line = strings.TrimSpace(line)
-	if line == "" || strings.HasPrefix(line, "-") {
-		return "", fmt.Errorf("marker %s does not contain a commit", m)
+	line := markerLine(b)
+	if line == "" {
+		if opts.UpdateMarker {
+			return "", nil // empty, e.g. made with touch
+		}
+		return "", fmt.Errorf("marker %s does not contain a commit id", m)
+	}
+	// Anything that is not a commit id is not ours to overwrite, and is not
+	// echoed: it may be a note the user pointed --marker at by mistake.
+	if !commitID.MatchString(line) {
+		return "", fmt.Errorf("marker %s does not contain a commit id", m)
 	}
 	sha, ok := revParse(repo, line)
 	switch {
@@ -191,7 +199,15 @@ func resolveSince(repo *gitwt.Repo, opts Options) (string, error) {
 	case opts.UpdateMarker:
 		return "", nil
 	}
-	return "", fmt.Errorf("marker %s names %q, which is not a commit in %s", m, line, opts.SyncDir)
+	return "", fmt.Errorf("marker %s names a commit that is not in %s", m, opts.SyncDir)
+}
+
+var commitID = regexp.MustCompile(`^[0-9a-f]{7,64}$`)
+
+// markerLine returns the first line of a marker file, trimmed.
+func markerLine(b []byte) string {
+	line, _, _ := strings.Cut(string(b), "\n")
+	return strings.TrimSpace(line)
 }
 
 func markerExists(path string) bool {
@@ -202,12 +218,19 @@ func markerExists(path string) bool {
 // busy reports whether the daemon's pull --rebase (or a merge or cherry-pick)
 // is stopped half-way, when HEAD is not a meaningful point to diff against.
 func busy(repo *gitwt.Repo) bool {
-	for _, name := range []string{"rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD"} {
-		out, err := repo.Run("rev-parse", "--git-path", name)
-		if err != nil {
+	names := []string{"rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD"}
+	args := []string{"rev-parse"}
+	for _, name := range names {
+		args = append(args, "--git-path", name)
+	}
+	out, err := repo.Run(args...)
+	if err != nil {
+		return false
+	}
+	for _, p := range strings.Split(strings.TrimSpace(out), "\n") {
+		if p == "" {
 			continue
 		}
-		p := strings.TrimSpace(out)
 		if !filepath.IsAbs(p) {
 			p = filepath.Join(repo.Dir, p)
 		}
@@ -225,6 +248,23 @@ func revParse(repo *gitwt.Repo, rev string) (string, bool) {
 		return "", false
 	}
 	return strings.TrimSpace(out), true
+}
+
+// AdvanceMarker writes head to the marker unless the marker already names a
+// commit that head is an ancestor of, i.e. unless that would move it
+// backwards (the repo was reset to an older commit): the changes in between
+// were reported already.
+func AdvanceMarker(repo *gitwt.Repo, path, head string) error {
+	if b, err := os.ReadFile(path); err == nil {
+		if line := markerLine(b); commitID.MatchString(line) {
+			if cur, ok := revParse(repo, line); ok && cur != head {
+				if _, err := repo.Run("merge-base", "--is-ancestor", head, cur); err == nil {
+					return nil
+				}
+			}
+		}
+	}
+	return WriteMarker(path, head)
 }
 
 // WriteMarker replaces the marker atomically: a half-written marker would

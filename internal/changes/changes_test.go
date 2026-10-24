@@ -2,6 +2,7 @@ package changes
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -522,8 +523,23 @@ func TestMarker_WrittenAtomically(t *testing.T) {
 	if err := WriteMarker(path, "abc"); err != nil {
 		t.Fatal(err)
 	}
+	// A reader that opened the marker before the next write keeps seeing the
+	// old, complete content, and the path gets a new file: that is a temp file
+	// plus rename, not a truncate-and-write.
+	old, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer old.Close()
+	oldInfo, _ := old.Stat()
 	if err := WriteMarker(path, "def"); err != nil {
 		t.Fatal(err)
+	}
+	if b, _ := io.ReadAll(old); string(b) != "abc\n" {
+		t.Errorf("open reader saw %q, want the old content", b)
+	}
+	if st, _ := os.Stat(path); os.SameFile(oldInfo, st) {
+		t.Error("marker was rewritten in place, not replaced")
 	}
 	if b, _ := os.ReadFile(path); string(b) != "def\n" {
 		t.Errorf("marker = %q", b)
@@ -537,6 +553,89 @@ func TestMarker_WrittenAtomically(t *testing.T) {
 	// No temp files are left behind.
 	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
 		t.Errorf("leftover files: %v", entries)
+	}
+}
+
+// --update-marker pointed at the wrong file (a note, a typo) must not
+// overwrite it, and the error must not echo what the file holds.
+func TestMarker_NeverOverwritesANonMarkerFile(t *testing.T) {
+	f := newFixture(t)
+	f.commit(map[string]string{mem(appHash, "a.md"): "a\n"})
+	const note = "# My notes\nimportant-9d2e\n"
+	for name, body := range map[string]string{
+		"note":      note,
+		"not hex":   "zzzzzzzz\n",
+		"too short": "abc12\n",
+		"option":    "--output=x\n",
+		"spaces":    "abcdef1 and more\n",
+	} {
+		m := filepath.Join(t.TempDir(), "MEMORY.md")
+		if err := os.WriteFile(m, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Compute(Options{SyncDir: f.repo.Dir, ClaudeDir: f.claude, Marker: m, UpdateMarker: true, Limit: 20})
+		if err == nil {
+			t.Errorf("%s: want an error", name)
+		} else if !strings.Contains(err.Error(), "does not contain a commit id") || strings.Contains(err.Error(), "important-9d2e") || strings.Contains(err.Error(), strings.TrimSpace(body)) {
+			t.Errorf("%s: error = %q", name, err)
+		}
+		if b, _ := os.ReadFile(m); string(b) != body {
+			t.Errorf("%s: file was overwritten with %q", name, b)
+		}
+	}
+}
+
+// An empty marker (made with touch) is reset under UpdateMarker, so a hook
+// session does not stay silent for good.
+func TestMarker_EmptyIsResetUnderUpdateMarker(t *testing.T) {
+	f := newFixture(t)
+	head := f.commit(map[string]string{mem(appHash, "a.md"): "a\n"})
+	m := filepath.Join(t.TempDir(), "seen")
+	if err := os.WriteFile(m, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	o := Options{SyncDir: f.repo.Dir, ClaudeDir: f.claude, Marker: m, UpdateMarker: true, Limit: 20}
+	r, err := Compute(o)
+	if err != nil || !r.Reset || r.Total != 0 {
+		t.Fatalf("want a reset: %+v %v", r, err)
+	}
+	if b, _ := os.ReadFile(m); strings.TrimSpace(string(b)) != head {
+		t.Errorf("marker = %q, want HEAD", b)
+	}
+	f.commit(map[string]string{mem(appHash, "b.md"): "b\n"})
+	if r, err := Compute(o); err != nil || r.Reset || r.Total != 1 {
+		t.Errorf("after reset: %+v %v", r, err)
+	}
+}
+
+// A marker ahead of HEAD (the repo was reset to an older commit) is left
+// where it is: moving it back would report the same changes twice.
+func TestMarker_NeverMovesBackwards(t *testing.T) {
+	f := newFixture(t)
+	older := f.commit(map[string]string{mem(appHash, "a.md"): "a\n"})
+	newer := f.commit(map[string]string{mem(appHash, "b.md"): "b\n"})
+	m := filepath.Join(t.TempDir(), "seen")
+	if err := os.WriteFile(m, []byte(newer+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.repo.Run("reset", "--hard", older); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Compute(Options{SyncDir: f.repo.Dir, ClaudeDir: f.claude, Marker: m, UpdateMarker: true, Limit: 20}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(m); strings.TrimSpace(string(b)) != newer {
+		t.Errorf("marker moved back to %q", b)
+	}
+	// Moving forward again still works.
+	f.commit(map[string]string{mem(appHash, "c.md"): "c\n"})
+	f.commit(map[string]string{mem(appHash, "d.md"): "d\n"})
+	head := f.head()
+	if _, err := Compute(Options{SyncDir: f.repo.Dir, ClaudeDir: f.claude, Marker: m, UpdateMarker: true, Limit: 20}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(m); strings.TrimSpace(string(b)) != head {
+		t.Errorf("marker = %q, want HEAD %s", b, head)
 	}
 }
 
@@ -572,52 +671,91 @@ func TestOutput_NeverContainsNoteContent(t *testing.T) {
 	}
 }
 
-// While the daemon's pull --rebase has stopped on a conflict, HEAD points at a
-// half-built history; report nothing and leave the marker alone.
-func TestCompute_BusyDuringRebase(t *testing.T) {
-	f := newFixture(t)
-	base := f.commit(map[string]string{mem(appHash, "a.md"): "a\n"})
-	marker := filepath.Join(t.TempDir(), "seen")
-	if err := os.WriteFile(marker, []byte(base+"\n"), 0600); err != nil {
-		t.Fatal(err)
+// diverge leaves main and side with conflicting edits of a.md, on main. It
+// returns the common base and side's tip.
+func (f *fixture) diverge() (base, side string) {
+	f.t.Helper()
+	base = f.commit(map[string]string{mem(appHash, "a.md"): "a\n"})
+	run := func(args ...string) {
+		f.t.Helper()
+		if _, err := f.repo.Run(args...); err != nil {
+			f.t.Fatal(err)
+		}
 	}
-	run := func(args ...string) error { _, err := f.repo.Run(args...); return err }
-	if err := run("checkout", "-q", "-b", "side"); err != nil {
-		t.Fatal(err)
-	}
-	f.commit(map[string]string{mem(appHash, "a.md"): "side\n"})
-	if err := run("checkout", "-q", "main"); err != nil {
-		t.Fatal(err)
-	}
+	run("checkout", "-q", "-b", "side")
+	side = f.commit(map[string]string{mem(appHash, "a.md"): "side\n"})
+	run("checkout", "-q", "main")
 	f.commit(map[string]string{mem(appHash, "a.md"): "main\n"})
-	if err := run("checkout", "-q", "side"); err != nil {
-		t.Fatal(err)
-	}
-	if err := run("rebase", "main"); err == nil {
-		t.Fatal("rebase should have stopped on a conflict")
-	}
+	return base, side
+}
 
-	o := Options{SyncDir: f.repo.Dir, ClaudeDir: f.claude, Marker: marker, UpdateMarker: true, Limit: 20}
-	r, err := Compute(o)
-	if err != nil {
-		t.Fatal(err)
+// While the daemon's pull --rebase (or a merge or cherry-pick) has stopped on
+// a conflict, HEAD points at a half-built history; report nothing and leave
+// the marker alone.
+func TestCompute_BusyMidOperation(t *testing.T) {
+	cases := []struct {
+		name  string
+		start func(f *fixture, side string) error // must fail with a conflict
+		abort []string
+	}{
+		{"rebase", func(f *fixture, side string) error {
+			if _, err := f.repo.Run("checkout", "-q", "side"); err != nil {
+				return err
+			}
+			_, err := f.repo.Run("rebase", "main")
+			return err
+		}, []string{"rebase", "--abort"}},
+		{"rebase-apply", func(f *fixture, side string) error {
+			if _, err := f.repo.Run("checkout", "-q", "side"); err != nil {
+				return err
+			}
+			_, err := f.repo.Run("rebase", "--apply", "main")
+			return err
+		}, []string{"rebase", "--abort"}},
+		{"merge", func(f *fixture, side string) error {
+			_, err := f.repo.Run("merge", "side")
+			return err
+		}, []string{"merge", "--abort"}},
+		{"cherry-pick", func(f *fixture, side string) error {
+			_, err := f.repo.Run("cherry-pick", side)
+			return err
+		}, []string{"cherry-pick", "--abort"}},
 	}
-	if !r.Busy || r.Total != 0 || len(r.Changes) != 0 {
-		t.Errorf("want an empty busy result: %+v", r)
-	}
-	if b, _ := os.ReadFile(marker); strings.TrimSpace(string(b)) != base {
-		t.Errorf("marker moved to %q while busy", b)
-	}
-	if b, _ := json.Marshal(r); !strings.Contains(string(b), `"busy":true`) {
-		t.Errorf("JSON should say busy: %s", b)
-	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t)
+			base, side := f.diverge()
+			marker := filepath.Join(t.TempDir(), "seen")
+			if err := os.WriteFile(marker, []byte(base+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.start(f, side); err == nil {
+				t.Fatal("operation should have stopped on a conflict")
+			}
 
-	// Once the rebase is abandoned the repo is reported on again.
-	if err := run("rebase", "--abort"); err != nil {
-		t.Fatal(err)
-	}
-	if r, err := Compute(o); err != nil || r.Busy {
-		t.Errorf("after abort: %+v %v", r, err)
+			o := Options{SyncDir: f.repo.Dir, ClaudeDir: f.claude, Marker: marker, UpdateMarker: true, Limit: 20}
+			r, err := Compute(o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !r.Busy || r.Total != 0 || len(r.Changes) != 0 {
+				t.Errorf("want an empty busy result: %+v", r)
+			}
+			if b, _ := os.ReadFile(marker); strings.TrimSpace(string(b)) != base {
+				t.Errorf("marker moved to %q while busy", b)
+			}
+			if b, _ := json.Marshal(r); !strings.Contains(string(b), `"busy":true`) {
+				t.Errorf("JSON should say busy: %s", b)
+			}
+
+			// Once the operation is abandoned the repo is reported on again.
+			if _, err := f.repo.Run(c.abort...); err != nil {
+				t.Fatal(err)
+			}
+			if r, err := Compute(o); err != nil || r.Busy {
+				t.Errorf("after abort: %+v %v", r, err)
+			}
+		})
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/MarimerLLC/claude-utils/internal/changes"
+	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
 
 // sessionIDPattern is what a session id must match before it is used as a
@@ -96,7 +97,7 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, project str
 	}
 	// Only now that the report went out does the marker move; otherwise the
 	// next prompt reports the same changes again.
-	if err := changes.WriteMarker(marker, res.Head); err != nil {
+	if err := changes.AdvanceMarker(gitwt.New(cfg.SyncDir), marker, res.Head); err != nil {
 		return fail(err)
 	}
 	return 0
