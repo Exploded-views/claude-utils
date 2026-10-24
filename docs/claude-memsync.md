@@ -627,16 +627,16 @@ With `--json`:
 ```
 
 `status` is `added`, `changed` or `deleted`; `local` is where Claude Code reads
-the file on this PC. `"localKept": true` (and, in text, the note `(local copy
-kept; the incoming version was saved next to the mirror copy as
-.from-remote-*)`) marks a non-deleted change whose local file does not hold the
-committed bytes: the daemon skipped it (held back by the scrub, or edited here
-since), so the local file keeps its own text and the incoming version sits
-beside the mirror copy as `.from-remote-*`. It costs one `git cat-file --batch`
-for all listed changes.
+the file on this PC. `"localKept": true` (and, in text, the note `(the copy on
+this PC differs from the synced version: a local edit not yet synced, or an
+incoming change that was held back)`) marks a non-deleted change whose local
+file does not hold the committed bytes. Either it was edited here since the last
+sync, or the daemon did not copy the incoming version (held back by the scrub;
+where it kept that version, it sits beside the mirror copy as
+`.from-remote-*`). It costs one `git cat-file --batch` for all listed changes.
 
-**Denylist.** A change is left out of the list when its repo path or its local
-path matches a pattern in your [denylist](#denylist) (the file the daemon
+**Denylist.** A change is left out of the list when its repo path (the path in
+the sync repo, as the daemon's commit-time check sees it) matches a pattern in your [denylist](#denylist) (the file the daemon
 reads), and the text output says `N changed file(s) whose name matches your
 denylist are not listed`; in JSON the entries are omitted and `"hidden": N`
 counts them (`total` counts only the listed ones). A peer, which has its own
@@ -677,7 +677,9 @@ recorded in `.state/synced-head` (what the daemon has copied into `~/.claude`),
 or `HEAD` when there is no such record, and advances its marker to that same
 commit; a commit that was pulled but not yet copied is reported by the first
 prompt after the copy, never before it. The marker only moves after that
-output was written, and never backwards. The first call in a session just
+output was written. It never moves backwards, except when history itself
+moved back (a reset, a force-push): then the difference is reported once and
+the marker follows. The first call in a session just
 records the baseline. Any error exits 0 and writes one line to stderr, and so
 does a panic, so the hook can never block a prompt. On an error before the
 report is printed, nothing goes to stdout; if the marker write fails after the

@@ -87,7 +87,7 @@ type Change struct {
 }
 
 // localKeptNote is appended to the line of a change whose local copy was kept.
-const localKeptNote = "(local copy kept; the incoming version was saved next to the mirror copy as .from-remote-*)"
+const localKeptNote = "(the copy on this PC differs from the synced version: a local edit not yet synced, or an incoming change that was held back)"
 
 // Describe is Display plus the note for a kept local copy.
 func (c Change) Describe() string {
@@ -122,7 +122,22 @@ type Result struct {
 	More    int      `json:"more"`    // changes not listed because of Limit
 	Changes []Change `json:"changes"` // never nil
 
+	// MovedBack: Head is an ancestor of Since (history moved back). The diff
+	// is still reported once, and the marker must then follow Head back
+	// (WriteMarker, not AdvanceMarker), or the same diff repeats on every run.
+	MovedBack bool `json:"movedBack"`
+
 	hideAll bool // Hidden counts everything because the rules were unusable
+}
+
+// SaveMarker moves the marker to res.Head after a report: back as well as
+// forward when history moved back, otherwise never backwards (see
+// AdvanceMarker), so two hooks racing cannot rewind each other.
+func SaveMarker(repo *gitwt.Repo, path string, res Result) error {
+	if res.MovedBack {
+		return WriteMarker(path, res.Head)
+	}
+	return AdvanceMarker(repo, path, res.Head)
 }
 
 // HiddenLine is the one line that stands in for the hidden changes, or "".
@@ -182,13 +197,11 @@ func Compute(opts Options) (Result, error) {
 	res.Since = since
 	if since != head {
 		// The upper bound is behind where the report last got to: history
-		// moved back (a reset, a force-push). What lies between was reported
-		// already, and a diff in that direction would repeat it on every run.
+		// moved back (a reset, a force-push). The diff is what changed on disk
+		// (a revert, say), so it is reported, once: the marker follows head
+		// back below.
 		if _, err := repo.Run("merge-base", "--is-ancestor", head, since); err == nil {
-			if opts.UpdateMarker {
-				return res, WriteMarker(opts.Marker, head)
-			}
-			return res, nil
+			res.MovedBack = true
 		}
 	}
 
@@ -229,7 +242,7 @@ func Compute(opts Options) (Result, error) {
 		markLocalKept(repo, head, res.Changes)
 	}
 	if opts.UpdateMarker && !opts.DeferMarker {
-		if err := AdvanceMarker(repo, opts.Marker, head); err != nil {
+		if err := SaveMarker(repo, opts.Marker, res); err != nil {
 			return res, err
 		}
 	}

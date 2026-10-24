@@ -306,7 +306,7 @@ func TestChangesCmd_LocalCopyKeptIsAnnotated(t *testing.T) {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
 	for _, l := range strings.Split(out.String(), "\n") {
-		kept := strings.Contains(l, "(local copy kept; the incoming version was saved next to the mirror copy as .from-remote-*)")
+		kept := strings.Contains(l, "(the copy on this PC differs from the synced version: a local edit not yet synced, or an incoming change that was held back)")
 		if kept != strings.Contains(l, "c.md") {
 			t.Errorf("line %q (kept=%v)", l, kept)
 		}

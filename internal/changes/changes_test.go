@@ -608,8 +608,9 @@ func TestMarker_EmptyIsResetUnderUpdateMarker(t *testing.T) {
 	}
 }
 
-// A marker ahead of HEAD (the repo was reset to an older commit) follows HEAD
-// back, reporting nothing, so the same report is not repeated on every run.
+// A marker ahead of HEAD (the repo was reset to an older commit): the
+// difference (here b.md going away) is reported once, the marker follows HEAD
+// back, and the next run reports nothing.
 func TestMarker_FollowsHeadBack(t *testing.T) {
 	f := newFixture(t)
 	older := f.commit(map[string]string{mem(appHash, "a.md"): "a\n"})
@@ -621,11 +622,14 @@ func TestMarker_FollowsHeadBack(t *testing.T) {
 	if _, err := f.repo.Run("reset", "--hard", older); err != nil {
 		t.Fatal(err)
 	}
-	if r, err := Compute(Options{SyncDir: f.repo.Dir, ClaudeDir: f.claude, Marker: m, UpdateMarker: true, Limit: 20}); err != nil || r.Total != 0 {
+	if r, err := Compute(Options{SyncDir: f.repo.Dir, ClaudeDir: f.claude, Marker: m, UpdateMarker: true, Limit: 20}); err != nil || r.Total != 1 || !r.MovedBack || r.Changes[0].Status != "deleted" {
 		t.Fatalf("reported %+v, %v", r, err)
 	}
 	if b, _ := os.ReadFile(m); strings.TrimSpace(string(b)) != older {
 		t.Errorf("marker = %q, want %s", b, older)
+	}
+	if r, err := Compute(Options{SyncDir: f.repo.Dir, ClaudeDir: f.claude, Marker: m, UpdateMarker: true, Limit: 20}); err != nil || r.Total != 0 {
+		t.Errorf("second run after moving back reported %+v, %v", r, err)
 	}
 	// Moving forward again still works.
 	f.commit(map[string]string{mem(appHash, "c.md"): "c\n"})
@@ -815,7 +819,7 @@ func TestCompute_UpperReplacesHead(t *testing.T) {
 
 // An upper bound behind the marker means history moved back: the changes in
 // between were reported already, so nothing is, and the marker follows.
-func TestCompute_UpperBehindSinceReportsNothing(t *testing.T) {
+func TestCompute_UpperBehindSinceReportsOnce(t *testing.T) {
 	f := newFixture(t)
 	older := f.commit(map[string]string{mem(appHash, "a.md"): "a\n"})
 	newer := f.commit(map[string]string{mem(appHash, "b.md"): "b\n"})
@@ -828,17 +832,22 @@ func TestCompute_UpperBehindSinceReportsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Total != 0 || len(r.Changes) != 0 {
-		t.Errorf("reported %+v", r.Changes)
+	// What differs is reported, flagged MovedBack; with DeferMarker the
+	// caller moves the marker (SaveMarker), so it has not moved yet.
+	if r.Total != 1 || !r.MovedBack {
+		t.Errorf("reported %+v", r)
+	}
+	if err := SaveMarker(f.repo, marker, r); err != nil {
+		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(marker); strings.TrimSpace(string(b)) != older {
 		t.Errorf("marker = %q, want %s", b, older)
 	}
 
-	// With --since there is no marker to move, and still nothing to report.
+	// With --since the same plain diff is reported.
 	o = f.opts(newer)
 	o.Upper = older
-	if r, err := Compute(o); err != nil || r.Total != 0 {
+	if r, err := Compute(o); err != nil || r.Total != 1 {
 		t.Errorf("--since ahead of the bound: %+v %v", r, err)
 	}
 }

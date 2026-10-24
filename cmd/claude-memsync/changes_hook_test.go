@@ -423,8 +423,8 @@ func TestHook_WaitsForSyncedHead(t *testing.T) {
 
 // HEAD moves back to an ancestor of the marker (git reset by hand, or the
 // fork-point rebase onto an upstream that was force-pushed back to drop a
-// commit). The changes in between were reported already: nothing is reported
-// now, the marker follows HEAD back, and what comes next is reported once.
+// commit). The difference (purged.md going away) is reported once, the
+// marker follows HEAD back, and what comes next is reported once.
 func TestHook_HeadMovedBackIsReportedOnce(t *testing.T) {
 	cfgPath, _ := changesRepo(t)
 	cfg, _ := loadDistillConfig(cfgPath)
@@ -441,9 +441,9 @@ func TestHook_HeadMovedBackIsReportedOnce(t *testing.T) {
 	if _, err := repo.Run("reset", "--hard", older); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 2; i++ {
+	for i, want := range []string{"deleted", ""} {
 		code, out, errs := runHook(t, in, "--config", cfgPath, "--hook")
-		if code != 0 || out != "" || errs != "" {
+		if code != 0 || errs != "" || (want == "" && out != "") || (want != "" && !strings.Contains(out, want+" ")) {
 			t.Fatalf("after reset, run %d: exit %d stdout %q stderr %q", i, code, out, errs)
 		}
 	}
@@ -666,7 +666,7 @@ func TestHook_LocalCopyKeptIsAnnotated(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &reply); err != nil {
 		t.Fatalf("not JSON: %v\n%s", err, out)
 	}
-	want := "(local copy kept; the incoming version was saved next to the mirror copy as .from-remote-*)"
+	want := "(the copy on this PC differs from the synced version: a local edit not yet synced, or an incoming change that was held back)"
 	for _, l := range strings.Split(reply.HookSpecificOutput.AdditionalContext, "\n")[1:] {
 		if strings.HasSuffix(l, "copied.md") == false && strings.Contains(l, "copied.md") {
 			t.Errorf("copied.md carries a note: %q", l)

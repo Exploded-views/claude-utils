@@ -120,7 +120,7 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, project str
 	}
 	// Only now that the report went out does the marker move; otherwise the
 	// next prompt reports the same changes again.
-	if err := changes.AdvanceMarker(gitwt.New(cfg.SyncDir), marker, res.Head); err != nil {
+	if err := changes.SaveMarker(gitwt.New(cfg.SyncDir), marker, res); err != nil {
 		return fail(err)
 	}
 	return 0

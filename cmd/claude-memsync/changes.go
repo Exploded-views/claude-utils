@@ -122,7 +122,7 @@ func changesCmd(stdin io.Reader, stdout, stderr io.Writer, args []string) (code 
 
 // denylistFilter builds the filter that keeps denylisted names out of the
 // report, from the same file and parser the daemon uses. A name is hidden when
-// its repo path or its local path matches. No denylist file: nothing is hidden.
+// its repo path matches. No denylist file: nothing is hidden.
 // A file that exists but cannot be read or parsed hides every name (hideAll)
 // and costs one line on stderr: it cannot vouch for any of them.
 func denylistFilter(cfg config.Config, stderr io.Writer) (hide func(changes.Change) bool, hideAll bool) {
