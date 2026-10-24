@@ -27,9 +27,11 @@ of its own — just a git remote you can push to.
   inherits your normal git credentials (Git Credential Manager on Windows, SSH
   agent or `~/.gitconfig` credential helpers on Linux/macOS). Confirm `git push`
   works against the remote before installing.
-- The same project paths on each PC. Claude's project-hash directory names are
-  derived from absolute paths, so if your repos live at the same drive letter /
-  mount point on every PC, you're set. (See [Limitations](#limitations--known-issues).)
+- Either the same project paths on each PC (Claude's project-hash directory
+  names are derived from absolute paths, so if your repos live at the same
+  drive letter / mount point on every PC, you're set), or
+  [`projectKey: "remote"`](#matching-projects-by-git-remote-instead-of-path)
+  if they don't.
 
 ## Setup
 
@@ -176,12 +178,127 @@ commits.
   `~/.claude/history.jsonl`, `~/.claude/settings.json`, etc.
 - `~/.claudesync/config.json` — per-PC (paths embed your machine layout)
 - `~/.claudesync/.state/manifest.json` — per-PC (delete-detection state)
+- `~/.claudesync/.state/projects.json` — per-PC (remote mode's folder cache)
 - `~/.claudesync/daemon.pid` — runtime state
 - `~/.claudesync/distilled/DISTILLED.md` — derived index, regenerated per-PC
   (the distilled `<slug>.md` entry files themselves **are** synced)
 
 If you want any of the additional `~/.claude/` content synced, that's a future
 enhancement.
+
+## Matching projects by git remote instead of path
+
+By default a project is identified by the folder name Claude Code gives it,
+which is the project's absolute path with every non-alphanumeric character
+replaced by `-`. `/home/alice/src/app` on one PC and `/home/bob/code/app` on
+another are different projects and never share memory.
+
+Set `"projectKey": "remote"` in `~/.claudesync/config.json` (per PC, then
+restart the daemon) to identify a project by its git `origin` remote instead:
+
+```json
+{ "projectKey": "remote" }
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `projectKey` | `"path"` | `"path"`: today's behavior. `"remote"`: a project whose directory is a git checkout with an `origin` remote is stored by remote. Any other value is rejected at startup. |
+
+### Repo layout
+
+A remote-keyed project is stored in the sync repo at
+
+```
+remotes/<host>/<owner>/<repo>/memory/<file>
+```
+
+for example `remotes/github.com/acme/app/memory/MEMORY.md`. The remote URL is
+normalized so that every spelling of the same repository gives the same key:
+`git@github.com:Acme/App.git`, `https://github.com/acme/app` and
+`ssh://git@github.com:2222/acme/app.git` all become `github.com/acme/app`
+(lower-cased, `.git` and credentials removed, port dropped). Hosts that nest
+groups keep every segment (`gitlab.example.com/group/sub/app`).
+
+`remotes/` sits beside `projects/` rather than inside it so the two layouts can
+never be mistaken for each other, and so that a PC still running in `path`
+mode (or an older build) simply ignores it. Projects that have no usable
+remote keep their path key under `projects/<hash>/memory/` exactly as before:
+
+- the directory isn't a git checkout, or has no `origin`
+- `origin` is a local path or `file://` URL (not the same string on another PC)
+- the directory is a subdirectory of a repo rather than its top level (two
+  subprojects of a monorepo would otherwise share one memory folder)
+
+### Finding the directory behind a folder name
+
+Claude's folder name is lossy: `/`, `.`, `_`, space and `-` all become `-`, so
+`-home-alice-src-my-app` could be `src/my-app`, `src/my.app` or `src/my/app`.
+To learn the remote the daemon walks the filesystem down from the root,
+following only entries whose escaped name can still match, and collects every
+directory that escapes to the folder name. Then:
+
+- exactly one match: use it
+- several matches that all have the same remote: use it
+- several matches with different remotes: **guess nothing**. The project keeps
+  its path key and the daemon logs a warning. It records the candidates in the
+  cache so you can pick
+- none (the checkout was deleted or lives on another PC): path key
+
+The result is cached per PC in `~/.claudesync/.state/projects.json` (`.state/`
+is git-ignored, so this file is never synced). The file is meant to be
+edited by hand:
+
+```json
+{
+  "version": 1,
+  "projects": {
+    "-home-alice-src-my-app": {
+      "candidates": ["/home/alice/src/my-app", "/home/alice/src/my.app"]
+    },
+    "-home-alice-src-app": { "dir": "/home/alice/src/app" },
+    "-home-alice-scratch": { "key": "path" },
+    "-home-alice-src-app-fork": { "key": "github.com/acme/app" }
+  }
+}
+```
+
+- `dir` pins the directory a folder name stands for (fill it in for an
+  ambiguous entry). The daemon re-derives the key from it on every refresh.
+- `key` overrides the repo-side key outright, or `"path"` to force the path
+  key for that project. It wins over everything else.
+- `candidates` is written by the daemon and informational.
+
+The cache is read at startup (restart the daemon after editing it), and
+entries are re-resolved on the hourly tick and when Claude creates a new
+project folder.
+
+### Several local folders for one repo
+
+Worktrees, or two clones of the same repo, give several Claude folders with
+one key. They share the single repo-side folder and are kept as a union:
+
+- a file any of them has is copied to the others
+- `MEMORY.md` versions are merged section by section, as between PCs
+- other files that differ keep the most recently modified version; the older
+  one is saved as `<name>.from-remote-<random>` next to the repo-side copy,
+  same as a cross-PC collision
+- a file is deleted from the repo only once **every** local folder has lost it.
+  Deleting it in one worktree alone is undone on the next pass, because the
+  daemon can't tell that from a worktree that never received the file yet
+
+### Switching an existing setup
+
+Nothing is moved or deleted. When a PC switches to `remote`, its remote-keyed
+projects are seeded into `remotes/...` from the local folders (the source of
+truth). The old `projects/<hash>/` folders stay in the repo, are no longer
+updated by that PC, and can be removed with `git rm` once every PC has
+switched. Switch all PCs that share a repo; a PC left on `path` keeps writing
+to `projects/` and won't see the others' memory.
+
+Memory reaches a PC only for projects Claude Code has opened there at least
+once, because that is what creates the local folder the daemon syncs into.
+Open the repo once on the new PC; the daemon fills the folder in as soon as
+it appears.
 
 ## Deletes
 
@@ -217,10 +334,12 @@ This means:
     ├── .gitattributes                    # MEMORY.md merge=claude-memory-index
     ├── .gitignore                        # excludes config.json, .state/, etc.
     ├── .state/manifest.json              # per-PC delete-detection state
+    ├── .state/projects.json              # per-PC folder->directory cache (remote mode)
     ├── distilled/                        # shared distilled-memory catalog
     │   ├── DISTILLED.md                  # derived index (gitignored)
     │   └── <slug>.md ...                 # distilled entries (synced)
-    └── projects/<hash>/memory/...        # git work-tree mirror
+    ├── projects/<hash>/memory/...        # git work-tree mirror (path-keyed)
+    └── remotes/<host>/<owner>/<repo>/memory/...  # mirror of remote-keyed projects
 ```
 
 ## Auth notes
@@ -246,10 +365,12 @@ If that works without prompting, the daemon will too.
 
 ## Limitations / known issues
 
-- **Path consistency required**: Claude derives the per-project memory directory
-  name by escaping the project's absolute path. PCs that open the same repo at
-  different paths (e.g. `C:\src\foo` vs. `D:\dev\foo`) will see them as different
-  projects.
+- **Path consistency required (by default)**: Claude derives the per-project
+  memory directory name by escaping the project's absolute path. PCs that open
+  the same repo at different paths (e.g. `C:\src\foo` vs. `D:\dev\foo`) will see
+  them as different projects. Set `projectKey` to `remote` to match git
+  checkouts by their `origin` remote instead; see
+  [Matching projects by git remote](#matching-projects-by-git-remote-instead-of-path).
 - **No live conflict UI**: when the merge driver emits actual conflict markers
   (rare; only on overlapping line edits within the same `MEMORY.md` section
   body), the file is committed and pushed with markers. The next time you edit on
