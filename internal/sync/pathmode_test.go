@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/merge"
 )
 
@@ -291,5 +293,157 @@ func TestReconcile_PathModeMatchesMain(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// mainPropagateChanges is propagateChanges exactly as it was on main, before
+// remote keys: the oracle that path mode must stay identical to.
+func mainPropagateChanges(repo *gitwt.Repo, roots Roots, pre, post string) error {
+	out, err := repo.Run("diff", "--name-status", pre+".."+post)
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		status := fields[0]
+		var path string
+		if strings.HasPrefix(status, "R") && len(fields) >= 3 {
+			oldPath := fields[1]
+			path = fields[2]
+			if hash, name, ok := splitMirrorPath(oldPath); ok {
+				_ = os.Remove(filepath.Join(roots.Claude, hash, "memory", name))
+			}
+		} else {
+			path = fields[1]
+		}
+		hash, name, ok := splitMirrorPath(path)
+		if !ok {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(status, "D"):
+			_ = os.Remove(filepath.Join(roots.Claude, hash, "memory", name))
+		default:
+			if err := CopyToClaude(roots, hash, name); err != nil {
+				log.Printf("propagate %s: %v", path, err)
+			}
+		}
+	}
+	return nil
+}
+
+// A pull that adds, modifies, deletes and renames files must reach Claude's
+// tree in path mode exactly as it did on main. Both versions replay the same
+// real git history onto identical Claude trees.
+func TestPropagateChanges_PathModeMatchesMain(t *testing.T) {
+	gitEnv(t)
+	shared := t.TempDir()
+	mirror := filepath.Join(shared, "projects")
+	sr := gitwt.New(shared)
+	if err := sr.Init("main"); err != nil {
+		t.Fatal(err)
+	}
+	commit := func(msg string) string {
+		t.Helper()
+		if err := sr.AddAll(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sr.Commit(msg); err != nil {
+			t.Fatal(err)
+		}
+		head, err := sr.Run("rev-parse", "HEAD")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(head)
+	}
+	body := strings.Repeat("a line long enough for git to see a rename\n", 8)
+	for _, f := range []struct{ hash, name, content string }{
+		{"proj1", "keep.md", "keep\n"}, {"proj1", "edit.md", "before\n"}, {"proj1", "drop.md", "drop\n"},
+		{"proj1", "old-name.md", body}, {"proj2", "other.md", "other\n"}, {"proj3", "unseen.md", "u\n"},
+	} {
+		writeMem(t, shared, "projects/"+f.hash, f.name, f.content)
+	}
+	pre := commit("one")
+
+	rewrite := func(hash, name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(mirror, hash, "memory", name), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rewrite("proj1", "edit.md", "after\n")                                                 // M
+	rewrite("proj1", "new.md", "new\n")                                                    // A
+	rewrite("proj2", "added-elsewhere.md", "x\n")                                          // A in another project
+	if err := os.Remove(filepath.Join(mirror, "proj1", "memory", "drop.md")); err != nil { // D
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(mirror, "proj1", "memory", "old-name.md"), // R
+		filepath.Join(mirror, "proj1", "memory", "new-name.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(shared, "README.md"), []byte("not a memory\n"), 0600); err != nil { // not a memory path
+		t.Fatal(err)
+	}
+	post := commit("two")
+
+	status, err := sr.Run("diff", "--name-status", pre+".."+post)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, letter := range []string{"A\t", "M\t", "D\t", "R"} {
+		if !strings.Contains("\n"+status, "\n"+letter) {
+			t.Fatalf("setup: the history has no %q entry:\n%s", letter, status)
+		}
+	}
+
+	claudeTree := func() Roots {
+		t.Helper()
+		claude := t.TempDir()
+		for _, f := range []struct{ hash, name, content string }{
+			{"proj1", "keep.md", "keep\n"}, {"proj1", "edit.md", "before\n"}, {"proj1", "drop.md", "drop\n"},
+			{"proj1", "old-name.md", body}, {"proj1", "local-only.md", "mine\n"}, {"proj2", "other.md", "other\n"},
+		} {
+			writeMem(t, claude, f.hash, f.name, f.content)
+		}
+		return Roots{Claude: claude, Mirror: mirror}
+	}
+	ours, main := claudeTree(), claudeTree()
+	if err := propagateChanges(sr, ours, pre, post); err != nil {
+		t.Fatal(err)
+	}
+	if err := mainPropagateChanges(sr, main, pre, post); err != nil {
+		t.Fatal(err)
+	}
+	got, want := snapTree(t, ours.Claude), snapTree(t, main.Claude)
+	for p, w := range want {
+		if g, ok := got[p]; !ok {
+			t.Errorf("%s exists on main but not here", p)
+		} else if g.content != w.content {
+			t.Errorf("%s = %q, main has %q", p, g.content, w.content)
+		}
+	}
+	for p := range got {
+		if _, ok := want[p]; !ok {
+			t.Errorf("%s exists here but not on main", p)
+		}
+	}
+	// And the oracle really did something with each kind of entry.
+	for _, rel := range []string{"proj1/memory/new.md", "proj1/memory/new-name.md", "proj2/memory/added-elsewhere.md"} {
+		if _, ok := want[rel]; !ok {
+			t.Errorf("setup: main's result lacks %s", rel)
+		}
+	}
+	for _, rel := range []string{"proj1/memory/drop.md", "proj1/memory/old-name.md"} {
+		if _, ok := want[rel]; ok {
+			t.Errorf("setup: main's result still has %s", rel)
+		}
 	}
 }
