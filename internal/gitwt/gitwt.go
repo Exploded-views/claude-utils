@@ -205,10 +205,15 @@ func (r *Repo) UnstageAll() error {
 	return err
 }
 
-// DirtyPaths lists paths under dir that differ from HEAD or are untracked
-// (ignored files excluded), one entry per path.
+// DirtyPaths lists paths under dir (the whole work-tree when dir is "") that
+// differ from HEAD or are untracked (ignored files excluded), one entry per
+// path.
 func (r *Repo) DirtyPaths(dir string) ([]string, error) {
-	out, err := r.Run("status", "--porcelain", "-z", "--no-renames", "--untracked-files=all", "--", Literal(dir))
+	args := []string{"status", "--porcelain", "-z", "--no-renames", "--untracked-files=all"}
+	if dir != "" {
+		args = append(args, "--", Literal(dir))
+	}
+	out, err := r.Run(args...)
 	if err != nil {
 		return nil, err
 	}
@@ -221,14 +226,18 @@ func (r *Repo) DirtyPaths(dir string) ([]string, error) {
 	return paths, nil
 }
 
-// HeadFiles returns the set of files under dir in HEAD (empty when HEAD is
-// unborn).
+// HeadFiles returns the set of files under dir (the whole tree when dir is "")
+// in HEAD (empty when HEAD is unborn).
 func (r *Repo) HeadFiles(dir string) (map[string]bool, error) {
 	set := map[string]bool{}
 	if _, err := r.Run("rev-parse", "--verify", "--quiet", "HEAD"); err != nil {
 		return set, nil
 	}
-	out, err := r.Run("ls-tree", "-r", "--name-only", "-z", "HEAD", "--", Literal(dir))
+	args := []string{"ls-tree", "-r", "--name-only", "-z", "HEAD"}
+	if dir != "" {
+		args = append(args, "--", Literal(dir))
+	}
+	out, err := r.Run(args...)
 	if err != nil {
 		return nil, err
 	}

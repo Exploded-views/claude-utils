@@ -91,10 +91,9 @@ func TestPark_RenamedUpstreamKeepsHeldBackOldPath(t *testing.T) {
 	}
 }
 
-// A crash between park and refill leaves the mirror without the user's
-// version. The Claude copy was never touched, so the startup Reconcile plus
-// the next flush simply re-mirror it: nothing is lost and nothing needs a
-// separate recovery path.
+// A crash between park and unpark leaves the mirror without the user's
+// version, and parked.json on disk. The next start finishes the park, then
+// Reconcile and the next flush carry on; the Claude copies were never touched.
 func TestPark_CrashBeforeRefillRecovers(t *testing.T) {
 	f := newPullFixture(t, map[string]string{"note.md": "alpha\nbeta\n", "MEMORY.md": "# Memory\n"})
 	captureLog(t)
@@ -117,7 +116,10 @@ func TestPark_CrashBeforeRefillRecovers(t *testing.T) {
 		}
 	}
 
-	// Restart: Reconcile, then flush.
+	// Restart: finish the park, Reconcile, then flush.
+	if err := finishParked(f.repo, f.roots); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := Reconcile(f.roots, NewManifest()); err != nil {
 		t.Fatal(err)
 	}
@@ -131,5 +133,115 @@ func TestPark_CrashBeforeRefillRecovers(t *testing.T) {
 		if m, _ := os.ReadFile(filepath.Join(f.roots.Mirror, "p1", "memory", name)); string(m) != want {
 			t.Errorf("mirror copy of %s was not re-mirrored", name)
 		}
+	}
+}
+
+// Liveness: a tracked held-back file edited on the peer must not
+// stop unrelated notes flowing both ways, over two cycles.
+func TestPark_LivenessTrackedHeldBackEditedUpstream(t *testing.T) {
+	f := newPullFixture(t, map[string]string{"note.md": "alpha\nbeta\n"})
+	captureLog(t)
+	local := "alpha\nbeta token: " + fakeSecret() + "\n"
+	f.editLocal("note.md", local)
+	f.editLocal("mine1.md", "mine one\n")
+	f.peerPush("note.md", "alpha\nbeta edited on peer\n")
+	f.peerPush("peer1.md", "peer one\n")
+
+	err := f.loop.flush(f.repo, f.roots, true)
+	f.requirePreserved("note.md", local, err)
+	if !f.originHas("projects/p1/memory/mine1.md") {
+		t.Errorf("cycle 1: mine1.md not pushed (err %v)", err)
+	}
+	if _, ok := f.claudeCopy("peer1.md"); !ok {
+		t.Errorf("cycle 1: peer1.md not pulled into Claude")
+	}
+
+	// Cycle 2: the peer edits the held-back file again plus another note.
+	f.peerPush("note.md", "alpha\nbeta edited on peer twice\n")
+	f.peerPush("peer2.md", "peer two\n")
+	f.editLocal("mine2.md", "mine two\n")
+	err = f.loop.flush(f.repo, f.roots, true)
+	f.requirePreserved("note.md", local, err)
+	if !f.originHas("projects/p1/memory/mine2.md") {
+		t.Errorf("cycle 2: mine2.md not pushed (err %v)", err)
+	}
+	if _, ok := f.claudeCopy("peer2.md"); !ok {
+		t.Errorf("cycle 2: peer2.md not pulled into Claude")
+	}
+	if st, _ := f.repo.Run("stash", "list"); st != "" {
+		t.Errorf("stash should be empty, got %q", st)
+	}
+}
+
+// A parked path need not be a memory file. An untracked held-back file outside
+// projects/ while the peer adds the same path must not stop the pull: git
+// would refuse to overwrite it, so every cycle would fail and nothing
+// unrelated would be pulled or pushed.
+func TestPark_DistilledUntrackedHeldBackDoesNotStall(t *testing.T) {
+	f := newPullFixture(t, map[string]string{"note.md": "n\n"})
+	captureLog(t)
+	entry := filepath.Join(f.repo.Dir, "distilled", "entry.md")
+	if err := os.MkdirAll(filepath.Dir(entry), 0700); err != nil {
+		t.Fatal(err)
+	}
+	local := "mine token: " + fakeSecret() + "\n"
+	if err := os.WriteFile(entry, []byte(local), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f.peerWrite("distilled/entry.md", "theirs\n")
+	f.peerPush("peernote.md", "peer note\n")
+	f.editLocal("mine.md", "mine\n")
+
+	var err error
+	for i := 0; i < 2; i++ {
+		err = f.loop.flush(f.repo, f.roots, true)
+	}
+	if err != nil {
+		t.Errorf("last flush err: %v", err)
+	}
+	if b, _ := os.ReadFile(entry); string(b) != local {
+		t.Errorf("distilled entry changed: %q", redact(string(b)))
+	}
+	if _, ok := f.claudeCopy("peernote.md"); !ok {
+		t.Errorf("peernote.md never pulled while distilled/entry.md is held back")
+	}
+	if !f.originHas("projects/p1/memory/mine.md") {
+		t.Errorf("mine.md never pushed while distilled/entry.md is held back")
+	}
+}
+
+// A tracked held-back distilled entry that the peer edits on the same line.
+// distilled/ has no Claude-side twin, so the work-tree file is the only copy of
+// the user's version: it must come back intact (no conflict markers, no
+// autostash entry) with the incoming version kept as a .from-remote-* backup.
+func TestPark_DistilledTrackedHeldBackKeepsLocalAndBacksUpIncoming(t *testing.T) {
+	f := newPullFixture(t, map[string]string{"note.md": "n\n"})
+	captureLog(t)
+	f.peerWrite("distilled/entry.md", "alpha\nbeta\n")
+	if err := f.loop.flush(f.repo, f.roots, true); err != nil {
+		t.Fatal(err)
+	}
+	entry := filepath.Join(f.repo.Dir, "distilled", "entry.md")
+	local := "alpha\nbeta token: " + fakeSecret() + "\n"
+	if err := os.WriteFile(entry, []byte(local), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f.peerWrite("distilled/entry.md", "alpha\nbeta edited on peer\n")
+
+	err := f.loop.flush(f.repo, f.roots, true)
+	b, _ := os.ReadFile(entry)
+	st, _ := f.repo.Run("stash", "list")
+	if err != nil || st != "" {
+		t.Errorf("flush err: %v; stash: %q", err, st)
+	}
+	if string(b) != local {
+		t.Errorf("distilled entry (only copy) damaged:\n%s", redact(string(b)))
+	}
+	bk, _ := filepath.Glob(entry + ".from-remote-*")
+	if len(bk) != 1 {
+		t.Fatalf("want one backup of the incoming entry, got %v", bk)
+	}
+	if c, _ := os.ReadFile(bk[0]); string(c) != "alpha\nbeta edited on peer\n" {
+		t.Errorf("backup = %q", c)
 	}
 }

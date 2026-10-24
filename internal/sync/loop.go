@@ -1,7 +1,6 @@
 package sync
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -17,7 +16,6 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/distill"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
-	"github.com/MarimerLLC/claude-utils/internal/merge"
 )
 
 // Loop is the long-running daemon body. It watches the Claude memory tree,
@@ -81,6 +79,11 @@ func (l *Loop) Run(ctx context.Context) error {
 	if err != nil {
 		log.Println("load manifest (continuing without delete detection):", err)
 		manifest = NewManifest()
+	}
+	// A park the last run did not finish must be undone before Reconcile
+	// compares the trees: the parked mirror copies differ from the Claude ones.
+	if err := finishParked(repo, roots); err != nil {
+		log.Println("finish parked files:", err)
 	}
 	if _, err := Reconcile(roots, manifest); err != nil {
 		log.Println("initial reconcile:", err)
@@ -220,7 +223,12 @@ func (l *Loop) handleEvent(watcher *fsnotify.Watcher, roots Roots, ev fsnotify.E
 // (a single ls-remote round-trip). If origin's SHA matches our cached
 // refs/remotes/origin/<branch> AND we have no unpushed commits, it returns
 // early — skipping the full pull/push churn that dominates idle ticks.
-func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) error {
+func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err error) {
+	// A park an earlier cycle (or a crashed run) did not finish comes first:
+	// nothing may be committed, or parked over, while files are still away.
+	if err := finishParked(repo, roots); err != nil {
+		return fmt.Errorf("finish earlier park: %w", err)
+	}
 	if includeLocal {
 		_, err := CommitMirror(repo, l.Cfg, fmt.Sprintf("auto: %s @ %s", l.Hostname, time.Now().UTC().Format(time.RFC3339)))
 		if err != nil {
@@ -233,11 +241,16 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) error {
 	}
 
 	// Whatever CommitMirror left uncommitted (held back by the scrub, or
-	// everything when the denylist policy blocks the commit) is parked: the
-	// mirror copy is reset to HEAD so the pull runs on a clean tree, the pull
-	// is not propagated over the Claude copy, and the mirror is refilled from
-	// the Claude copy afterwards. The Claude copy is authoritative throughout.
-	held, err := parkUncommitted(repo)
+	// everything when the denylist policy blocks the commit) is parked: reset
+	// to HEAD so the pull runs on a clean tree, skipped by propagateChanges,
+	// and put back afterwards (see park.go). The deferred finish runs whatever
+	// happens below, and tries every path.
+	defer func() {
+		if ferr := finishParked(repo, roots); ferr != nil {
+			err = errors.Join(err, fmt.Errorf("restore held-back files: %w", ferr))
+		}
+	}()
+	st, err := parkUncommitted(repo)
 	if err != nil {
 		return fmt.Errorf("park held-back files: %w", err)
 	}
@@ -252,19 +265,10 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) error {
 		}
 	}
 	postRev, _ := repo.Run("rev-parse", "HEAD")
-	upstream := map[string]bool{}
 	if conflictErr == nil && strings.TrimSpace(preRev) != strings.TrimSpace(postRev) && strings.TrimSpace(preRev) != "" {
-		if err := propagateChanges(repo, roots, strings.TrimSpace(preRev), strings.TrimSpace(postRev), held); err != nil {
+		if err := propagate(repo, roots, strings.TrimSpace(preRev), strings.TrimSpace(postRev), st.skip()); err != nil {
 			return fmt.Errorf("propagate: %w", err)
 		}
-		if out, err := repo.Run("diff", "--name-only", "-z", "--no-renames", strings.TrimSpace(preRev), strings.TrimSpace(postRev)); err == nil {
-			for _, p := range strings.Split(out, "\x00") {
-				upstream[p] = true
-			}
-		}
-	}
-	if err := unpark(repo, roots, held, upstream, strings.TrimSpace(preRev)); err != nil {
-		return fmt.Errorf("restore held-back files: %w", err)
 	}
 	if conflictErr != nil {
 		return conflictErr // nothing to push: origin is ahead
@@ -275,6 +279,9 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) error {
 	}
 	return nil
 }
+
+// propagate is propagateChanges; a variable so a test can make it fail.
+var propagate = propagateChanges
 
 // resolveRebaseConflict deals with a `pull --rebase` that stopped on a
 // conflict (both PCs edited the same lines of a committed file). It aborts the
@@ -391,106 +398,6 @@ func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string, skip map[
 		}
 	}
 	return nil
-}
-
-// parkUncommitted resets every uncommitted memory file in the mirror to HEAD
-// (removing it if HEAD lacks it) and returns the set of paths it touched. Only
-// projects/<hash>/memory/<file> paths are parked: they are the ones with an
-// authoritative Claude copy to refill from.
-func parkUncommitted(repo *gitwt.Repo) (map[string]bool, error) {
-	dirty, err := repo.DirtyPaths("projects")
-	if err != nil {
-		return nil, err
-	}
-	held := map[string]bool{}
-	var paths []string
-	for _, p := range dirty {
-		if _, _, ok := splitMirrorPath(p); ok && !held[p] {
-			held[p] = true
-			paths = append(paths, p)
-		}
-	}
-	if len(paths) == 0 {
-		return held, nil
-	}
-	inHead, err := repo.HeadFiles("projects")
-	if err != nil {
-		return nil, err
-	}
-	var restore []string
-	for _, p := range paths {
-		if inHead[p] {
-			restore = append(restore, p)
-		} else if err := os.Remove(filepath.Join(repo.Dir, filepath.FromSlash(p))); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return nil, err
-		}
-	}
-	if err := repo.CheckoutHead(restore); err != nil {
-		return nil, err
-	}
-	return held, nil
-}
-
-// unpark makes the mirror copy of each parked path match the Claude copy
-// again, so the next CommitMirror re-checks the user's version. If the pull
-// changed a parked path, committing the user's version later would silently
-// revert the incoming change, so it is kept: a MEMORY.md is merged with the
-// incoming version (3-way, against the version at preRev) and written to both
-// trees; anything else, or a MEMORY.md whose merge conflicts, is kept beside
-// the mirror copy as a .from-remote-* backup, as Reconcile does.
-//
-// Nothing here is needed for correctness after a crash between park and
-// unpark: the Claude copy is never written before the merge step, so the
-// next startup's Reconcile and flush re-mirror it.
-func unpark(repo *gitwt.Repo, roots Roots, held, upstream map[string]bool, preRev string) error {
-	backedUp := 0
-	for p := range held {
-		hash, name, _ := splitMirrorPath(p)
-		if upstream[p] {
-			kept, err := keepIncoming(repo, roots, p, preRev)
-			if err != nil {
-				return err
-			}
-			if kept {
-				backedUp++
-			}
-		}
-		err := CopyToMirror(roots, hash, name)
-		if errors.Is(err, fs.ErrNotExist) {
-			err = RemoveFromMirror(roots, hash, name)
-		}
-		if err != nil {
-			return err
-		}
-	}
-	if backedUp > 0 {
-		// Count only: the path may itself match the denylist.
-		log.Printf("scrub: %d held-back file(s) changed upstream; incoming copies kept as .from-remote-*", backedUp)
-	}
-	return nil
-}
-
-// keepIncoming preserves the pulled version of parked path p (still in the
-// mirror at this point). It returns true when a backup file was written.
-func keepIncoming(repo *gitwt.Repo, roots Roots, p, preRev string) (bool, error) {
-	hash, name, _ := splitMirrorPath(p)
-	mp := filepath.Join(roots.Mirror, hash, "memory", name)
-	cp := filepath.Join(roots.Claude, hash, "memory", name)
-	incoming, err := os.ReadFile(mp)
-	if err != nil {
-		return false, nil // deleted upstream: the user's version stands
-	}
-	local, err := os.ReadFile(cp)
-	if err != nil || bytes.Equal(local, incoming) {
-		return false, nil
-	}
-	if name == "MEMORY.md" {
-		base, _ := repo.Run("show", preRev+":"+p) // "" when it did not exist
-		if merged, conflict := merge.Merge(base, string(local), string(incoming)); !conflict {
-			return false, writeAtomic(cp, []byte(merged))
-		}
-	}
-	return true, writeAtomic(fmt.Sprintf("%s.from-remote-%s", mp, randSuffix()), incoming)
 }
 
 // splitMirrorPath converts a path of the form "projects/<hash>/memory/<file>"
