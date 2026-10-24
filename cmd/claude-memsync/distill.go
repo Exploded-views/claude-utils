@@ -34,6 +34,16 @@ func runDistill(args []string) int {
 		ProjectsDir:  cfg.ClaudeProjectsDir,
 		DistilledDir: cfg.DistilledPath(),
 	}
+	// With several repos, only folders routed to non-client repos feed the
+	// catalog: a client's notes never enter the personal worklist. An explicit
+	// --config means a single repo and no filter.
+	if *cfgPath == "" {
+		if path, ok, err := resolveRoutesPath(""); err == nil && ok {
+			if set, err := loadRouted(path); err == nil {
+				opts.Keep = set.Router.NonClient
+			}
+		}
+	}
 
 	var res distill.Result
 	if *dryRun {

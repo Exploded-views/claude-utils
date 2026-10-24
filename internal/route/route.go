@@ -515,3 +515,10 @@ func globRe(key, pat string, fold bool) *regexp.Regexp {
 	globCache.Store(key, re)
 	return re
 }
+
+// NonClient reports whether the folder is routed to a repo that is not a client
+// repo: the only folders whose notes may feed the personal catalog.
+func (r *Router) NonClient(folder string) bool {
+	d := r.Decide(folder)
+	return d.Repo != "" && !r.cur().Repos[d.Repo].Client
+}

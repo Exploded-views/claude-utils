@@ -245,3 +245,29 @@ func TestReconcileKeepsEntriesWhoseOriginFolderIsAbsentHere(t *testing.T) {
 		t.Errorf("entry with a missing file in a present folder should be pruned")
 	}
 }
+
+// Folders Keep rejects never reach the worklist, and their entries are not pruned.
+func TestKeepFiltersWorklistAndPrune(t *testing.T) {
+	dir := t.TempDir()
+	projects := filepath.Join(dir, "projects")
+	distilled := filepath.Join(dir, "distilled")
+	writeFile(t, filepath.Join(projects, "own", "memory", "a.md"), sourceMemory("own-note", true, "x"))
+	writeFile(t, filepath.Join(projects, "client", "memory", "b.md"), sourceMemory("client-note", true, "y"))
+	writeFile(t, filepath.Join(distilled, "old.md"), catalogEntry("old", "d", "feedback", "client", "gone.md", "z"))
+	keep := func(f string) bool { return f == "own" }
+
+	res, err := BuildIndex(Options{ProjectsDir: projects, DistilledDir: distilled, Keep: keep})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Pending) != 1 || res.Pending[0].Project != "own" {
+		t.Fatalf("pending = %+v, want only the kept folder", res.Pending)
+	}
+	if r, err := Reconcile(Options{ProjectsDir: projects, DistilledDir: distilled, Keep: keep}); err != nil || r.Pruned != 0 {
+		t.Fatalf("prune touched a rejected folder's entry: %+v %v", r, err)
+	}
+	all, _ := BuildIndex(Options{ProjectsDir: projects, DistilledDir: distilled})
+	if len(all.Pending) != 2 {
+		t.Fatalf("control without Keep: %d pending", len(all.Pending))
+	}
+}

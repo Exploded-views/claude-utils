@@ -96,6 +96,21 @@ func loadRouted(path string) (*routedSet, error) {
 	return s, nil
 }
 
+// repoForSyncDir names the repo of routes.json whose config.json lives in dir.
+func (s *routedSet) repoForSyncDir(dir string) string {
+	want, err := filepath.Abs(dir)
+	if err != nil {
+		return ""
+	}
+	for _, name := range s.File.RepoNames() {
+		got, err := filepath.Abs(filepath.Dir(route.ExpandHome(s.File.Repos[name].Config)))
+		if err == nil && filepath.Clean(got) == filepath.Clean(want) {
+			return name
+		}
+	}
+	return ""
+}
+
 // Primary is the config the daemon's PID file and the default commands use:
 // the personal repo if this host has it, else the first repo by name.
 func (s *routedSet) Primary() (config.Config, bool) {
