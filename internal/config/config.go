@@ -46,6 +46,11 @@ type Config struct {
 	// is false.
 	RequireDenylist bool `json:"requireDenylist"`
 
+	// PrivateOnly turns on the private-only guard: the mem-* name allowlist
+	// and GitHub visibility checks at init and daemon start. Default false,
+	// which leaves behavior exactly as without the guard.
+	PrivateOnly bool `json:"privateOnly,omitempty"`
+
 	// GitHubTokenEnv names the env var holding a GitHub API token used only
 	// for the private-only visibility check (default MEMSYNC_GITHUB_TOKEN).
 	GitHubTokenEnv string `json:"githubTokenEnv,omitempty"`

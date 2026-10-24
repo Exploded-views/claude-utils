@@ -27,6 +27,11 @@ type Loop struct {
 	Hostname string
 	OnFlush  func(localChanges bool, err error) // optional, for tests/observability
 
+	// PushAllowed, when set, is asked before each push. Returning false
+	// keeps committing and pulling locally but does not push (the remote is
+	// no longer private).
+	PushAllowed func() bool
+
 	// recovered is the outcome of a recoverLeftovers the cycle already ran
 	// before flush, so flush does not repeat it: a path whose restore keeps
 	// failing is counted once per cycle.
@@ -396,6 +401,9 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 		return conflictErr // nothing to push: origin is ahead
 	}
 
+	if l.PushAllowed != nil && !l.PushAllowed() {
+		return nil
+	}
 	if err := repo.Push(l.Branch); err != nil {
 		return fmt.Errorf("push: %w", err)
 	}

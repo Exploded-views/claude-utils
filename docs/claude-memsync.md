@@ -799,8 +799,11 @@ If that works without prompting, the daemon will too.
 
 ## Private repos only
 
-Nothing on GitHub stops an org owner from making a repo public, so the tool
-enforces privacy itself.
+Nothing on GitHub stops an org owner from making a repo public, so the tool can
+enforce privacy itself. This is **opt-in**: set `"privateOnly": true` in
+`config.json` or run `init --private-only`. With it off, `init` and the daemon
+behave as they always did (any remote name, no token, no checks). `doctor` and
+`repo create` always apply the `mem-*` rules.
 
 - **Names.** The tool only creates, joins or checks repos named `mem-registry`,
   `mem-personal`, `mem-project-<x>`, `mem-infra-<x>`, `mem-client-<x>`,
@@ -832,7 +835,12 @@ error messages.
 | `doctor` | yes | Non-zero exit if it cannot check. |
 | daemon start | no | With a token: refuses to start on a non-private repo. Without one: logs once that visibility was verified only at init and by `doctor`, and starts. |
 
-The daemon does not re-check while running; schedule `doctor` for that.
+With `privateOnly` on and a token configured, the daemon also re-checks at most
+once an hour (conditional request with the ETag; 304 means unchanged). If the
+repo is no longer private it stops pushing but keeps committing locally, logs one
+line per state change, and `claude-memsync status` says so. A failed API call
+keeps the last known state, is logged once, and does not block. Without a token
+there is no re-check; schedule `doctor`.
 
 ### doctor
 
@@ -844,7 +852,7 @@ Lists the org's repos and exits non-zero, naming each one, if any `mem-*` repo
 is public or internal, or if the repo this host joined is not private or lacks
 the `mem-` prefix. Public repos without the prefix are ignored. Output is repo
 names only. `--org` defaults to `githubOrg` in `config.json`, else the owner of
-the remote.
+the remote. `repo create` resolves the org the same way and refuses if none is set.
 
 `claude-memsync doctor --install-timer` writes a daily systemd user timer
 (Linux) or launchd agent (macOS) into `~/.config/systemd/user` or
@@ -852,7 +860,7 @@ the remote.
 it prints the command. The timer needs the token in its environment or
 `githubTokenFile`.
 
-Config keys: `githubTokenEnv`, `githubTokenFile`, `githubApiUrl`, `githubOrg`.
+Config keys: `privateOnly`, `githubTokenEnv`, `githubTokenFile`, `githubApiUrl`, `githubOrg`.
 
 ## Limitations / known issues
 

@@ -41,7 +41,7 @@ func (p *program) Start(s service.Service) error {
 	p.done = make(chan struct{})
 	go func() {
 		defer close(p.done)
-		loop := &syncpkg.Loop{Cfg: cfg}
+		loop := &syncpkg.Loop{Cfg: cfg, PushAllowed: pushWatch(cfg, log.Printf)}
 		p.loopErr = loop.Run(ctx)
 	}()
 	return nil
@@ -180,6 +180,9 @@ func runStatus(args []string) int {
 	fmt.Println(st)
 	if cfg, err := loadDistillConfig(""); err == nil {
 		if line := pausedLine(cfg); line != "" {
+			fmt.Println(line)
+		}
+		if line := visibilityLine(cfg); line != "" {
 			fmt.Println(line)
 		}
 	}

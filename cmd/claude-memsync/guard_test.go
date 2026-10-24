@@ -32,6 +32,7 @@ func guardCfg(t *testing.T, h http.HandlerFunc, withToken bool) config.Config {
 	cfg := config.Defaults()
 	cfg.SyncDir = t.TempDir()
 	cfg.GitHubAPIURL = srv.URL
+	cfg.PrivateOnly = true
 	cfg.RemoteURL = "git@gh-mem-personal:Org/mem-personal.git"
 	if withToken {
 		f := filepath.Join(t.TempDir(), "tok")
@@ -175,5 +176,53 @@ func TestInstallTimerWritesUnits(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join(dir, "claude-memsync-doctor.timer"))
 	if err != nil || !strings.Contains(string(b), "OnCalendar=daily") {
 		t.Errorf("timer file: %v %s", err, b)
+	}
+}
+
+func TestGuardOffByDefault(t *testing.T) {
+	// Legacy name, no token, API that would refuse everything: off means untouched.
+	cfg := guardCfg(t, jsonH(500, map[string]string{}), false)
+	cfg.PrivateOnly = false
+	cfg.RemoteURL = "git@github.com:someone/claude-memories.git"
+	if err := guardRemote(cfg); err != nil {
+		t.Errorf("init guard must be off: %v", err)
+	}
+	var logs []string
+	if err := daemonGuard(cfg, func(f string, a ...any) { logs = append(logs, f) }); err != nil || len(logs) != 0 {
+		t.Errorf("daemon guard must be silent and off: %v %v", err, logs)
+	}
+	if config.Defaults().PrivateOnly {
+		t.Error("PrivateOnly must default to false")
+	}
+}
+
+func TestRepoCreateOrgResolution(t *testing.T) {
+	var path string
+	h := func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			path = r.URL.Path
+			w.WriteHeader(201)
+		}
+		_ = json.NewEncoder(w).Encode(repoJSON{Name: "mem-personal", Private: tb(true), Visibility: "private"})
+	}
+	var out, errb bytes.Buffer
+	cfg := guardCfg(t, h, true)
+	cfg.GitHubOrg = "CfgOrg"
+	if repoCreateRun(cfg, "FlagOrg", "mem-personal", &out, &errb) != 0 || path != "/orgs/FlagOrg/repos" {
+		t.Errorf("flag wins: %s", path)
+	}
+	repoCreateRun(cfg, "", "mem-personal", &out, &errb)
+	if path != "/orgs/CfgOrg/repos" {
+		t.Errorf("config next: %s", path)
+	}
+	cfg.GitHubOrg = ""
+	repoCreateRun(cfg, "", "mem-personal", &out, &errb)
+	if path != "/orgs/Org/repos" {
+		t.Errorf("remote last: %s", path)
+	}
+	cfg.RemoteURL = ""
+	path = ""
+	if repoCreateRun(cfg, "", "mem-personal", &out, &errb) == 0 || path != "" {
+		t.Error("no org must refuse without a request")
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/ghguard"
@@ -32,6 +33,9 @@ var errNoToken = errors.New("no GitHub token configured (set " + ghguard.Default
 // guardRemote is the check run by init before anything is cloned or pushed.
 // It fails closed, including when no token is available.
 func guardRemote(cfg config.Config) error {
+	if !cfg.PrivateOnly {
+		return nil
+	}
 	c, err := guardClient(cfg)
 	if err != nil {
 		return err
@@ -45,6 +49,9 @@ func guardRemote(cfg config.Config) error {
 // daemonGuard runs at daemon start. With a token it must pass; without one it
 // logs once that the check only ran at init/doctor and lets the daemon start.
 func daemonGuard(cfg config.Config, logf func(format string, args ...any)) error {
+	if !cfg.PrivateOnly {
+		return nil
+	}
 	c, err := guardClient(cfg)
 	if err != nil {
 		return err
@@ -225,4 +232,33 @@ func runRepo(args []string) int {
 		return 2
 	}
 	return repoCreateRun(loadCfgOptional(*cfgPath), *org, flags.Arg(0), os.Stdout, os.Stderr)
+}
+
+// pushWatch returns the loop's PushAllowed hook, or nil when private-only is
+// off or no token is configured (nothing to re-check with).
+func pushWatch(cfg config.Config, logf func(string, ...any)) func() bool {
+	if !cfg.PrivateOnly {
+		return nil
+	}
+	c, err := guardClient(cfg)
+	if err != nil || c == nil {
+		return nil
+	}
+	owner, name, err := ghguard.ParseRemote(cfg.RemoteURL)
+	if err != nil {
+		return nil
+	}
+	w := &ghguard.Watch{C: c, Owner: owner, Name: name, StateDir: filepath.Join(cfg.SyncDir, ".state"), Logf: logf}
+	return w.Allowed
+}
+
+// visibilityLine is the status line for a repo that stopped being private.
+func visibilityLine(cfg config.Config) string {
+	if !cfg.PrivateOnly {
+		return ""
+	}
+	if s := ghguard.ReadState(filepath.Join(cfg.SyncDir, ".state")); strings.HasPrefix(s, "not private") {
+		return "pushing stopped: the repo is " + s + "; commits stay local"
+	}
+	return ""
 }

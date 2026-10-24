@@ -132,6 +132,10 @@ func (c *Client) scrub(err error) error {
 // do sends one request and returns status, body and headers. Error bodies are
 // deliberately never put into errors.
 func (c *Client) do(method, target string, body any) (int, []byte, http.Header, error) {
+	return c.doH(method, target, body, "")
+}
+
+func (c *Client) doH(method, target string, body any, ifNoneMatch string) (int, []byte, http.Header, error) {
 	var rd io.Reader
 	if body != nil {
 		b, _ := json.Marshal(body)
@@ -145,6 +149,9 @@ func (c *Client) do(method, target string, body any) (int, []byte, http.Header, 
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if ifNoneMatch != "" {
+		req.Header.Set("If-None-Match", ifNoneMatch)
 	}
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)

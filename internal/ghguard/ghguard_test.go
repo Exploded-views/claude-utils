@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testToken = "tok-SECRET-1234567890"
@@ -352,5 +353,94 @@ func TestCreateRepoReadBackMustBePrivate(t *testing.T) {
 	})
 	if err := c.CreateRepo("Org", "mem-personal"); err == nil {
 		t.Fatal("a read-back that is public must fail the create")
+	}
+}
+
+type clock struct{ t time.Time }
+
+func (c *clock) now() time.Time { return c.t }
+
+func TestWatchHourlyETagAndStateChanges(t *testing.T) {
+	var reqs int
+	var inm []string
+	public, fail := false, false
+	c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		reqs++
+		inm = append(inm, r.Header.Get("If-None-Match"))
+		if fail {
+			writeJSON(w, 500, map[string]string{})
+			return
+		}
+		if r.Header.Get("If-None-Match") == `"v1"` && !public {
+			w.WriteHeader(304)
+			return
+		}
+		if public {
+			w.Header().Set("ETag", `"v2"`)
+			writeJSON(w, 200, fakeRepo{Name: "mem-personal", Private: bp(false), Visibility: "public"})
+			return
+		}
+		w.Header().Set("ETag", `"v1"`)
+		writeJSON(w, 200, fakeRepo{Name: "mem-personal", Private: bp(true), Visibility: "private"})
+	})
+	dir := t.TempDir()
+	clk := &clock{time.Unix(1000000, 0)}
+	var logs []string
+	w := &Watch{C: c, Owner: "Org", Name: "mem-personal", Now: clk.now, StateDir: dir,
+		Logf: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }}
+
+	if !w.Allowed() || reqs != 1 {
+		t.Fatalf("first poll: reqs=%d", reqs)
+	}
+	clk.t = clk.t.Add(59 * time.Minute)
+	w.Allowed()
+	if reqs != 1 {
+		t.Fatalf("must not call API within the hour, reqs=%d", reqs)
+	}
+	clk.t = clk.t.Add(2 * time.Minute)
+	if !w.Allowed() || reqs != 2 || inm[1] != `"v1"` {
+		t.Fatalf("304 path: reqs=%d inm=%v", reqs, inm)
+	}
+	if len(logs) != 0 {
+		t.Fatalf("no state change, no log: %v", logs)
+	}
+	// API failure keeps last state, logs once.
+	fail = true
+	clk.t = clk.t.Add(61 * time.Minute)
+	if !w.Allowed() {
+		t.Fatal("API failure must not block")
+	}
+	clk.t = clk.t.Add(61 * time.Minute)
+	w.Allowed()
+	if len(logs) != 1 {
+		t.Fatalf("failure logged once, got %v", logs)
+	}
+	fail = false
+	// Goes public.
+	public = true
+	clk.t = clk.t.Add(61 * time.Minute)
+	if w.Allowed() {
+		t.Fatal("public must stop pushing")
+	}
+	if len(logs) != 2 {
+		t.Fatalf("one line per state change: %v", logs)
+	}
+	if got := ReadState(dir); !strings.Contains(got, "not private") {
+		t.Errorf("state file: %q", got)
+	}
+	clk.t = clk.t.Add(61 * time.Minute)
+	if w.Allowed() || len(logs) != 2 {
+		t.Fatalf("still public, no extra log: %v", logs)
+	}
+	// API failure while public keeps blocking.
+	fail = true
+	clk.t = clk.t.Add(61 * time.Minute)
+	if w.Allowed() {
+		t.Fatal("failure must keep last known (not private) state")
+	}
+	for _, l := range logs {
+		if strings.Contains(l, testToken) {
+			t.Error("token in log")
+		}
 	}
 }
