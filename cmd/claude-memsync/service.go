@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -51,10 +52,18 @@ func (p *program) Stop(s service.Service) error {
 	return p.run.Stop()
 }
 
+// unitRoutes is the absolute routes.json path `install` writes into the unit
+// (empty for a single-repo install). The unit must not depend on the
+// environment or default location it happens to be started from.
+var unitRoutes string
+
 func serviceConfig(configPath string) *service.Config {
 	args := []string{"run"}
 	if configPath != "" {
 		args = append(args, "--config", configPath)
+	}
+	if unitRoutes != "" {
+		args = append(args, "--routes", unitRoutes)
 	}
 	return &service.Config{
 		Name:        "claude-memsync",
@@ -96,16 +105,27 @@ func primarySyncDir() string {
 	return defaultSyncDir()
 }
 
+// legacyPidFilePath is where a daemon started before routing wrote its PID.
+func legacyPidFilePath() string { return pidFilePathIn(defaultSyncDir()) }
+
+// readPidFile reads the PID file of the running daemon: the current location,
+// then the old ~/.claudesync one, so `stop` still finds a daemon that was
+// started before an upgrade.
 func readPidFile() (int, error) {
-	b, err := os.ReadFile(pidFilePath())
-	if err != nil {
-		return 0, err
+	var firstErr error
+	for _, p := range []string{pidFilePath(), legacyPidFilePath()} {
+		b, err := os.ReadFile(p)
+		if err == nil {
+			var pid int
+			if pid, err = strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+				return pid, nil
+			}
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil {
-		return 0, err
-	}
-	return pid, nil
+	return 0, firstErr
 }
 
 func writePidFileAt(path string, pid int) error {
@@ -115,7 +135,13 @@ func writePidFileAt(path string, pid int) error {
 	return os.WriteFile(path, []byte(strconv.Itoa(pid)), 0600)
 }
 
-func removePidFile() error { return removePidFileAt(pidFilePath()) }
+func removePidFile() error {
+	err := removePidFileAt(pidFilePath())
+	if legacyPidFilePath() != pidFilePath() {
+		err = errors.Join(err, removePidFileAt(legacyPidFilePath()))
+	}
+	return err
+}
 
 func removePidFileAt(path string) error {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -127,11 +153,23 @@ func removePidFileAt(path string) error {
 func runInstall(args []string) int {
 	flags := flag.NewFlagSet("install", flag.ContinueOnError)
 	cfgPath := flags.String("config", "", "path to config.json (default: ~/.claudesync/config.json)")
+	routesFlag := flags.String("routes", "", "path to routes.json to run several repos (default: $"+routesEnv+", then ~/.config/claude-memsync/routes.json if it exists)")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 	if *cfgPath == "" {
 		*cfgPath = defaultConfigPath()
+	}
+	if rp, ok, err := resolveRoutesPath(*routesFlag); err != nil {
+		fmt.Fprintln(os.Stderr, "install:", err)
+		return 1
+	} else if ok {
+		abs, err := filepath.Abs(rp)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "resolve routes path:", err)
+			return 1
+		}
+		unitRoutes = abs
 	}
 	abs, err := filepath.Abs(*cfgPath)
 	if err != nil {

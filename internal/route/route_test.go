@@ -485,3 +485,11 @@ func TestOwnersFileUsesUniqueTempAndLeavesNone(t *testing.T) {
 		t.Fatalf("dir holds %v", entries)
 	}
 }
+
+func TestNonClient(t *testing.T) {
+	f := fileOf(Rule{Folder: "-p", Repo: "projects"}, Rule{Folder: "-c", Repo: "client-a"})
+	r := testRouter(t, f, []string{"personal", "projects", "client-a"}, nil)
+	if !r.NonClient("-p") || r.NonClient("-c") || r.NonClient("-zz") {
+		t.Fatal("NonClient wrong")
+	}
+}

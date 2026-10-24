@@ -32,6 +32,40 @@ func defaultRoutesPath() string {
 	return filepath.Join(home, ".config", "claude-memsync", "routes.json")
 }
 
+// knownRoutesPaths lists the places a routes file may be without being named:
+// the environment variable's path, then $XDG_CONFIG_HOME's and ~/.config's.
+func knownRoutesPaths() []string {
+	var out []string
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		for _, o := range out {
+			if o == p {
+				return
+			}
+		}
+		out = append(out, p)
+	}
+	add(os.Getenv(routesEnv))
+	add(defaultRoutesPath())
+	home, _ := os.UserHomeDir()
+	add(filepath.Join(home, ".config", "claude-memsync", "routes.json"))
+	return out
+}
+
+// legacyGuard refuses single-repo mode on a host that has a routes file at any
+// known place: such a host's folders belong to several repos, and one daemon
+// mirroring all of them into one repo would undo the routing.
+func legacyGuard(cfg config.Config) error {
+	for _, p := range knownRoutesPaths() {
+		if _, err := os.Stat(p); err == nil {
+			return fmt.Errorf("a routes file exists at %s: run through it (--routes %s) instead of syncing %s on its own", p, p, cfg.SyncDir)
+		}
+	}
+	return nil
+}
+
 // resolveRoutesPath picks the routes file: the flag, then the environment, then
 // the default location if a file is there. ok is false for single-repo mode.
 // A flag or environment path that does not exist is an error, not a fallback:
@@ -47,9 +81,10 @@ func resolveRoutesPath(flagVal string) (path string, ok bool, err error) {
 		}
 		return explicit, true, nil
 	}
-	p := defaultRoutesPath()
-	if _, err := os.Stat(p); err == nil {
-		return p, true, nil
+	for _, p := range knownRoutesPaths() {
+		if _, err := os.Stat(p); err == nil {
+			return p, true, nil
+		}
 	}
 	return "", false, nil
 }
@@ -57,11 +92,12 @@ func resolveRoutesPath(flagVal string) (path string, ok bool, err error) {
 // routedSet is a loaded routes.json: the router, plus the config of every repo
 // this host has.
 type routedSet struct {
-	Path    string
-	File    route.File
-	Router  *route.Router
-	Cfgs    map[string]config.Config // repos this host has
-	Missing []string                 // repos named in routes.json that this host lacks
+	reloadErr string // last reload failure, logged once
+	Path      string
+	File      route.File
+	Router    *route.Router
+	Cfgs      map[string]config.Config // repos this host has
+	Missing   []string                 // repos named in routes.json that this host lacks
 }
 
 func loadRouted(path string) (*routedSet, error) {
@@ -168,6 +204,9 @@ func (r *running) Wait() { r.wg.Wait() }
 // startSingle runs one Loop on cfg, as before routing existed, but refuses a
 // second daemon on the same sync dir.
 func startSingle(ctx context.Context, cfg config.Config) (*running, error) {
+	if err := legacyGuard(cfg); err != nil {
+		return nil, err
+	}
 	l, err := lock.Acquire(cfg.SyncDir)
 	if err != nil {
 		return nil, err
@@ -218,10 +257,7 @@ func (s *routedSet) Start(ctx context.Context) (*running, error) {
 		r.wg.Add(1)
 		go func() {
 			defer r.wg.Done()
-			if err := loop.Run(ctx); err != nil {
-				log.Printf("[%s] stopped: %v", loop.Name, err)
-				r.fail(fmt.Errorf("repo %q: %w", loop.Name, err))
-			}
+			superviseLoop(ctx, loop)
 		}()
 	}
 	// Checkouts and remotes change; decisions are re-read on the pull tick.
@@ -235,11 +271,70 @@ func (s *routedSet) Start(ctx context.Context) (*running, error) {
 			case <-ctx.Done():
 				return
 			case <-t.C:
+				s.reload()
 				s.Router.Refresh()
 			}
 		}
 	}()
 	return r, nil
+}
+
+// reload re-reads routes.json and swaps the table in atomically. A file that no
+// longer parses leaves the old table in force and is logged once.
+func (s *routedSet) reload() {
+	f, err := route.Load(s.Path)
+	if err != nil {
+		if msg := err.Error(); msg != s.reloadErr {
+			s.reloadErr = msg
+			log.Printf("routing: keeping the previous routes, %v", err)
+		}
+		return
+	}
+	s.reloadErr = ""
+	s.Router.Replace(f)
+}
+
+// Loop supervision. A loop that dies is recorded in .state/loop-failed (which
+// `status` shows) and restarted with a growing delay.
+var (
+	loopBackoffMin = 5 * time.Second
+	loopBackoffMax = 5 * time.Minute
+	loopHealthy    = 30 * time.Second
+	runLoop        = func(ctx context.Context, l *syncpkg.Loop) error { return l.Run(ctx) }
+)
+
+func loopFailedPath(syncDir string) string { return filepath.Join(syncDir, ".state", "loop-failed") }
+
+func superviseLoop(ctx context.Context, loop *syncpkg.Loop) {
+	backoff := loopBackoffMin
+	failed := loopFailedPath(loop.Cfg.SyncDir)
+	for {
+		healthy := time.AfterFunc(loopHealthy, func() { os.Remove(failed) })
+		started := time.Now()
+		err := runLoop(ctx, loop)
+		healthy.Stop()
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			err = errors.New("loop returned")
+		}
+		msg := strings.SplitN(err.Error(), "\n", 2)[0]
+		log.Printf("[%s] stopped: %s; restarting in %s", loop.Name, msg, backoff)
+		_ = os.MkdirAll(filepath.Dir(failed), 0700)
+		_ = os.WriteFile(failed, []byte(time.Now().UTC().Format(time.RFC3339)+" "+msg+"\n"), 0600)
+		if time.Since(started) > loopHealthy {
+			backoff = loopBackoffMin
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		if backoff *= 2; backoff > loopBackoffMax {
+			backoff = loopBackoffMax
+		}
+	}
 }
 
 // claudeFolders lists the project folders in the Claude tree.
@@ -263,17 +358,20 @@ func (s *routedSet) statusLines() []string {
 	lines := []string{"routing: " + s.Path}
 	primary, _ := s.Primary()
 	sum := s.Router.Summarize(claudeFolders(primary.ClaudeProjectsDir))
-	for _, name := range s.File.RepoNames() {
+	for _, name := range s.Router.File().RepoNames() {
 		cfg, have := s.Cfgs[name]
 		switch {
 		case !have:
 			lines = append(lines, fmt.Sprintf("  %s: not on this host (folders routed to it are denied)", name))
-		case name == s.File.Personal:
+		case name == s.Router.File().Personal:
 			lines = append(lines, fmt.Sprintf("  %s: personal, owns no folders; syncs %s", name, cfg.SyncDir))
 		default:
 			lines = append(lines, fmt.Sprintf("  %s: owns %d %s; syncs %s", name, sum.Owned[name], plural(sum.Owned[name], "folder", "folders"), cfg.SyncDir))
 		}
 		if have {
+			if b, err := os.ReadFile(loopFailedPath(cfg.SyncDir)); err == nil {
+				lines = append(lines, "    loop stopped, restarting with backoff: "+strings.TrimSpace(string(b)))
+			}
 			if l := pausedLine(cfg); l != "" {
 				lines = append(lines, "    "+strings.ReplaceAll(l, "\n", " "))
 			}

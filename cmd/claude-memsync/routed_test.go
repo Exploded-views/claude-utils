@@ -8,11 +8,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/lock"
+	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
 
 // routedHost builds a fake host: a fake HOME, the named sync repos (each an
@@ -119,15 +122,15 @@ func TestRouted_SecondDaemonOnSameSyncDirRefused(t *testing.T) {
 	if _, err := set.Start(context.Background()); !errors.Is(err, lock.ErrHeld) {
 		t.Fatalf("second routed daemon: %v, want ErrHeld", err)
 	}
-	if _, err := startSingle(context.Background(), cfgs["projects"]); !errors.Is(err, lock.ErrHeld) {
-		t.Fatalf("single daemon on a routed sync dir: %v, want ErrHeld", err)
+	if _, err := lock.Acquire(cfgs["projects"].SyncDir); !errors.Is(err, lock.ErrHeld) {
+		t.Fatalf("lock on a routed sync dir: %v, want ErrHeld", err)
 	}
 	_ = first.Stop()
-	again, err := startSingle(context.Background(), cfgs["projects"])
+	l, err := lock.Acquire(cfgs["projects"].SyncDir)
 	if err != nil {
 		t.Fatalf("after stop: %v", err)
 	}
-	_ = again.Stop()
+	l.Release()
 }
 
 func TestRouted_ReposSharingASyncDirRejected(t *testing.T) {
@@ -215,5 +218,133 @@ func TestRouted_HookReportsAcrossReposOwnedFoldersOnly(t *testing.T) {
 	}
 	if strings.Contains(out, "unowned") {
 		t.Errorf("owned-folder filtering must not show up as hidden files: %s", out)
+	}
+}
+
+func TestRouted_LegacyModeRefusedWhenARoutesFileExists(t *testing.T) {
+	cfgs := routedHost(t, []string{"projects"}, "", nil)
+	if _, err := startSingle(context.Background(), cfgs["projects"]); err == nil || !strings.Contains(err.Error(), "routes file") {
+		t.Fatalf("single-repo daemon started beside a routes file: %v", err)
+	}
+	// The same, with the file only at the XDG location.
+	home := os.Getenv("HOME")
+	xdg := filepath.Join(home, "xdg")
+	if err := os.MkdirAll(filepath.Join(xdg, "claude-memsync"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(xdg, "claude-memsync", "routes.json"), []byte(`{"repos":{}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(routesEnv, "")
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	if err := os.Remove(filepath.Join(home, ".config", "claude-memsync", "routes.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacyGuard(cfgs["projects"]); err == nil {
+		t.Fatal("a routes file under XDG_CONFIG_HOME was not noticed")
+	}
+}
+
+func TestRouted_InstallWritesAbsoluteRoutesIntoTheUnit(t *testing.T) {
+	routedHost(t, []string{"projects"}, "", nil)
+	rel := filepath.Join(t.TempDir(), "r.json")
+	if err := os.WriteFile(rel, []byte(`{"repos":{}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	old := unitRoutes
+	defer func() { unitRoutes = old }()
+	unitRoutes = rel
+	args := strings.Join(serviceConfig("/abs/config.json").Arguments, " ")
+	if !strings.Contains(args, "--routes "+rel) || !strings.Contains(args, "--config /abs/config.json") {
+		t.Fatalf("unit args: %s", args)
+	}
+	if !filepath.IsAbs(rel) {
+		t.Fatal("test setup")
+	}
+}
+
+func TestRouted_ReloadSwapsTableAndKeepsOldOnBadFile(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "projects"}, "personal", []map[string]string{{"folder": "-a", "repo": "projects"}})
+	set, err := loadRouted(os.Getenv(routesEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set.Router.Decide("-a").Repo != "projects" || set.Router.Decide("-b").Repo != "" {
+		t.Fatal("setup")
+	}
+	good := `{"repos":{"personal":"` + cfgs["personal"].Path() + `","projects":"` + cfgs["projects"].Path() + `"},"personal":"personal","routes":[{"folder":"-b","repo":"projects"}]}`
+	if err := os.WriteFile(set.Path, []byte(good), 0600); err != nil {
+		t.Fatal(err)
+	}
+	set.reload()
+	if set.Router.Decide("-b").Repo != "projects" || set.Router.Decide("-a").Repo != "" {
+		t.Fatal("reload did not swap the table")
+	}
+	if err := os.WriteFile(set.Path, []byte("{broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	set.reload()
+	set.reload()
+	if set.Router.Decide("-b").Repo != "projects" {
+		t.Fatal("a bad file replaced the working table")
+	}
+}
+
+func TestRouted_DeadLoopIsRecordedAndRestartedWithBackoff(t *testing.T) {
+	routedHost(t, []string{"personal", "projects"}, "personal", nil)
+	set, err := loadRouted(os.Getenv(routesEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldMin, oldRun := loopBackoffMin, runLoop
+	defer func() { loopBackoffMin, runLoop = oldMin, oldRun }()
+	loopBackoffMin = time.Millisecond
+	var calls atomic.Int32
+	runLoop = func(ctx context.Context, l *syncpkg.Loop) error {
+		if l.Name != "projects" {
+			<-ctx.Done()
+			return nil
+		}
+		if calls.Add(1) < 3 {
+			return errors.New("watch failed")
+		}
+		<-ctx.Done()
+		return nil
+	}
+	run, err := set.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for calls.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if calls.Load() < 3 {
+		t.Fatalf("loop restarted %d times, want 3 starts", calls.Load())
+	}
+	out := strings.Join(set.statusLines(), "\n")
+	if !strings.Contains(out, "loop stopped") || !strings.Contains(out, "watch failed") {
+		t.Errorf("status does not show the dead loop:\n%s", out)
+	}
+	_ = run.Stop()
+}
+
+func TestRouted_StopFindsALegacyPidFile(t *testing.T) {
+	routedHost(t, []string{"personal"}, "personal", nil)
+	legacy := legacyPidFilePath()
+	if err := os.MkdirAll(filepath.Dir(legacy), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte("4242"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if pid, err := readPidFile(); err != nil || pid != 4242 {
+		t.Fatalf("pid=%d err=%v", pid, err)
+	}
+	if err := removePidFile(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(legacy); err == nil {
+		t.Fatal("legacy pid file left behind")
 	}
 }
