@@ -42,6 +42,9 @@ func ListRecipients(dir string) ([]string, error) {
 	return out, nil
 }
 
+// AcceptRecipients pins the work-tree's recipients after a person reviewed them.
+func AcceptRecipients(repo *gitwt.Repo) error { return PinCurrent(repo) }
+
 // AddRecipient adds key to .age-recipients, re-encrypts every file to the new
 // set and commits (neutral message). The new key can read what this commit and
 // later ones hold; older history stays unreadable to it. Nothing is pushed.
@@ -96,7 +99,13 @@ func rewriteRecipients(repo *gitwt.Repo, keys []string, msg string) error {
 	if err := CheckKeyed(repo); err != nil {
 		return err
 	}
+	if u, _ := Unreviewed(repo); u {
+		return ErrRecipientsUnreviewed
+	}
 	if err := WriteRecipients(repo.Dir, keys); err != nil {
+		return err
+	}
+	if err := PinCurrent(repo); err != nil {
 		return err
 	}
 	f, err := NewFilter(repo.Dir)

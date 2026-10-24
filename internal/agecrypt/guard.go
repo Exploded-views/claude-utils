@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 
+	"filippo.io/age"
+
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
 
@@ -81,7 +83,13 @@ func CheckKeyed(repo *gitwt.Repo) error {
 // must be age ciphertext. It catches a clone whose filter config went missing.
 // It returns nil when encryption is off.
 func PushGuard(repo *gitwt.Repo, branch string) error {
-	if !Enabled(repo) || !repo.HasHead() {
+	if !Enabled(repo) {
+		return nil
+	}
+	if u, _ := Unreviewed(repo); u {
+		return ErrRecipientsUnreviewed
+	}
+	if !repo.HasHead() {
 		return nil
 	}
 	rng := "HEAD"
@@ -136,4 +144,30 @@ func RecipientsChanged(repo *gitwt.Repo, pre, post string) bool {
 	}
 	var ee *exec.ExitError
 	return errors.As(err, &ee) // exit 1 = differs
+}
+
+// PlainReader returns a function that turns a blob read straight from git into
+// plaintext. For an unencrypted repo it returns the blob as is. For an
+// encrypted one it decrypts age blobs with this host's identity and returns an
+// error when it cannot. Plaintext blobs pass through.
+func PlainReader(repo *gitwt.Repo) func([]byte) ([]byte, error) {
+	if !Enabled(repo) {
+		return func(b []byte) ([]byte, error) { return b, nil }
+	}
+	var ids []age.Identity
+	var idErr error
+	loaded := false
+	return func(b []byte) ([]byte, error) {
+		if !IsCiphertext(b) {
+			return b, nil
+		}
+		if !loaded {
+			ids, idErr = LoadIdentities(IdentityPath(repo))
+			loaded = true
+		}
+		if idErr != nil {
+			return nil, idErr
+		}
+		return Decrypt(b, ids)
+	}
 }

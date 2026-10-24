@@ -4,35 +4,35 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"time"
+	"strings"
 
 	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
 
-const recipientsNoticeFile = "recipients-changed"
+const recipientsStateFile = "recipients-unreviewed"
 
-func recipientsNoticePath(dir string) string {
-	return filepath.Join(dir, manifestStateDir, recipientsNoticeFile)
+func recipientsStatePath(dir string) string {
+	return filepath.Join(dir, manifestStateDir, recipientsStateFile)
 }
 
-// noteRecipientsChange warns when a pull changed .age-recipients: anyone with
-// write access to the remote could have added their own key. The warning is
-// logged and kept for `status` until someone runs `recipients list`.
-func noteRecipientsChange(repo *gitwt.Repo, pre, post string) {
-	if !agecrypt.Enabled(repo) || !agecrypt.RecipientsChanged(repo, pre, post) {
-		return
+// noteRecipientsChange is logUnreviewed for after a pull; kept as the one
+// place the loop calls.
+func noteRecipientsChange(repo *gitwt.Repo, _, _ string) { logUnreviewed(repo) }
+
+// logUnreviewed logs once per change of state when the work-tree's recipients
+// differ from the pinned set (anyone with write access to the remote can edit
+// them). While they differ the daemon commits and pushes nothing.
+func logUnreviewed(repo *gitwt.Repo) bool {
+	p := recipientsStatePath(repo.Dir)
+	u, fp := agecrypt.Unreviewed(repo)
+	if !u {
+		_ = os.Remove(p)
+		return false
 	}
-	log.Println("WARNING: .age-recipients changed upstream; review it with `claude-memsync recipients list` (anyone with write access to the remote can add a key)")
-	_ = writeSynced(recipientsNoticePath(repo.Dir), []byte(time.Now().UTC().Format(time.RFC3339)+"\n"))
+	if b, err := os.ReadFile(p); err != nil || strings.TrimSpace(string(b)) != fp {
+		log.Println("WARNING: " + agecrypt.ErrRecipientsUnreviewed.Error())
+		_ = writeSynced(p, []byte(fp+"\n"))
+	}
+	return true
 }
-
-// RecipientsNotice reports whether an unreviewed upstream recipients change is
-// recorded for the sync repo in dir.
-func RecipientsNotice(dir string) bool {
-	_, err := os.Stat(recipientsNoticePath(dir))
-	return err == nil
-}
-
-// ClearRecipientsNotice marks the recipients as reviewed.
-func ClearRecipientsNotice(dir string) { _ = os.Remove(recipientsNoticePath(dir)) }

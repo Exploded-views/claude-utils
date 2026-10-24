@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/merge"
 )
@@ -483,6 +484,9 @@ func keepIncoming(repo *gitwt.Repo, roots Roots, preRev, p string, saved []byte,
 		cp := filepath.Join(roots.Claude, hash, "memory", name)
 		if cur, err := os.ReadFile(cp); err == nil && bytes.Equal(cur, saved) {
 			base, _ := repo.Run("show", preRev+":"+p) // "" when it did not exist
+			if pb, err := agecrypt.PlainReader(repo)([]byte(base)); err == nil {
+				base = string(pb)
+			}
 			if merged, conflict := merge.Merge(base, string(saved), string(incoming)); !conflict {
 				return false, []byte(merged), writeAtomic(cp, []byte(merged))
 			}

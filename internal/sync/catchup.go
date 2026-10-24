@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
 
@@ -192,5 +193,10 @@ func blobAt(repo *gitwt.Repo, rev, p string) ([]byte, bool) {
 	if err != nil {
 		return nil, false
 	}
-	return []byte(out), true
+	// An encrypted repo stores ciphertext; the Claude tree gets plaintext.
+	plain, err := agecrypt.PlainReader(repo)([]byte(out))
+	if err != nil {
+		return nil, false
+	}
+	return plain, true
 }

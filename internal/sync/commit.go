@@ -39,6 +39,9 @@ func CommitMirror(repo *gitwt.Repo, cfg config.Config, msg string) (bool, error)
 		if err := agecrypt.CheckKeyed(repo); err != nil {
 			return false, err
 		}
+		if u, _ := agecrypt.Unreviewed(repo); u {
+			return false, agecrypt.ErrRecipientsUnreviewed
+		}
 	}
 	if err := refuseConflictMarkers(repo); err != nil {
 		return false, err
@@ -115,8 +118,19 @@ func holdBack(repo *gitwt.Repo, cfg config.Config) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("read staged files: %w", err)
 	}
+	// An encrypted repo stages ciphertext, which no rule can match: scan the
+	// plaintext. A blob this host cannot decrypt cannot be checked, so it is
+	// held back.
+	plain := agecrypt.PlainReader(repo)
 	for j, content := range contents {
 		path := changes[readIdx[j]].Path
+		pt, perr := plain(content)
+		if perr != nil {
+			log.Printf("scrub: holding back %s (cannot decrypt to check it)", path)
+			held = append(held, path)
+			continue
+		}
+		content = pt
 		if rules := scanner.Scan(content); len(rules) > 0 {
 			// Path and rule names only: never log the matched text.
 			log.Printf("scrub: holding back %s (rule: %s)", path, strings.Join(rules, ", "))

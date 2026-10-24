@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
 
@@ -273,8 +274,13 @@ func markLocalKept(repo *gitwt.Repo, commit string, list []Change) {
 	if err != nil {
 		return
 	}
+	plain := agecrypt.PlainReader(repo)
 	for k, i := range idx {
-		list[i].LocalKept = !bytes.Equal(blobs[k], local[k])
+		b, err := plain(blobs[k])
+		if err != nil {
+			b = blobs[k]
+		}
+		list[i].LocalKept = !bytes.Equal(b, local[k])
 	}
 }
 

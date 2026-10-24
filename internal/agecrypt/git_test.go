@@ -71,8 +71,14 @@ func newHost(t *testing.T, remote string, first bool, extra ...string) *host {
 			t.Fatal(err)
 		}
 		os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("config.json\n"), 0o600)
+		if err := PinCurrent(repo); err != nil {
+			t.Fatal(err)
+		}
 	} else if repo.HasHead() {
 		if _, err := repo.Run("checkout", "-q", "main"); err != nil {
+			t.Fatal(err)
+		}
+		if err := PinCurrent(repo); err != nil { // trust on first use
 			t.Fatal(err)
 		}
 	}
@@ -206,6 +212,12 @@ func TestGit_SecondHostWithKeyReadsAfterRecipientAdd(t *testing.T) {
 	if _, err := b.repo.Run("pull", "-q", "--rebase", "origin", "main"); err != nil {
 		t.Fatal(err)
 	}
+	if u, _ := Unreviewed(b.repo); !u {
+		t.Fatal("an upstream recipients change must be unreviewed on b")
+	}
+	if err := AcceptRecipients(b.repo); err != nil {
+		t.Fatal(err)
+	}
 	if err := CheckKeyed(b.repo); err != nil {
 		t.Fatalf("after recipients add, b can read: %v", err)
 	}
@@ -302,6 +314,7 @@ func TestGit_MemoryMdAndNoteMergesThroughRealDrivers(t *testing.T) {
 	}
 	a.repo.Run("push", "origin", "main")
 	b.repo.Run("pull", "-q", "--rebase", "origin", "main")
+	AcceptRecipients(b.repo)
 
 	// Both append to MEMORY.md and edit different lines of the note: clean merges.
 	a.write(t, "MEMORY.md", a.read(t, "MEMORY.md")+"- [fromA](a.md) hook\n")

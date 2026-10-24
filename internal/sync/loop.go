@@ -170,6 +170,25 @@ func (l *Loop) keyless(repo *gitwt.Repo) bool {
 	return false
 }
 
+// keylessPull is all a keyless host does in a cycle: fetch and rebase what
+// others pushed, which is how the recipients change that admits this host
+// arrives. Nothing is committed, propagated to the Claude tree or pushed, and
+// the synced head is not recorded, so catchUp copies the new content once the
+// host can read it.
+func (l *Loop) keylessPull(repo *gitwt.Repo) {
+	if handResolving(repo) {
+		return
+	}
+	if err := runPull(repo, l.Branch); err != nil {
+		if repo.RebaseInProgress() {
+			_ = abortRebaseConflict(repo)
+		} else {
+			log.Println("pull:", newPathGuard(l.Cfg).Err(err))
+		}
+	}
+	clearPullMark(repo)
+}
+
 // recoverLeftovers undoes what a crash or an earlier failed cycle left: a
 // rebase or merge the daemon's own pull left stopped, then an unfinished park.
 // A rebase or merge the daemon did not start is the user's: it returns
@@ -326,6 +345,7 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	// Without a key that reads the repo nothing may be committed, pulled into
 	// the Claude tree or pushed.
 	if l.keyless(repo) {
+		l.keylessPull(repo)
 		return agecrypt.ErrKeyless
 	}
 	// A rebase or merge the daemon left stopped goes first (one the user is
@@ -364,9 +384,11 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 		return pause()
 	}
 	clearPaused(repo)
+	logUnreviewed(repo)
 	if includeLocal {
 		_, err := CommitMirror(repo, l.Cfg, fmt.Sprintf("auto: %s @ %s", l.Hostname, time.Now().UTC().Format(time.RFC3339)))
-		if err != nil {
+		// Unreviewed recipients stop commits and pushes; pulling goes on.
+		if err != nil && !errors.Is(err, agecrypt.ErrRecipientsUnreviewed) {
 			return fmt.Errorf("commit: %w", err)
 		}
 	}
@@ -422,8 +444,11 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 		return conflictErr // nothing to push: origin is ahead
 	}
 
+	logUnreviewed(repo)
 	if err := agecrypt.PushGuard(repo, l.Branch); err != nil {
-		log.Println(err)
+		if !errors.Is(err, agecrypt.ErrRecipientsUnreviewed) { // logged once by logUnreviewed
+			log.Println(err)
+		}
 		return err
 	}
 	if err := repo.Push(l.Branch); err != nil {

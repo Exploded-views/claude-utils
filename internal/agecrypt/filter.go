@@ -30,6 +30,7 @@ type Filter struct {
 	CacheDir     string                            // ciphertext cache, under the git dir
 	IdentityPath string                            // age identity; may be missing (keyless)
 	Indexed      func(path string) ([]byte, error) // the blob currently in the index
+	PinPath      string                            // pinned recipient set; "" = read the work-tree file (unit tests only)
 }
 
 // NewFilter builds a Filter for the git work-tree containing dir, reading the
@@ -42,7 +43,7 @@ func NewFilter(dir string) (*Filter, error) {
 	if !filepath.IsAbs(gitDir) {
 		gitDir = filepath.Join(dir, gitDir)
 	}
-	f := &Filter{Dir: dir, CacheDir: filepath.Join(gitDir, "memage-cache")}
+	f := &Filter{Dir: dir, CacheDir: filepath.Join(gitDir, "memage-cache"), PinPath: pinPathFor(gitDir)}
 	f.IdentityPath, _ = gitOut(dir, "config", "--get", IdentityConfigKey)
 	f.Indexed = func(p string) ([]byte, error) {
 		cmd := exec.Command("git", "-C", dir, "cat-file", "blob", ":0:"+p)
@@ -57,7 +58,16 @@ func gitOut(dir string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+// recipients is the set to encrypt to: the one this host pinned, never the
+// work-tree file, which a pull can change. An unpinned clone encrypts nothing.
 func (f *Filter) recipients() (*Recipients, error) {
+	if f.PinPath != "" {
+		data, err := os.ReadFile(f.PinPath)
+		if err != nil {
+			return nil, fmt.Errorf("recipients are not pinned on this host: %w", err)
+		}
+		return ParseRecipients(data)
+	}
 	data, err := os.ReadFile(filepath.Join(f.Dir, RecipientsFile))
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", RecipientsFile, err)

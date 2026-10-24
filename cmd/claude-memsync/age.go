@@ -8,7 +8,6 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
-	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
 
 // runAgeFilter is the git long-running filter process (`filter.memage.process`).
@@ -78,7 +77,24 @@ func runRecipients(args []string) int {
 		for _, k := range keys {
 			fmt.Println(k)
 		}
-		syncpkg.ClearRecipientsNotice(cfg.SyncDir)
+		if u, _ := agecrypt.Unreviewed(repo); u {
+			printRecipientsDiff(repo)
+		}
+	case "accept":
+		if u, _ := agecrypt.Unreviewed(repo); !u {
+			fmt.Fprintln(os.Stderr, "recipients: nothing to accept; the work-tree matches the pinned set")
+			return 0
+		}
+		printRecipientsDiff(repo)
+		if len(args) != 2 || args[1] != "--yes" {
+			fmt.Fprintln(os.Stderr, "recipients: review the change above; if you trust every added key, run `claude-memsync recipients accept --yes`")
+			return 1
+		}
+		if err := agecrypt.AcceptRecipients(repo); err != nil {
+			fmt.Fprintln(os.Stderr, "recipients:", err)
+			return 1
+		}
+		fmt.Fprintln(os.Stderr, "recipients accepted; syncing resumes on the next cycle")
 	case "add", "remove":
 		if len(args) != 2 {
 			fmt.Fprintf(os.Stderr, "usage: claude-memsync recipients %s <public-key>\n", args[0])
@@ -93,7 +109,6 @@ func runRecipients(args []string) int {
 			fmt.Fprintln(os.Stderr, "recipients:", err)
 			return 1
 		}
-		syncpkg.ClearRecipientsNotice(cfg.SyncDir)
 		fmt.Fprintln(os.Stderr, "recipients updated and committed; the daemon pushes it on its next cycle")
 		if args[0] == "remove" {
 			fmt.Fprintln(os.Stderr, "note: the removed key still reads everything it already fetched; only new content is closed to it")
@@ -122,8 +137,24 @@ func encryptionLines(cfg config.Config) []string {
 	default:
 		out = append(out, "encryption: age, this host can decrypt the repo")
 	}
-	if syncpkg.RecipientsNotice(cfg.SyncDir) {
-		out = append(out, "warning: .age-recipients changed upstream; review with `claude-memsync recipients list`")
+	if u, _ := agecrypt.Unreviewed(repo); u {
+		out = append(out, "recipients UNREVIEWED: .age-recipients differs from the set pinned on this host; nothing is committed or pushed. Review with `claude-memsync recipients list`, then `recipients accept --yes`")
 	}
 	return out
+}
+
+// printRecipientsDiff shows the unreviewed recipient change as short
+// fingerprints of the keys, never the keys themselves.
+func printRecipientsDiff(repo *gitwt.Repo) {
+	added, removed, err := agecrypt.RecipientsDiff(repo)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "recipients:", err)
+		return
+	}
+	for _, f := range added {
+		fmt.Fprintln(os.Stderr, "  + key", f, "(not pinned)")
+	}
+	for _, f := range removed {
+		fmt.Fprintln(os.Stderr, "  - key", f, "(pinned, gone upstream)")
+	}
 }
