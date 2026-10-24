@@ -19,10 +19,10 @@ import (
 // the files a pull or checkout tripped over. Everything the daemon logs or
 // returns from a cycle on an error path goes through Err or Path.
 //
-// The rule is the simple one: a path that matches the denylist is never
-// printed. The text around it is: only the tokens that match are replaced. If
-// the denylist exists but cannot be parsed, no pattern can be ruled out, so no
-// path-like token is printed at all.
+// A path that matches the denylist is never printed: each token that matches
+// is replaced by a placeholder, and the text around it (the exit status, git's
+// reason) is kept. If the denylist exists but cannot be parsed, no pattern can
+// be ruled out, so every path-like token is replaced.
 type pathGuard struct {
 	scanner *scrub.Scanner // nil: no denylist, nothing to hide
 	closed  bool           // denylist unreadable: hide every path
@@ -152,9 +152,13 @@ func (g *pathGuard) hidesToken(tok string) bool {
 	return g.matches(filepath.ToSlash(tok))
 }
 
-// maxRunWords bounds a run of words tried as one name that holds spaces. It
-// bounds the work per line, not the number of words examined.
-const maxRunWords = 12
+// maxRunWords bounds a run of words tried as one name that holds spaces, on a
+// line longer than maxFullLineChars. maxFullLineChars is the line length, in
+// characters, up to which every run of words is tried, of any word count.
+const (
+	maxRunWords      = 12
+	maxFullLineChars = 1024
+)
 
 type span struct{ start, end int }
 
@@ -166,7 +170,10 @@ type span struct{ start, end int }
 //     magic prefix such as "(literal)" cut off, so ":(literal)projects/x" and
 //     "projects/x:" are seen as "projects/x";
 //   - each quoted string, for a name with spaces in quotes;
-//   - runs of words, for a name with spaces that is not quoted;
+//   - runs of words, for a name with spaces that is not quoted: every run, of
+//     any word count, on a line of up to maxFullLineChars characters (which
+//     includes the rest of the line from each word), and only runs of up to
+//     maxRunWords words on a longer one, to bound the work;
 //   - the line as a whole, if nothing in it matched.
 //
 // Matches in a word cover only the matching part of it.
@@ -183,11 +190,17 @@ func redactLine(line string, hide func(string) bool) (string, bool) {
 		}
 	}
 	marks = append(marks, hiddenQuotes(body, words, marked, hide)...)
+	// Every run of words on a line up to maxFullLineChars; beyond that the
+	// work is bounded by a window of maxRunWords words.
+	window := len(words)
+	if len([]rune(body)) > maxFullLineChars {
+		window = maxRunWords
+	}
 	for i := 0; i < len(words); i++ {
 		if marked[i] {
 			continue
 		}
-		for j := i + 1; j < len(words) && j < i+maxRunWords && !marked[j]; j++ {
+		for j := i + 1; j < len(words) && j < i+window && !marked[j]; j++ {
 			run := span{words[i].start, words[j].end}
 			if hide(trimPunct(body[run.start:run.end])) {
 				marks = append(marks, run)

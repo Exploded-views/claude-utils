@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -366,12 +367,44 @@ func TestRedact_LongFileList(t *testing.T) {
 	}
 }
 
-// Each line is also tested as a whole, for a name the word splitting breaks up.
+// Each line is also tested as a whole, as it is written: a name that only the
+// whole line matches (here, because of the parentheses that word and run
+// matching cut off) is caught.
 func TestRedact_WholeLine(t *testing.T) {
-	g, _ := guardFor(t, `^\s*my heron's (?:very )?private note\.md$`)
-	got := g.Err(errors.New("overwritten:\n\tmy heron's private note.md\nAborting")).Error()
-	if strings.Contains(got, "heron") || !strings.Contains(got, "Aborting") {
+	g, _ := guardFor(t, `^\(private note\.md\)$`)
+	got := g.Err(errors.New("overwritten:\n\t(private note.md)\nAborting")).Error()
+	if strings.Contains(got, "private") || !strings.Contains(got, "Aborting") {
 		t.Errorf("got %q", got)
+	}
+}
+
+// A denylisted name of any word count is caught, not only one within a fixed
+// window of words, also in the middle of a line that does not start with it.
+func TestRedact_NameOfAnyWordCount(t *testing.T) {
+	for _, words := range []int{13, 40, 200} {
+		name := strings.TrimSpace(strings.Repeat("a b c d e f g h i j ", words/10+1))
+		name = strings.Join(strings.Fields(name)[:words], " ") + " heron.md"
+		g, _ := guardFor(t, `^projects/[^/]+/memory/`+regexp.QuoteMeta(name)+`$`)
+		text := "error: projects/p1/memory/" + name + ": needs merge"
+		got := g.Err(errors.New(text)).Error()
+		if strings.Contains(got, "heron") || !strings.Contains(got, "needs merge") {
+			t.Errorf("%d words: %q", words, got)
+		}
+	}
+}
+
+// A line longer than the bound still has every word and quoted string tested
+// and is not searched run by run, so a pathological line stays cheap.
+func TestRedact_LongLineIsBounded(t *testing.T) {
+	g, _ := guardFor(t, "heron")
+	line := strings.Repeat("a ", maxFullLineChars) + "heron.md: needs merge"
+	start := time.Now()
+	got := g.Err(errors.New(line)).Error()
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("took %v", d)
+	}
+	if strings.Contains(got, "heron") || !strings.Contains(got, "needs merge") {
+		t.Errorf("got %q", got[len(got)-60:])
 	}
 }
 
