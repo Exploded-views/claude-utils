@@ -489,3 +489,42 @@ func TestAge_KeepIncomingSkipsMergeWhenBaseUndecryptable(t *testing.T) {
 		t.Errorf("Claude copy was rewritten by a merge: %q", got)
 	}
 }
+
+// Accept re-encrypts from HEAD only: whatever else is staged (an interrupted
+// cycle's AddAll, or the user's own work) is neither committed nor unstaged.
+func TestAge_AcceptCommitsOnlyReencryptedHeadAndLeavesStagedAlone(t *testing.T) {
+	origin := ageEnv(t)
+	a := newAgeHost(t, origin, "aaa", true)
+	a.edit("fine.md", "harmless\n")
+	if err := a.flushRetry(); err != nil {
+		t.Fatal(err)
+	}
+	a.edit("leak.md", "token "+fakeSecret()+"\n") // never seen by the scrub
+	a.edit("fine.md", "harmless, edited\n")       // a staged modification of a tracked file
+	mustGit(t, a.repo, "add", "-A")
+	stagedBefore := mustGit(t, a.repo, "diff", "--cached", "--name-only")
+	r, _ := agecrypt.GenerateIdentity(filepath.Join(t.TempDir(), "r"))
+	if err := agecrypt.AddRecipient(a.repo, r); err != nil {
+		t.Fatal(err)
+	}
+	files := committedFiles(t, a.repo)
+	if files["projects/p1/memory/leak.md"] {
+		t.Fatal("the re-encrypt commit swept in a staged, unscrubbed file")
+	}
+	if got := mustGit(t, a.repo, "diff", "--cached", "--name-only"); got != stagedBefore {
+		t.Errorf("staged work changed: before %q after %q", stagedBefore, got)
+	}
+	// The staged edit is still the staged content, not HEAD's.
+	staged := mustGit(t, a.repo, "diff", "--cached", "--stat")
+	if !strings.Contains(staged, "fine.md") || !strings.Contains(staged, "leak.md") {
+		t.Errorf("both staged entries must remain staged:\n%s", staged)
+	}
+	// And the scrub still sees the leak on the next cycle.
+	mustGit(t, a.repo, "reset", "-q")
+	if _, err := CommitMirror(a.repo, a.loop.Cfg, "x"); err != nil {
+		t.Fatal(err)
+	}
+	if committedFiles(t, a.repo)["projects/p1/memory/leak.md"] {
+		t.Error("scrub must still hold the secret back")
+	}
+}

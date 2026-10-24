@@ -438,3 +438,47 @@ func TestGit_PushGuardIgnoresRepoEnv(t *testing.T) {
 		t.Fatalf("guard must use the repo it was given: %v", err)
 	}
 }
+
+// Rotation keeps the set size (remove K, add C). The edit-back must produce a
+// blob C can read and K cannot, and the clone must stay clean throughout.
+func TestGit_RotationSameSizeEditBackIsReadableByNewKeyOnly(t *testing.T) {
+	gitEnv(t)
+	remote := bareRemote(t)
+	a := newHost(t, remote, true)
+	idK, k := newIdentity(t, "k")
+	idC, c := newIdentity(t, "c")
+	if err := AddRecipient(a.repo, k); err != nil {
+		t.Fatal(err)
+	}
+	a.write(t, "x.md", "p1\n")
+	a.commit(t, "memsync: 1 files")
+	if err := RemoveRecipient(a.repo, k); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddRecipient(a.repo, c); err != nil {
+		t.Fatal(err)
+	}
+	if d := a.dirty(t); d != "" {
+		t.Fatalf("dirty after rotation: %s", d)
+	}
+	a.write(t, "x.md", "p2\n")
+	a.commit(t, "memsync: 1 files")
+	a.write(t, "x.md", "p1\n") // edit back to the old plaintext
+	a.commit(t, "memsync: 1 files")
+	blob := []byte(a.blob(t, "HEAD", "x.md"))
+	kids, _ := LoadIdentities(idK)
+	cids, _ := LoadIdentities(idC)
+	if _, err := Decrypt(blob, cids); err != nil {
+		t.Errorf("the new key must read the edit-back: %v", err)
+	}
+	if _, err := Decrypt(blob, kids); err == nil {
+		t.Error("the rotated-out key must not read the edit-back")
+	}
+	os.Remove(filepath.Join(a.repo.Dir, "x.md"))
+	if _, err := a.repo.Run("checkout", "-f", "HEAD", "--", "."); err != nil {
+		t.Fatal(err)
+	}
+	if d := a.dirty(t); d != "" {
+		t.Errorf("dirty after re-checkout: %s", d)
+	}
+}

@@ -57,6 +57,12 @@ func (r *Repo) run(env []string, stdin []byte, args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
+// RunEnv is RunStdin with extra environment variables (KEY=VALUE), e.g. a
+// private GIT_INDEX_FILE.
+func (r *Repo) RunEnv(env []string, stdin []byte, args ...string) (string, error) {
+	return r.run(env, stdin, args...)
+}
+
 // RunClean is Run; kept for callers that want to say the output must not
 // depend on the environment (run already drops git's repository-location
 // variables, see repoEnv).

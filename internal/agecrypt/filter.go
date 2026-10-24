@@ -22,8 +22,8 @@ const RecipientsFile = ".age-recipients"
 const ReencryptEnv = "MEMAGE_REENCRYPT"
 
 // Filter is git's clean/smudge/textconv filter for age. It is deterministic:
-// the ciphertext for a given plaintext and pinned recipient set is cached, and
-// an unchanged checked-out file is cleaned back to the indexed blob (decrypt,
+// the ciphertext this host's clean produced for a given plaintext and pinned
+// recipient set is cached, and an unchanged checked-out file is cleaned back to the indexed blob (decrypt,
 // compare, reuse), so the work-tree stays clean after a checkout or rebase.
 type Filter struct {
 	Dir          string                            // work-tree root (holds .age-recipients)
@@ -163,27 +163,11 @@ func (f *Filter) Smudge(path string, in []byte) []byte {
 	if err != nil {
 		return in
 	}
-	// Seed the cache so that re-cleaning the checked-out file yields this very
-	// blob. But only if the blob has as many recipient stanzas as the pinned
-	// set: a blob written under an older (smaller or larger) set must not be
-	// handed back for new commits, or a newly admitted host could not read it.
-	if rcpt, err := f.recipients(); err == nil && rcpt.Len() > 0 && stanzaCount(in) == rcpt.Len() {
-		f.cachePut(cacheName(pt, rcpt.Fingerprint()), in)
-	}
+	// The cache is not seeded from smudged blobs: a blob's recipient set cannot
+	// be told from its bytes, so a seeded entry could hand a blob written under
+	// a rotated-out set back for new commits. Clean finds the committed blob
+	// again by decrypting the indexed one and comparing (see Clean).
 	return pt
-}
-
-// stanzaCount counts the recipient stanzas of an age header, not counting the
-// random "grease" stanza age may add.
-func stanzaCount(ct []byte) int {
-	hdr, _, _ := bytes.Cut(ct, []byte("\n--- "))
-	n := 0
-	for _, l := range bytes.Split(hdr, []byte("\n")) {
-		if bytes.HasPrefix(l, []byte("-> X25519 ")) || bytes.HasPrefix(l, []byte("-> ssh-")) {
-			n++
-		}
-	}
-	return n
 }
 
 // Textconv shows a blob's plaintext for diff and log.

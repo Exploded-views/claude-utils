@@ -13,6 +13,7 @@ import (
 	"github.com/kardianos/service"
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
+	"github.com/MarimerLLC/claude-utils/internal/lock"
 	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
 
@@ -26,6 +27,7 @@ type program struct {
 	cancel     context.CancelFunc
 	done       chan struct{}
 	loopErr    error
+	lk         *lock.Lock
 }
 
 func (p *program) Start(s service.Service) error {
@@ -33,6 +35,12 @@ func (p *program) Start(s service.Service) error {
 	if err != nil {
 		return fmt.Errorf("load config %s: %w", p.configPath, err)
 	}
+	// One daemon (or one `recipients` action) per sync dir.
+	lk, err := lock.Acquire(cfg.SyncDir)
+	if err != nil {
+		return err
+	}
+	p.lk = lk
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
 	p.done = make(chan struct{})
@@ -51,6 +59,7 @@ func (p *program) Stop(s service.Service) error {
 	if p.done != nil {
 		<-p.done
 	}
+	p.lk.Release()
 	return p.loopErr
 }
 

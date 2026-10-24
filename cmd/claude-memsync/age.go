@@ -8,6 +8,7 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
+	"github.com/MarimerLLC/claude-utils/internal/lock"
 )
 
 // runAgeFilter is the git long-running filter process (`filter.memage.process`).
@@ -90,9 +91,8 @@ func runRecipients(args []string) int {
 			fmt.Fprintln(os.Stderr, "recipients: review the change above; if you trust every added key, run `claude-memsync recipients accept --yes`")
 			return 1
 		}
-		if err := agecrypt.AcceptRecipients(repo); err != nil {
-			fmt.Fprintln(os.Stderr, "recipients:", err)
-			return 1
+		if err := withSyncLock(cfg.SyncDir, func() error { return agecrypt.AcceptRecipients(repo) }); err != nil {
+			return recipientsFail(err)
 		}
 		fmt.Fprintln(os.Stderr, "recipients accepted; syncing resumes on the next cycle")
 	case "add", "remove":
@@ -100,14 +100,14 @@ func runRecipients(args []string) int {
 			fmt.Fprintf(os.Stderr, "usage: claude-memsync recipients %s <public-key>\n", args[0])
 			return 2
 		}
-		if args[0] == "add" {
-			err = agecrypt.AddRecipient(repo, args[1])
-		} else {
-			err = agecrypt.RemoveRecipient(repo, args[1])
-		}
+		err = withSyncLock(cfg.SyncDir, func() error {
+			if args[0] == "add" {
+				return agecrypt.AddRecipient(repo, args[1])
+			}
+			return agecrypt.RemoveRecipient(repo, args[1])
+		})
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "recipients:", err)
-			return 1
+			return recipientsFail(err)
 		}
 		fmt.Fprintln(os.Stderr, "recipients updated and committed; the daemon pushes it on its next cycle")
 		if args[0] == "remove" {
@@ -118,6 +118,26 @@ func runRecipients(args []string) int {
 		return 2
 	}
 	return 0
+}
+
+// withSyncLock runs fn holding the sync dir's lock, the one the daemon holds
+// for its whole life. It refuses (never waits) when the daemon has it: the
+// actions that use it rewrite refs and the index, which must not race a cycle.
+func withSyncLock(syncDir string, fn func() error) error {
+	l, err := lock.Acquire(syncDir)
+	if err != nil {
+		return err
+	}
+	defer l.Release()
+	return fn()
+}
+
+func recipientsFail(err error) int {
+	fmt.Fprintln(os.Stderr, "recipients:", err)
+	if errors.Is(err, lock.ErrHeld) {
+		fmt.Fprintln(os.Stderr, "the daemon is running on this sync dir; run `claude-memsync stop`, then this command, then `claude-memsync start`")
+	}
+	return 1
 }
 
 // encryptionLines is the encryption part of `status`: nothing for an

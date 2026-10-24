@@ -853,7 +853,9 @@ that can read the repo:
     claude-memsync recipients remove <public-key>
 
 Each edits `.age-recipients`, re-encrypts every file to the new set and commits
-(the daemon pushes). A removed key cannot read content written after the change,
+(the daemon pushes). The commit is built from HEAD alone: anything else staged
+in the sync repo is neither committed nor unstaged. These actions (and
+`accept --yes`) refuse to run while the daemon holds the sync dir; stop it first. A removed key cannot read content written after the change,
 but it still reads everything it already fetched; rewriting history does not
 help once a key has fetched it, so treat removal as "stop future leakage".
 
