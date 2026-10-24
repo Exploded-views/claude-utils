@@ -11,8 +11,11 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/MarimerLLC/claude-utils/internal/proc"
 )
@@ -43,7 +46,13 @@ type ReadClone struct {
 	tree    string
 	url     string
 	Timeout time.Duration // per git command; zero means DefaultFetchTimeout
+	// MaxBytes caps the files exported from one fetch (zero: DefaultMaxBytes).
+	// A tip larger than that is refused and the old copy is kept.
+	MaxBytes int64
 }
+
+// DefaultMaxBytes is the default cap on one clone's exported files.
+const DefaultMaxBytes int64 = 64 << 20
 
 // URLRepoName is the repository name a clone URL points at: its last path
 // segment (also for scp-style ssh aliases), lower-cased, without ".git".
@@ -116,9 +125,12 @@ func (c *ReadClone) git(ctx context.Context, useStore bool, args ...string) ([]b
 	return c.gitIn(ctx, useStore, nil, args...)
 }
 
-func (c *ReadClone) gitIn(ctx context.Context, useStore bool, stdin []byte, args ...string) ([]byte, error) {
+func (c *ReadClone) command(ctx context.Context, useStore bool, args ...string) *exec.Cmd {
 	full := []string{"-c", "core.hooksPath=" + os.DevNull, "-c", "core.fsmonitor=false",
-		"-c", "protocol.ext.allow=never", "-c", "fetch.fsckObjects=true"}
+		"-c", "protocol.ext.allow=never",
+		// The host's config must not relax object checks on content the remote chose.
+		"-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true",
+		"-c", "fetch.fsck.hasDotgit=error", "-c", "fsck.hasDotgit=error"}
 	if useStore {
 		full = append(full, "--git-dir="+c.store)
 	}
@@ -127,6 +139,11 @@ func (c *ReadClone) gitIn(ctx context.Context, useStore bool, stdin []byte, args
 	proc.HideWindow(cmd)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND="+sshCommand())
 	cmd.WaitDelay = 2 * time.Second
+	return cmd
+}
+
+func (c *ReadClone) gitIn(ctx context.Context, useStore bool, stdin []byte, args ...string) ([]byte, error) {
+	cmd := c.command(ctx, useStore, args...)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
@@ -185,64 +202,75 @@ func (c *ReadClone) Fetch() (err error) {
 
 // export replaces the readable tree with the fetched tip. It reads the blobs
 // as they are stored (ls-tree and cat-file): git archive and checkout would run
-// the host's smudge filters on content the remote chose.
+// the host's smudge filters on content the remote chose. Blobs stream to their
+// files one at a time; the total is checked against MaxBytes before anything
+// is written, and again while writing.
 func (c *ReadClone) export(ctx context.Context) error {
-	listing, err := c.git(ctx, true, "ls-tree", "-r", "-z", "--full-tree", refHead)
+	limit := c.MaxBytes
+	if limit <= 0 {
+		limit = DefaultMaxBytes
+	}
+	listing, err := c.git(ctx, true, "ls-tree", "-r", "-l", "-z", "--full-tree", refHead)
 	if err != nil {
 		return err
 	}
-	type ent struct{ oid, path string }
+	type ent struct {
+		oid, path string
+		size      int64
+	}
 	var ents []ent
 	var oids bytes.Buffer
+	var total int64
 	for _, rec := range strings.Split(string(listing), "\x00") {
 		tab := strings.IndexByte(rec, '\t')
 		if tab < 0 {
 			continue
 		}
 		f := strings.Fields(rec[:tab])
-		if len(f) != 3 || f[1] != "blob" || f[0] == "120000" {
+		if len(f) != 4 || f[1] != "blob" || f[0] == "120000" {
 			continue // symlinks and submodules are not exported
 		}
 		p, ok := safeRel(rec[tab+1:])
 		if !ok {
 			continue
 		}
-		ents = append(ents, ent{f[2], p})
-		oids.WriteString(f[2] + "\n")
-	}
-	var blobs []byte
-	if len(ents) > 0 {
-		if blobs, err = c.gitIn(ctx, true, oids.Bytes(), "cat-file", "--batch"); err != nil {
-			return err
+		size, err := strconv.ParseInt(f[3], 10, 64)
+		if err != nil {
+			return fmt.Errorf("unexpected listing for %s", p)
 		}
+		if total += size; total > limit {
+			return fmt.Errorf("%s is larger than the %d byte limit for a read clone; not exported", c.name, limit)
+		}
+		ents = append(ents, ent{f[2], p, size})
+		oids.WriteString(f[2] + "\n")
 	}
 	tmp, err := os.MkdirTemp(c.root, ".tmp-"+c.name+"-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmp)
-	br := bufio.NewReader(bytes.NewReader(blobs))
-	for _, e := range ents {
-		var oid, typ string
-		var size int64
-		line, err := br.ReadString('\n')
+	if len(ents) > 0 {
+		cmd := c.command(ctx, true, "cat-file", "--batch")
+		cmd.Stdin = bytes.NewReader(oids.Bytes())
+		var errb bytes.Buffer
+		cmd.Stderr = &errb
+		pipe, err := cmd.StdoutPipe()
 		if err != nil {
-			return fmt.Errorf("reading %s: %w", e.path, err)
-		}
-		if _, err := fmt.Sscanf(line, "%s %s %d", &oid, &typ, &size); err != nil || typ != "blob" || size > maxFile {
-			return fmt.Errorf("unexpected object for %s: %q", e.path, strings.TrimSpace(line))
-		}
-		body := make([]byte, size)
-		if _, err := io.ReadFull(br, body); err != nil {
 			return err
 		}
-		br.ReadByte() // the newline after the body
-		dst := filepath.Join(tmp, filepath.FromSlash(e.path))
-		if err := os.MkdirAll(filepath.Dir(dst), 0700); err != nil {
+		if err := cmd.Start(); err != nil {
 			return err
 		}
-		if err := os.WriteFile(dst, body, 0600); err != nil {
-			return err
+		werr := writeBlobs(tmp, bufio.NewReader(pipe), len(ents), func(i int) (string, int64) { return ents[i].path, ents[i].size })
+		if werr != nil {
+			cmd.Process.Kill()
+		}
+		cerr := cmd.Wait()
+		if werr != nil {
+			return werr
+		}
+		if cerr != nil {
+			return fmt.Errorf("git cat-file: %w: %s", cerr, strings.TrimSpace(errb.String()))
 		}
 	}
 	if err := os.RemoveAll(c.tree); err != nil {
@@ -251,21 +279,85 @@ func (c *ReadClone) export(ctx context.Context) error {
 	return os.Rename(tmp, c.tree)
 }
 
-const maxFile = 64 << 20
+// writeBlobs reads n cat-file --batch records and streams each into its file
+// under dir, checking each header against the size ls-tree announced.
+func writeBlobs(dir string, br *bufio.Reader, n int, entry func(i int) (string, int64)) error {
+	for i := 0; i < n; i++ {
+		rel, want := entry(i)
+		line, err := br.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", rel, err)
+		}
+		var oid, typ string
+		var size int64
+		if _, err := fmt.Sscanf(line, "%s %s %d", &oid, &typ, &size); err != nil || typ != "blob" || size != want {
+			return fmt.Errorf("unexpected object for %s: %q", rel, strings.TrimSpace(line))
+		}
+		dst := filepath.Join(dir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(dst), 0700); err != nil {
+			return err
+		}
+		f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0600)
+		if err != nil {
+			return err
+		}
+		_, cerr := io.CopyN(f, br, size)
+		if err := f.Close(); cerr == nil {
+			cerr = err
+		}
+		if cerr != nil {
+			return cerr
+		}
+		br.ReadByte() // the newline after the body
+	}
+	return nil
+}
 
-// safeRel cleans a repo path and refuses one that leaves the tree or touches
-// a .git directory.
+var driveRe = regexp.MustCompile(`^[A-Za-z]:`)
+
+// safeRel cleans a repo path and refuses one that leaves the tree, is
+// absolute, uses backslashes, or has a segment that is, or could be taken by
+// some file system for, a .git directory. fsck on fetch is the first layer;
+// this is the second.
 func safeRel(p string) (string, bool) {
-	name := path.Clean(p)
-	if name == "." || path.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../") {
+	if p == "" || strings.ContainsAny(p, "\\\x00") || strings.HasPrefix(p, "/") || driveRe.MatchString(p) {
 		return "", false
 	}
-	for _, seg := range strings.Split(name, "/") {
-		if strings.EqualFold(seg, ".git") {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." || isDotgitAlias(seg) {
 			return "", false
 		}
 	}
+	name := path.Clean(p)
+	if name == "." || path.IsAbs(name) {
+		return "", false
+	}
 	return name, true
+}
+
+// isDotgitAlias reports a path segment that names .git on some file system:
+// any case, trailing dots or spaces (NTFS), the short name git~N, an NTFS
+// stream suffix, or invisible Unicode (HFS+) mixed in.
+func isDotgitAlias(seg string) bool {
+	var b strings.Builder
+	for _, r := range seg {
+		if unicode.Is(unicode.Cf, r) {
+			continue
+		}
+		b.WriteRune(unicode.ToLower(r))
+	}
+	s := b.String()
+	if i := strings.IndexByte(s, ':'); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimRight(s, ". ")
+	if s == ".git" {
+		return true
+	}
+	if rest, ok := strings.CutPrefix(s, "git~"); ok && rest != "" {
+		return strings.Trim(rest, "0123456789") == ""
+	}
+	return false
 }
 
 func (c *ReadClone) stateFile(kind string) string {

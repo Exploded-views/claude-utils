@@ -14,6 +14,7 @@ import (
 
 	"github.com/MarimerLLC/claude-utils/internal/related"
 	"github.com/MarimerLLC/claude-utils/internal/route"
+	"github.com/MarimerLLC/claude-utils/internal/scrub"
 )
 
 // relatedVisibility is the private-only check applied to both ends of every
@@ -34,6 +35,7 @@ type relCtx struct {
 	checker related.Checker
 	root    string
 	timeout time.Duration
+	maxMB   int
 	stderr  io.Writer
 }
 
@@ -114,6 +116,7 @@ func loadRelCtx(routesFlag string) (*relCtx, error) {
 	}
 	rc := &relCtx{set: set, reg: reg, acc: acc, stderr: io.Discard,
 		checker: related.Checker{Lookup: set.lookupNode, Visible: relatedVisibility}}
+	rc.maxMB = set.File.RelatedMaxMB
 	if n := set.File.RelatedFetchTimeoutSec; n > 0 {
 		rc.timeout = time.Duration(n) * time.Second
 	}
@@ -414,6 +417,7 @@ func (rc *relCtx) syncRelated() []string {
 			continue
 		}
 		c.Timeout = rc.timeout
+		c.MaxBytes = int64(rc.maxMB) << 20
 		err = c.Fetch()
 		switch {
 		case err != nil:
@@ -647,7 +651,7 @@ func (rc *relCtx) hider(owner string) func(string) bool {
 	case hideAll:
 		return func(string) bool { return true }
 	case sc == nil:
-		return func(string) bool { return false }
+		sc = scrub.New(nil) // no denylist: the built-in secret rules still apply
 	}
 	return func(text string) bool { return sc.MatchesPath(text) || len(sc.Scan([]byte(text))) > 0 }
 }

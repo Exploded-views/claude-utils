@@ -135,6 +135,8 @@ type File struct {
 	RelatedRemotes map[string]string `json:"relatedRemotes,omitempty"`
 	// RelatedFetchTimeoutSec bounds one fetch of a read clone (default 60).
 	RelatedFetchTimeoutSec int `json:"relatedFetchTimeoutSec,omitempty"`
+	// RelatedMaxMB caps the exported size of one read clone (default 64).
+	RelatedMaxMB int `json:"relatedMaxMB,omitempty"`
 }
 
 // Load reads and validates routes.json. A rule may name a repo that is not in

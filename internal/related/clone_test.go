@@ -260,3 +260,180 @@ func TestReadClone_FetchTimesOutAndIsStale(t *testing.T) {
 		t.Fatalf("stale = %q %v", since, stale)
 	}
 }
+
+// hostileRemote builds a bare repo whose tip has a tree entry with the given
+// name, made with plumbing so git's own add-time checks do not stand in the way.
+func hostileRemote(t *testing.T, repo, entry string) string {
+	t.Helper()
+	gitEnv(t)
+	root := t.TempDir()
+	bare := filepath.Join(root, repo+".git")
+	g := gitwt.New(root)
+	if _, err := g.Run("init", "--bare", "-b", "main", bare); err != nil {
+		t.Fatal(err)
+	}
+	b := gitwt.New(bare)
+	oid, err := b.RunStdin([]byte("hostile"), "hash-object", "-w", "--stdin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := b.RunStdin([]byte("100644 blob "+strings.TrimSpace(oid)+"\t"+entry+"\x00"), "mktree", "-z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, err := b.Run("commit-tree", strings.TrimSpace(tree), "-m", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Run("update-ref", "refs/heads/main", strings.TrimSpace(commit)); err != nil {
+		t.Fatal(err)
+	}
+	return bare
+}
+
+func TestReadClone_HostileTreeNamesAreRefusedAtFetch(t *testing.T) {
+	for _, name := range []string{"git~1", ".git\u200c", ".GIT", "git~1 "} {
+		bare := hostileRemote(t, "mem-project-b", name)
+		root := t.TempDir()
+		rc, _ := NewReadClone(root, "mem-project-b", bare)
+		if err := rc.Fetch(); err == nil {
+			t.Errorf("%q: fetch accepted a .git alias", name)
+		}
+		if _, err := os.Stat(rc.Dir()); err == nil {
+			t.Errorf("%q: a tree was written", name)
+		}
+		ents, _ := os.ReadDir(root)
+		for _, e := range ents {
+			if strings.HasPrefix(e.Name(), ".tmp-") {
+				t.Errorf("%q: temp dir left behind", name)
+			}
+		}
+	}
+}
+
+// Host config cannot relax the fetch checks.
+func TestReadClone_HostConfigCannotRelaxFsck(t *testing.T) {
+	gitEnv(t)
+	gcfg := filepath.Join(t.TempDir(), "gitconfig")
+	os.WriteFile(gcfg, []byte("[fetch]\n\tfsckObjects = false\n[transfer]\n\tfsckObjects = false\n[fsck]\n\thasDotgit = ignore\n[fetch \"fsck\"]\n\thasDotgit = ignore\n"), 0600)
+	bare := hostileRemote(t, "mem-project-b", "git~1")
+	t.Setenv("GIT_CONFIG_GLOBAL", gcfg)
+	rc, _ := NewReadClone(t.TempDir(), "mem-project-b", bare)
+	if err := rc.Fetch(); err == nil {
+		t.Fatal("host config relaxed the object checks")
+	}
+}
+
+func TestSafeRel(t *testing.T) {
+	good := map[string]string{"a.md": "a.md", "projects/p/memory/n.md": "projects/p/memory/n.md", "x//y.md": "x/y.md", "./a.md": "a.md", ".gitignore": ".gitignore", "gitx/a": "gitx/a", ".github/w.yml": ".github/w.yml", "git~/a": "git~/a"}
+	for in, want := range good {
+		if got, ok := safeRel(in); !ok || got != want {
+			t.Errorf("safeRel(%q) = %q %v, want %q", in, got, ok, want)
+		}
+	}
+	bad := []string{"", "..", "../x", "a/../b", "a/..", "/abs", "C:/x", "c:\\x", "a\\b", "a\\..\\b", "x\x00y",
+		".git", ".git/config", "a/.git/hooks/x", ".GIT/x", ".Git", ".git.", ".git ", ".git. .", "a/.git /x",
+		"git~1", "GIT~1/x", "git~12/x", "git~1.", ".g\u200cit", ".git\u200c", ".git\ufeff/x", ".git::$INDEX_ALLOCATION/x"}
+	for _, in := range bad {
+		if got, ok := safeRel(in); ok {
+			t.Errorf("safeRel(%q) = %q, want refusal", in, got)
+		}
+	}
+}
+
+func TestReadClone_SymlinksAreNotExported(t *testing.T) {
+	gitEnv(t)
+	bare := bareWithNotes(t, "mem-project-b", map[string]string{"note.md": "ok"})
+	work := t.TempDir()
+	w := gitwt.New(work)
+	if err := w.Clone(bare); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/etc/passwd", filepath.Join(work, "link.md")); err != nil {
+		t.Skip("no symlinks")
+	}
+	w.AddAll()
+	if _, err := w.Commit("link"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Run("push", "origin", "HEAD:main"); err != nil {
+		t.Fatal(err)
+	}
+	rc, _ := NewReadClone(t.TempDir(), "mem-project-b", bare)
+	if err := rc.Fetch(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(rc.Dir(), "link.md")); err == nil {
+		t.Fatal("a symlink was exported")
+	}
+	if _, err := os.Stat(filepath.Join(rc.Dir(), "note.md")); err != nil {
+		t.Fatal("regular file missing")
+	}
+}
+
+func TestReadClone_SizeCap(t *testing.T) {
+	big := strings.Repeat("x", 600)
+	bare := bareWithNotes(t, "mem-project-b", map[string]string{"a.md": big, "b.md": big})
+	root := t.TempDir()
+	rc, _ := NewReadClone(root, "mem-project-b", bare)
+	rc.MaxBytes = 1000
+	err := rc.Fetch()
+	if err == nil || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("over the cap: %v", err)
+	}
+	if _, err := os.Stat(rc.Dir()); err == nil {
+		t.Fatal("a refused tip was exported")
+	}
+	rc.MaxBytes = 1300
+	if err := rc.Fetch(); err != nil {
+		t.Fatalf("under the cap: %v", err)
+	}
+	// A refused later tip leaves the old copy in place.
+	pushFiles(t, bare, map[string]string{"c.md": big})
+	if err := rc.Fetch(); err == nil {
+		t.Fatal("grown past the cap")
+	}
+	if _, err := os.Stat(filepath.Join(rc.Dir(), "a.md")); err != nil {
+		t.Fatal("old copy lost")
+	}
+	// The default cap is 64 MB.
+	rc2, _ := NewReadClone(t.TempDir(), "mem-project-b", bare)
+	if err := rc2.Fetch(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A hooks directory in the host's config never runs for a fetch.
+func TestReadClone_HooksPathIsOff(t *testing.T) {
+	gitEnv(t)
+	hooks := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "RAN")
+	os.WriteFile(filepath.Join(hooks, "reference-transaction"), []byte("#!/bin/sh\ntouch "+marker+"\n"), 0700)
+	gcfg := filepath.Join(t.TempDir(), "gitconfig")
+	os.WriteFile(gcfg, []byte("[core]\n\thooksPath = "+hooks+"\n"), 0600)
+	bare := bareWithNotes(t, "mem-project-b", map[string]string{"a.md": "x"})
+	t.Setenv("GIT_CONFIG_GLOBAL", gcfg)
+	// Control: the hook does fire for an ordinary ref update under this config.
+	ctl := t.TempDir()
+	if _, err := gitwt.New(ctl).Run("init", "--bare", "-q", "ctl.git"); err != nil {
+		t.Fatal(err)
+	}
+	g := gitwt.New(filepath.Join(ctl, "ctl.git"))
+	empty, _ := g.RunStdin(nil, "hash-object", "-t", "tree", "-w", "--stdin")
+	commit, err := g.Run("commit-tree", strings.TrimSpace(empty), "-m", "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.Run("update-ref", "refs/heads/x", strings.TrimSpace(commit))
+	if _, err := os.Stat(marker); err != nil {
+		t.Skip("this git does not run reference-transaction hooks")
+	}
+	os.Remove(marker)
+	rc, _ := NewReadClone(t.TempDir(), "mem-project-b", bare)
+	if err := rc.Fetch(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a hook from the host's core.hooksPath ran during the fetch")
+	}
+}

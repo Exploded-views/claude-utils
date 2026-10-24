@@ -664,3 +664,47 @@ func TestBackgroundSync_TimeoutClearsTheGuard(t *testing.T) {
 		t.Fatal("timeout not recorded as stale")
 	}
 }
+
+func TestHider_ByPathAndByContentScan(t *testing.T) {
+	h := newRelHost(t, map[string][2]string{"a": {"mem-project-a", "project"}}, nil)
+	os.WriteFile(h.cfgs["a"].DenylistPath(), []byte("^secret-dir/\n"), 0600)
+	rc, err := loadRelCtx("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hide := rc.hider("mem-project-a")
+	// By path: the denylist pattern names the path.
+	if !hide("secret-dir/n.md") || hide("public-dir/n.md") {
+		t.Fatal("path hiding wrong")
+	}
+	// By content: a credential in a heading is hidden by the built-in scan.
+	if !hide(`# deploy token = "abcdefghijklmnopqrstuvwx"`) || hide("# deploy notes") {
+		t.Fatal("content scan wrong")
+	}
+	// With no denylist at all the content scan still applies.
+	os.Remove(h.cfgs["a"].DenylistPath())
+	hide = rc.hider("mem-project-a")
+	if !hide(`# api_key = "abcdefghijklmnopqrstuvwx"`) || hide("secret-dir/n.md") {
+		t.Fatal("no-denylist hiding wrong")
+	}
+}
+
+func TestSync_SizeCapIsConfigurable(t *testing.T) {
+	big := strings.Repeat("x", 1<<20+10)
+	bare := bareRemote(t, "mem-project-b", map[string]string{"a.md": big})
+	h := newRelHost(t, map[string][2]string{"a": {"mem-project-a", "project"}}, map[string]string{"mem-project-b": bare})
+	p := os.Getenv(routesEnv)
+	var rj map[string]any
+	b, _ := os.ReadFile(p)
+	json.Unmarshal(b, &rj)
+	rj["relatedMaxMB"] = 1
+	b, _ = json.Marshal(rj)
+	os.WriteFile(p, b, 0600)
+	relate("mem-project-a", "mem-project-b", "--read")
+	if out := syncOut(); !strings.Contains(out, "limit") {
+		t.Fatalf("sync:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(h.root, "mem-project-b")); err == nil {
+		t.Fatal("oversize tip exported")
+	}
+}
