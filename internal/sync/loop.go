@@ -262,7 +262,7 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	var conflictErr error
 	if err := repo.Pull(l.Branch); err != nil {
 		if repo.RebaseInProgress() {
-			conflictErr = resolveRebaseConflict(repo, l.Branch)
+			conflictErr = abortRebaseConflict(repo)
 		} else {
 			// Don't propagate first-time failure (no upstream yet); push will create it.
 			log.Println("pull:", g.Err(err))
@@ -287,44 +287,21 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 // propagate is propagateChanges; a variable so a test can make it fail.
 var propagate = propagateChanges
 
-// resolveRebaseConflict deals with a `pull --rebase` that stopped on a
-// conflict (both PCs edited the same lines of a committed file). It aborts the
-// rebase, so the work-tree never holds conflict markers for propagateChanges to
-// copy into the Claude tree, then merges origin's branch keeping this PC's
-// side of every conflict: the Claude copy is authoritative, as everywhere else.
-// The other PC's version of each conflicted file is saved beside the mirror
-// copy as .from-remote-*, and stays in git history. The conflict is logged by
-// count only, as the paths may match the denylist.
-//
-// A nil return means the branch now includes origin's and the caller can
-// propagate and push. Otherwise the local commits are untouched and the
-// returned error says so; the next cycle tries again, so the failure is logged
-// every cycle until it clears.
-func resolveRebaseConflict(repo *gitwt.Repo, branch string) error {
+// abortRebaseConflict deals with a `pull --rebase` that stopped on a conflict
+// (both PCs edited the same lines of a committed file). It aborts the rebase, so
+// the work-tree never holds conflict markers for propagateChanges to copy into
+// the Claude tree. Nothing decides the conflict for the user: the local commits
+// are kept, nothing is propagated or pushed, and every cycle fails the same way
+// until the user resolves it (see "Rebase conflicts" in the docs). The error is
+// the cycle's one log line; it gives the count only, as the paths may match the
+// denylist.
+func abortRebaseConflict(repo *gitwt.Repo) error {
 	conflicted, _ := repo.UnmergedPaths()
 	n := len(conflicted)
 	if err := repo.RebaseAbort(); err != nil {
-		return fmt.Errorf("rebase conflict in %d file(s) and abort failed; resolve in %s", n, repo.Dir)
+		return fmt.Errorf("pull: rebase conflict in %d file(s) and abort failed; resolve in %s", n, repo.Dir)
 	}
-	ref := "refs/remotes/origin/" + branch
-	incoming := make([][]byte, len(conflicted))
-	for i, p := range conflicted {
-		if out, err := repo.Run("show", ref+":"+p); err == nil {
-			incoming[i] = []byte(out)
-		}
-	}
-	if err := repo.MergeKeepOurs(ref); err != nil {
-		return fmt.Errorf("pull: rebase conflict in %d file(s) could not be merged; local commits kept, nothing propagated, retrying next cycle", n)
-	}
-	for i, p := range conflicted {
-		if incoming[i] == nil {
-			continue // deleted upstream: this PC's version stands
-		}
-		bak := fmt.Sprintf("%s.from-remote-%s", filepath.Join(repo.Dir, filepath.FromSlash(p)), randSuffix())
-		_ = writeAtomic(bak, incoming[i]) // best effort: it is in history either way
-	}
-	log.Printf("pull: rebase conflict in %d file(s); kept this PC's version, other PC's copies saved as .from-remote-*", n)
-	return nil
+	return fmt.Errorf("pull: rebase conflict in %d file(s); rebase aborted, local commits kept, nothing propagated or pushed until you resolve it (see docs: Rebase conflicts)", n)
 }
 
 // remoteAndLocalIdle reports whether there is nothing to do: origin's branch

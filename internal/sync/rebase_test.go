@@ -3,7 +3,6 @@ package sync
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -23,95 +22,17 @@ func inProgress(f *pullFixture) bool {
 }
 
 // Both PCs edit the same line of a committed note. The pull rebase stops on a
-// conflict; the work-tree must not be left mid-rebase, the conflicted file must
-// never reach the Claude tree with markers, and unrelated notes must still
-// sync both ways. This PC's version wins; the other PC's copy is kept beside
-// the mirror file as .from-remote-*.
-func TestRebaseConflict_CommittedFileLocalWinsAndSyncContinues(t *testing.T) {
+// conflict. Nothing decides it for the user: the rebase is aborted (the
+// work-tree never holds conflict markers), the local commit is kept, nothing
+// reaches the Claude tree or origin, and every cycle fails the same way, with
+// the conflict given by count and never by path.
+func TestRebaseConflict_AbortsKeepsLocalAndBlocksSync(t *testing.T) {
 	f := newPullFixture(t, map[string]string{"clean.md": "a\nb\n"})
 	logs := captureLog(t)
 	f.editLocal("clean.md", "a\nlocal\n")
 	f.peerPush("clean.md", "a\npeer\n")
 	f.peerPush("peer1.md", "peer one\n")
-
-	err := f.loop.flush(f.repo, f.roots, true)
-	if err != nil {
-		t.Fatalf("flush: %v", err)
-	}
-	if got, _ := f.claudeCopy("clean.md"); got != "a\nlocal\n" {
-		t.Errorf("Claude copy of the conflicted note = %q, want the local version", got)
-	}
-	if inProgress(f) {
-		t.Error("work-tree left mid-rebase or mid-merge")
-	}
-	if b := f.backups("clean.md"); len(b) != 1 {
-		t.Errorf("want the peer's version kept once as .from-remote-*, got %v", b)
-	} else if c, _ := os.ReadFile(b[0]); string(c) != "a\npeer\n" {
-		t.Errorf("backup = %q, want the peer's version", c)
-	}
-	if got, ok := f.claudeCopy("peer1.md"); !ok || got != "peer one\n" {
-		t.Errorf("unrelated peer note not pulled")
-	}
-	if !f.originHas("projects/p1/memory/clean.md") {
-		t.Error("nothing pushed")
-	}
-	if !strings.Contains(logs.String(), "1 file(s)") || strings.Contains(logs.String(), "clean.md") {
-		t.Errorf("want the conflict logged by count, never by path; log:\n%s", logs)
-	}
-
-	// Later cycles keep flowing.
-	f.editLocal("later.md", "later\n")
-	f.peerPush("peer2.md", "peer two\n")
-	if err := f.loop.flush(f.repo, f.roots, true); err != nil {
-		t.Fatalf("second flush: %v", err)
-	}
-	if !f.originHas("projects/p1/memory/later.md") {
-		t.Error("later.md never pushed")
-	}
-	if _, ok := f.claudeCopy("peer2.md"); !ok {
-		t.Error("peer2.md never pulled")
-	}
-}
-
-// The peer deletes a note this PC edited: a modify/delete conflict, which a
-// content strategy cannot settle. This PC's version is kept.
-func TestRebaseConflict_ModifyDelete(t *testing.T) {
-	f := newPullFixture(t, map[string]string{"clean.md": "a\nb\n", "other.md": "o\n"})
-	captureLog(t)
-	f.editLocal("clean.md", "a\nlocal\n")
-	f.peerPush("clean.md", "")
-	f.peerPush("peer1.md", "peer one\n")
-
-	if err := f.loop.flush(f.repo, f.roots, true); err != nil {
-		t.Fatalf("flush: %v", err)
-	}
-	if got, ok := f.claudeCopy("clean.md"); !ok || got != "a\nlocal\n" {
-		t.Errorf("Claude copy = %q, ok=%v, want the local version", got, ok)
-	}
-	if inProgress(f) {
-		t.Error("work-tree left mid-rebase or mid-merge")
-	}
-	if _, ok := f.claudeCopy("peer1.md"); !ok {
-		t.Error("peer1.md not pulled")
-	}
-}
-
-// When even the fallback merge fails, the rebase is aborted, the local commit
-// is kept, nothing is propagated into the Claude tree, and every cycle logs
-// the conflict by count until it resolves.
-func TestRebaseConflict_FallbackFailsAbortsAndLogsEveryCycle(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("needs a shell hook")
-	}
-	f := newPullFixture(t, map[string]string{"clean.md": "a\nb\n"})
-	logs := captureLog(t)
-	hook := filepath.Join(f.repo.Dir, ".git", "hooks", "pre-merge-commit")
-	if err := os.WriteFile(hook, []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	f.editLocal("clean.md", "a\nlocal\n")
-	f.peerPush("clean.md", "a\npeer\n")
-	f.peerPush("peer1.md", "peer one\n")
+	tip := strings.TrimSpace(mustGit(t, f.repo, "ls-remote", "origin", "refs/heads/main"))
 
 	for i := 1; i <= 2; i++ {
 		logs.Reset()
@@ -134,16 +55,71 @@ func TestRebaseConflict_FallbackFailsAbortsAndLogsEveryCycle(t *testing.T) {
 		if show, _ := f.repo.Run("show", "HEAD:projects/p1/memory/clean.md"); show != "a\nlocal\n" {
 			t.Errorf("cycle %d: the local commit was not kept: %q", i, show)
 		}
+		if m, _ := os.ReadFile(filepath.Join(f.roots.Mirror, "p1", "memory", "clean.md")); strings.Contains(string(m), "<<<<<<<") {
+			t.Errorf("cycle %d: conflict markers in the mirror", i)
+		}
+		if now := strings.TrimSpace(mustGit(t, f.repo, "ls-remote", "origin", "refs/heads/main")); now != tip {
+			t.Errorf("cycle %d: origin moved while the conflict is unresolved", i)
+		}
+	}
+	if b := f.backups("clean.md"); len(b) != 0 {
+		t.Errorf("no side is picked, so no .from-remote-* copies expected, got %v", b)
+	}
+}
+
+// The peer deletes a note this PC edited: a modify/delete conflict. Same
+// handling.
+func TestRebaseConflict_ModifyDeleteAborts(t *testing.T) {
+	f := newPullFixture(t, map[string]string{"clean.md": "a\nb\n", "other.md": "o\n"})
+	captureLog(t)
+	f.editLocal("clean.md", "a\nlocal\n")
+	f.peerPush("clean.md", "")
+	f.peerPush("peer1.md", "peer one\n")
+
+	err := f.loop.flush(f.repo, f.roots, true)
+	if err == nil || !strings.Contains(err.Error(), "1 file(s)") {
+		t.Fatalf("want a conflict error naming the count, got %v", err)
+	}
+	if inProgress(f) {
+		t.Error("work-tree left mid-rebase or mid-merge")
+	}
+	if got, ok := f.claudeCopy("clean.md"); !ok || got != "a\nlocal\n" {
+		t.Errorf("Claude copy = %q, ok=%v", got, ok)
+	}
+	if _, ok := f.claudeCopy("peer1.md"); ok {
+		t.Error("propagated despite the unresolved conflict")
+	}
+}
+
+// The documented resolution works: after the abort, `git pull --rebase` in the
+// sync dir, fix the file, `git add`, `git rebase --continue`; the next cycle
+// pushes the result and pulls the rest.
+func TestRebaseConflict_ManualResolutionThenNextCycleSyncs(t *testing.T) {
+	f := newPullFixture(t, map[string]string{"clean.md": "a\nb\n"})
+	captureLog(t)
+	t.Setenv("GIT_EDITOR", "true")
+	f.editLocal("clean.md", "a\nlocal\n")
+	f.peerPush("clean.md", "a\npeer\n")
+	f.peerPush("peer1.md", "peer one\n")
+	if err := f.loop.flush(f.repo, f.roots, true); err == nil {
+		t.Fatal("want the conflict error")
 	}
 
-	// A later edit resolves it once the fallback can work again.
-	if err := os.Remove(hook); err != nil {
-		t.Fatal(err)
+	// The user's steps from the docs, with the daemon stopped.
+	if _, err := f.repo.Run("pull", "--rebase", "origin", "main"); err == nil {
+		t.Fatal("expected the pull to stop on the conflict again")
 	}
+	writeRepoFile(t, f.repo, "projects/p1/memory/clean.md", "a\nboth\n")
+	mustGit(t, f.repo, "add", "projects/p1/memory/clean.md")
+	mustGit(t, f.repo, "rebase", "--continue")
+
 	if err := f.loop.flush(f.repo, f.roots, true); err != nil {
-		t.Fatalf("after the hook is gone: %v", err)
+		t.Fatalf("flush after the resolution: %v", err)
 	}
-	if _, ok := f.claudeCopy("peer1.md"); !ok {
-		t.Error("peer1.md never pulled after the conflict cleared")
+	if !f.originHas("projects/p1/memory/clean.md") {
+		t.Error("resolved note never pushed")
+	}
+	if show := mustGit(t, f.repo, "show", "origin/main:projects/p1/memory/clean.md"); show != "a\nboth\n" {
+		t.Errorf("origin has %q", show)
 	}
 }

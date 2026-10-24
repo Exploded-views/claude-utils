@@ -252,27 +252,36 @@ In practice:
 
 Separate from held-back files: if you and another PC edit the **same lines of
 the same committed file**, `git pull --rebase` stops on a conflict. The daemon
-aborts the rebase, so the work-tree never holds conflict markers and none reach
-`~/.claude`, then merges the other PC's branch keeping **this PC's side** of
-every conflict (your `~/.claude` copy is authoritative here too). The other
-PC's version of each conflicted file is saved as `<name>.from-remote-<id>`
-next to the mirror file, and stays in git history. The merge is pushed, so the
-other PC picks up this PC's version on its next pull. Everything else in the
-pull syncs normally.
+does not pick a side. It aborts the rebase (`git rebase --abort`), so the
+work-tree never holds conflict markers and none reach `~/.claude`, and it keeps
+your local commits as they were. For as long as the conflict is unresolved,
+that cycle propagates nothing into `~/.claude` and pushes nothing, and the same
+happens on every following cycle: **sync of your other notes is blocked, both
+ways, until you resolve it.** Your `~/.claude` copies are never touched.
 
-The conflict is logged by **count only**, because a path may match your
-denylist:
+The conflict is logged once per cycle, by **count only**, because a path may
+match your denylist:
 
 ```
-pull: rebase conflict in 1 file(s); kept this PC's version, other PC's copies saved as .from-remote-*
+pull: rebase conflict in 1 file(s); rebase aborted, local commits kept, nothing propagated or pushed until you resolve it (see docs: Rebase conflicts)
 ```
 
-If that merge cannot finish either, the daemon aborts it too and keeps your
-local commits as they were, propagates nothing into `~/.claude` for that cycle,
-skips the push, and the cycle fails with an error naming the count. It tries
-again every cycle and logs the failure each time until it succeeds. To resolve
-it by hand, run `git status` in `~/.claudesync`, fix the conflict there, and
-commit.
+To resolve it, with `claude-memsync stop` run first so the daemon does not
+abort your rebase again:
+
+```
+git -C ~/.claudesync pull --rebase origin main    # stops on the conflict again
+git -C ~/.claudesync status                       # lists the conflicted files
+# edit each conflicted file in ~/.claudesync, keeping what you want
+git -C ~/.claudesync add <file>
+git -C ~/.claudesync rebase --continue
+```
+
+Then start the daemon again (`claude-memsync start`). The next cycle pushes the
+result and pulls everything that was waiting. Edit the resolved note in
+`~/.claude` too if you want that copy to match; the pull brings the resolved
+version into it for any file you did not change since. If the file is a
+deletion on one side, `git add` keeps it and `git rm` removes it.
 
 Built-in rules:
 
@@ -443,10 +452,9 @@ If that works without prompting, the daemon will too.
   different paths (e.g. `C:\src\foo` vs. `D:\dev\foo`) will see them as different
   projects.
 - **No live conflict UI**: when two PCs edit the same lines of a file (for
-  `MEMORY.md`, overlapping edits within the same section body), this PC's
-  version wins and the other's is kept as `<name>.from-remote-<id>` in the
-  mirror; see [Rebase conflicts](#rebase-conflicts). Merge the two by hand if
-  you want both.
+  `MEMORY.md`, overlapping edits within the same section body), the daemon
+  aborts the pull and stops syncing until you resolve it by hand; see
+  [Rebase conflicts](#rebase-conflicts).
 - **Auto-start runs while logged in**: the daemon stops when the user logs off.
   Acceptable since memories don't change while you're away. For 24/7 sync,
   register a system-wide service manually or enable systemd lingering.
