@@ -13,6 +13,7 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/changes"
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
+	"github.com/MarimerLLC/claude-utils/internal/route"
 )
 
 // sessionIDPattern is what a session id must match before it is used as a
@@ -131,6 +132,26 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 			lines = append(lines, r.res.HiddenLine())
 		}
 	}
+	// Read-only clones of the project's related repos: paths only.
+	var relLines []string
+	var relCommit func()
+	if hookHasRelated(routesFlag) {
+		var rerr error
+		relLines, relCommit, rerr = relatedHookLines(routesFlag, project, in.SessionID, limit)
+		if rerr != nil {
+			fmt.Fprintln(stderr, "changes: related:", rerr)
+		}
+	}
+	if len(relLines) > 0 {
+		if reported {
+			lines = append(lines, "")
+		} else {
+			lines = nil
+		}
+		lines = append(lines, "Memory notes changed in related, read-only repos (paths only; read a file before relying on it):")
+		lines = append(lines, relLines...)
+		reported = true
+	}
 	if reported {
 		var reply struct {
 			Out struct {
@@ -146,6 +167,9 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 	}
 	// Only now that the report went out does a marker move; otherwise the
 	// next prompt reports the same changes again.
+	if relCommit != nil {
+		relCommit()
+	}
 	for _, r := range reports {
 		if err := changes.SaveMarker(gitwt.New(r.cfg.SyncDir), r.marker, r.res); err != nil {
 			return fail(err)
@@ -222,4 +246,14 @@ func pruneMarkers(dir, keep string, maxAge time.Duration) {
 			os.Remove(filepath.Join(dir, e.Name()))
 		}
 	}
+}
+
+// hookHasRelated reports whether a routes file with a registry is in play.
+func hookHasRelated(routesFlag string) bool {
+	path, ok, err := resolveRoutesPath(routesFlag)
+	if err != nil || !ok {
+		return false
+	}
+	f, err := route.Load(path)
+	return err == nil && f.Registry != ""
 }

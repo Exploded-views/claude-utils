@@ -299,6 +299,7 @@ func (s *routedSet) Start(ctx context.Context) (*running, error) {
 			case <-t.C:
 				s.reload()
 				s.Router.Refresh()
+				s.syncRelatedInBackground()
 			}
 		}
 	}()
