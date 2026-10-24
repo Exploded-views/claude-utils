@@ -341,17 +341,13 @@ func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string, skip map[
 // projects/<hash>/memory/<file> paths are parked: they are the ones with an
 // authoritative Claude copy to refill from.
 func parkUncommitted(repo *gitwt.Repo) (map[string]bool, error) {
-	out, err := repo.Run("status", "--porcelain", "-z", "--no-renames", "--untracked-files=all", "--", "projects")
+	dirty, err := repo.DirtyPaths("projects")
 	if err != nil {
 		return nil, err
 	}
 	held := map[string]bool{}
 	var paths []string
-	for _, e := range strings.Split(out, "\x00") {
-		if len(e) < 4 {
-			continue
-		}
-		p := e[3:]
+	for _, p := range dirty {
 		if _, _, ok := splitMirrorPath(p); ok && !held[p] {
 			held[p] = true
 			paths = append(paths, p)
@@ -360,24 +356,20 @@ func parkUncommitted(repo *gitwt.Repo) (map[string]bool, error) {
 	if len(paths) == 0 {
 		return held, nil
 	}
-	tracked := map[string]bool{}
-	if ls, err := repo.Run(append([]string{"ls-tree", "-r", "--name-only", "HEAD", "--"}, paths...)...); err == nil {
-		for _, p := range strings.Split(ls, "\n") {
-			tracked[p] = true
-		}
+	inHead, err := repo.HeadFiles("projects")
+	if err != nil {
+		return nil, err
 	}
 	var restore []string
 	for _, p := range paths {
-		if tracked[p] {
+		if inHead[p] {
 			restore = append(restore, p)
 		} else if err := os.Remove(filepath.Join(repo.Dir, filepath.FromSlash(p))); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return nil, err
 		}
 	}
-	if len(restore) > 0 {
-		if _, err := repo.Run(append([]string{"checkout", "-q", "HEAD", "--"}, restore...)...); err != nil {
-			return nil, err
-		}
+	if err := repo.CheckoutHead(restore); err != nil {
+		return nil, err
 	}
 	return held, nil
 }

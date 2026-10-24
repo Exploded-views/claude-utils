@@ -161,3 +161,16 @@ func (r rule) matches(content []byte) bool {
 	}
 	return false
 }
+
+// MatchesPath reports whether any denylist pattern matches the file path
+// itself. The built-in rules are about contents and are not applied to names.
+// Callers must not log a path for which this is true: the name may be exactly
+// what the user listed as sensitive.
+func (s *Scanner) MatchesPath(path string) bool {
+	for _, d := range s.deny {
+		if d.re.MatchString(path) {
+			return true
+		}
+	}
+	return false
+}

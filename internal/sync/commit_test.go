@@ -2,6 +2,7 @@ package sync
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -297,6 +298,109 @@ func TestCommitMirror_InvalidDenylistFailsClosed(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "line 1") {
 		t.Errorf("log should point at the bad line, got %q", logs.String())
+	}
+}
+
+// A file whose name matches the denylist is held back even when its content
+// is clean, and the log neither names it nor echoes the pattern.
+func TestCommitMirror_PathMatchesDenylist(t *testing.T) {
+	repo, cfg := commitFixture(t)
+	writeRepoFile(t, repo, "denylist.txt", "nightjar\n")
+	writeRepoFile(t, repo, "projects/p1/memory/Nightjar-notes.md", "harmless\n")
+	writeRepoFile(t, repo, "projects/p1/memory/also-nightjar.md", "harmless\n")
+	writeRepoFile(t, repo, "projects/p1/memory/b.md", "harmless\n")
+	writeRepoFile(t, repo, "projects/p1/memory/leaky.md", "token "+fakeSecret()+"\n")
+
+	logs := captureLog(t)
+	committed, err := CommitMirror(repo, cfg, "auto: test")
+	if err != nil || !committed {
+		t.Fatalf("committed=%v err=%v", committed, err)
+	}
+	files := committedFiles(t, repo)
+	if files["projects/p1/memory/Nightjar-notes.md"] || files["projects/p1/memory/also-nightjar.md"] {
+		t.Error("file with a denylisted name committed")
+	}
+	if !files["projects/p1/memory/b.md"] {
+		t.Error("clean file missing")
+	}
+	msg := logs.String()
+	if strings.Contains(strings.ToLower(msg), "nightjar") {
+		t.Errorf("log must not print a path that matches the denylist, got %q", msg)
+	}
+	if !strings.Contains(msg, "<held back: path matches denylist>") || !strings.Contains(msg, "2") {
+		t.Errorf("log should say how many paths matched, got %q", msg)
+	}
+	if !strings.Contains(msg, "leaky.md") {
+		t.Errorf("a content-only hit is still logged by path, got %q", msg)
+	}
+}
+
+// The denylist is per-PC and must never be committed, even when the file
+// system hands us a differently-cased name.
+func TestCommitMirror_DenylistUnstagedCaseInsensitively(t *testing.T) {
+	repo, cfg := commitFixture(t)
+	cfg.Scrub = false
+	for _, name := range []string{"DENYLIST.TXT", "Denylist.txt"} {
+		writeRepoFile(t, repo, name, "anything\n")
+	}
+	writeRepoFile(t, repo, "projects/p1/memory/a.md", "x\n")
+	if _, err := CommitMirror(repo, cfg, "auto: test"); err != nil {
+		t.Fatal(err)
+	}
+	files := committedFiles(t, repo)
+	if files["DENYLIST.TXT"] || files["Denylist.txt"] {
+		t.Errorf("denylist committed under another case: %v", files)
+	}
+	if !files["projects/p1/memory/a.md"] {
+		t.Error("a.md should be committed")
+	}
+}
+
+// Paths go to git literally: a held-back file called "[ab].md" must not drag
+// a.md or b.md out of the commit, and odd names must survive.
+func TestCommitMirror_PathsAreLiteral(t *testing.T) {
+	repo, cfg := commitFixture(t)
+	secret := "token " + fakeSecret() + "\n"
+	writeRepoFile(t, repo, "projects/p1/memory/[ab].md", secret)
+	writeRepoFile(t, repo, "projects/p1/memory/a.md", "clean\n")
+	writeRepoFile(t, repo, "projects/p1/memory/b.md", "clean\n")
+	writeRepoFile(t, repo, "projects/p1/memory/new\nline.md", secret)
+	writeRepoFile(t, repo, "projects/p1/memory/-dash.md", secret)
+	writeRepoFile(t, repo, "projects/p1/memory/:colon.md", secret)
+	captureLog(t)
+
+	committed, err := CommitMirror(repo, cfg, "auto: test")
+	if err != nil || !committed {
+		t.Fatalf("committed=%v err=%v", committed, err)
+	}
+	files := committedFiles(t, repo)
+	for _, n := range []string{"a.md", "b.md"} {
+		if !files["projects/p1/memory/"+n] {
+			t.Errorf("%s was dragged out of the commit", n)
+		}
+	}
+	if len(files) != 2 {
+		t.Errorf("only a.md and b.md should be committed, got %v", files)
+	}
+}
+
+// A long list of held-back files must not run into command-line limits.
+func TestCommitMirror_ManyHeldBackFiles(t *testing.T) {
+	repo, cfg := commitFixture(t)
+	secret := "token " + fakeSecret() + "\n"
+	long := strings.Repeat("n", 100)
+	for i := 0; i < 3000; i++ {
+		writeRepoFile(t, repo, fmt.Sprintf("projects/p1/memory/%s-%04d.md", long, i), secret)
+	}
+	writeRepoFile(t, repo, "projects/p1/memory/ok.md", "clean\n")
+	captureLog(t)
+
+	committed, err := CommitMirror(repo, cfg, "auto: test")
+	if err != nil || !committed {
+		t.Fatalf("committed=%v err=%v", committed, err)
+	}
+	if files := committedFiles(t, repo); len(files) != 1 || !files["projects/p1/memory/ok.md"] {
+		t.Errorf("only ok.md should be committed, got %d files", len(files))
 	}
 }
 

@@ -32,8 +32,10 @@ func CommitMirror(repo *gitwt.Repo, cfg config.Config, msg string) (bool, error)
 	if err := repo.AddAll(); err != nil {
 		return false, fmt.Errorf("add: %w", err)
 	}
-	// Per-PC file: never part of a commit, whatever the scrub setting.
-	if err := repo.Unstage(denylistRel); err != nil {
+	// Per-PC file: never part of a commit, whatever the scrub setting. Matched
+	// case-insensitively so "Denylist.txt" from a copy or a case-folding file
+	// system is caught too.
+	if err := repo.UnstageFold(denylistRel); err != nil {
 		return false, fmt.Errorf("unstage denylist: %w", err)
 	}
 	if cfg.Scrub {
@@ -70,20 +72,38 @@ func holdBack(repo *gitwt.Repo, cfg config.Config) (bool, error) {
 		return false, fmt.Errorf("list staged changes: %w", err)
 	}
 	scanner := scrub.New(deny)
-	var held []string
-	for _, c := range changes {
-		if c.Status == 'D' {
+
+	// Deletions are not scanned, and neither are submodule entries (no blob).
+	var held, toRead []string
+	var readIdx []int
+	byPathHits := 0
+	for i, c := range changes {
+		if c.Status == 'D' || c.Mode == "160000" {
 			continue
 		}
-		content, err := repo.StagedContent(c.Path)
-		if err != nil {
-			return false, fmt.Errorf("read staged %s: %w", c.Path, err)
+		if scanner.MatchesPath(c.Path) {
+			held = append(held, c.Path)
+			byPathHits++
+			continue
 		}
+		toRead = append(toRead, c.Oid)
+		readIdx = append(readIdx, i)
+	}
+	contents, err := repo.BlobContents(toRead)
+	if err != nil {
+		return false, fmt.Errorf("read staged files: %w", err)
+	}
+	for j, content := range contents {
+		path := changes[readIdx[j]].Path
 		if rules := scanner.Scan(content); len(rules) > 0 {
 			// Path and rule names only: never log the matched text.
-			log.Printf("scrub: holding back %s (rule: %s)", c.Path, strings.Join(rules, ", "))
-			held = append(held, c.Path)
+			log.Printf("scrub: holding back %s (rule: %s)", path, strings.Join(rules, ", "))
+			held = append(held, path)
 		}
+	}
+	if byPathHits > 0 {
+		// The path itself matches the denylist, so it is not printed.
+		log.Printf("scrub: <held back: path matches denylist> (%d)", byPathHits)
 	}
 	if err := repo.Unstage(held...); err != nil {
 		return false, fmt.Errorf("unstage held-back files: %w", err)
@@ -103,7 +123,7 @@ func loadDenylist(cfg config.Config) ([]scrub.DenylistPattern, error) {
 
 // unstageAll empties the index (the work-tree is untouched).
 func unstageAll(repo *gitwt.Repo) error {
-	if err := repo.Unstage("."); err != nil {
+	if err := repo.UnstageAll(); err != nil {
 		return fmt.Errorf("unstage: %w", err)
 	}
 	return nil
