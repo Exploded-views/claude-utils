@@ -122,7 +122,7 @@ and SSH keys. None require root.
 
 | Command | What it does |
 |---|---|
-| `claude-memsync init --remote <url>` | One-time bootstrap. |
+| `claude-memsync init --remote <url>` | One-time bootstrap. `--project-key path\|remote` sets [how projects are identified](#matching-projects-by-git-remote-instead-of-path); `--force` re-initializes an existing sync dir and keeps its current `projectKey` unless the flag is given. |
 | `claude-memsync install` | Register for auto-start at next logon. |
 | `claude-memsync uninstall` | Remove the auto-start hook. |
 | `claude-memsync start` | Start the daemon now. |
@@ -193,8 +193,9 @@ which is the project's absolute path with every non-alphanumeric character
 replaced by `-`. `/home/alice/src/app` on one PC and `/home/bob/code/app` on
 another are different projects and never share memory.
 
-Set `"projectKey": "remote"` in `~/.claudesync/config.json` (per PC, then
-restart the daemon) to identify a project by its git `origin` remote instead:
+Run `claude-memsync init --remote <url> --project-key remote`, or set
+`"projectKey": "remote"` in `~/.claudesync/config.json` (per PC, then restart
+the daemon), to identify a project by its git `origin` remote instead:
 
 ```json
 { "projectKey": "remote" }
@@ -228,6 +229,27 @@ remote keep their path key under `projects/<hash>/memory/` exactly as before:
 - `origin` is a local path or `file://` URL (not the same string on another PC)
 - the directory is a subdirectory of a repo rather than its top level (two
   subprojects of a monorepo would otherwise share one memory folder)
+- the directory is a linked git worktree (see
+  [Worktrees and several clones](#worktrees-and-several-clones))
+
+Normalization is purely textual, so spellings that don't look alike give
+different keys even when they reach the same repository:
+
+- an ssh host alias from `~/.ssh/config` (`git@work-github:acme/app.git`) keeps
+  the alias as the host
+- `ssh.github.com:443` is a different host from `github.com`
+- Azure DevOps over ssh (`git@ssh.dev.azure.com:v3/acme/proj/app`) and over
+  https (`https://dev.azure.com/acme/proj/_git/app`) have different shapes
+
+PCs that spell a remote differently don't share memory until you join them with
+the cache's `key` override (below): give the odd folder the key the other PCs
+derive, for example `"key": "github.com/acme/app"`.
+
+Segments are limited to `[a-z0-9._-]`; anything else becomes `_`, and a
+segment that Windows reserves as a device name (`con`, `prn`, `aux`, `nul`,
+`com1`-`com9`, `lpt1`-`lpt9`, with or without an extension) gets a `_` prefix.
+A remote whose path contains `@` is rejected, because that is what an
+unescaped `/` in a URL password leaves behind.
 
 ### Finding the directory behind a folder name
 
@@ -242,7 +264,18 @@ directory that escapes to the folder name. Then:
 - several matches with different remotes: **guess nothing**. The project keeps
   its path key and the daemon logs a warning. It records the candidates in the
   cache so you can pick
-- none (the checkout was deleted or lives on another PC): path key
+- none (the checkout was deleted or lives on another PC): the folder keeps
+  the key it last had, or its path key if it never had one
+
+On Windows and macOS the walk compares names case-insensitively, as those file
+systems do; elsewhere exactly.
+
+A folder's key is **sticky**. The daemon stores the last key it resolved
+(`lastKey`) and keeps using it whenever it can't get an answer: the directory
+is gone or unmounted, git isn't installed, git refuses with a "dubious
+ownership" error, or fails for any other reason. The key only changes on
+positive evidence: git ran and reported no `origin`, or a different one. So
+deleting a checkout doesn't fork its notes into `projects/<hash>/`.
 
 The result is cached per PC in `~/.claudesync/.state/projects.json` (`.state/`
 is git-ignored, so this file is never synced). The file is meant to be
@@ -255,6 +288,10 @@ edited by hand:
     "-home-alice-src-my-app": {
       "candidates": ["/home/alice/src/my-app", "/home/alice/src/my.app"]
     },
+    "-home-alice-src-old": {
+      "dir": "/home/alice/src/old",
+      "lastKey": "github.com/acme/old"
+    },
     "-home-alice-src-app": { "dir": "/home/alice/src/app" },
     "-home-alice-scratch": { "key": "path" },
     "-home-alice-src-app-fork": { "key": "github.com/acme/app" }
@@ -265,26 +302,62 @@ edited by hand:
 - `dir` pins the directory a folder name stands for (fill it in for an
   ambiguous entry). The daemon re-derives the key from it on every refresh.
 - `key` overrides the repo-side key outright, or `"path"` to force the path
-  key for that project. It wins over everything else.
-- `candidates` is written by the daemon and informational.
+  key for that project. It wins over everything else. It must look like what
+  normalization produces: at least two `/`-separated segments, each made of
+  `[a-z0-9._-]` and none of them `.` or `..`. An invalid value is ignored with
+  a logged warning (the file is left as you wrote it) and the folder is
+  resolved as if it were absent, so a typo can't point memory outside
+  `remotes/`.
+- `lastKey` and `candidates` are written by the daemon and informational.
 
-The cache is read at startup (restart the daemon after editing it), and
-entries are re-resolved on the hourly tick and when Claude creates a new
-project folder.
+The cache is read at startup (restart the daemon after editing it). The daemon
+writes it atomically; if it can't be parsed anyway (a bad hand edit), the
+daemon logs the error, renames it to `projects.json.corrupt-<unix time>` and
+carries on with an empty cache, which it rebuilds. Only project folders that
+exist under this PC's `~/.claude/projects` are resolved or cached; the hashes
+of projects other PCs pushed under `projects/` are not.
 
-### Several local folders for one repo
+Entries are re-resolved when Claude creates a new project folder, and on the
+pull interval (`pullIntervalSec`, default 3600), which also runs the full
+reconcile pass. That refresh is skipped while local changes are still waiting
+for their debounced commit; it runs on the next tick instead.
 
-Worktrees, or two clones of the same repo, give several Claude folders with
-one key. They share the single repo-side folder and are kept as a union:
+### Worktrees and several clones
 
-- a file any of them has is copied to the others
-- `MEMORY.md` versions are merged section by section, as between PCs
-- other files that differ keep the most recently modified version; the older
-  one is saved as `<name>.from-remote-<random>` next to the repo-side copy,
-  same as a cross-PC collision
-- a file is deleted from the repo only once **every** local folder has lost it.
-  Deleting it in one worktree alone is undone on the next pass, because the
-  daemon can't tell that from a worktree that never received the file yet
+Current Claude Code derives its auto-memory folder from the git repository, so
+all worktrees and subdirectories of a repo share **one** memory directory (the
+main checkout's). A session in a linked worktree still creates its own project
+folder under `~/.claude/projects`, but that folder holds only transcripts and
+has no `memory/`. memsync therefore:
+
+- doesn't key a linked worktree's folder by remote (it is told apart from a
+  plain checkout by `git rev-parse --git-dir` differing from
+  `--git-common-dir`), and never copies memory into it
+- only treats a project folder as part of a remote-keyed group if it already
+  has a `memory/` directory, and never creates `memory/` in one that doesn't
+
+What's left is the case of two real clones of one remote on the same PC, each
+with its own `memory/`. They share the single repo-side folder, and the
+committed copy in the sync repo is the merge base between them:
+
+- a clone whose copy still equals the base is stale: it takes the other
+  clone's change, with no backup
+- a file the base or that clone's manifest entry knew about, and that the clone
+  no longer has, counts as deleted there, and the delete is applied to the
+  other clones and the repo. The one exception is a file another clone has
+  edited since the base: the edit is kept and restored
+- a `MEMORY.md` section removed in one clone stays removed
+- only a real divergence (both clones edited a file since the base) uses the
+  collision rules: `MEMORY.md` is merged three-way, and for any other file the
+  most recently modified copy wins and the other is saved as
+  `<name>.from-remote-<random>` next to the repo-side copy
+
+A file that isn't in the last commit yet has no base, so the clones' copies of
+it are unioned instead.
+
+`*.from-remote-*` backups, here and in cross-PC collisions, are git-ignored.
+They exist only on the PC that produced them, are never synced, and are never
+cleaned up by the daemon; delete them by hand once you've looked.
 
 ### Switching an existing setup
 
@@ -295,10 +368,15 @@ updated by that PC, and can be removed with `git rm` once every PC has
 switched. Switch all PCs that share a repo; a PC left on `path` keeps writing
 to `projects/` and won't see the others' memory.
 
-Memory reaches a PC only for projects Claude Code has opened there at least
-once, because that is what creates the local folder the daemon syncs into.
-Open the repo once on the new PC; the daemon fills the folder in as soon as
-it appears.
+On startup in remote mode the daemon logs one line per remote-keyed folder
+whose old `projects/<hash>/memory` copy is still in the repo, saying that copy
+is no longer updated. Nothing is migrated automatically; remove the old folders
+only after every PC has switched.
+
+Memory reaches a PC only for projects that already have a Claude `memory/`
+directory there, because the daemon never creates one. Open the repo in Claude
+Code on the new PC and let it write a memory; the daemon then fills the folder
+in as soon as the directory appears.
 
 ## Deletes
 
