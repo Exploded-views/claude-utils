@@ -23,35 +23,32 @@ import (
 // platform — see task_windows.go and task_other.go.
 type program struct {
 	configPath string
-	cancel     context.CancelFunc
-	done       chan struct{}
-	loopErr    error
+	routes     string // routes.json when several repos run in this process
+	run        *running
 }
 
 func (p *program) Start(s service.Service) error {
+	if p.routes != "" {
+		set, err := loadRouted(p.routes)
+		if err != nil {
+			return err
+		}
+		p.run, err = set.Start(context.Background())
+		return err
+	}
 	cfg, err := config.Load(p.configPath)
 	if err != nil {
 		return fmt.Errorf("load config %s: %w", p.configPath, err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	p.cancel = cancel
-	p.done = make(chan struct{})
-	go func() {
-		defer close(p.done)
-		loop := &syncpkg.Loop{Cfg: cfg}
-		p.loopErr = loop.Run(ctx)
-	}()
-	return nil
+	p.run, err = startSingle(context.Background(), cfg)
+	return err
 }
 
 func (p *program) Stop(s service.Service) error {
-	if p.cancel != nil {
-		p.cancel()
+	if p.run == nil {
+		return nil
 	}
-	if p.done != nil {
-		<-p.done
-	}
-	return p.loopErr
+	return p.run.Stop()
 }
 
 func serviceConfig(configPath string) *service.Config {
@@ -79,7 +76,24 @@ func defaultSyncDir() string {
 // runService at startup (and removed on exit) so that the start/stop/status
 // subcommands on Windows can manage the daemon process directly.
 func pidFilePath() string {
-	return filepath.Join(defaultSyncDir(), "daemon.pid")
+	return pidFilePathIn(primarySyncDir())
+}
+
+func pidFilePathIn(syncDir string) string {
+	return filepath.Join(syncDir, "daemon.pid")
+}
+
+// primarySyncDir is where the PID file lives: the personal (or first) repo's
+// sync dir when routes.json is in use, else the default sync dir.
+func primarySyncDir() string {
+	if path, ok, err := resolveRoutesPath(""); err == nil && ok {
+		if set, err := loadRouted(path); err == nil {
+			if c, ok := set.Primary(); ok {
+				return c.SyncDir
+			}
+		}
+	}
+	return defaultSyncDir()
 }
 
 func readPidFile() (int, error) {
@@ -94,15 +108,17 @@ func readPidFile() (int, error) {
 	return pid, nil
 }
 
-func writePidFile(pid int) error {
-	if err := os.MkdirAll(filepath.Dir(pidFilePath()), 0700); err != nil {
+func writePidFileAt(path string, pid int) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
-	return os.WriteFile(pidFilePath(), []byte(strconv.Itoa(pid)), 0600)
+	return os.WriteFile(path, []byte(strconv.Itoa(pid)), 0600)
 }
 
-func removePidFile() error {
-	if err := os.Remove(pidFilePath()); err != nil && !os.IsNotExist(err) {
+func removePidFile() error { return removePidFileAt(pidFilePath()) }
+
+func removePidFileAt(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil
@@ -159,7 +175,7 @@ func runStop(args []string) int {
 	}
 	// A pull the stop cut short leaves its marker; one that no stopped rebase
 	// or merge needs must not outlive the pull.
-	if cfg, err := loadDistillConfig(""); err == nil {
+	for _, cfg := range allConfigs() {
 		if err := syncpkg.ClearStalePullMarker(cfg.SyncDir); err != nil {
 			fmt.Fprintln(os.Stderr, "stop: clear pull marker:", err)
 		}
@@ -175,6 +191,19 @@ func runStatus(args []string) int {
 		return 1
 	}
 	fmt.Println(st)
+	if path, ok, err := resolveRoutesPath(""); err != nil {
+		fmt.Fprintln(os.Stderr, "status:", err)
+	} else if ok {
+		set, err := loadRouted(path)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "status:", err)
+			return 1
+		}
+		for _, l := range set.statusLines() {
+			fmt.Println(l)
+		}
+		return 0
+	}
 	if cfg, err := loadDistillConfig(""); err == nil {
 		if line := pausedLine(cfg); line != "" {
 			fmt.Println(line)
@@ -202,17 +231,41 @@ func pausedLine(cfg config.Config) string {
 // in kardianos's service.Run() so the same code path serves both interactive
 // invocation (terminal, Windows scheduled task, systemd user unit) and any
 // future move to true SCM-managed mode.
-func runService(configPath string) int {
+func runService(configPath, routesFlag string) int {
 	if configPath == "" {
 		configPath = defaultConfigPath()
 	}
-
-	if err := writePidFile(os.Getpid()); err != nil {
+	routes, routed, err := resolveRoutesPath(routesFlag)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "run:", err)
+		return 1
+	}
+	pidDir := ""
+	if routed {
+		set, err := loadRouted(routes)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "run:", err)
+			return 1
+		}
+		if c, ok := set.Primary(); ok {
+			pidDir = c.SyncDir
+		}
+	} else {
+		routes = ""
+		if c, err := config.Load(configPath); err == nil {
+			pidDir = c.SyncDir
+		}
+	}
+	if pidDir == "" {
+		pidDir = defaultSyncDir()
+	}
+	pidPath := pidFilePathIn(pidDir)
+	if err := writePidFileAt(pidPath, os.Getpid()); err != nil {
 		log.Println("warning: write pid file:", err)
 	}
-	defer removePidFile()
+	defer removePidFileAt(pidPath)
 
-	prg := &program{configPath: configPath}
+	prg := &program{configPath: configPath, routes: routes}
 	svc, err := service.New(prg, serviceConfig(configPath))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "service:", err)
@@ -234,4 +287,22 @@ type serviceLogWriter struct{ logger service.Logger }
 func (w serviceLogWriter) Write(p []byte) (int, error) {
 	_ = w.logger.Info(string(p))
 	return len(p), nil
+}
+
+// allConfigs is every sync dir config the lifecycle commands act on: each repo
+// of routes.json this host has, or the default one.
+func allConfigs() []config.Config {
+	if path, ok, err := resolveRoutesPath(""); err == nil && ok {
+		if set, err := loadRouted(path); err == nil {
+			var out []config.Config
+			for _, n := range set.names() {
+				out = append(out, set.Cfgs[n])
+			}
+			return out
+		}
+	}
+	if cfg, err := loadDistillConfig(""); err == nil {
+		return []config.Config{cfg}
+	}
+	return nil
 }

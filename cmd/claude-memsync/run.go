@@ -10,8 +10,9 @@ import (
 func runRun(args []string) int {
 	flags := flag.NewFlagSet("run", flag.ContinueOnError)
 	cfgPath := flags.String("config", "", "path to config.json (default: ~/.claudesync/config.json)")
+	routes := flags.String("routes", "", "path to routes.json (default: $"+routesEnv+", then ~/.config/claude-memsync/routes.json if it exists)")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
-	return runService(*cfgPath)
+	return runService(*cfgPath, *routes)
 }

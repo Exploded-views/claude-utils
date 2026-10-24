@@ -54,6 +54,18 @@ func runDistill(args []string) int {
 // no config exists yet (the catalog can be indexed before `init` has run).
 func loadDistillConfig(cfgPath string) (config.Config, error) {
 	if cfgPath == "" {
+		// With several repos the catalog lives in the personal one.
+		if path, ok, err := resolveRoutesPath(""); err != nil {
+			return config.Config{}, err
+		} else if ok {
+			set, err := loadRouted(path)
+			if err != nil {
+				return config.Config{}, err
+			}
+			if c, ok := set.Primary(); ok {
+				return c, nil
+			}
+		}
 		cfgPath = defaultConfigPath()
 	}
 	cfg, err := config.Load(cfgPath)

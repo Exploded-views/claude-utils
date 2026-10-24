@@ -180,6 +180,12 @@ func Reconcile(opts Options) (Result, error) {
 		if e.OriginProject == "" || e.OriginFile == "" {
 			continue // hand-authored entry with no source; leave it alone
 		}
+		// The origin folder is not on this host (the entry came from another
+		// one, perhaps a client folder routed elsewhere): its absence says
+		// nothing about the source, so the entry stays.
+		if info, err := os.Stat(filepath.Join(opts.ProjectsDir, e.OriginProject)); err != nil || !info.IsDir() {
+			continue
+		}
 		src := filepath.Join(opts.ProjectsDir, e.OriginProject, "memory", e.OriginFile)
 		content, err := os.ReadFile(src)
 		stale := false

@@ -462,4 +462,3 @@ func globMatch(pat, name string) bool {
 	globCache.Store(pat, re)
 	return re.MatchString(name)
 }
-

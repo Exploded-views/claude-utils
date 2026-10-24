@@ -219,3 +219,29 @@ func TestReconcileNeverPrunesBlindWhenSourcesInvisible(t *testing.T) {
 		t.Errorf("live.md should not be pruned blind: %v", err)
 	}
 }
+
+// An entry whose origin folder is not on this host was made on another host.
+// "File gone" is not "folder never here": prune must leave it alone.
+func TestReconcileKeepsEntriesWhoseOriginFolderIsAbsentHere(t *testing.T) {
+	dir := t.TempDir()
+	projects := filepath.Join(dir, "projects")
+	distilled := filepath.Join(dir, "distilled")
+
+	writeFile(t, filepath.Join(projects, "P1", "memory", "live.md"), sourceMemory("live", true, "x"))
+	writeFile(t, filepath.Join(distilled, "elsewhere.md"), catalogEntry("elsewhere", "d", "feedback", "OTHER-HOST-FOLDER", "n.md", "x"))
+	writeFile(t, filepath.Join(distilled, "gone.md"), catalogEntry("gone", "d", "feedback", "P1", "missing.md", "z"))
+
+	res, err := Reconcile(Options{DistilledDir: distilled, ProjectsDir: projects})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Pruned != 1 {
+		t.Fatalf("Pruned = %d, want 1 (only the entry whose folder is here)", res.Pruned)
+	}
+	if _, err := os.Stat(filepath.Join(distilled, "elsewhere.md")); err != nil {
+		t.Errorf("entry from an absent folder was pruned: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(distilled, "gone.md")); !os.IsNotExist(err) {
+		t.Errorf("entry with a missing file in a present folder should be pruned")
+	}
+}
