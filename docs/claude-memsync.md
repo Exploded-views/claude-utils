@@ -159,9 +159,10 @@ commits.
   `git pull` are written back atomically.
 - The custom merge driver is registered in the local repo config and invoked by
   git via `.gitattributes` (`MEMORY.md merge=claude-memory-index`).
-- Conflicts in non-`MEMORY.md` files surface as standard git conflict markers in
-  the affected file. Rare in practice because each memory file has a unique
-  filename per topic.
+- Two PCs editing the same lines of the same committed file is rare in practice
+  (each memory file has a unique filename per topic). When it happens the pull
+  never leaves conflict markers in your files; see
+  [Rebase conflicts](#rebase-conflicts).
 
 ## What gets synced (and what doesn't)
 
@@ -176,6 +177,8 @@ commits.
   `~/.claude/history.jsonl`, `~/.claude/settings.json`, etc.
 - `~/.claudesync/config.json` — per-PC (paths embed your machine layout)
 - `~/.claudesync/.state/manifest.json` — per-PC (delete-detection state)
+- `~/.claudesync/.state/parked.json` and `.state/parked/` — per-PC (in-flight
+  [parking](#parking-held-back-files-around-the-pull) state, normally absent)
 - `~/.claudesync/denylist.txt` — per-PC (your [denylist](#secret-scrub-and-denylist))
 - `~/.claudesync/daemon.pid` — runtime state
 - `~/.claudesync/distilled/DISTILLED.md` — derived index, regenerated per-PC
@@ -195,26 +198,81 @@ the next cycle, so it syncs as soon as it no longer matches.
 
 Your copy under `~/.claude/projects/...` is the authoritative one and is never
 changed or deleted because a file is held back. The mirror copy is not left
-alone, though. A held-back file would otherwise sit modified in the mirror
-work-tree and collide with `git pull --rebase --autostash` when a peer touches
-the same file. So each cycle, before pulling, the daemon **parks** every
-uncommitted memory file in the mirror: it resets the mirror copy to the last
-committed version (or removes it if it was never committed), pulls, skips the
-parked files when copying pulled changes back into `~/.claude`, and then
-refills the mirror from your copy. In practice:
+alone, though; see the next section.
 
-- A held-back file is briefly absent from, or reverted in, the mirror
-  work-tree (`~/.claudesync/projects/...`) during each pull. Don't edit there.
-- If the pull brought in a peer's change to a parked file, that change is not
-  copied over your version. For `MEMORY.md` it is merged with your copy (the
-  same section-level merge as everywhere else); if the merge conflicts, or for
-  any other file, the peer's version is kept as `<name>.from-remote-<id>` in
-  the mirror, so committing your version later doesn't silently revert it.
-- If the peer deleted a parked file or renamed it, your copy stays.
-- If the daemon dies mid-cycle your copy is untouched, and the next start
-  re-mirrors it.
-- Files outside `projects/<hash>/memory/` (such as the `distilled/` catalog)
-  have no separate authoritative copy and are not parked.
+### Parking held-back files around the pull
+
+A held-back file would otherwise sit modified (or untracked) in the sync
+work-tree and collide with `git pull --rebase --autostash` when a peer touches
+the same file: autostash conflicts on a changed file and cannot stash an
+untracked one, so the pull would fail every cycle. So each cycle, when there is
+something to pull or push, the daemon **parks** every uncommitted path in the
+work-tree before the pull. This is path-agnostic: `projects/` memory files, the
+`distilled/` catalog, and any other layout the work-tree holds. Deletions are
+parked too.
+
+1. Each dirty path's bytes are copied to `~/.claudesync/.state/parked/<path>`.
+2. `~/.claudesync/.state/parked.json` (the paths, whether each was a file or a
+   deletion, and the commit the work-tree was at) is written atomically and
+   fsynced. Only then is the work-tree touched.
+3. Each path is reset to the last commit, or removed if it was never committed.
+4. The pull runs on a clean tree. Pulled changes are copied into `~/.claude`
+   except for parked paths, which are skipped by their sync-repo path.
+5. Each parked path is put back. If the pull changed it, the incoming version
+   is kept first: a `MEMORY.md` is merged 3-way with your copy (the same
+   section-level merge as everywhere else, against the version from before the
+   pull), and if that conflicts, or for any other file, the peer's version is
+   kept as `<name>.from-remote-<id>` next to it, so committing your version
+   later doesn't silently revert it. Then your version is restored: for a memory
+   file the mirror is refilled from your `~/.claude` copy; for any other path
+   from the saved bytes.
+6. The state is deleted last.
+
+Step 5 runs in a `defer`, so it happens even if the pull or the copy back into
+`~/.claude` fails, and it tries every path rather than stopping at the first
+error. A path that cannot be restored stays recorded in `parked.json`; the next
+cycle retries it before doing anything else, and nothing is committed or parked
+over it meanwhile.
+
+In practice:
+
+- A held-back file is briefly absent from, or reverted in, the work-tree
+  (`~/.claudesync/...`) during each pull. Don't edit there.
+- If the peer deleted a parked file or renamed it, your version stays.
+- If the daemon dies mid-cycle, nothing is lost: your `~/.claude` copies are
+  never touched, and the parked bytes and `parked.json` are on disk before the
+  work-tree is changed. On the next start, before the startup reconcile, the
+  daemon finishes the leftover park the same way (and aborts a pull rebase the
+  crash left stopped). Whether the crash came before the reset, between the
+  reset and the pull, or after the pull, the files return as you had them, and
+  a file the pull did not change gets no spurious `.from-remote-*` backup.
+- The denylist file itself is never parked.
+
+### Rebase conflicts
+
+Separate from held-back files: if you and another PC edit the **same lines of
+the same committed file**, `git pull --rebase` stops on a conflict. The daemon
+aborts the rebase, so the work-tree never holds conflict markers and none reach
+`~/.claude`, then merges the other PC's branch keeping **this PC's side** of
+every conflict (your `~/.claude` copy is authoritative here too). The other
+PC's version of each conflicted file is saved as `<name>.from-remote-<id>`
+next to the mirror file, and stays in git history. The merge is pushed, so the
+other PC picks up this PC's version on its next pull. Everything else in the
+pull syncs normally.
+
+The conflict is logged by **count only**, because a path may match your
+denylist:
+
+```
+pull: rebase conflict in 1 file(s); kept this PC's version, other PC's copies saved as .from-remote-*
+```
+
+If that merge cannot finish either, the daemon aborts it too and keeps your
+local commits as they were, propagates nothing into `~/.claude` for that cycle,
+skips the push, and the cycle fails with an error naming the count. It tries
+again every cycle and logs the failure each time until it succeeds. To resolve
+it by hand, run `git status` in `~/.claudesync`, fix the conflict there, and
+commit.
 
 Built-in rules:
 
@@ -222,17 +280,17 @@ Built-in rules:
 |---|---|
 | `private-key` | a `-----BEGIN ... PRIVATE KEY-----` header |
 | `github-token` | `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` tokens and `github_pat_` tokens, also directly after `_` (for example `MY_TOKEN_ghp_...`) |
-| `anthropic-api-key` | `sk-ant-...` |
+| `anthropic-api-key` | `sk-ant-...`, also directly after `_` |
 | `openai-api-key` | `sk-...`, `sk-proj-...`, `sk-svcacct-...` and `sk-admin-...` |
 | `stripe-key` | `sk_live_...` and `rk_live_...` (live keys only; `sk_test_` is not flagged) |
 | `google-api-key` | `AIza` followed by 35 characters |
 | `gitlab-token` | `glpat-...` personal access tokens |
-| `slack-token` | `xox?-...` tokens |
-| `aws-access-key` | `AKIA...` / `ASIA...` access key IDs |
+| `slack-token` | `xox?-...` tokens, also directly after `_` |
+| `aws-access-key` | `AKIA...` / `ASIA...` access key IDs, also directly after `_` |
 | `aws-secret-key` | `aws_secret_access_key` set to a 40-character value (a value starting with `<` or `$` is treated as a placeholder) |
-| `jwt` | three dot-separated base64url segments starting `eyJ` |
-| `url-credentials` | `scheme://user:password@host`. Obvious placeholders are skipped: `user:password@`, `:pass@`, `:changeme@`, `<...>`, `${...}` and `{{...}}` |
-| `credential-assignment` | `password`, `passwd`, `token`, `secret` or `api_key` (case-insensitive), optionally followed by only `_key`, `_access_key`, `_value`, `_string`, `_str` or `_data`, assigned a quoted value of 16 or more characters without whitespace, with `=` or `:`. So `client_secret: "..."` and `"api_key": "..."` match, but `tokenizer`, `secretName` and `token_type` do not |
+| `jwt` | three dot-separated base64url segments starting `eyJ`, also directly after `_` |
+| `url-credentials` | `scheme://user:password@host`, or `scheme://:password@host` with no username (`redis://:pw@host`). `$`, `*` and `'` are allowed in the password. A password that is wholly a placeholder is skipped: `${...}`, `<...>`, `{{...}}`, a run of `*`, or a dummy word such as `password`, `pass` or `changeme` |
+| `credential-assignment` | `password`, `passwd`, `token`, `secret` or `api_key` (case-insensitive), optionally followed by only `_key`, `_access_key`, `_value`, `_string`, `_str` or `_data`, assigned a quoted value of 16 or more characters without whitespace, with `=` or `:`. A value starting with `<`, `$` or `{` is a placeholder and is skipped. So `client_secret: "..."` and `"api_key": "..."` match, but `tokenizer`, `secretName` and `token_type` do not |
 
 Not covered: unquoted assignments, other vendors' keys, and anything without a
 recognizable prefix. These rules are a safety net for accidents, not a
@@ -279,6 +337,12 @@ not logged either; you will see a count instead:
 ```
 scrub: <held back: path matches denylist> (2)
 ```
+
+The same rule covers error messages: an error from copying a file, from the
+park, or from git (a failed pull or checkout names files in its output) that
+mentions a path matching the denylist is logged with `<path redacted>` in place
+of the path, keeping the rest of the message. If the denylist exists but cannot
+be parsed, no path is logged at all.
 
 The file is per-PC, never committed (the daemon refuses to stage it, in any
 letter case, even if your `.gitignore` predates it) and read on every cycle, so
@@ -378,10 +442,11 @@ If that works without prompting, the daemon will too.
   name by escaping the project's absolute path. PCs that open the same repo at
   different paths (e.g. `C:\src\foo` vs. `D:\dev\foo`) will see them as different
   projects.
-- **No live conflict UI**: when the merge driver emits actual conflict markers
-  (rare; only on overlapping line edits within the same `MEMORY.md` section
-  body), the file is committed and pushed with markers. The next time you edit on
-  that PC you'll see them; resolve by hand and save.
+- **No live conflict UI**: when two PCs edit the same lines of a file (for
+  `MEMORY.md`, overlapping edits within the same section body), this PC's
+  version wins and the other's is kept as `<name>.from-remote-<id>` in the
+  mirror; see [Rebase conflicts](#rebase-conflicts). Merge the two by hand if
+  you want both.
 - **Auto-start runs while logged in**: the daemon stops when the user logs off.
   Acceptable since memories don't change while you're away. For 24/7 sync,
   register a system-wide service manually or enable systemd lingering.
