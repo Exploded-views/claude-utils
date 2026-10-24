@@ -155,6 +155,11 @@ func bootstrap(cfg config.Config, force bool) error {
 	if err := writeGitignore(cfg.SyncDir); err != nil {
 		return fmt.Errorf("write .gitignore: %w", err)
 	}
+	// The tracked .gitignore is shared and may predate a pattern; this one is
+	// per-PC and always current.
+	if err := syncpkg.EnsureLocalExcludes(cfg.SyncDir); err != nil {
+		return fmt.Errorf("write .git/info/exclude: %w", err)
+	}
 
 	// Step 4: write config.json.
 	if err := config.Save(cfg); err != nil {
@@ -254,7 +259,9 @@ func writeGitattributes(syncDir string) error {
 // shared across workstations; each PC writes its own at init time. Likewise,
 // daemon.pid is runtime state and *.from-remote-* are local conflict backups
 // surfaced for the user (*.local-before-join-* is the same for a folder that
-// just joined a remote key) — none of these should propagate.
+// just joined a remote key) — none of these should propagate. The same backup
+// patterns are also written to .git/info/exclude (syncpkg.EnsureLocalExcludes),
+// which is per-PC and does not depend on this shared file being current.
 func writeGitignore(syncDir string) error {
 	path := filepath.Join(syncDir, ".gitignore")
 	content := `# Managed by claude-memsync — local-only daemon state, must not sync.

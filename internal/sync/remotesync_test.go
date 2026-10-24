@@ -1052,3 +1052,160 @@ func readFile(t *testing.T, p string) string {
 	b, _ := os.ReadFile(p)
 	return string(b)
 }
+
+// oldIgnore is the .gitignore of a sync dir made before *.local-before-join-*
+// was listed in it.
+const oldIgnore = "config.json\ndaemon.pid\n.state/\n*.tmp\n*.tmp.*\n*.from-remote-*\ndistilled/DISTILLED.md\n"
+
+// A join's backup of the folder's own note stays on the PC that made it, even
+// when the sync dir's tracked .gitignore predates the pattern: it is never
+// committed, so it cannot reach another PC's Claude folder.
+func TestRemoteSync_JoinBackupNeverReachesGit(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	b := newMachine(t, "bob")
+	appA := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(appA, "diff.md", "shared\n")
+	a.sync()
+	a.commitSyncRepo("a1")
+
+	b.pullFrom(a)
+	appB := mkRepo(t, filepath.Join(b.home, "code", "app"), "git@github.com:acme/app.git")
+	b.write(appB, "diff.md", "bob's local, private\n")
+	br := gitwt.New(b.cfg.SyncDir)
+	if err := br.Init("main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(b.cfg.SyncDir, ".gitignore"), []byte(oldIgnore), 0600); err != nil {
+		t.Fatal(err)
+	}
+	b.sync() // daemon start and the join
+	backups, _ := filepath.Glob(filepath.Join(remoteDir(b.cfg.SyncDir, appKey), "*.local-before-join-*"))
+	if len(backups) != 1 {
+		t.Fatalf("setup: want one join backup on disk, got %v", backups)
+	}
+	if err := br.AddAll(); err != nil { // the flush's staging
+		t.Fatal(err)
+	}
+	if _, err := br.Commit("b1"); err != nil {
+		t.Fatal(err)
+	}
+	tracked, err := br.Run("ls-files")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(tracked, ".local-before-join-") {
+		t.Errorf("a join backup is committed with an old .gitignore: %q", tracked)
+	}
+	if _, err := os.Stat(backups[0]); err != nil {
+		t.Errorf("the backup must stay on this PC: %v", err)
+	}
+}
+
+// The patterns are listed in the repo's .git/info/exclude at startup, once,
+// next to whatever is already there.
+func TestNewRoots_ListsTheBackupPatternsInInfoExclude(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	if err := gitwt.New(a.cfg.SyncDir).Init("main"); err != nil {
+		t.Fatal(err)
+	}
+	excl := filepath.Join(a.cfg.SyncDir, ".git", "info", "exclude")
+	if err := os.MkdirAll(filepath.Dir(excl), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(excl, []byte("mine.txt"), 0600); err != nil { // no trailing newline
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := NewRoots(a.cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := readFile(t, excl)
+	for _, want := range []string{"mine.txt\n", "*.local-before-join-*\n", "*.from-remote-*\n"} {
+		if strings.Count(got, want) != 1 {
+			t.Errorf("info/exclude should list %q once: %q", want, got)
+		}
+	}
+	// A sync dir that is not a repo (yet) is left alone.
+	b := newMachine(t, "bob")
+	if _, err := NewRoots(b.cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(b.cfg.SyncDir, ".git")); err == nil {
+		t.Error("NewRoots must not create a repo")
+	}
+}
+
+// A backup that an older client pushed is never copied into Claude's tree, in
+// either layout, and never read from Claude's tree into the repo.
+func TestPropagateChanges_BackupsFromOlderClientsStayOutOfClaude(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	plain := mkdirs(t, a.home, "notes")[0]
+	a.write(app, "n.md", "x\n")
+	a.write(plain, "n.md", "x\n")
+	a.sync()
+	pre := a.commitSyncRepo("one")
+
+	roots, err := NewRoots(a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sr := gitwt.New(a.cfg.SyncDir)
+	bad := []string{
+		filepath.Join(remoteDir(a.cfg.SyncDir, appKey), "n.md.local-before-join-1234"),
+		filepath.Join(a.pathDir(plain), "n.md.from-remote-1234"),
+		filepath.Join(a.pathDir(plain), "n.md.local-before-join-1234"),
+	}
+	for _, p := range bad {
+		if err := os.WriteFile(p, []byte("private\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sr.Run("add", "-f", p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := sr.Run("commit", "-q", "-m", "from an older client"); err != nil {
+		t.Fatal(err)
+	}
+	post, _ := sr.Run("rev-parse", "HEAD")
+	if err := propagateChanges(sr, roots, pre, strings.TrimSpace(post)); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{app, plain} {
+		got, _ := filepath.Glob(filepath.Join(a.claude, a.hash(d), "memory", "*-*"))
+		if len(got) > 0 {
+			t.Errorf("a backup reached the Claude folder: %v", got)
+		}
+	}
+	for _, p := range []string{"remotes/github.com/acme/app/memory/n.md.local-before-join-1", "projects/x/memory/n.md.from-remote-1"} {
+		if _, _, ok := claudeFolderFor(roots, p); ok {
+			t.Errorf("claudeFolderFor mapped the backup %s", p)
+		}
+	}
+}
+
+// A backup name in Claude's own folder is not a note: Reconcile and a join
+// leave it where it is.
+func TestReconcile_BackupNamesInClaudeAreNotCopiedToTheMirror(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	plain := mkdirs(t, a.home, "notes")[0]
+	for _, d := range []string{app, plain} {
+		a.write(d, "n.md", "x\n")
+		a.write(d, "n.md.local-before-join-1", "private\n")
+		a.write(d, "n.md.from-remote-1", "private\n")
+	}
+	a.sync() // joins app, reconciles plain
+	a.sync()
+	for _, dir := range []string{remoteDir(a.cfg.SyncDir, appKey), a.pathDir(plain)} {
+		got, _ := filepath.Glob(filepath.Join(dir, "*-*"))
+		if len(got) > 0 {
+			t.Errorf("a backup name in Claude was copied to %s: %v", dir, got)
+		}
+	}
+}

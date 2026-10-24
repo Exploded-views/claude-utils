@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
+	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/merge"
 )
 
@@ -43,6 +45,9 @@ type Roots struct {
 // NewRoots builds the Roots for a config, resolving project keys when
 // cfg.ProjectKey is "remote".
 func NewRoots(cfg config.Config) (Roots, error) {
+	if err := EnsureLocalExcludes(cfg.SyncDir); err != nil {
+		log.Println("keep backups out of git:", err)
+	}
 	r := Roots{Claude: cfg.ClaudeProjectsDir, Mirror: filepath.Join(cfg.SyncDir, "projects")}
 	if cfg.ProjectKey == config.ProjectKeyRemote {
 		m, err := NewRemoteMap(cfg.SyncDir, cfg.ClaudeProjectsDir)
@@ -178,7 +183,7 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 		// Walk Claude side
 		if entries, err := os.ReadDir(claudeMem); err == nil {
 			for _, e := range entries {
-				if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+				if e.IsDir() || strings.HasPrefix(e.Name(), ".") || isBackupName(e.Name()) {
 					continue
 				}
 				files[e.Name()] = struct{}{}
@@ -324,8 +329,60 @@ func RemoveFromMirror(r Roots, hash, name string) error {
 
 // backupMarkers are in the name of the local-only conflict backups: the mirror
 // copy Reconcile replaced (.from-remote-*) and the Claude copy a join replaced
-// (.local-before-join-*). Both are git-ignored and never synced.
+// (.local-before-join-*). Both are kept out of git by the sync repo's
+// .git/info/exclude (see EnsureLocalExcludes) and never synced.
 var backupMarkers = []string{".from-remote-", ".local-before-join-"}
+
+// EnsureLocalExcludes lists the backup patterns in the sync repo's
+// .git/info/exclude, which is per-PC and never committed, so a backup cannot be
+// staged whatever the tracked .gitignore says (a sync dir made before a pattern
+// existed has an older one). Missing lines are appended; existing ones are
+// kept. A sync dir that is not a git repo (yet) is left alone.
+func EnsureLocalExcludes(syncDir string) error {
+	repo := gitwt.New(syncDir)
+	if !repo.IsRepo() {
+		return nil
+	}
+	out, err := repo.Run("rev-parse", "--git-path", "info/exclude")
+	if err != nil {
+		return err
+	}
+	p := strings.TrimSpace(out)
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(syncDir, p)
+	}
+	existing, err := os.ReadFile(p)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	have := map[string]bool{}
+	for _, l := range strings.Split(string(existing), "\n") {
+		have[strings.TrimSpace(l)] = true
+	}
+	var add strings.Builder
+	for _, m := range backupMarkers {
+		if pat := "*" + m + "*"; !have[pat] {
+			add.WriteString(pat + "\n")
+		}
+	}
+	if add.Len() == 0 {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	text := add.String()
+	if len(existing) > 0 && existing[len(existing)-1] != '\n' {
+		text = "\n" + text
+	}
+	_, err = f.WriteString(text)
+	return err
+}
 
 func isBackupName(name string) bool {
 	for _, m := range backupMarkers {

@@ -403,7 +403,7 @@ side wins and nothing is deleted.
   both sides.
 - Any other file that differs keeps the shared version, in the repo and in
   Claude. The folder's own version is saved next to the shared copy as
-  `<name>.local-before-join-<random>` (git-ignored, local to this PC, never
+  `<name>.local-before-join-<random>` (kept out of git, local to this PC, never
   cleaned up; look, then delete).
 - A file only the repo has is copied into Claude.
 - A file only the folder has is copied into the repo.
@@ -428,12 +428,16 @@ copy may be the live notes of a PC that is still on `path`, and removing it
 would delete them there. Clean up old copies by hand once every PC has switched.
 
 `*.from-remote-*` backups (made when a file differs between a PC and the repo
-copy) and `*.local-before-join-*` backups (made by a join) are git-ignored. They
-exist only on the PC that produced them, are never synced, and are never cleaned
-up by the daemon; delete them by hand once you've looked. `claude-memsync init`
-writes the `.gitignore` entries, so run it (with `--force`, which keeps the
-sync dir and its `projectKey`) on a PC whose sync dir predates
-`*.local-before-join-*`.
+copy) and `*.local-before-join-*` backups (made by a join) exist only on the PC
+that produced them, are never synced, and are never cleaned up by the daemon;
+delete them by hand once you've looked. They are kept out of git by the sync
+repo's `.git/info/exclude`, which is per-PC and never committed: the daemon
+adds the patterns to it at every start, and `claude-memsync init` does too. The
+tracked `.gitignore` lists them as well, but a sync dir made before
+`*.local-before-join-*` existed has an older one, so the daemon does not rely on
+it. As a second line of defence a file with a backup name is never copied from
+the repo into a Claude folder, and reconcile and joins skip such names in the
+Claude folder too, so a backup that an older client pushed does not spread.
 
 ### Switching an existing setup
 

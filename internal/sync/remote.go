@@ -379,8 +379,12 @@ func splitRemotePath(p string) (key, name string, ok bool) {
 // projects/<hash>/memory/<file>, or the one folder holding the key of
 // remotes/<key>/memory/<file>. ok is false for a path that is not for this PC's
 // Claude tree: not a memory file, a remote nobody here holds, or the old
-// projects/<hash> copy of a folder that is remote-keyed now.
+// projects/<hash> copy of a folder that is remote-keyed now, or a conflict
+// backup (see isBackupName) that an older client pushed.
 func claudeFolderFor(roots Roots, repoPath string) (hash, name string, ok bool) {
+	if isBackupName(filepath.Base(filepath.FromSlash(repoPath))) {
+		return "", "", false // a local-only backup that reached the repo anyway
+	}
 	if hash, name, ok := splitMirrorPath(repoPath); ok {
 		if roots.Remote != nil && roots.Remote.Key(hash) != "" {
 			return "", "", false // superseded by its remote-keyed copy
