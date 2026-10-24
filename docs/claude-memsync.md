@@ -88,7 +88,10 @@ On a second or third PC where the remote already has content from another
 workstation, init handles collisions:
 
 - `MEMORY.md` present on both sides → semantic merge (sections from both PCs are
-  unioned)
+  unioned). If a section was edited on one side only, that is a conflict here
+  (there is no common base): the local version is taken and the mirror copy is
+  kept as `<name>.from-remote-<random>`, like any other file. Conflict markers
+  are never written.
 - Other memory files differing on both sides → mirror copy is preserved as
   `<name>.from-remote-<random>` for manual review; the local version is taken
 
@@ -311,7 +314,11 @@ cp ~/.claudesync/.state/parked.broken-<unix time>/parked/distilled/entry.md \
    ~/.claudesync/distilled/entry.md
 ```
 
-Then delete the `parked.broken-*` directory. If a path keeps landing there,
+Then delete the `parked.broken-*` directory. They are never cleaned up by the
+daemon, so remove old ones once you have checked them: each holds only the bytes
+of files that could not be put back (copies of your memory files, possibly ones
+you listed in the denylist because they were sensitive) and the `parked.json`
+that listed them, so don't leave them lying around. If a path keeps landing there,
 the cause is whatever stops it being written back (a file where a directory
 should be, a permission, a full disk); fix that first.
 
@@ -333,12 +340,22 @@ match your denylist:
 pull: rebase conflict in 1 file(s); rebase aborted, local commits kept, nothing propagated or pushed until you resolve it (see docs: Rebase conflicts)
 ```
 
-To resolve it, stopping the daemon first is recommended (`claude-memsync
-stop`), but no longer required: the daemon aborts a stopped rebase only if its
-own pull started it (it writes `~/.claudesync/.state/pull-running` around the
-pull). A rebase it did not start is taken to be yours: the whole cycle is
-skipped (nothing is staged, reconciled, pulled or pushed) and logged once, as
-`a rebase or merge is in progress in the sync repo ...`, until you finish it.
+To resolve it, **stop the daemon first** (`claude-memsync stop`). This is
+required, not a nicety. A cycle that finds a stopped rebase it did not start
+takes it to be yours: it skips the whole cycle (nothing is staged, reconciled,
+pulled or pushed) and logs `a rebase or merge is in progress in the sync repo
+...` once. But a cycle checks at its start and again right before its pull, and
+cannot see a rebase you start in between. While the rebase is stopped halfway
+the work-tree holds conflict markers and `HEAD` is detached at some commit in
+the middle of your resolution. Stopping the daemon takes it out of that race, so
+that nothing is staged, parked, recorded or aborted behind your back. What the
+daemon does guard, in case you did not: it records no synced `HEAD` (see below)
+while a rebase or merge is stopped or `HEAD` is detached, and it aborts only a
+rebase its own pull started, never one that existed before the pull (it writes
+`~/.claudesync/.state/pull-running`, holding the commit it started from, around
+the pull; a rebase counts as its own only if it began from that commit after the
+marker was written, so a marker left by a crash cannot claim a rebase you start
+later).
 
 ```
 git -C ~/.claudesync pull --rebase --autostash origin main   # stops on the conflict again
@@ -365,7 +382,16 @@ git -C ~/.claudesync checkout HEAD -- <the held-back file>
 git -C ~/.claudesync stash drop
 ```
 
-Then start the daemon again (`claude-memsync start`). The next cycle pushes the
+If you abandon the resolution, undo it instead of finishing it:
+
+```
+git -C ~/.claudesync rebase --abort   # an abandoned rebase
+git -C ~/.claudesync merge --abort    # an abandoned merge
+```
+
+Both put the branch and the work-tree back where they were; your local commits
+are kept, and the conflict is back at the next cycle. Then start the daemon
+again (`claude-memsync start`). The next cycle pushes the
 result and pulls everything that was waiting. You do not need to edit anything
 in `~/.claude`: before a cycle does anything else, the daemon compares the sync
 repo's HEAD with the commit it last finished a cycle at
@@ -375,10 +401,32 @@ there instead of the older `~/.claude` copies being pushed over them. This
 catch-up leaves alone a file that is modified in `~/.claudesync` (held back)
 and a file whose `~/.claude` copy has changed since that commit: your version
 stands and the incoming one is kept beside it in `~/.claudesync` as
-`<name>.from-remote-<id>`. If the history was rewritten (`git rebase`, `git
+`<name>.from-remote-<id>` (written once the copy into `~/.claude` and the
+record have succeeded, and not again if the same bytes are already kept there).
+A file that is modified in `~/.claudesync` is skipped **without** a backup:
+autostash (or the park) already merged the incoming change into that file, so
+there is nothing to keep beside it. A `~/.claude` copy that already equals the
+incoming version (the daemon died after its own commit, before the record was
+written) is not a change of yours and is handled as usual. If the history was rewritten (`git rebase`, `git
 reset` by hand) the same applies to the difference between the two commits,
 and the log says so. With no record yet (the first start after an upgrade) the
 daemon only records the current HEAD.
+
+If the catch-up keeps failing (the log says `catch up with the sync repo` every
+cycle, and nothing else syncs), fix what it names first: a file where a
+directory should be, a permission, a full disk. If it cannot be fixed, you can
+make the daemon forget the record:
+
+```
+rm ~/.claudesync/.state/synced-head
+```
+
+The next cycle then takes the current HEAD as already reflected in `~/.claude`
+and records it, **without copying anything**. Every commit between the old
+record and HEAD that was never propagated stays out of `~/.claude` (copy those
+files from `~/.claudesync/projects/<hash>/memory/` yourself), and until you have
+the Claude copies you want, Reconcile will treat the `~/.claude` copies as yours
+and set the other versions aside as `.from-remote-*`, rather than adopt them.
 
 ### Built-in rules
 
@@ -448,12 +496,17 @@ The same rule covers error messages: an error from copying a file, from the
 park, or from git (a failed pull or checkout names files in its output) that
 mentions a path matching the denylist is logged with `<path redacted>` in place
 of just that part. The rest of the message stays, including the exit status and
-git's reason. Each word is tried on its own after splitting on whitespace,
-quotes and colons (a leading `:(literal)` from git is ignored), and so are
-quoted strings, runs of words and each whole line, so a name with spaces is
-caught. On a line of up to 1024 characters every run of words is tried, so a
-name of any word count is found; on a longer line runs are limited to 12 words
-(each word and quoted string is still tested). A word in your denylist that
+git's reason. Each pattern is run once over the line as it is and once over a
+normalised copy of it (git's `:(literal)` prefixes and the quotes cut out, the
+absolute sync and Claude directories written as the repo-relative path your
+patterns are written against), each word of the copy is tried on its own after
+splitting on whitespace, quotes and colons, and a match is widened to the whole
+word, so a name of any word count, with spaces, is caught. In this search `^`
+and `$` also stand for the boundary of a name (whitespace, a quote, a colon, a
+comma or a bracket), so `^projects/[^/]+/memory/night owl` finds that path in
+the middle of a line. The work is linear in the length of the line. A line over
+64 KiB is replaced whole by `<path redacted>`, since it cannot be checked
+within a sane amount of work. A word in your denylist that
 also appears in the remote URL redacts the URL in the message, not the error.
 If the denylist exists but cannot be parsed, no path or file name is logged at
 all.
