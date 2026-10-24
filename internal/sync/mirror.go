@@ -11,11 +11,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/merge"
 )
 
@@ -31,6 +34,60 @@ import (
 type Roots struct {
 	Claude string // ~/.claude/projects
 	Mirror string // ~/.claudesync/projects
+
+	// Remote, when non-nil, stores a project folder that holds a remote key
+	// under remotes/<host>/<owner>/<repo>/ instead of projects/<hash>/. Nil
+	// means every project is keyed by its path (the default).
+	Remote *RemoteMap
+}
+
+// NewRoots builds the Roots for a config, resolving project keys when
+// cfg.ProjectKey is "remote".
+func NewRoots(cfg config.Config) (Roots, error) {
+	r := Roots{Claude: cfg.ClaudeProjectsDir, Mirror: filepath.Join(cfg.SyncDir, "projects")}
+	if cfg.ProjectKey == config.ProjectKeyRemote {
+		m, err := NewRemoteMap(cfg.SyncDir, cfg.ClaudeProjectsDir)
+		if err != nil {
+			return r, err
+		}
+		r.Remote = m
+	}
+	return r, nil
+}
+
+// MirrorMemDir returns the repo-side memory directory for the local project
+// folder named hash. It is the only place the two layouts differ: a folder
+// holding a remote key lives under remotes/, every other folder under
+// projects/<hash>/. Everything else treats both alike.
+func (r Roots) MirrorMemDir(hash string) string {
+	if r.Remote != nil {
+		if key := r.Remote.Key(hash); key != "" {
+			return r.Remote.MemoryDir(key)
+		}
+	}
+	return filepath.Join(r.Mirror, hash, "memory")
+}
+
+// LogSuperseded logs, once per remote-keyed project folder, that a copy under
+// projects/<hash>/memory is still in the sync repo but is no longer updated:
+// the folder was path-keyed before projectKey was switched to remote. Nothing
+// is migrated or removed; that stays a manual step once every PC has switched.
+func (r Roots) LogSuperseded() {
+	if r.Remote == nil {
+		return
+	}
+	hashes := make([]string, 0, len(r.Remote.keys))
+	for h := range r.Remote.keys {
+		hashes = append(hashes, h)
+	}
+	sort.Strings(hashes)
+	for _, h := range hashes {
+		key := r.Remote.keys[h]
+		if key != "" && isDir(filepath.Join(r.Mirror, h, "memory")) {
+			log.Printf("remote keys: %s is now stored as remotes/%s; its old copy projects/%s/memory in the sync repo is no longer updated",
+				h, key, h)
+		}
+	}
 }
 
 // MemoryDirs lists every <hash>/memory directory found under either root.
@@ -101,7 +158,7 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 
 	for _, hash := range hashes {
 		claudeMem := filepath.Join(r.Claude, hash, "memory")
-		mirrorMem := filepath.Join(r.Mirror, hash, "memory")
+		mirrorMem := r.MirrorMemDir(hash)
 		if err := os.MkdirAll(mirrorMem, 0700); err != nil {
 			return rep, err
 		}
@@ -199,7 +256,7 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 // parent dirs as needed. Used by the watcher loop on a file change.
 func CopyToMirror(r Roots, hash, name string) error {
 	src := filepath.Join(r.Claude, hash, "memory", name)
-	dst := filepath.Join(r.Mirror, hash, "memory", name)
+	dst := filepath.Join(r.MirrorMemDir(hash), name)
 	b, err := os.ReadFile(src)
 	if err != nil {
 		return err
@@ -213,7 +270,7 @@ func CopyToMirror(r Roots, hash, name string) error {
 // CopyToClaude copies a single mirror-side file back into Claude's tree.
 // Used after a `git pull` brings in remote changes.
 func CopyToClaude(r Roots, hash, name string) error {
-	src := filepath.Join(r.Mirror, hash, "memory", name)
+	src := filepath.Join(r.MirrorMemDir(hash), name)
 	dst := filepath.Join(r.Claude, hash, "memory", name)
 	b, err := os.ReadFile(src)
 	if err != nil {
@@ -228,7 +285,7 @@ func CopyToClaude(r Roots, hash, name string) error {
 // RemoveFromMirror handles a Claude-side delete: remove the corresponding
 // mirror file so the next commit propagates the deletion.
 func RemoveFromMirror(r Roots, hash, name string) error {
-	target := filepath.Join(r.Mirror, hash, "memory", name)
+	target := filepath.Join(r.MirrorMemDir(hash), name)
 	err := os.Remove(target)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil

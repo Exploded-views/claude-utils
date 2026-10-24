@@ -357,3 +357,41 @@ func classifyGitFailure(err error) string {
 	}
 	return "other"
 }
+
+// splitRemotePath converts "remotes/<host>/<owner>/<repo>/memory/<file>" into
+// its key ("<host>/<owner>/<repo>") and file name.
+func splitRemotePath(p string) (key, name string, ok bool) {
+	parts := strings.Split(filepath.ToSlash(p), "/")
+	// remotes + at least host and repo + "memory" + file
+	if len(parts) < 5 || parts[0] != remotesDir || parts[len(parts)-2] != "memory" {
+		return "", "", false
+	}
+	return strings.Join(parts[1:len(parts)-2], "/"), parts[len(parts)-1], true
+}
+
+// claudeFolderFor maps a path in the sync repo, as `git diff` prints it, to the
+// local Claude project folder and file name it belongs to: the folder named by
+// projects/<hash>/memory/<file>, or the one folder holding the key of
+// remotes/<key>/memory/<file>. ok is false for a path that is not for this PC's
+// Claude tree: not a memory file, a remote nobody here holds, or the old
+// projects/<hash> copy of a folder that is remote-keyed now.
+func claudeFolderFor(roots Roots, repoPath string) (hash, name string, ok bool) {
+	if hash, name, ok := splitMirrorPath(repoPath); ok {
+		if roots.Remote != nil && roots.Remote.Key(hash) != "" {
+			return "", "", false // superseded by its remote-keyed copy
+		}
+		return hash, name, true
+	}
+	if roots.Remote == nil {
+		return "", "", false
+	}
+	key, name, ok := splitRemotePath(repoPath)
+	if !ok {
+		return "", "", false
+	}
+	hash, ok = roots.Remote.FolderFor(key)
+	if !ok || !isDir(filepath.Join(roots.Claude, hash)) {
+		return "", "", false
+	}
+	return hash, name, true
+}

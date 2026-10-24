@@ -44,8 +44,11 @@ func (l *Loop) Run(ctx context.Context) error {
 		return fmt.Errorf("sync dir %s is not a git repo — run `claude-memsync init` first", l.Cfg.SyncDir)
 	}
 
-	mirrorProjects := filepath.Join(l.Cfg.SyncDir, "projects")
-	roots := Roots{Claude: l.Cfg.ClaudeProjectsDir, Mirror: mirrorProjects}
+	roots, err := NewRoots(l.Cfg)
+	if err != nil {
+		return fmt.Errorf("resolve project keys: %w", err)
+	}
+	roots.LogSuperseded()
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -141,6 +144,9 @@ func (l *Loop) Run(ctx context.Context) error {
 			// in rapid succession before the new dir's watcher was registered).
 			// Using the on-disk manifest also lets us propagate deletes the
 			// watcher missed.
+			if roots.Remote != nil {
+				roots.Remote.Refresh() // pick up moved checkouts and new remotes
+			}
 			m, err := LoadManifest(l.Cfg.SyncDir)
 			if err != nil {
 				log.Println("load manifest:", err)
@@ -281,6 +287,20 @@ func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string) error {
 	if err != nil {
 		return err
 	}
+	// apply brings one repo path (written, or removed when deleted) to the
+	// Claude folder it belongs to. The repo-path to Claude-folder mapping is
+	// claudeFolderFor, and this is the only place that calls it.
+	apply := func(path string, deleted bool) {
+		hash, name, ok := claudeFolderFor(roots, path)
+		if !ok {
+			return
+		}
+		if deleted {
+			_ = os.Remove(filepath.Join(roots.Claude, hash, "memory", name))
+		} else if err := CopyToClaude(roots, hash, name); err != nil {
+			log.Printf("propagate %s: %v", path, err)
+		}
+	}
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -297,24 +317,11 @@ func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string) error {
 		if strings.HasPrefix(status, "R") && len(fields) >= 3 {
 			oldPath := fields[1]
 			path = fields[2]
-			if hash, name, ok := splitMirrorPath(oldPath); ok {
-				_ = os.Remove(filepath.Join(roots.Claude, hash, "memory", name))
-			}
+			apply(oldPath, true)
 		} else {
 			path = fields[1]
 		}
-		hash, name, ok := splitMirrorPath(path)
-		if !ok {
-			continue
-		}
-		switch {
-		case strings.HasPrefix(status, "D"):
-			_ = os.Remove(filepath.Join(roots.Claude, hash, "memory", name))
-		default:
-			if err := CopyToClaude(roots, hash, name); err != nil {
-				log.Printf("propagate %s: %v", path, err)
-			}
-		}
+		apply(path, strings.HasPrefix(status, "D"))
 	}
 	return nil
 }
