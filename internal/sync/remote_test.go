@@ -547,9 +547,10 @@ func TestRemoteKey_LinkedWorktreeDoesNotUndoPruning(t *testing.T) {
 	}
 }
 
-// A folder with no memory/ dir is not a group member: it is not filled in and
-// not given a memory/ dir.
-func TestRemoteKey_FolderWithoutMemoryDirIsNotFilled(t *testing.T) {
+// A repo's own folder is always its root folder (linked worktrees and
+// subdirectories are keyed by path), so a fresh clone on a new PC, whose folder
+// has no memory/ yet, is filled in from the shared notes.
+func TestRemoteKey_FreshCloneWithoutMemoryDirIsFilled(t *testing.T) {
 	gitEnv(t)
 	shared := t.TempDir()
 	a := newMachine(t, "alice", shared)
@@ -558,15 +559,43 @@ func TestRemoteKey_FolderWithoutMemoryDirIsNotFilled(t *testing.T) {
 	appB := mkRepo(t, filepath.Join(b.home, "code", "app"), "git@github.com:acme/app.git")
 	a.write(appA, "note.md", "hi\n")
 	a.sync()
-	b.open(appB)
-	b.sync()
-	if b.hasMemDir(appB) {
-		t.Error("a folder without memory/ must not get one")
-	}
-	b.openMem(appB)
+	b.open(appB) // a session was started here; no memory/ yet
 	b.sync()
 	if got, ok := b.read(appB, "note.md"); !ok || got != "hi\n" {
-		t.Errorf("once memory/ exists the folder is filled in: %q %v", got, ok)
+		t.Errorf("a folder with no memory/ should be filled in: %q %v", got, ok)
+	}
+}
+
+// Only a key resolved on this run fills a folder. One merely remembered from an
+// earlier run (the checkout is gone, git will not answer) only keeps syncing
+// what it already has.
+func TestRemoteKey_StickyKeyDoesNotFillAFolder(t *testing.T) {
+	gitEnv(t)
+	shared := t.TempDir()
+	a := newMachine(t, "alice", shared)
+	b := newMachine(t, "bob", shared)
+	appA := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(appA, "note.md", "hi\n")
+	a.sync()
+
+	gone := filepath.Join(b.home, "code", "gone")
+	b.open(gone) // the checkout does not exist on this PC
+	c := &ProjectCache{Projects: map[string]ProjectEntry{b.hash(gone): {LastKey: "github.com/acme/app"}}}
+	if err := c.Save(shared); err != nil {
+		t.Fatal(err)
+	}
+	b.sync()
+	if b.hasMemDir(gone) {
+		t.Error("a folder keyed only by lastKey must not be filled in")
+	}
+	// An explicit key in the cache is deliberate: it fills.
+	c.Projects[b.hash(gone)] = ProjectEntry{Key: "github.com/acme/app"}
+	if err := c.Save(shared); err != nil {
+		t.Fatal(err)
+	}
+	b.sync()
+	if got, ok := b.read(gone, "note.md"); !ok || got != "hi\n" {
+		t.Errorf("a key override should fill the folder: %q %v", got, ok)
 	}
 }
 

@@ -333,8 +333,13 @@ has no `memory/`. memsync therefore:
 - doesn't key a linked worktree's folder by remote (it is told apart from a
   plain checkout by `git rev-parse --git-dir` differing from
   `--git-common-dir`), and never copies memory into it
-- only treats a project folder as part of a remote-keyed group if it already
-  has a `memory/` directory, and never creates `memory/` in one that doesn't
+- fills any folder whose key it positively resolved on this run (git
+  reported the origin, or the cache pins a `key`), even before the folder has a
+  `memory/` directory: a remote-keyed folder is always a repo's own folder,
+  because worktrees and subdirectories are keyed by path, so a fresh clone on a
+  new PC gets the shared notes as soon as its project folder exists. A folder
+  that only remembers its key (`lastKey`: the checkout is gone, or git won't
+  answer) keeps syncing the notes it already has but is never filled in
 
 What's left is the case of two real clones of one remote on the same PC, each
 with its own `memory/`. They share the single repo-side folder, and the
@@ -373,10 +378,9 @@ whose old `projects/<hash>/memory` copy is still in the repo, saying that copy
 is no longer updated. Nothing is migrated automatically; remove the old folders
 only after every PC has switched.
 
-Memory reaches a PC only for projects that already have a Claude `memory/`
-directory there, because the daemon never creates one. Open the repo in Claude
-Code on the new PC and let it write a memory; the daemon then fills the folder
-in as soon as the directory appears.
+On a new PC the project folder Claude Code creates when you open the repo is
+filled with the shared notes by the next reconcile, which runs as soon as the
+folder appears.
 
 ## Deletes
 

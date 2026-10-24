@@ -406,6 +406,7 @@ type RemoteMap struct {
 
 	cache  *ProjectCache
 	keys   map[string]string // folder name -> key; "" means path key
+	fresh  map[string]bool   // folders whose key was positively resolved this run, not just remembered
 	warned map[string]bool   // invalid overrides already logged, by folder name
 	dirty  bool              // cache changed since it was last saved
 }
@@ -416,7 +417,7 @@ func NewRemoteMap(syncDir, claudeRoot string) (*RemoteMap, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &RemoteMap{syncDir: syncDir, claudeRoot: claudeRoot, Lookup: gitOrigin, cache: c, keys: map[string]string{}, warned: map[string]bool{}}
+	m := &RemoteMap{syncDir: syncDir, claudeRoot: claudeRoot, Lookup: gitOrigin, cache: c, keys: map[string]string{}, fresh: map[string]bool{}, warned: map[string]bool{}}
 	m.Refresh()
 	return m, nil
 }
@@ -425,6 +426,7 @@ func NewRemoteMap(syncDir, claudeRoot string) (*RemoteMap, error) {
 // the cache if anything changed.
 func (m *RemoteMap) Refresh() {
 	m.keys = map[string]string{}
+	m.fresh = map[string]bool{}
 	entries, err := os.ReadDir(m.claudeRoot)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		log.Println("remote keys: read", m.claudeRoot+":", err)
@@ -451,12 +453,27 @@ func (m *RemoteMap) Key(hash string) string {
 	return k
 }
 
-// Members lists the known project folders stored under key that have a
-// memory/ dir, sorted. A folder without one is never filled in.
+// Member reports whether the project folder takes part in its group: it is
+// filled from the shared notes and its own changes are shared. That holds for a
+// folder whose key was positively resolved on this run (git reported the origin,
+// or the cache pins a key), even before it has a memory/ dir: gitOrigin keys
+// linked worktrees and subdirectories by path, so a remote-keyed folder is
+// always a repo's own folder and a fresh clone should get the shared notes. A
+// folder that only remembers its key (the checkout is gone, git will not
+// answer) takes part for as long as it has a memory/ dir, but is never filled.
+func (m *RemoteMap) Member(hash string) bool {
+	if m.keys[hash] == "" {
+		return false
+	}
+	return m.fresh[hash] || isDir(filepath.Join(m.claudeRoot, hash, "memory"))
+}
+
+// Members lists the known project folders stored under key that take part in
+// the group (see Member), sorted.
 func (m *RemoteMap) Members(key string) []string {
 	var out []string
 	for h, k := range m.keys {
-		if k == key && isDir(filepath.Join(m.claudeRoot, h, "memory")) {
+		if k == key && m.Member(h) {
 			out = append(out, h)
 		}
 	}
@@ -506,6 +523,7 @@ func (m *RemoteMap) resolve(hash string) string {
 	case override == "path":
 	case override != "":
 		key = override
+		m.fresh[hash] = true
 	default:
 		// Keys are sticky: a deleted checkout, an unmounted drive or a git
 		// that will not answer must not flip a folder back to its path key
@@ -553,6 +571,7 @@ func (m *RemoteMap) resolve(hash string) string {
 			if k, ok := m.keyOf(dir); ok {
 				key = k
 				e.LastKey = k
+				m.fresh[hash] = k != ""
 			}
 		}
 	}

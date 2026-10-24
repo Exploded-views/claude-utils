@@ -90,7 +90,7 @@ func (r Roots) MirrorMemDir(hash string) string {
 
 // group is one repo-side memory directory and the local project folders that
 // share it: exactly one in path mode, one or more in remote mode (several
-// clones of one remote on this PC, each with a memory/ dir).
+// clones of one remote on this PC).
 type group struct {
 	mirrorMem string
 	locals    []string // project folder names under Claude
@@ -126,10 +126,10 @@ func (r Roots) groups() ([]group, error) {
 			}
 			if root == r.Claude {
 				local[e.Name()] = true
-				if r.Remote != nil && r.Remote.Key(e.Name()) != "" && !isDir(filepath.Join(r.Claude, e.Name(), "memory")) {
-					// Claude Code reads memory only from the repo's own folder
-					// (a worktree's folder holds transcripts), so a folder
-					// that has no memory/ is not a member and never gets one.
+				if r.Remote != nil && r.Remote.Key(e.Name()) != "" && !r.Remote.Member(e.Name()) {
+					// Keyed only from memory (the checkout is gone, git will
+					// not answer) and with no memory/ dir: nothing to share,
+					// and not a folder to fill.
 					continue
 				}
 				add(e.Name(), r.MirrorMemDir(e.Name()))
@@ -273,8 +273,7 @@ func recordFile(st *SyncState, gkey, mirrorMem, name string) {
 // reconcileGroup applies the Reconcile rules to one repo-side directory and
 // the local folders that map to it. With a single local folder (always the
 // case in path mode) it is the plain two-way rule set documented on
-// Reconcile. With several (two clones of one remote on this PC, both with a
-// memory/ dir) each file goes through reconcileMulti.
+// Reconcile. With several (two clones of one remote on this PC) each file goes through reconcileMulti.
 func reconcileGroup(r Roots, g group, manifest *Manifest, st *SyncState, rep *SyncReport) error {
 	if err := os.MkdirAll(g.mirrorMem, 0700); err != nil {
 		return err
