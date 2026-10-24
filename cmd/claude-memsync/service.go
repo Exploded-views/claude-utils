@@ -213,7 +213,12 @@ func runStop(args []string) int {
 	}
 	// A pull the stop cut short leaves its marker; one that no stopped rebase
 	// or merge needs must not outlive the pull.
-	for _, cfg := range allConfigs() {
+	cfgs, err := allConfigs()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "stop:", err)
+		return 1
+	}
+	for _, cfg := range cfgs {
 		if err := syncpkg.ClearStalePullMarker(cfg.SyncDir); err != nil {
 			fmt.Fprintln(os.Stderr, "stop: clear pull marker:", err)
 		}
@@ -229,18 +234,8 @@ func runStatus(args []string) int {
 		return 1
 	}
 	fmt.Println(st)
-	if path, ok, err := resolveRoutesPath(""); err != nil {
-		fmt.Fprintln(os.Stderr, "status:", err)
-	} else if ok {
-		set, err := loadRouted(path)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "status:", err)
-			return 1
-		}
-		for _, l := range set.statusLines() {
-			fmt.Println(l)
-		}
-		return 0
+	if handled, code := routedStatus(); handled {
+		return code
 	}
 	if cfg, err := loadDistillConfig(""); err == nil {
 		if line := pausedLine(cfg); line != "" {
@@ -248,6 +243,28 @@ func runStatus(args []string) int {
 		}
 	}
 	return 0
+}
+
+// routedStatus prints the routing part of status. handled is false only when no
+// routes file exists; an unusable one is an error, never a silent fall back.
+func routedStatus() (handled bool, code int) {
+	path, ok, err := resolveRoutesPath("")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "status:", err)
+		return true, 1
+	}
+	if !ok {
+		return false, 0
+	}
+	set, err := loadRouted(path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "status:", err)
+		return true, 1
+	}
+	for _, l := range set.statusLines() {
+		fmt.Println(l)
+	}
+	return true, 0
 }
 
 // pausedLine says that syncing is paused for a rebase or merge being resolved by
@@ -329,18 +346,25 @@ func (w serviceLogWriter) Write(p []byte) (int, error) {
 
 // allConfigs is every sync dir config the lifecycle commands act on: each repo
 // of routes.json this host has, or the default one.
-func allConfigs() []config.Config {
-	if path, ok, err := resolveRoutesPath(""); err == nil && ok {
-		if set, err := loadRouted(path); err == nil {
-			var out []config.Config
-			for _, n := range set.names() {
-				out = append(out, set.Cfgs[n])
-			}
-			return out
+func allConfigs() ([]config.Config, error) {
+	path, ok, err := resolveRoutesPath("")
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		set, err := loadRouted(path)
+		if err != nil {
+			return nil, err
 		}
+		var out []config.Config
+		for _, n := range set.names() {
+			out = append(out, set.Cfgs[n])
+		}
+		return out, nil
 	}
-	if cfg, err := loadDistillConfig(""); err == nil {
-		return []config.Config{cfg}
+	cfg, err := loadDistillConfig("")
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	return []config.Config{cfg}, nil
 }

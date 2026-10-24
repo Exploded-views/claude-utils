@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -346,5 +347,108 @@ func TestRouted_StopFindsALegacyPidFile(t *testing.T) {
 	}
 	if _, err := os.Stat(legacy); err == nil {
 		t.Fatal("legacy pid file left behind")
+	}
+}
+
+func writeSource(t *testing.T, claude, folder, name string) {
+	t.Helper()
+	p := filepath.Join(claude, folder, "memory", name+".md")
+	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nname: " + name + "\ndescription: d\nmetadata:\n  type: feedback\n  scope: environment\n---\n\nbody\n"
+	if err := os.WriteFile(p, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// captureStdout runs f and returns what it printed to stdout.
+func captureStdout(t *testing.T, f func() int) (int, string) {
+	t.Helper()
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	code := f()
+	w.Close()
+	os.Stdout = old
+	b, _ := io.ReadAll(r)
+	return code, string(b)
+}
+
+func TestFailClosed_DistillRefusesACorruptRoutesFile(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal"}, "personal", nil)
+	if err := os.WriteFile(os.Getenv(routesEnv), []byte("{broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{nil, {"--config", cfgs["personal"].Path()}} {
+		if code, out := captureStdout(t, func() int { return runDistill(args) }); code != 1 || strings.Contains(out, "indexed") {
+			t.Errorf("args %v: exit %d, output %q: distill ran with an unusable routes file", args, code, out)
+		}
+	}
+}
+
+func TestFailClosed_DistillWithExplicitConfigStillDropsClientFolders(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "projects", "client-a"}, "personal", []map[string]string{
+		{"folder": "-own", "repo": "projects"},
+		{"folder": "-client", "repo": "client-a"},
+	})
+	claude := cfgs["personal"].ClaudeProjectsDir
+	writeSource(t, claude, "-own", "own-note")
+	writeSource(t, claude, "-client", "client-note")
+	// client-a is a client repo in routes.json only if marked: routedHost marks
+	// extra repos; mark this one by rewriting.
+	set, _ := loadRouted(os.Getenv(routesEnv))
+	f := set.Router.File()
+	r := f.Repos["client-a"]
+	r.Client = true
+	f.Repos["client-a"] = r
+	b, _ := json.Marshal(f)
+	if err := os.WriteFile(os.Getenv(routesEnv), b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{nil, {"--config", cfgs["personal"].Path()}} {
+		code, out := captureStdout(t, func() int { return runDistill(args) })
+		if code != 0 || !strings.Contains(out, "own-note") || strings.Contains(out, "client-note") {
+			t.Errorf("args %v: exit %d, output:\n%s", args, code, out)
+		}
+	}
+}
+
+func TestFailClosed_HookWithConfigAppliesTheReposGateAndRefusesUnusableRoutes(t *testing.T) {
+	cfgs := routedHost(t, []string{"projects", "client-a"}, "", []map[string]string{
+		{"folder": "-home-alice-src-app", "repo": "projects"},
+		{"folder": "-home-alice-src-cl", "repo": "client-a"},
+	})
+	cp := cfgs["projects"].Path()
+	in := hookJSON("s", "/home/alice/src/app", "UserPromptSubmit")
+	runHook(t, in, "--config", cp, "--hook")
+	addNotes(t, cp, map[string]string{
+		"-home-alice-src-app/memory/mine.md":  "a",
+		"-home-alice-src-cl/memory/frozen.md": "f",
+	})
+	_, out, _ := runHook(t, hookJSON("s", "/home/alice/src/cl", "UserPromptSubmit"), "--config", cp, "--hook", "--project", "/home/alice/src/cl")
+	if strings.Contains(out, "frozen.md") {
+		t.Errorf("--config bypassed the owns gate: %s", out)
+	}
+	if err := os.WriteFile(os.Getenv(routesEnv), []byte("{broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	addNotes(t, cp, map[string]string{"-home-alice-src-app/memory/more.md": "b"})
+	_, out, errs := runHook(t, in, "--config", cp, "--hook")
+	if out != "" || errs == "" {
+		t.Errorf("unusable routes: stdout %q stderr %q, want nothing reported and an error", out, errs)
+	}
+}
+
+func TestFailClosed_StatusAndStopRefuseUnusableRoutes(t *testing.T) {
+	routedHost(t, []string{"personal"}, "personal", nil)
+	if err := os.WriteFile(os.Getenv(routesEnv), []byte("{broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := allConfigs(); err == nil {
+		t.Error("allConfigs fell back to the default config")
+	}
+	if handled, code := routedStatus(); !handled || code != 1 {
+		t.Errorf("status: handled=%v exit %d, want a refusal", handled, code)
 	}
 }

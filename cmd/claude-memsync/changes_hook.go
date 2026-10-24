@@ -165,29 +165,43 @@ type hookTarget struct {
 // every repo of routes.json this host has (each limited to its own folders),
 // else the default repo.
 func hookTargets(cfgPath, routesFlag string) ([]hookTarget, error) {
-	if cfgPath == "" {
-		path, ok, err := resolveRoutesPath(routesFlag)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			set, err := loadRouted(path)
-			if err != nil {
-				return nil, err
-			}
-			var out []hookTarget
-			for _, n := range set.names() {
-				owns := set.Router.Owns(n)
-				out = append(out, hookTarget{n, set.Cfgs[n], func(c changes.Change) bool { return owns(c.Project) }})
-			}
-			return out, nil
-		}
-	}
-	cfg, err := loadDistillConfig(cfgPath)
+	path, ok, err := resolveRoutesPath(routesFlag)
 	if err != nil {
 		return nil, err
 	}
-	return []hookTarget{{name: "default", cfg: cfg}}, nil
+	if !ok {
+		cfg, err := loadDistillConfig(cfgPath)
+		if err != nil {
+			return nil, err
+		}
+		return []hookTarget{{name: "default", cfg: cfg}}, nil
+	}
+	set, err := loadRouted(path)
+	if err != nil {
+		return nil, err
+	}
+	gate := func(n string) func(changes.Change) bool {
+		owns := set.Router.Owns(n)
+		return func(c changes.Change) bool { return owns(c.Project) }
+	}
+	if cfgPath != "" {
+		// An explicit --config names one repo, but it still reports only the
+		// folders routes.json gives that repo, and it must be listed there.
+		cfg, err := loadDistillConfig(cfgPath)
+		if err != nil {
+			return nil, err
+		}
+		name := set.repoForSyncDir(cfg.SyncDir)
+		if name == "" {
+			return nil, fmt.Errorf("routes file %s does not list the sync dir %s", path, cfg.SyncDir)
+		}
+		return []hookTarget{{name, cfg, gate(name)}}, nil
+	}
+	var out []hookTarget
+	for _, n := range set.names() {
+		out = append(out, hookTarget{n, set.Cfgs[n], gate(n)})
+	}
+	return out, nil
 }
 
 // pruneMarkers deletes the markers in dir that were last written more than
