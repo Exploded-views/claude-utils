@@ -159,12 +159,7 @@ func walk(root, rest string, fold func(string) string) []string {
 // them read the one config of the containing repository. ok is false when dir
 // is not in a work tree or git could not answer; url "" means no origin.
 func remoteURL(dir string) (url string, ok bool) {
-	git := func(args ...string) (string, error) {
-		c := exec.Command("git", append([]string{"-C", dir}, args...)...)
-		c.Env = append(cleanGitEnv(os.Environ()), "LC_ALL=C", "LANGUAGE=C")
-		out, err := c.Output()
-		return strings.TrimSpace(string(out)), err
-	}
+	git := func(args ...string) (string, error) { return gitOut(dir, args...) }
 	if in, err := git("rev-parse", "--is-inside-work-tree"); err != nil || in != "true" {
 		return "", false
 	}
@@ -182,6 +177,14 @@ func remoteURL(dir string) (url string, ok bool) {
 		return "", false
 	}
 	return u, true
+}
+
+// gitOut runs git in dir with the inherited GIT_* variables dropped.
+func gitOut(dir string, args ...string) (string, error) {
+	c := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	c.Env = append(cleanGitEnv(os.Environ()), "LC_ALL=C", "LANGUAGE=C")
+	out, err := c.Output()
+	return strings.TrimSpace(string(out)), err
 }
 
 // sshHostname asks ssh which real host an alias stands for (ssh -G reads the

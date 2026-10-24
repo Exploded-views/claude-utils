@@ -256,6 +256,7 @@ func (s *routedSet) Start(ctx context.Context) (*running, error) {
 	if len(s.Cfgs) == 0 {
 		return nil, fmt.Errorf("%s: this host has none of the repos", s.Path)
 	}
+	s.Router.Writable()
 	ctx, cancel := context.WithCancel(ctx)
 	r := &running{cancel: cancel}
 	for _, name := range s.names() {
@@ -403,6 +404,24 @@ func (s *routedSet) statusLines() []string {
 		}
 	}
 	lines = append(lines, fmt.Sprintf("  denied: %d %s", sum.Denied, plural(sum.Denied, "folder", "folders")))
+	for _, rf := range sum.Renamed {
+		lines = append(lines, fmt.Sprintf("  renamed remote: add an alias (folder %s is routed by its root commits for %d more %s)", rf.Hash, rf.DaysLeft, plural(rf.DaysLeft, "day", "days")))
+	}
+	for _, h := range sum.Expired {
+		lines = append(lines, fmt.Sprintf("  renamed remote: folder %s is denied, the grace period is over; add an alias", h))
+	}
+	for _, h := range sum.Transferred {
+		lines = append(lines, fmt.Sprintf("  renamed remote: client folder %s is denied, its remote moved to another owner; add an alias if that is intended", h))
+	}
+	for _, h := range sum.Different {
+		lines = append(lines, fmt.Sprintf("  different repository at this path: folder %s is denied", h))
+	}
+	if sum.Unreadable {
+		lines = append(lines, "  identity.json is unreadable: folders routed before are denied until it is fixed or removed ("+s.Router.IdentityProblem()+")")
+	}
+	for _, h := range sum.Changed {
+		lines = append(lines, fmt.Sprintf("  remote changed repos: folder %s is denied until routes.json is edited", h))
+	}
 	for _, sh := range s.Router.Shadowed() {
 		lines = append(lines, fmt.Sprintf("  shadowed: rule %d is never reached first (rule %d matches the same folders)", sh.Rule, sh.By))
 	}
