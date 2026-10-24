@@ -409,7 +409,7 @@ func refreshMirror(roots Roots, paths []parkedPath) {
 	failed := 0
 	for _, e := range paths {
 		hash, name, ok := splitMirrorPath(e.Path)
-		if !ok {
+		if !ok || !roots.owns(hash) {
 			continue
 		}
 		err := CopyToMirror(roots, hash, name)
