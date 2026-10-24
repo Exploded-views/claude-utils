@@ -443,6 +443,17 @@ func TestPathSpans(t *testing.T) {
 	if sp := s.PathSpans("nothing here"); len(sp) != 0 {
 		t.Errorf("spans in a clean line: %v", sp)
 	}
+	// A period or a slash ends a name too, but only at its end: ^ is not
+	// satisfied by them.
+	night := New(mustParse(t, "^projects/[^/]+/memory/night owl\\.md$"))
+	for _, text := range []string{"restore projects/p1/memory/night owl.md.", "in projects/p1/memory/night owl.md/x"} {
+		if len(night.PathSpans(text)) == 0 {
+			t.Errorf("no span in %q", text)
+		}
+	}
+	if sp := New(mustParse(t, "^heron$")).PathSpans("x/heron y.heron z"); len(sp) != 0 {
+		t.Errorf("a period or slash satisfied a begin anchor: %v", sp)
+	}
 	// An anchor still means a name boundary, not any substring.
 	if sp := New(mustParse(t, "^heron$")).PathSpans("https://git.example.com/heron/memory.git"); len(sp) != 0 {
 		t.Errorf("anchored pattern matched inside a longer name: %v", sp)

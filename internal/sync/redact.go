@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -27,17 +28,34 @@ type pathGuard struct {
 	scanner *scrub.Scanner // nil: no denylist, nothing to hide
 	closed  bool           // denylist unreadable: hide every path
 	roots   []rootPrefix
+	// foldCase: the file system ignores case, so a root is matched without it.
+	foldCase bool
 }
 
 // rootPrefix maps an absolute directory to the sync-repo-relative form of the
 // paths under it, which is what denylist patterns are written against.
 type rootPrefix struct{ abs, rel string }
 
+// foldsCase reports whether paths on goos are compared without regard to case.
+func foldsCase(goos string) bool { return goos == "windows" || goos == "darwin" }
+
+// asciiLower is s with A-Z folded, byte for byte: it keeps the length, which
+// strings.ToLower does not for every rune, so offsets in it are offsets in s.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
+}
+
 const redactedPath = "<path redacted>"
 
 // newPathGuard loads the denylist. A missing file means nothing to hide.
 func newPathGuard(cfg config.Config) *pathGuard {
-	g := &pathGuard{roots: []rootPrefix{
+	g := &pathGuard{foldCase: foldsCase(runtime.GOOS), roots: []rootPrefix{
 		{filepath.ToSlash(cfg.SyncDir), ""},
 		{filepath.ToSlash(cfg.ClaudeProjectsDir), "projects"},
 	}}
@@ -250,22 +268,34 @@ func (g *pathGuard) normalise(body string) *normalised {
 		text       string
 	}
 	var reps []rep
+	// Go and git print a Windows path with backslashes and the roots are
+	// slashed, so they are looked for in a copy of the line with its backslashes
+	// turned (and its case folded, where the file system does): the copy is as
+	// long as the line, and an offset in one is an offset in the other.
+	hay := strings.ReplaceAll(body, `\`, "/")
+	if g.foldCase {
+		hay = asciiLower(hay)
+	}
 	for _, r := range g.roots {
 		if r.abs == "" {
 			continue
 		}
-		prefix := r.abs + "/"
+		prefix := strings.ReplaceAll(r.abs, `\`, "/") + "/"
+		if g.foldCase {
+			prefix = asciiLower(prefix)
+		}
+		replen := len(prefix)
 		text := ""
 		if r.rel != "" {
 			text = r.rel + "/"
 		}
 		for off := 0; ; {
-			i := strings.Index(body[off:], prefix)
+			i := strings.Index(hay[off:], prefix)
 			if i < 0 {
 				break
 			}
-			reps = append(reps, rep{off + i, off + i + len(prefix), text})
-			off += i + len(prefix)
+			reps = append(reps, rep{off + i, off + i + replen, text})
+			off += i + replen
 		}
 	}
 	sort.Slice(reps, func(i, j int) bool { return reps[i].start < reps[j].start })
@@ -316,17 +346,29 @@ func (g *pathGuard) normalise(body string) *normalised {
 func widen(body string, marks []span) []span {
 	out := make([]span, 0, len(marks))
 	for _, m := range marks {
-		s, e := m.start, m.end
+		// A relaxed anchor takes the delimiter beside the name along; it is not
+		// part of the name.
+		ms, me := m.start, m.end
+		for ms < me && (isBreak(body[ms]) || strings.IndexByte(punct, body[ms]) >= 0) {
+			ms++
+		}
+		for me > ms && (isBreak(body[me-1]) || strings.IndexByte(punct, body[me-1]) >= 0) {
+			me--
+		}
+		if ms >= me {
+			continue
+		}
+		s, e := ms, me
 		for s > 0 && !isBreak(body[s-1]) {
 			s--
 		}
 		for e < len(body) && !isBreak(body[e]) {
 			e++
 		}
-		for s < m.start && strings.IndexByte(punct, body[s]) >= 0 {
+		for s < ms && strings.IndexByte(punct, body[s]) >= 0 {
 			s++
 		}
-		for e > m.end && (strings.IndexByte(punct, body[e-1]) >= 0 || body[e-1] == '.') {
+		for e > me && (strings.IndexByte(punct, body[e-1]) >= 0 || body[e-1] == '.') {
 			e--
 		}
 		out = append(out, span{s, e})

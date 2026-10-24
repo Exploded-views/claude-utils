@@ -199,6 +199,13 @@ var delimiters = []rune{
 	':', ';', '[', '[', ']', ']', '`', '`', '{', '{', '}', '}',
 }
 
+// endDelimiters also end a name that stops at the end anchor: a sentence ends
+// in a period, and a directory name is followed by a slash.
+var endDelimiters = []rune{
+	'\t', '\n', '\r', '\r', ' ', ' ', '"', '"', '\'', ')', ',', ',', '.', '/',
+	':', ';', '[', '[', ']', ']', '`', '`', '{', '{', '}', '}',
+}
+
 // relax returns re with every anchor also matched by one delimiter character
 // beside it, so a pattern written against a whole path (^projects/x$) finds
 // that path in the middle of a line. nil if re has no anchor or cannot be
@@ -214,8 +221,12 @@ func relax(re *regexp.Regexp) *regexp.Regexp {
 		for i, sub := range n.Sub {
 			switch sub.Op {
 			case syntax.OpBeginText, syntax.OpBeginLine, syntax.OpEndText, syntax.OpEndLine:
+				set := delimiters
+				if sub.Op == syntax.OpEndText || sub.Op == syntax.OpEndLine {
+					set = endDelimiters
+				}
 				n.Sub[i] = &syntax.Regexp{Op: syntax.OpAlternate, Sub: []*syntax.Regexp{
-					sub, {Op: syntax.OpCharClass, Rune: delimiters},
+					sub, {Op: syntax.OpCharClass, Rune: set},
 				}}
 				changed = true
 			default:

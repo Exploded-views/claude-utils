@@ -497,13 +497,17 @@ park, or from git (a failed pull or checkout names files in its output) that
 mentions a path matching the denylist is logged with `<path redacted>` in place
 of just that part. The rest of the message stays, including the exit status and
 git's reason. Each pattern is run once over the line as it is and once over a
-normalised copy of it (git's `:(literal)` prefixes and the quotes cut out, the
-absolute sync and Claude directories written as the repo-relative path your
-patterns are written against), each word of the copy is tried on its own after
+normalised copy of it (git's `:(literal)` prefixes and the quotes cut out,
+backslashes turned into slashes, and the absolute sync and Claude directories
+rewritten as the repo-relative path your patterns are written against; those
+directories are found whatever the slashes were, and on Windows and macOS
+without regard to letter case, so `C:\Users\you\.claudesync\projects\p1\memory\x.md`
+is `projects/p1/memory/x.md`), each word of the copy is tried on its own after
 splitting on whitespace, quotes and colons, and a match is widened to the whole
 word, so a name of any word count, with spaces, is caught. In this search `^`
 and `$` also stand for the boundary of a name (whitespace, a quote, a colon, a
-comma or a bracket), so `^projects/[^/]+/memory/night owl` finds that path in
+comma or a bracket; `$` also a period or a slash, which end a sentence or a
+directory name), so `^projects/[^/]+/memory/night owl` finds that path in
 the middle of a line. The work is linear in the length of the line. A line over
 64 KiB is replaced whole by `<path redacted>`, since it cannot be checked
 within a sane amount of work. A word in your denylist that

@@ -15,6 +15,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
+	"github.com/MarimerLLC/claude-utils/internal/scrub"
 )
 
 // secretName is a file name the test denylist lists. Nothing the daemon logs or
@@ -516,4 +517,79 @@ func TestRedact_HandleEventVanishedFileRemoveError(t *testing.T) {
 		t.Fatal("the remove error was not triggered")
 	}
 	requireNoName(t, "handleEvent error", err.Error())
+}
+
+// winGuard is a guard whose roots are the slashed forms of Windows paths, which
+// is what newPathGuard builds there, with the case folding Windows has.
+func winGuard(t *testing.T, patterns ...string) *pathGuard {
+	t.Helper()
+	deny, err := scrub.ParseDenylist(strings.NewReader(strings.Join(patterns, "\n") + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &pathGuard{scanner: scrub.New(deny), foldCase: foldsCase("windows"), roots: []rootPrefix{
+		{`C:/Users/u/.claudesync`, ""},
+		{`C:/Users/u/.claude/projects`, "projects"},
+	}}
+}
+
+// Go and git print Windows paths with backslashes, but the roots are slashed. An
+// anchored pattern must still see the path as the repo-relative one it is
+// written against.
+func TestRedact_WindowsAbsolutePaths(t *testing.T) {
+	for _, pat := range []string{`^projects/[^/]+/memory/heron\.md$`, `heron`, `^projects/p1/memory/heron\.md$`} {
+		g := winGuard(t, pat)
+		for _, text := range []string{
+			`open C:\Users\u\.claudesync\projects\p1\memory\heron.md: Access is denied.`,
+			`write claude C:\Users\u\.claude\projects\p1\memory\heron.md: The process cannot access the file`,
+			`open c:\users\U\.CLAUDESYNC\projects\p1\memory\heron.md: Access is denied.`, // drive letter and directories fold
+			`open "C:/Users/u/.claudesync/projects/p1/memory/heron.md": denied`,
+		} {
+			got := g.Err(errors.New(text)).Error()
+			if strings.Contains(got, "heron") {
+				t.Errorf("%s: leaked: %q", pat, got)
+			}
+			if !strings.Contains(got, redactedPath) {
+				t.Errorf("%s: no placeholder: %q", pat, got)
+			}
+		}
+	}
+}
+
+// On a case-sensitive system a root that differs in case is another directory.
+func TestRedact_RootCaseFoldsOnlyOnWindowsAndMac(t *testing.T) {
+	for goos, folds := range map[string]bool{"windows": true, "darwin": true, "linux": false} {
+		if foldsCase(goos) != folds {
+			t.Errorf("foldsCase(%q) = %v", goos, !folds)
+		}
+	}
+	g := winGuard(t, `^projects/[^/]+/memory/heron\.md$`)
+	g.foldCase = false
+	text := `open C:\USERS\u\.claudesync\projects\p1\memory\heron.md: denied`
+	if got := g.Err(errors.New(text)).Error(); !strings.Contains(got, "heron") {
+		t.Errorf("the other directory was rewritten: %q", got)
+	}
+}
+
+// A line the root rewrite maps back to the original must replace exactly the
+// path, whatever its slashes were.
+func TestRedact_WindowsKeepsSurroundingText(t *testing.T) {
+	g := winGuard(t, `^projects/[^/]+/memory/heron\.md$`)
+	got := g.Err(errors.New(`open C:\Users\u\.claudesync\projects\p1\memory\heron.md: Access is denied.`)).Error()
+	if got != "open "+redactedPath+": Access is denied." {
+		t.Errorf("got %q", got)
+	}
+}
+
+// A sentence-ending period or a trailing slash follows a name with a space.
+func TestRedact_AnchoredNameWithSpaceBeforePeriod(t *testing.T) {
+	g, _ := guardFor(t, `^projects/[^/]+/memory/night owl\.md$`)
+	for _, text := range []string{
+		"could not restore projects/p1/memory/night owl.md.",
+		"could not restore projects/p1/memory/night owl.md/",
+	} {
+		if got := g.Err(errors.New(text)).Error(); strings.Contains(got, "owl") {
+			t.Errorf("leaked: %q", got)
+		}
+	}
 }
