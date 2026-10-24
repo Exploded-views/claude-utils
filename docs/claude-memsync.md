@@ -868,7 +868,11 @@ configured remote, checked at `init` and daemon start. Without a token the
 daemon still runs the name, host and push-URL checks and skips only the API
 check. The hourly re-check also stops pushing after `recheckMaxFailures`
 consecutive failures or `recheckMaxAgeHours` without a success (defaults 24 and
-24). The timer needs `githubTokenFile` set; install refuses otherwise.
+24). The timer needs `githubTokenFile` set; install refuses otherwise. `githubHost`
+must pair with the API: github.com with api.github.com, or another host with
+`githubApiUrl` set to `https://<host>/api/v3` or `https://api.<host>`. The mode
+refuses ssh remotes while `core.sshCommand`, `GIT_SSH_COMMAND` or `GIT_SSH` is
+set, and the daemon re-checks the push URL and these overrides before every push.
 
 Config keys: `githubHost`, `recheckMaxFailures`, `recheckMaxAgeHours`, `privateOnly`, `githubTokenEnv`, `githubTokenFile`, `githubApiUrl`, `githubOrg`.
 

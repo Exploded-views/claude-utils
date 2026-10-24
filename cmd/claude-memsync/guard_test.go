@@ -28,6 +28,10 @@ func tb(b bool) *bool { return &b }
 func guardCfg(t *testing.T, h http.HandlerFunc, withToken bool) config.Config {
 	t.Helper()
 	initEnv(t)
+	t.Setenv("GIT_SSH_COMMAND", "")
+	t.Setenv("GIT_SSH", "")
+	skipAPIHostCheck = true
+	t.Cleanup(func() { skipAPIHostCheck = false })
 	t.Setenv("MEMSYNC_GITHUB_TOKEN", "")
 	t.Setenv("HOME", t.TempDir())
 	old := hostResolver
@@ -385,3 +389,60 @@ func TestTimerNeedsTokenFile(t *testing.T) {
 }
 
 var _ = url.PathEscape
+
+func TestGitHostMustMatchAPI(t *testing.T) {
+	cfg := guardCfg(t, privateH(), true)
+	skipAPIHostCheck = false
+	cfg.GitHubHost = "gitlab.com"
+	cfg.GitHubAPIURL = ""
+	cfg.RemoteURL = "https://gitlab.com/Org/mem-personal.git"
+	if err := guardRemote(cfg); err == nil {
+		t.Error("githubHost gitlab.com with the default API must be refused")
+	}
+	if err := daemonGuard(cfg, func(string, ...any) {}); err == nil {
+		t.Error("daemon must refuse it too")
+	}
+}
+
+func TestSSHOverridesRefused(t *testing.T) {
+	cfg := guardCfg(t, privateH(), true)
+	t.Setenv("GIT_SSH_COMMAND", "ssh -F /elsewhere")
+	if err := guardRemote(cfg); err == nil || !strings.Contains(err.Error(), "GIT_SSH_COMMAND") {
+		t.Errorf("env override: %v", err)
+	}
+	t.Setenv("GIT_SSH_COMMAND", "")
+	g := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(g, []byte("[core]\n\tsshCommand = ssh -F /elsewhere\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", g)
+	if err := daemonGuard(cfg, func(string, ...any) {}); err == nil || !strings.Contains(err.Error(), "core.sshCommand") {
+		t.Errorf("config override: %v", err)
+	}
+	cfg.RemoteURL = "https://github.com/Org/mem-personal.git"
+	gitInitRemote2(t, cfg)
+	if err := validateRemoteOffline(cfg); err != nil {
+		t.Errorf("https remotes are unaffected by ssh overrides: %v", err)
+	}
+}
+
+func gitInitRemote2(t *testing.T, cfg config.Config) {
+	t.Helper()
+	_ = exec.Command("git", "-C", cfg.SyncDir, "remote", "set-url", "origin", cfg.RemoteURL).Run()
+}
+
+func TestPushWatchBlocksOnMidRunInsteadOf(t *testing.T) {
+	cfg := guardCfg(t, privateH(), true)
+	allowed := pushWatch(cfg, func(string, ...any) {})
+	if allowed == nil || !allowed() {
+		t.Fatal("should start allowed")
+	}
+	g := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(g, []byte("[url \"https://example.invalid/x/\"]\n\tinsteadOf = git@gh-mem-personal:Org/\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", g)
+	if allowed() {
+		t.Fatal("an insteadOf rule added mid-run must block the next push")
+	}
+}

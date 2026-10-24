@@ -40,11 +40,47 @@ func AllowedHost(host, apiURL string) string {
 		return strings.ToLower(host)
 	}
 	if apiURL != "" {
-		if u, err := url.Parse(apiURL); err == nil && u.Hostname() != "" && !strings.EqualFold(u.Hostname(), "api.github.com") {
-			return strings.ToLower(u.Hostname())
+		if u, err := url.Parse(apiURL); err == nil && u.Hostname() != "" {
+			h := strings.ToLower(u.Hostname())
+			if h == "api.github.com" {
+				return "github.com"
+			}
+			return strings.TrimPrefix(h, "api.")
 		}
 	}
 	return "github.com"
+}
+
+// ValidateHostAPI ties the git host to the API: github.com with
+// api.github.com, or another host with https://<host>/api/v3 or
+// https://api.<host>. Any other pairing is refused, so a hostile githubHost
+// cannot make a non-GitHub host look allowed.
+func ValidateHostAPI(host, apiURL string) error {
+	host = strings.ToLower(host)
+	bad := fmt.Errorf("git host %q does not match the API URL; use github.com with api.github.com, or https://<host>/api/v3 or https://api.<host>", host)
+	if apiURL == "" {
+		if host == "github.com" {
+			return nil
+		}
+		return bad
+	}
+	u, err := url.Parse(apiURL)
+	if err != nil || u.Scheme != "https" || u.User != nil {
+		return bad
+	}
+	path := strings.TrimRight(u.Path, "/")
+	h := strings.ToLower(u.Hostname())
+	switch {
+	case host == "github.com":
+		if h == "api.github.com" && path == "" {
+			return nil
+		}
+	case h == host && path == "/api/v3":
+		return nil
+	case h == "api."+host && path == "":
+		return nil
+	}
+	return bad
 }
 
 func (c *Client) allowedHost() string { return AllowedHost(c.Host, c.BaseURL) }
@@ -62,23 +98,11 @@ func ValidateRemote(remote, allowed string, resolve HostResolver) (owner, name s
 		return "", "", err
 	}
 	allowed = strings.ToLower(allowed)
-	s := strings.TrimSpace(remote)
-	var host string
-	viaSSH := true
-	if strings.Contains(s, "://") {
-		u, _ := url.Parse(s)
-		host = strings.ToLower(u.Hostname())
-		switch u.Scheme {
-		case "https":
-			viaSSH = false
-		case "ssh":
-		default:
-			return "", "", fmt.Errorf("remote scheme %q refused", u.Scheme)
-		}
-	} else {
-		at := strings.Index(s, "@")
-		host = strings.ToLower(s[at+1 : strings.Index(s, ":")])
+	host, scheme, _, err := splitRemote(remote)
+	if err != nil {
+		return "", "", err
 	}
+	viaSSH := scheme != "https"
 	if viaSSH {
 		if resolve == nil {
 			resolve = ResolveSSHHost

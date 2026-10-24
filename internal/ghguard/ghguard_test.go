@@ -595,3 +595,78 @@ func TestWatchHourlyETagAndStateChanges(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateHostAPI(t *testing.T) {
+	ok := [][2]string{{"github.com", ""}, {"github.com", "https://api.github.com"},
+		{"ghe.example", "https://ghe.example/api/v3"}, {"ghe.example", "https://ghe.example/api/v3/"},
+		{"ghe.example", "https://api.ghe.example"}}
+	for _, c := range ok {
+		if err := ValidateHostAPI(c[0], c[1]); err != nil {
+			t.Errorf("%v should pass: %v", c, err)
+		}
+	}
+	bad := [][2]string{{"gitlab.com", ""}, {"gitlab.com", "https://api.github.com"}, {"github.com", "https://evil.example"},
+		{"github.com", "http://api.github.com"}, {"ghe.example", "https://other.example/api/v3"},
+		{"ghe.example", "https://ghe.example/other"}, {"ghe.example", ""}, {"github.com", "https://api.github.com.evil.example"}}
+	for _, c := range bad {
+		if err := ValidateHostAPI(c[0], c[1]); err == nil {
+			t.Errorf("%v must be refused", c)
+		}
+	}
+}
+
+func TestCraftedRemotesNeverPanic(t *testing.T) {
+	res := func(string) (string, error) { return "github.com", nil }
+	crafted := []string{
+		"x:y@host:Org/mem-personal", "x:y@github.com:Org/mem-personal", "@:Org/mem-personal", "a@:Org/mem-personal",
+		"@", ":", "@:", "a@b", "a:b", "git@github.com:", "git@github.com:Org/", "git@github.com:/mem-personal",
+		"git@github.com:Org/mem-personal@x", "git@github.com:Org:x/mem-personal", "git@github.com:O@rg/mem-personal",
+		"git@github.com:Or g/mem-personal", "ssh://", "ssh://@/", "https://", "https:///Org/mem-personal",
+		"https://github.com/Org/mem-personal/extra", "git@github.com:Org/mem-personal/extra", "::::", "@@@@", "a@b@c:d/e",
+		"git@github.com:Org\\mem-personal", "\x00", "git@[::1]:Org/mem-personal",
+	}
+	for _, in := range crafted {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("%q panicked: %v", in, r)
+				}
+			}()
+			if _, _, err := ValidateRemote(in, "github.com", res); err == nil {
+				t.Errorf("%q must be refused", in)
+			}
+			_, _, _ = ParseRemote(in)
+		}()
+	}
+}
+
+func TestWatchPrecheckBlocksMidRun(t *testing.T) {
+	c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, fakeRepo{Name: "mem-personal", Private: bp(true), Visibility: "private"})
+	})
+	dir := t.TempDir()
+	var logs []string
+	bad := false
+	w := &Watch{C: c, Owner: "Org", Name: "mem-personal", StateDir: dir,
+		Precheck: func() error {
+			if bad {
+				return fmt.Errorf("push URL changed")
+			}
+			return nil
+		},
+		Logf: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }}
+	if !w.Allowed() {
+		t.Fatal("first")
+	}
+	bad = true
+	if w.Allowed() || w.Allowed() {
+		t.Fatal("precheck failure must block the very next push, inside the hour")
+	}
+	if len(logs) != 1 || !strings.Contains(ReadState(dir), "unverifiable") {
+		t.Errorf("logs=%v state=%q", logs, ReadState(dir))
+	}
+	bad = false
+	if !w.Allowed() || ReadState(dir) != "private" {
+		t.Errorf("recovers: %q", ReadState(dir))
+	}
+}

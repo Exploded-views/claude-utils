@@ -31,6 +31,10 @@ type Watch struct {
 	StateDir string           // where the status file goes (e.g. <sync>/.state)
 	Logf     func(format string, args ...any)
 
+	// Precheck, when set, runs on every Allowed call (not rate limited); an
+	// error blocks pushing until it passes again (e.g. the push URL changed).
+	Precheck func() error
+
 	MaxFailures int           // default 24
 	MaxAge      time.Duration // default 24h
 
@@ -43,6 +47,7 @@ type Watch struct {
 	fails      int
 	failLogged bool
 	wrote      bool
+	preBad     bool
 }
 
 func (w *Watch) now() time.Time {
@@ -58,13 +63,29 @@ func (w *Watch) logf(f string, a ...any) {
 	}
 }
 
-func (w *Watch) ok() bool { return !w.notPrivate && !w.stale }
+func (w *Watch) ok() bool { return !w.notPrivate && !w.stale && !w.preBad }
 
 // Allowed returns true while pushing is permitted.
 func (w *Watch) Allowed() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	now := w.now()
+	if w.Precheck != nil {
+		if err := w.Precheck(); err != nil {
+			if !w.preBad {
+				w.preBad = true
+				w.logf("pushing stopped: %v", err)
+				w.writeState("unverifiable since " + now.UTC().Format(time.RFC3339) + " (push target changed)")
+				w.wrote = true
+			}
+			return false
+		}
+		if w.preBad {
+			w.preBad = false
+			w.logf("push target check passes again")
+			w.writeState(w.stateText(now))
+		}
+	}
 	if w.lastOK.IsZero() {
 		w.lastOK = now // the daemon-start check is the baseline
 	}
@@ -115,14 +136,20 @@ func (w *Watch) Allowed() bool {
 		}
 	}
 	if changed || wasStale || !w.wrote {
-		if w.notPrivate {
-			w.writeState("not private since " + now.UTC().Format(time.RFC3339))
-		} else {
-			w.writeState("private")
-		}
+		w.writeState(w.stateText(now))
 		w.wrote = true
 	}
 	return w.ok()
+}
+
+func (w *Watch) stateText(now time.Time) string {
+	switch {
+	case w.notPrivate:
+		return "not private since " + now.UTC().Format(time.RFC3339)
+	case w.stale:
+		return "unverifiable since " + now.UTC().Format(time.RFC3339)
+	}
+	return "private"
 }
 
 func (w *Watch) writeState(s string) {

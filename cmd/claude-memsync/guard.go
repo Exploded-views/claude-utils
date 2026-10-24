@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -20,6 +21,9 @@ import (
 // guardClient builds an API client from config. A nil client with a nil error
 // means no token is configured.
 func guardClient(cfg config.Config) (*ghguard.Client, error) {
+	if err := checkAPIHost(cfg); err != nil {
+		return nil, err
+	}
 	tok, err := ghguard.LoadToken(cfg.GitHubTokenEnv, cfg.GitHubTokenFile)
 	if err != nil {
 		return nil, err
@@ -41,9 +45,44 @@ func allowedHost(cfg config.Config) string {
 // validateRemoteOffline needs no token or network: a mem-* name on the allowed
 // git host.
 func validateRemoteOffline(cfg config.Config) error {
+	if err := checkAPIHost(cfg); err != nil {
+		return err
+	}
+	if err := checkSSHOverride(cfg); err != nil {
+		return err
+	}
 	_, _, err := ghguard.ValidateRemote(cfg.RemoteURL, allowedHost(cfg), hostResolver)
 	if err != nil {
 		return fmt.Errorf("remote refused: %w", err)
+	}
+	return nil
+}
+
+// skipAPIHostCheck lets tests point the API at httptest.
+var skipAPIHostCheck bool
+
+func checkAPIHost(cfg config.Config) error {
+	if skipAPIHostCheck {
+		return nil
+	}
+	return ghguard.ValidateHostAPI(allowedHost(cfg), cfg.GitHubAPIURL)
+}
+
+// checkSSHOverride refuses when something other than ssh's own config decides
+// how git connects, because `ssh -G` would not see it.
+func checkSSHOverride(cfg config.Config) error {
+	if strings.HasPrefix(strings.TrimSpace(cfg.RemoteURL), "https://") {
+		return nil
+	}
+	if os.Getenv("GIT_SSH_COMMAND") != "" || os.Getenv("GIT_SSH") != "" {
+		return errors.New("GIT_SSH_COMMAND or GIT_SSH is set; the ssh host check cannot see it, so private-only mode refuses")
+	}
+	cmd := exec.Command("git", "config", "--get", "core.sshCommand")
+	if st, err := os.Stat(cfg.SyncDir); err == nil && st.IsDir() {
+		cmd.Dir = cfg.SyncDir
+	}
+	if out, err := cmd.Output(); err == nil && strings.TrimSpace(string(out)) != "" {
+		return errors.New("git config core.sshCommand is set; the ssh host check cannot see it, so private-only mode refuses")
 	}
 	return nil
 }
@@ -310,7 +349,13 @@ func pushWatch(cfg config.Config, logf func(string, ...any)) func() bool {
 	if err != nil {
 		return nil
 	}
-	w := &ghguard.Watch{C: c, Owner: owner, Name: name,
+	pre := func() error {
+		if err := checkSSHOverride(cfg); err != nil {
+			return err
+		}
+		return checkPushURL(cfg, cfg.SyncDir)
+	}
+	w := &ghguard.Watch{C: c, Owner: owner, Name: name, Precheck: pre,
 		MaxFailures: cfg.RecheckMaxFailures, MaxAge: time.Duration(cfg.RecheckMaxAgeHours) * time.Hour, StateDir: filepath.Join(cfg.SyncDir, ".state"), Logf: logf}
 	return w.Allowed
 }

@@ -42,26 +42,46 @@ func ValidName(name string) error {
 	return nil
 }
 
-// ParseRemote extracts owner and repo from an ssh, ssh:// or https remote URL.
-// Any ssh host works, including per-repo aliases such as gh-mem-personal.
-func ParseRemote(remote string) (owner, repo string, err error) {
+var ownerRE = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
+
+// splitRemote splits a remote into lower-cased host, scheme ("https", "ssh")
+// and the owner/repo path. scp-style remotes are user@host:path, where the
+// host is the text between the first @ and the first : after it and no : may
+// come before the @. Anything odd is an error, never a panic.
+func splitRemote(remote string) (host, scheme, path string, err error) {
 	s := strings.TrimSpace(remote)
-	var path string
 	switch {
 	case strings.Contains(s, "://"):
 		u, perr := url.Parse(s)
-		if perr != nil || (u.Scheme != "ssh" && u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
-			return "", "", errors.New("unsupported remote URL")
+		if perr != nil || (u.Scheme != "ssh" && u.Scheme != "https") || u.Hostname() == "" {
+			return "", "", "", errors.New("unsupported remote URL")
 		}
-		path = u.Path
-	case strings.Contains(s, "@") && strings.Contains(s, ":") && !strings.HasPrefix(s, "/"):
-		path = s[strings.Index(s, ":")+1:]
-	default:
-		return "", "", errors.New("unsupported remote URL")
+		return strings.ToLower(u.Hostname()), u.Scheme, u.Path, nil
+	case !strings.HasPrefix(s, "/"):
+		at := strings.Index(s, "@")
+		if at < 0 {
+			return "", "", "", errors.New("unsupported remote URL")
+		}
+		rest := s[at+1:]
+		colon := strings.Index(rest, ":")
+		if colon <= 0 || strings.Contains(s[:at], ":") {
+			return "", "", "", errors.New("unsupported remote URL")
+		}
+		return strings.ToLower(rest[:colon]), "ssh", rest[colon+1:], nil
+	}
+	return "", "", "", errors.New("unsupported remote URL")
+}
+
+// ParseRemote extracts owner and repo from an ssh, ssh:// or https remote URL.
+// Any ssh host works, including per-repo aliases such as gh-mem-personal.
+func ParseRemote(remote string) (owner, repo string, err error) {
+	_, _, path, err := splitRemote(remote)
+	if err != nil {
+		return "", "", err
 	}
 	path = strings.TrimSuffix(strings.Trim(path, "/"), ".git")
 	parts := strings.Split(path, "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	if len(parts) != 2 || !ownerRE.MatchString(parts[0]) || parts[1] == "" || strings.ContainsAny(parts[1], "@: \\") {
 		return "", "", errors.New("remote URL is not of the form owner/repo")
 	}
 	return parts[0], parts[1], nil
