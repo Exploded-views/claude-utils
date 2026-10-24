@@ -101,7 +101,9 @@ func NormalizeRemote(raw string) (string, bool) {
 		if s == "" || s == "." || s == ".." || strings.Contains(s, "@") {
 			return "", false
 		}
-		segs[i] = sanitizeSegment(s)
+		if segs[i] = sanitizeSegment(s); segs[i] == "" {
+			return "", false // nothing but dots
+		}
 	}
 	return host + "/" + strings.Join(segs, "/"), true
 }
@@ -113,7 +115,8 @@ func isLetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 var windowsReserved = regexp.MustCompile(`^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)`)
 
 // sanitizeSegment keeps a path segment safe to use as a directory name on
-// every platform.
+// every platform: Windows silently drops trailing dots, so they are removed
+// here rather than have two spellings share a directory on some PCs only.
 func sanitizeSegment(s string) string {
 	var b strings.Builder
 	for _, r := range s {
@@ -124,7 +127,7 @@ func sanitizeSegment(s string) string {
 			b.WriteByte('_')
 		}
 	}
-	out := b.String()
+	out := strings.TrimRight(b.String(), ".")
 	if windowsReserved.MatchString(out) {
 		out = "_" + out
 	}
@@ -134,14 +137,15 @@ func sanitizeSegment(s string) string {
 // validKey reports whether k is acceptable as a repo-side key: what
 // NormalizeRemote can produce. At least two segments, each of [a-z0-9._-]
 // and neither "." nor "..", so a key can never leave remotes/ or collide with
-// a one-segment path key.
+// a one-segment path key. A segment must also survive sanitizeSegment
+// unchanged, which rules out a trailing dot and the Windows device names.
 func validKey(k string) bool {
 	segs := strings.Split(k, "/")
 	if len(segs) < 2 {
 		return false
 	}
 	for _, s := range segs {
-		if s == "" || s == "." || s == ".." {
+		if s == "" || s == "." || s == ".." || strings.HasSuffix(s, ".") || sanitizeSegment(s) != s {
 			return false
 		}
 		for _, r := range s {
@@ -250,12 +254,14 @@ func isDir(p string) bool {
 	return err == nil && info.IsDir()
 }
 
-// isDirEntry reports whether e is a directory, following symlinks.
+// isDirEntry reports whether e is a directory, following symlinks. On Windows
+// a junction is reported as irregular rather than as a symlink, so that type is
+// stat-ed too.
 func isDirEntry(parent string, e fs.DirEntry) bool {
 	if e.IsDir() {
 		return true
 	}
-	if e.Type()&fs.ModeSymlink != 0 {
+	if e.Type()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
 		info, err := os.Stat(filepath.Join(parent, e.Name()))
 		return err == nil && info.IsDir()
 	}

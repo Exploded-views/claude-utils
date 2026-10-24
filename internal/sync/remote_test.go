@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -57,6 +58,13 @@ func TestNormalizeRemote(t *testing.T) {
 		{"git@github.com:acme/lpt9.git", "github.com/acme/_lpt9"},
 		{"git@github.com:acme/console.git", "github.com/acme/console"},
 		{"git@github.com:acme/com10.git", "github.com/acme/com10"},
+		// Windows drops trailing dots from a name, so two spellings would
+		// otherwise share one directory there and not elsewhere.
+		{"https://github.com/acme/app./", "github.com/acme/app"},
+		{"git@github.com:acme/app...git", "github.com/acme/app"},
+		{"git@github.com:acme/con..git", "github.com/acme/_con"},
+		{"https://github.com/acme/...", ""},
+		{"https://github.com/acme/ok/...", ""},
 	}
 	for _, c := range cases {
 		got, ok := NormalizeRemote(c.in)
@@ -75,7 +83,10 @@ func TestNormalizeRemote(t *testing.T) {
 func TestValidKey(t *testing.T) {
 	good := []string{"github.com/acme/app", "gitlab.example.com/g/sub/app", "h/r", "a.b/c_d/e-f"}
 	bad := []string{"", "path", "github.com", "../../escaped", "a/../b", "a/./b", "/abs/olute", "a//b",
-		"a/b/", "Github.com/acme/app", "a/b c", `a\b/c`, "a/b@c", "a:b/c", "a/.."}
+		"a/b/", "Github.com/acme/app", "a/b c", `a\b/c`, "a/b@c", "a:b/c", "a/..",
+		// Not what NormalizeRemote can produce, and not usable on Windows.
+		"github.com/acme/app.", "a./b", "github.com/acme/...", "github.com/acme/con", "github.com/aux.txt/app",
+		"github.com/lpt1/x"}
 	for _, k := range good {
 		if !validKey(k) {
 			t.Errorf("validKey(%q) = false", k)
@@ -85,6 +96,40 @@ func TestValidKey(t *testing.T) {
 		if validKey(k) {
 			t.Errorf("validKey(%q) = true", k)
 		}
+	}
+}
+
+// fakeEntry is a directory entry whose type is not a plain file or directory
+// (a Windows junction reads as irregular).
+type fakeEntry struct {
+	name string
+	typ  fs.FileMode
+}
+
+func (f fakeEntry) Name() string               { return f.name }
+func (f fakeEntry) IsDir() bool                { return false }
+func (f fakeEntry) Type() fs.FileMode          { return f.typ }
+func (f fakeEntry) Info() (fs.FileInfo, error) { return nil, errors.New("unused") }
+
+func TestIsDirEntry_StatsSymlinksAndIrregularEntries(t *testing.T) {
+	root := t.TempDir()
+	mkdirs(t, root, "real")
+	if err := os.WriteFile(filepath.Join(root, "file"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, typ := range []fs.FileMode{fs.ModeSymlink, fs.ModeIrregular} {
+		if !isDirEntry(root, fakeEntry{"real", typ}) {
+			t.Errorf("type %v pointing at a directory should count as one", typ)
+		}
+		if isDirEntry(root, fakeEntry{"file", typ}) {
+			t.Errorf("type %v pointing at a file is not a directory", typ)
+		}
+		if isDirEntry(root, fakeEntry{"missing", typ}) {
+			t.Errorf("type %v pointing nowhere is not a directory", typ)
+		}
+	}
+	if isDirEntry(root, fakeEntry{"real", 0}) {
+		t.Error("a plain non-directory entry is not a directory")
 	}
 }
 

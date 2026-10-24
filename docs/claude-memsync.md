@@ -248,6 +248,9 @@ derive, for example `"key": "github.com/acme/app"`.
 Segments are limited to `[a-z0-9._-]`; anything else becomes `_`, and a
 segment that Windows reserves as a device name (`con`, `prn`, `aux`, `nul`,
 `com1`-`com9`, `lpt1`-`lpt9`, with or without an extension) gets a `_` prefix.
+Trailing dots are dropped too, since Windows drops them from a directory name
+(`app.` is `app`), and a `key` override in the cache must already be in that
+normalized form.
 A remote whose path contains `@` is rejected, because that is what an
 unescaped `/` in a URL password leaves behind.
 
