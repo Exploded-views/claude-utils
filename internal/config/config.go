@@ -12,6 +12,12 @@ import (
 	"runtime"
 )
 
+// Valid values for Config.ProjectKey.
+const (
+	ProjectKeyPath   = "path"
+	ProjectKeyRemote = "remote"
+)
+
 // Config controls the daemon's behavior. Defaults() returns a Config with
 // reasonable per-platform defaults; only RemoteURL is required from the user.
 type Config struct {
@@ -35,6 +41,13 @@ type Config struct {
 	// work-tree so the daemon's git sync carries it across workstations.
 	DistilledDir string `json:"distilledDir,omitempty"`
 
+	// ProjectKey chooses how a project is identified in the sync repo:
+	// "path" (default) uses Claude's escaped-path folder name, so a repo must
+	// live at the same absolute path on every PC; "remote" keys a project by
+	// its git origin remote when it has one, so checkouts at different paths
+	// share memory. See docs/claude-memsync.md.
+	ProjectKey string `json:"projectKey"`
+
 	// DebounceMs is how long to wait after a file change before committing.
 	DebounceMs int `json:"debounceMs"`
 
@@ -49,6 +62,7 @@ func Defaults() Config {
 	return Config{
 		SyncDir:           filepath.Join(home, ".claudesync"),
 		ClaudeProjectsDir: filepath.Join(home, ".claude", "projects"),
+		ProjectKey:        ProjectKeyPath,
 		DebounceMs:        3000,
 		PullIntervalSec:   3600,
 	}
@@ -97,6 +111,9 @@ func Load(path string) (Config, error) {
 	c := Defaults()
 	if err := json.Unmarshal(b, &c); err != nil {
 		return Config{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if c.ProjectKey != ProjectKeyPath && c.ProjectKey != ProjectKeyRemote {
+		return Config{}, fmt.Errorf("%s: projectKey must be %q or %q, got %q", path, ProjectKeyPath, ProjectKeyRemote, c.ProjectKey)
 	}
 	return c, nil
 }
