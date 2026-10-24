@@ -177,6 +177,9 @@ commits.
   `~/.claude/history.jsonl`, `~/.claude/settings.json`, etc.
 - `~/.claudesync/config.json` — per-PC (paths embed your machine layout)
 - `~/.claudesync/.state/manifest.json` — per-PC (delete-detection state)
+- `~/.claudesync/.state/synced-head` and `.state/pull-running` — per-PC (the
+  last commit reflected in `~/.claude`, and a marker around the daemon's own
+  pull)
 - `~/.claudesync/.state/parked.json` and `.state/parked/` — per-PC (in-flight
   [parking](#parking-held-back-files-around-the-pull) state, normally absent;
   `.state/parked.broken-*/` holds a park that was set aside)
@@ -262,9 +265,11 @@ In practice:
   the reset, between the reset and the pull, or after the pull, the files
   return as you had them, and a file the pull did not change gets no spurious
   `.from-remote-*` backup.
-- A rebase or merge a crash left stopped is aborted on start in all cases, and
-  again at the start of every cycle, whether or not anything is parked: its
-  work-tree holds conflict markers, which must never be staged. As a safety net
+- A rebase or merge the daemon's own pull left stopped (a crash) is aborted on
+  start in all cases, and again at the start of every cycle, whether or not
+  anything is parked: its work-tree holds conflict markers, which must never be
+  staged. One the daemon did not start is yours, and is left alone (see
+  [Rebase conflicts](#rebase-conflicts)). As a safety net
   the commit step also refuses to stage a file with conflict marker lines
   (`<<<<<<< `, `=======`, `>>>>>>> `) while a merge, a rebase or unmerged
   entries exist. Your local commits are kept.
@@ -320,23 +325,52 @@ match your denylist:
 pull: rebase conflict in 1 file(s); rebase aborted, local commits kept, nothing propagated or pushed until you resolve it (see docs: Rebase conflicts)
 ```
 
-To resolve it, run `claude-memsync stop` first: the daemon aborts any stopped
-rebase at the start of every cycle, so it would undo your resolution halfway.
+To resolve it, stopping the daemon first is recommended (`claude-memsync
+stop`), but no longer required: the daemon aborts a stopped rebase only if its
+own pull started it (it writes `~/.claudesync/.state/pull-running` around the
+pull). A rebase it did not start is taken to be yours: the whole cycle is
+skipped (nothing is staged, reconciled, pulled or pushed) and logged once, as
+`a rebase or merge is in progress in the sync repo ...`, until you finish it.
 
 ```
-git -C ~/.claudesync pull --rebase origin main    # stops on the conflict again
-                                                  # (or: git -C ~/.claudesync pull --rebase)
-git -C ~/.claudesync status                       # lists the conflicted files
+git -C ~/.claudesync pull --rebase --autostash origin main   # stops on the conflict again
+git -C ~/.claudesync status                                  # lists the conflicted files
 # edit each conflicted file in ~/.claudesync, keeping what you want
 git -C ~/.claudesync add <file>
 git -C ~/.claudesync rebase --continue
 ```
 
+`--autostash` is needed when a held-back file is modified in `~/.claudesync`:
+without it git refuses to pull with "You have unstaged changes". Repeat `git
+add` and `git rebase --continue` until git reports that the rebase is done: if
+you have several local commits, it stops again on each one that conflicts. If
+a file is a deletion on one side, `git add` keeps it and `git rm` removes it.
+
+When the rebase is done, git applies the autostash. If it prints `Applying
+autostash resulted in conflicts` (the peer changed a held-back file you also
+changed), your edit is safe in the stash and in `~/.claude`, and the file in
+`~/.claudesync` holds conflict markers. Your `~/.claude` copy is the real one,
+so drop the conflicted copy and the stash:
+
+```
+git -C ~/.claudesync checkout HEAD -- <the held-back file>
+git -C ~/.claudesync stash drop
+```
+
 Then start the daemon again (`claude-memsync start`). The next cycle pushes the
-result and pulls everything that was waiting. Edit the resolved note in
-`~/.claude` too if you want that copy to match; the pull brings the resolved
-version into it for any file you did not change since. If the file is a
-deletion on one side, `git add` keeps it and `git rm` removes it.
+result and pulls everything that was waiting. You do not need to edit anything
+in `~/.claude`: before a cycle does anything else, the daemon compares the sync
+repo's HEAD with the commit it last finished a cycle at
+(`~/.claudesync/.state/synced-head`) and copies the files that changed in
+between into `~/.claude`, so your resolution and the peer's other edits arrive
+there instead of the older `~/.claude` copies being pushed over them. This
+catch-up leaves alone a file that is modified in `~/.claudesync` (held back)
+and a file whose `~/.claude` copy has changed since that commit: your version
+stands and the incoming one is kept beside it in `~/.claudesync` as
+`<name>.from-remote-<id>`. If the history was rewritten (`git rebase`, `git
+reset` by hand) the same applies to the difference between the two commits,
+and the log says so. With no record yet (the first start after an upgrade) the
+daemon only records the current HEAD.
 
 ### Built-in rules
 
