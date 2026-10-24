@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 
+	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/merge"
 	"github.com/MarimerLLC/claude-utils/internal/version"
 )
@@ -34,14 +36,24 @@ func main() {
 		}
 	}
 
-	if len(os.Args) < 4 {
+	args := os.Args[1:]
+	textMode := false
+	if len(args) > 0 && args[0] == "--text" {
+		textMode = true
+		args = args[1:]
+	}
+	if len(args) < 3 {
 		usage()
 		os.Exit(2)
 	}
 
-	basePath := os.Args[1]
-	oursPath := os.Args[2]
-	theirsPath := os.Args[3]
+	basePath := args[0]
+	oursPath := args[1]
+	theirsPath := args[2]
+	markerSize := 0
+	if len(args) >= 4 {
+		markerSize, _ = strconv.Atoi(args[3])
+	}
 
 	base, err := os.ReadFile(basePath)
 	if err != nil {
@@ -59,9 +71,31 @@ func main() {
 		os.Exit(2)
 	}
 
-	merged, conflict := merge.Merge(string(base), string(ours), string(theirs))
+	// In an age-encrypted repo git hands the driver ciphertext: decrypt the
+	// three versions, merge, and write ciphertext back. Plaintext inputs (an
+	// unencrypted repo) are merged and written as before.
+	var mctx *agecrypt.MergeContext
+	if agecrypt.IsCiphertext(ours) || agecrypt.IsCiphertext(theirs) || agecrypt.IsCiphertext(base) {
+		var err error
+		if mctx, err = agecrypt.OpenMergeContext("."); err != nil {
+			fmt.Fprintln(os.Stderr, "memmerge: cannot decrypt:", err)
+			os.Exit(2)
+		}
+	}
+	fn := agecrypt.MergeFunc(func(b, o, t []byte) ([]byte, bool, error) {
+		m, c := merge.Merge(string(b), string(o), string(t))
+		return []byte(m), c, nil
+	})
+	if textMode {
+		fn = agecrypt.TextMerge(markerSize)
+	}
+	merged, conflict, err := mctx.Merge(fn, base, ours, theirs)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "memmerge:", err)
+		os.Exit(2)
+	}
 
-	if err := os.WriteFile(oursPath, []byte(merged), 0644); err != nil {
+	if err := os.WriteFile(oursPath, merged, 0644); err != nil {
 		fmt.Fprintln(os.Stderr, "write ours:", err)
 		os.Exit(2)
 	}
@@ -75,7 +109,10 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `claude-memmerge — git custom merge driver for MEMORY.md
 
 Usage:
-  claude-memmerge <base> <ours> <theirs> [marker-len] [pathname]
+  claude-memmerge [--text] <base> <ours> <theirs> [marker-len] [pathname]
+
+--text merges plain lines (git merge-file) instead of MEMORY.md sections.
+In an age-encrypted repo both modes decrypt the inputs and write ciphertext.
 
 This binary is invoked by git via merge.<name>.driver configuration; not
 typically run by hand.`)

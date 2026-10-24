@@ -13,6 +13,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
+	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/distill"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
@@ -155,6 +156,20 @@ func (l *Loop) Run(ctx context.Context) error {
 	}
 }
 
+// keyless reports (and logs) that encryption is on but this host's identity
+// cannot read the repo.
+func (l *Loop) keyless(repo *gitwt.Repo) bool {
+	err := agecrypt.CheckKeyed(repo)
+	if errors.Is(err, agecrypt.ErrKeyless) {
+		log.Println("encryption: keyless, syncing stopped:", err)
+		return true
+	}
+	if err != nil {
+		log.Println("encryption: key check failed:", err)
+	}
+	return false
+}
+
 // recoverLeftovers undoes what a crash or an earlier failed cycle left: a
 // rebase or merge the daemon's own pull left stopped, then an unfinished park.
 // A rebase or merge the daemon did not start is the user's: it returns
@@ -195,6 +210,11 @@ func (l *Loop) takeRecovery(repo *gitwt.Repo, roots Roots) error {
 // Reconcile would merge them into the Claude tree), nor while a rebase or
 // merge is still stopped.
 func (l *Loop) startCycle(repo *gitwt.Repo, roots Roots) bool {
+	// A keyless clone holds ciphertext: Reconcile would copy it into the
+	// Claude tree.
+	if l.keyless(repo) {
+		return false
+	}
 	err := l.recoverLeftovers(repo, roots)
 	l.recovered = &recovery{err}
 	if errors.Is(err, errHandResolving) {
@@ -303,6 +323,11 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	// the restore error below) is stripped of denylisted names.
 	g := newPathGuard(l.Cfg)
 	defer func() { err = g.Err(err) }()
+	// Without a key that reads the repo nothing may be committed, pulled into
+	// the Claude tree or pushed.
+	if l.keyless(repo) {
+		return agecrypt.ErrKeyless
+	}
 	// A rebase or merge the daemon left stopped goes first (one the user is
 	// resolving ends the cycle), before anything is staged, and then
 	// a park an earlier cycle (or a crashed run) did not finish: nothing may be
@@ -387,6 +412,7 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	}
 	postRev, _ := repo.Run("rev-parse", "HEAD")
 	if conflictErr == nil && strings.TrimSpace(preRev) != strings.TrimSpace(postRev) && strings.TrimSpace(preRev) != "" {
+		noteRecipientsChange(repo, strings.TrimSpace(preRev), strings.TrimSpace(postRev))
 		if err := propagate(repo, roots, strings.TrimSpace(preRev), strings.TrimSpace(postRev), st.skip(), g); err != nil {
 			settled = false
 			return fmt.Errorf("propagate: %w", err)
@@ -396,6 +422,10 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 		return conflictErr // nothing to push: origin is ahead
 	}
 
+	if err := agecrypt.PushGuard(repo, l.Branch); err != nil {
+		log.Println(err)
+		return err
+	}
 	if err := repo.Push(l.Branch); err != nil {
 		return fmt.Errorf("push: %w", err)
 	}

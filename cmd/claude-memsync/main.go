@@ -24,6 +24,12 @@ func main() {
 		os.Exit(runRun(os.Args[2:]))
 	case "distill":
 		os.Exit(runDistill(os.Args[2:]))
+	case "age-filter":
+		os.Exit(runAgeFilter())
+	case "age-textconv":
+		os.Exit(runAgeTextconv(os.Args[2:]))
+	case "recipients":
+		os.Exit(runRecipients(os.Args[2:]))
 	case "changes":
 		os.Exit(runChanges(os.Args[2:]))
 	case "install":
@@ -54,6 +60,7 @@ Subcommands:
   run         Run the sync daemon in the foreground
   distill     Rebuild the distilled-memory catalog index (see --prune, --dry-run)
   changes     List memory files changed in the sync repo since a commit (for hooks)
+  recipients  add | remove | list the age recipients of an encrypted repo
   install     Install as a system service (Windows Service / systemd unit / launchd plist)
   uninstall   Remove the system service
   start       Start the system service

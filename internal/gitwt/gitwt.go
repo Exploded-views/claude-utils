@@ -77,6 +77,25 @@ func (r *Repo) Clone(url string) error {
 	return nil
 }
 
+// CloneNoCheckout is Clone without populating the work-tree (`clone -n`), so
+// config that checkout depends on (filters) can be set first.
+func (r *Repo) CloneNoCheckout(url string) error {
+	cmd := exec.Command("git", "clone", "-n", url, r.Dir)
+	proc.HideWindow(cmd)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git clone -n %s: %w: %s", url, err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// HasHead reports whether HEAD points at a commit (false in an empty repo).
+func (r *Repo) HasHead() bool {
+	_, err := r.Run("rev-parse", "--verify", "--quiet", "HEAD")
+	return err == nil
+}
+
 // Init runs `git init` in r.Dir. The directory is created if missing.
 func (r *Repo) Init(defaultBranch string) error {
 	cmd := exec.Command("git", "init", "-b", defaultBranch, r.Dir)

@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/scrub"
@@ -31,6 +32,14 @@ const denylistRel = "denylist.txt"
 // merge or rebase is unresolved, a file with conflict markers is never staged:
 // CommitMirror fails instead (see refuseConflictMarkers).
 func CommitMirror(repo *gitwt.Repo, cfg config.Config, msg string) (bool, error) {
+	encrypted := agecrypt.Enabled(repo)
+	if encrypted {
+		// Keyless: staging would store nothing useful and the work-tree holds
+		// ciphertext. Commit nothing.
+		if err := agecrypt.CheckKeyed(repo); err != nil {
+			return false, err
+		}
+	}
 	if err := refuseConflictMarkers(repo); err != nil {
 		return false, err
 	}
@@ -51,6 +60,14 @@ func CommitMirror(repo *gitwt.Repo, cfg config.Config, msg string) (bool, error)
 		if !ok {
 			return false, nil
 		}
+	}
+	if encrypted {
+		// Names, host and time must not reach the remote in the clear.
+		changes, err := repo.StagedChanges()
+		if err != nil {
+			return false, fmt.Errorf("list staged changes: %w", err)
+		}
+		msg = fmt.Sprintf("memsync: %d files", len(changes))
 	}
 	return repo.Commit(msg)
 }
