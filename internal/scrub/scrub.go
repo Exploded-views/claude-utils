@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"regexp/syntax"
 	"strings"
 )
 
@@ -97,6 +98,9 @@ func realCredentialValue(sub [][]byte) bool {
 type DenylistPattern struct {
 	Line int
 	re   *regexp.Regexp
+	// relaxed is re with each anchor (^, $, \A, \z) also satisfied by a
+	// delimiter next to the match, nil if it cannot be built. See PathSpans.
+	relaxed *regexp.Regexp
 }
 
 // ParseDenylist reads one case-insensitive regex per line. Blank lines and
@@ -129,7 +133,7 @@ func ParseDenylist(r io.Reader) ([]DenylistPattern, error) {
 		if err != nil {
 			return nil, fmt.Errorf("denylist line %d: invalid regular expression", n)
 		}
-		out = append(out, DenylistPattern{Line: n, re: re})
+		out = append(out, DenylistPattern{Line: n, re: re, relaxed: relax(re)})
 	}
 	if err := sc.Err(); err != nil {
 		return nil, err
@@ -186,4 +190,70 @@ func (s *Scanner) MatchesPath(path string) bool {
 		}
 	}
 	return false
+}
+
+// delimiters are the characters that end a name in a line of text: white space,
+// quotes, and the punctuation that follows or wraps a path in git's messages.
+var delimiters = []rune{
+	'\t', '\n', '\r', '\r', ' ', ' ', '"', '"', '\'', ')', ',', ',',
+	':', ';', '[', '[', ']', ']', '`', '`', '{', '{', '}', '}',
+}
+
+// relax returns re with every anchor also matched by one delimiter character
+// beside it, so a pattern written against a whole path (^projects/x$) finds
+// that path in the middle of a line. nil if re has no anchor or cannot be
+// rebuilt.
+func relax(re *regexp.Regexp) *regexp.Regexp {
+	tree, err := syntax.Parse(re.String(), syntax.Perl)
+	if err != nil {
+		return nil
+	}
+	changed := false
+	var walk func(n *syntax.Regexp)
+	walk = func(n *syntax.Regexp) {
+		for i, sub := range n.Sub {
+			switch sub.Op {
+			case syntax.OpBeginText, syntax.OpBeginLine, syntax.OpEndText, syntax.OpEndLine:
+				n.Sub[i] = &syntax.Regexp{Op: syntax.OpAlternate, Sub: []*syntax.Regexp{
+					sub, {Op: syntax.OpCharClass, Rune: delimiters},
+				}}
+				changed = true
+			default:
+				walk(sub)
+			}
+		}
+	}
+	holder := &syntax.Regexp{Op: syntax.OpConcat, Sub: []*syntax.Regexp{tree}}
+	walk(holder)
+	if !changed {
+		return nil
+	}
+	out, err := regexp.Compile(holder.Sub[0].String())
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
+// PathSpans returns the byte ranges of text that denylist patterns match: each
+// pattern is run once over text, as written and with its anchors relaxed to
+// name boundaries (see relax), so a name inside a longer line is found by an
+// anchored pattern too. The ranges may overlap, and none is empty. The work is
+// linear in len(text) for each pattern. Callers must not log what the ranges
+// cover.
+func (s *Scanner) PathSpans(text string) [][2]int {
+	var spans [][2]int
+	for _, d := range s.deny {
+		for _, re := range []*regexp.Regexp{d.re, d.relaxed} {
+			if re == nil {
+				continue
+			}
+			for _, m := range re.FindAllStringIndex(text, -1) {
+				if m[1] > m[0] {
+					spans = append(spans, [2]int{m[0], m[1]})
+				}
+			}
+		}
+	}
+	return spans
 }

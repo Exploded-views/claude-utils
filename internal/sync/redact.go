@@ -117,16 +117,13 @@ func (g *pathGuard) hides(s string) bool {
 // redactedPath, and whether any was. A nil guard, or one whose denylist could
 // not be read, hides every path-like token.
 func (g *pathGuard) redact(s string) (string, bool) {
-	hide := g.hidesToken
-	if g == nil || g.closed {
-		hide = looksLikePath
-	} else if g.scanner == nil || s == "" {
+	if g != nil && !g.closed && (g.scanner == nil || s == "") {
 		return s, false
 	}
 	var b strings.Builder
 	hit := false
 	for _, line := range strings.SplitAfter(s, "\n") {
-		out, ok := redactLine(line, hide)
+		out, ok := g.redactLine(line)
 		b.WriteString(out)
 		hit = hit || ok
 	}
@@ -146,78 +143,203 @@ func looksLikePath(tok string) bool {
 	return i > 0 && i < len(tok)-1
 }
 
-// hidesToken reports whether tok matches the denylist, as a repo-relative path
-// or under one of the root directories.
-func (g *pathGuard) hidesToken(tok string) bool {
-	return g.matches(filepath.ToSlash(tok))
-}
-
-// maxRunWords bounds a run of words tried as one name that holds spaces, on a
-// line longer than maxFullLineChars. maxFullLineChars is the line length, in
-// characters, up to which every run of words is tried, of any word count.
-const (
-	maxRunWords      = 12
-	maxFullLineChars = 1024
-)
+// maxLineBytes is the longest line that is searched. A longer one is redacted
+// whole, since it cannot be vouched for within a sane amount of work.
+const maxLineBytes = 64 << 10
 
 type span struct{ start, end int }
 
-// redactLine replaces the hidden tokens of one line (a trailing newline is
-// kept). The line is searched in four ways, since a name can be written many
-// ways in an error:
+// redactLine replaces the hidden names of one line (a trailing newline is
+// kept). The work is linear in the length of the line for each denylist
+// pattern. A name can be written many ways in an error, so the line is searched
+// in four ways, and the matches are widened to whole words and joined:
 //
-//   - each word, split on whitespace and quotes, then on colons, with a git
-//     magic prefix such as "(literal)" cut off, so ":(literal)projects/x" and
-//     "projects/x:" are seen as "projects/x";
-//   - each quoted string, for a name with spaces in quotes;
-//   - runs of words, for a name with spaces that is not quoted: every run, of
-//     any word count, on a line of up to maxFullLineChars characters (which
-//     includes the rest of the line from each word), and only runs of up to
-//     maxRunWords words on a longer one, to bound the work;
-//   - the line as a whole, if nothing in it matched.
+//   - each pattern is run over the line as it is;
+//   - and over a normalised copy of it, with git's pathspec magic such as
+//     ":(literal)" and the quotes cut out, backslashes turned to slashes and
+//     the absolute sync and Claude roots written as the repo-relative paths
+//     patterns are written against;
+//   - each word of the copy (split on white space and quotes, then on colons)
+//     is tested on its own, so an anchored pattern matches a path token;
+//   - the line as a whole, trimmed, is tested if nothing in it matched.
 //
-// Matches in a word cover only the matching part of it.
-func redactLine(line string, hide func(string) bool) (string, bool) {
+// Patterns are run with their anchors relaxed to name boundaries (see
+// scrub.Scanner.PathSpans), which finds an anchored name with spaces in the
+// middle of a line. A line over maxLineBytes is redacted whole.
+func (g *pathGuard) redactLine(line string) (string, bool) {
 	body := strings.TrimRight(line, "\r\n")
 	tail := line[len(body):]
+	if strings.TrimSpace(body) == "" {
+		return line, false
+	}
+	if len(body) > maxLineBytes {
+		return redactedPath + tail, true
+	}
+	var marks []span
+	if g == nil || g.closed {
+		marks = closedMarks(body)
+	} else {
+		marks = widen(body, g.scannerMarks(body))
+	}
+	if len(marks) == 0 {
+		return line, false
+	}
+	return apply(body, marks) + tail, true
+}
+
+// closedMarks is the words and quoted strings of body that look like paths, for
+// a guard with no denylist to ask.
+func closedMarks(body string) []span {
 	words := splitWords(body)
 	var marks []span
 	marked := make([]bool, len(words))
 	for i, w := range words {
-		if sp, ok := hiddenPart(body, w, hide); ok {
+		if sp, ok := hiddenPart(body, w, looksLikePath); ok {
 			marks = append(marks, sp)
 			marked[i] = true
 		}
 	}
-	marks = append(marks, hiddenQuotes(body, words, marked, hide)...)
-	// Every run of words on a line up to maxFullLineChars; beyond that the
-	// work is bounded by a window of maxRunWords words.
-	window := len(words)
-	if len([]rune(body)) > maxFullLineChars {
-		window = maxRunWords
+	return append(marks, hiddenQuotes(body, words, marked, looksLikePath)...)
+}
+
+// scannerMarks is the parts of body that the denylist matches, found in the
+// ways listed at redactLine.
+func (g *pathGuard) scannerMarks(body string) []span {
+	var marks []span
+	for _, m := range g.scanner.PathSpans(body) {
+		marks = append(marks, span{m[0], m[1]})
 	}
-	for i := 0; i < len(words); i++ {
-		if marked[i] {
+	norm := g.normalise(body)
+	if norm.text != body {
+		for _, m := range g.scanner.PathSpans(norm.text) {
+			marks = append(marks, norm.back(span{m[0], m[1]}))
+		}
+	}
+	hide := func(tok string) bool { return g.scanner.MatchesPath(tok) }
+	for _, w := range splitWords(norm.text) {
+		if sp, ok := hiddenPart(norm.text, w, hide); ok {
+			marks = append(marks, norm.back(sp))
+		}
+	}
+	// Whole, if nothing in it matched: an unanchored pattern matches any line
+	// that holds a hit, and that line is already marked.
+	if trimmed := strings.TrimSpace(norm.text); len(marks) == 0 && trimmed != "" && hide(trimmed) {
+		start := strings.Index(norm.text, trimmed)
+		marks = append(marks, norm.back(span{start, start + len(trimmed)}))
+	}
+	return marks
+}
+
+// normalised is a copy of a line with an offset map back to the original.
+type normalised struct {
+	text       string
+	start, end []int // per byte of text: the range of the original it came from
+}
+
+// back maps a span of the copy to the span of the original it came from.
+func (n *normalised) back(sp span) span {
+	return span{n.start[sp.start], n.end[sp.end-1]}
+}
+
+// normalise cuts the pathspec magic and the quotes out of body, turns
+// backslashes into slashes, and writes the absolute sync and Claude roots as
+// the repo-relative paths under them.
+func (g *pathGuard) normalise(body string) *normalised {
+	type rep struct {
+		start, end int
+		text       string
+	}
+	var reps []rep
+	for _, r := range g.roots {
+		if r.abs == "" {
 			continue
 		}
-		for j := i + 1; j < len(words) && j < i+window && !marked[j]; j++ {
-			run := span{words[i].start, words[j].end}
-			if hide(trimPunct(body[run.start:run.end])) {
-				marks = append(marks, run)
-				i = j
+		prefix := r.abs + "/"
+		text := ""
+		if r.rel != "" {
+			text = r.rel + "/"
+		}
+		for off := 0; ; {
+			i := strings.Index(body[off:], prefix)
+			if i < 0 {
 				break
 			}
+			reps = append(reps, rep{off + i, off + i + len(prefix), text})
+			off += i + len(prefix)
 		}
 	}
-	if len(marks) == 0 {
-		trimmed := strings.TrimSpace(body)
-		if trimmed == "" || !hide(trimmed) {
-			return line, false
-		}
-		start := strings.Index(body, trimmed)
-		marks = append(marks, span{start, start + len(trimmed)})
+	sort.Slice(reps, func(i, j int) bool { return reps[i].start < reps[j].start })
+
+	n := &normalised{}
+	var b strings.Builder
+	emit := func(c byte, from, to int) {
+		b.WriteByte(c)
+		n.start = append(n.start, from)
+		n.end = append(n.end, to)
 	}
-	return apply(body, marks) + tail, true
+	next := 0 // index into reps
+	for i := 0; i < len(body); {
+		for next < len(reps) && reps[next].start < i {
+			next++ // overlaps what was just written
+		}
+		switch c := body[i]; {
+		case next < len(reps) && reps[next].start == i:
+			r := reps[next]
+			for k := 0; k < len(r.text); k++ {
+				emit(r.text[k], r.start, r.end)
+			}
+			i = r.end
+		case c == '\'' || c == '"' || c == '`':
+			i++
+		case c == ':' && i+1 < len(body) && body[i+1] == '(':
+			if loc := magicPrefix.FindStringIndex(body[i+1:]); loc != nil {
+				i += 1 + loc[1]
+				continue
+			}
+			emit(c, i, i+1)
+			i++
+		case c == '\\':
+			emit('/', i, i+1)
+			i++
+		default:
+			emit(c, i, i+1)
+			i++
+		}
+	}
+	n.text = b.String()
+	return n
+}
+
+// widen extends each span to the whole words it touches (a word ends at white
+// space or a quote), without the punctuation that only wraps it, and drops the
+// spans that nothing is left of.
+func widen(body string, marks []span) []span {
+	out := make([]span, 0, len(marks))
+	for _, m := range marks {
+		s, e := m.start, m.end
+		for s > 0 && !isBreak(body[s-1]) {
+			s--
+		}
+		for e < len(body) && !isBreak(body[e]) {
+			e++
+		}
+		for s < m.start && strings.IndexByte(punct, body[s]) >= 0 {
+			s++
+		}
+		for e > m.end && (strings.IndexByte(punct, body[e-1]) >= 0 || body[e-1] == '.') {
+			e--
+		}
+		out = append(out, span{s, e})
+	}
+	return out
+}
+
+func isBreak(c byte) bool {
+	switch c {
+	case ' ', '\t', '\r', '\n', '\'', '"', '`':
+		return true
+	}
+	return false
 }
 
 // splitWords returns the runs of body that hold no whitespace and no quote.
@@ -360,21 +482,4 @@ func apply(body string, marks []span) string {
 	}
 	b.WriteString(body[pos:])
 	return b.String()
-}
-
-func (g *pathGuard) matches(s string) bool {
-	if g.scanner.MatchesPath(s) {
-		return true
-	}
-	for _, r := range g.roots {
-		if rest, ok := strings.CutPrefix(s, r.abs+"/"); ok && r.abs != "" {
-			if r.rel != "" {
-				rest = r.rel + "/" + rest
-			}
-			if g.scanner.MatchesPath(rest) {
-				return true
-			}
-		}
-	}
-	return false
 }

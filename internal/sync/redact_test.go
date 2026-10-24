@@ -393,18 +393,79 @@ func TestRedact_NameOfAnyWordCount(t *testing.T) {
 	}
 }
 
-// A line longer than the bound still has every word and quoted string tested
-// and is not searched run by run, so a pathological line stays cheap.
-func TestRedact_LongLineIsBounded(t *testing.T) {
-	g, _ := guardFor(t, "heron")
-	line := strings.Repeat("a ", maxFullLineChars) + "heron.md: needs merge"
-	start := time.Now()
-	got := g.Err(errors.New(line)).Error()
-	if d := time.Since(start); d > 5*time.Second {
-		t.Errorf("took %v", d)
+// A long line with a long name in it, whether the pattern is anchored or not,
+// which no fixed window of words may miss.
+func TestRedact_LongLineWithLongName(t *testing.T) {
+	name := "one two three four five six seven eight nine ten eleven twelve thirteen heron.md"
+	for pat, pattern := range map[string]string{
+		"anchored":   `^projects/[^/]+/memory/` + regexp.QuoteMeta(name) + `$`,
+		"unanchored": regexp.QuoteMeta(name),
+	} {
+		g, _ := guardFor(t, pattern)
+		for _, filler := range []int{600, 20000} {
+			line := strings.Repeat("x ", filler) + "projects/p1/memory/" + name + ": needs merge"
+			got := g.Err(errors.New(line)).Error()
+			if strings.Contains(got, "heron") || strings.Contains(got, "thirteen") {
+				t.Errorf("%s, %d fillers: leaked: ...%s", pat, filler, got[len(got)-80:])
+			}
+			if !strings.HasSuffix(got, "needs merge") {
+				t.Errorf("%s, %d fillers: lost the reason: ...%s", pat, filler, got[len(got)-80:])
+			}
+		}
 	}
+}
+
+// The cost of a line is linear in its length: one worst-case line at the
+// budget, with 10 patterns, anchored and not, finishes well inside the limit.
+func TestRedact_WorstCaseLineIsFast(t *testing.T) {
+	var pats []string
+	for i := 0; i < 5; i++ {
+		pats = append(pats, fmt.Sprintf(`nomatch%d\.md$`, i), fmt.Sprintf(`^projects/[^/]+/memory/nomatch%d`, i))
+	}
+	g, _ := guardFor(t, pats...)
+	line := strings.TrimSpace(strings.Repeat("a ", maxLineBytes/2))
+	for name, text := range map[string]string{
+		"words":  line,
+		"quotes": strings.TrimSpace(strings.Repeat("'a b' ", maxLineBytes/6)),
+		"colons": strings.TrimSpace(strings.Repeat("a:(b) ", maxLineBytes/6)),
+	} {
+		start := time.Now()
+		got := g.Err(errors.New(text)).Error()
+		if d := time.Since(start); d > 2*time.Second {
+			t.Errorf("%s: %d-char line took %v", name, len(text), d)
+		}
+		if got != text {
+			t.Errorf("%s: nothing matches, but the line changed", name)
+		}
+	}
+}
+
+// A line over the budget is not searched: it is redacted whole, and the lines
+// around it are untouched.
+func TestRedact_LineOverBudgetIsRedactedWhole(t *testing.T) {
+	g, _ := guardFor(t, "heron")
+	long := strings.Repeat("a ", maxLineBytes/2+1) + "plain words"
+	got := g.Err(errors.New("first\n" + long + "\nheron.md\nlast")).Error()
+	if got != "first\n"+redactedPath+"\n"+redactedPath+"\nlast" {
+		t.Errorf("got %q", got)
+	}
+}
+
+// An anchor in a pattern means the start or end of the name, which in an error
+// line is a delimiter: the word inside a longer name is not the name.
+func TestRedact_AnchorsMeanNameBoundaries(t *testing.T) {
+	g, _ := guardFor(t, "^heron$")
+	for _, text := range []string{
+		"unable to access 'https://git.example.com/heron/memory.git/': Could not resolve host",
+		"error: projects/p1/memory/heron.md: needs merge",
+	} {
+		if got := g.Err(errors.New(text)).Error(); got != text {
+			t.Errorf("changed: %q", got)
+		}
+	}
+	got := g.Err(errors.New("error: heron: needs merge")).Error()
 	if strings.Contains(got, "heron") || !strings.Contains(got, "needs merge") {
-		t.Errorf("got %q", got[len(got)-60:])
+		t.Errorf("got %q", got)
 	}
 }
 

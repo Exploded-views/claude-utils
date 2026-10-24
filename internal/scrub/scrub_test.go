@@ -418,3 +418,42 @@ func TestScan_OpenAIKeyAfterUnderscore(t *testing.T) {
 		}
 	}
 }
+
+func TestPathSpans(t *testing.T) {
+	deny, err := ParseDenylist(strings.NewReader("^projects/[^/]+/memory/night owl\\.md$\nheron\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(deny)
+	text := "error: 'projects/p1/memory/night owl.md': needs merge; HERON.md"
+	var got []string
+	for _, sp := range s.PathSpans(text) {
+		got = append(got, text[sp[0]:sp[1]])
+	}
+	want := map[string]bool{"projects/p1/memory/night owl.md": false, "HERON": false}
+	for _, g := range got {
+		// A relaxed anchor may take one delimiter along.
+		want[strings.Trim(g, "' :")] = true
+	}
+	for w, seen := range want {
+		if !seen {
+			t.Errorf("no span for %q: %q", w, got)
+		}
+	}
+	if sp := s.PathSpans("nothing here"); len(sp) != 0 {
+		t.Errorf("spans in a clean line: %v", sp)
+	}
+	// An anchor still means a name boundary, not any substring.
+	if sp := New(mustParse(t, "^heron$")).PathSpans("https://git.example.com/heron/memory.git"); len(sp) != 0 {
+		t.Errorf("anchored pattern matched inside a longer name: %v", sp)
+	}
+}
+
+func mustParse(t *testing.T, s string) []DenylistPattern {
+	t.Helper()
+	d, err := ParseDenylist(strings.NewReader(s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
