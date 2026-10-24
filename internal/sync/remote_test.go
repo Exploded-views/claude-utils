@@ -583,6 +583,39 @@ func TestRemoteKey_CacheRecordsResolvedDirAndSurvivesRestart(t *testing.T) {
 	}
 }
 
+// A corrupt (hand-edited or torn) projects.json must not stop the daemon: it is
+// set aside and resolution starts from an empty cache.
+func TestRemoteKey_CorruptCacheIsQuarantined(t *testing.T) {
+	gitEnv(t)
+	shared := t.TempDir()
+	a := newMachine(t, "alice", shared)
+	p := ProjectCachePath(shared)
+	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(`{"version":1,"projects":{`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(app, "a.md", "a\n")
+	a.sync() // fails the test if NewRoots errors
+
+	matches, _ := filepath.Glob(p + ".corrupt-*")
+	if len(matches) != 1 {
+		t.Fatalf("want the corrupt file renamed aside, got %v", matches)
+	}
+	if b, _ := os.ReadFile(matches[0]); string(b) != `{"version":1,"projects":{` {
+		t.Errorf("quarantined content = %q", b)
+	}
+	if _, err := os.Stat(filepath.Join(shared, "remotes", "github.com", "acme", "app", "memory", "a.md")); err != nil {
+		t.Errorf("daemon should carry on with an empty cache: %v", err)
+	}
+	c, err := LoadProjectCache(shared)
+	if err != nil || c.Projects[a.hash(app)].Dir != app {
+		t.Errorf("fresh cache should have been written: %+v, %v", c, err)
+	}
+}
+
 func TestLoadProjectCache_MissingIsEmpty(t *testing.T) {
 	c, err := LoadProjectCache(t.TempDir())
 	if err != nil || len(c.Projects) != 0 {

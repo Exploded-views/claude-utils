@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
@@ -226,7 +227,10 @@ func ProjectCachePath(syncDir string) string {
 	return filepath.Join(syncDir, manifestStateDir, "projects.json")
 }
 
-// LoadProjectCache reads the cache. A missing file yields an empty cache.
+// LoadProjectCache reads the cache. A missing file yields an empty cache. A
+// file that does not parse is renamed to projects.json.corrupt-<unix time> and
+// also yields an empty cache: the cache only records what can be re-derived,
+// so a torn or hand-mangled file must never stop the daemon.
 func LoadProjectCache(syncDir string) (*ProjectCache, error) {
 	c := &ProjectCache{Version: projectCacheVersion, Projects: map[string]ProjectEntry{}}
 	b, err := os.ReadFile(ProjectCachePath(syncDir))
@@ -237,7 +241,13 @@ func LoadProjectCache(syncDir string) (*ProjectCache, error) {
 		return nil, err
 	}
 	if err := json.Unmarshal(b, c); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", ProjectCachePath(syncDir), err)
+		p := ProjectCachePath(syncDir)
+		aside := fmt.Sprintf("%s.corrupt-%d", p, time.Now().Unix())
+		log.Printf("remote keys: %s: %v; moving it to %s and starting with an empty cache", p, err, aside)
+		if err := os.Rename(p, aside); err != nil {
+			log.Println("remote keys: set aside corrupt cache:", err)
+		}
+		return &ProjectCache{Version: projectCacheVersion, Projects: map[string]ProjectEntry{}}, nil
 	}
 	if c.Projects == nil {
 		c.Projects = map[string]ProjectEntry{}
@@ -245,7 +255,7 @@ func LoadProjectCache(syncDir string) (*ProjectCache, error) {
 	return c, nil
 }
 
-// Save writes the cache as pretty-printed JSON.
+// Save writes the cache as pretty-printed JSON, atomically.
 func (c *ProjectCache) Save(syncDir string) error {
 	c.Version = projectCacheVersion
 	b, err := json.MarshalIndent(c, "", "  ")
@@ -256,7 +266,7 @@ func (c *ProjectCache) Save(syncDir string) error {
 	if err := os.MkdirAll(filepath.Dir(ProjectCachePath(syncDir)), 0700); err != nil {
 		return err
 	}
-	return os.WriteFile(ProjectCachePath(syncDir), b, 0600)
+	return writeAtomic(ProjectCachePath(syncDir), b)
 }
 
 // RemoteMap decides, for each local Claude project folder, whether it is
