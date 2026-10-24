@@ -519,3 +519,124 @@ func ignoreState(t *testing.T, dir string) {
 		t.Fatal(err)
 	}
 }
+
+// A memory file whose name matches this PC's denylist can reach HEAD from a
+// peer (the denylist is per-PC) or an older client. The daemon keeps such a
+// name out of its logs; the hook must keep it out of Claude's context too, and
+// say how many were left out.
+func TestHook_DenylistedNameIsCountedNotListed(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	cfg, _ := loadDistillConfig(cfgPath)
+	ignoreState(t, cfg.SyncDir)
+	if err := os.WriteFile(cfg.DenylistPath(), []byte("# clients\nacmecorp\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	in := hookJSON("sess-deny", "/home/alice/src/app", "UserPromptSubmit")
+	if code, out, _ := runHook(t, in, "--config", cfgPath, "--hook"); code != 0 || out != "" {
+		t.Fatalf("baseline: %d %q", code, out)
+	}
+	addNotes(t, cfgPath, map[string]string{
+		"-home-alice-src-app/memory/acmecorp_contract.md": "x",
+		"-home-alice-src-app/memory/ACMECORP_two.md":      "x",
+		"-home-alice-src-app/memory/fine.md":              "x",
+	})
+	code, out, errs := runHook(t, in, "--config", cfgPath, "--hook")
+	if code != 0 || errs != "" {
+		t.Fatalf("exit %d stderr %q", code, errs)
+	}
+	if strings.Contains(strings.ToLower(out), "acmecorp") {
+		t.Errorf("hook output names a denylisted file: %s", out)
+	}
+	var reply hookReply
+	if err := json.Unmarshal([]byte(out), &reply); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	lines := strings.Split(reply.HookSpecificOutput.AdditionalContext, "\n")
+	if len(lines) != 3 || !strings.HasPrefix(lines[1], "added ") || !strings.HasSuffix(lines[1], "fine.md") ||
+		lines[2] != "2 changed file(s) whose name matches your denylist are not listed" {
+		t.Errorf("context lines: %q", lines)
+	}
+}
+
+// Only denylisted names changed: the count is the whole report.
+func TestHook_OnlyDenylistedNamesChanged(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	cfg, _ := loadDistillConfig(cfgPath)
+	ignoreState(t, cfg.SyncDir)
+	os.WriteFile(cfg.DenylistPath(), []byte("acmecorp\n"), 0600)
+	in := hookJSON("sess-deny1", "/home/alice/src/app", "UserPromptSubmit")
+	runHook(t, in, "--config", cfgPath, "--hook")
+	addNotes(t, cfgPath, map[string]string{"-home-alice-src-app/memory/acmecorp.md": "x"})
+	_, out, _ := runHook(t, in, "--config", cfgPath, "--hook")
+	var reply hookReply
+	if err := json.Unmarshal([]byte(out), &reply); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	want := framingLine + "\n1 changed file(s) whose name matches your denylist are not listed"
+	if got := reply.HookSpecificOutput.AdditionalContext; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// A denylist that exists but cannot be used: list no names, counts only, one
+// line on stderr, and still exit 0.
+func TestHook_UnparseableDenylistFailsClosed(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	cfg, _ := loadDistillConfig(cfgPath)
+	ignoreState(t, cfg.SyncDir)
+	os.WriteFile(cfg.DenylistPath(), []byte("acmecorp\n(unclosed\n"), 0600)
+	in := hookJSON("sess-badden", "/home/alice/src/app", "UserPromptSubmit")
+	runHook(t, in, "--config", cfgPath, "--hook")
+	addNotes(t, cfgPath, map[string]string{
+		"-home-alice-src-app/memory/acmecorp_contract.md": "x",
+		"-home-alice-src-app/memory/fine.md":              "x",
+	})
+	code, out, errs := runHook(t, in, "--config", cfgPath, "--hook")
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if strings.Contains(out, "acmecorp") || strings.Contains(out, "fine.md") {
+		t.Errorf("names listed despite an unusable denylist: %s", out)
+	}
+	var reply hookReply
+	if err := json.Unmarshal([]byte(out), &reply); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	if got := reply.HookSpecificOutput.AdditionalContext; !strings.HasPrefix(got, framingLine+"\n2 changed file(s)") || strings.Count(got, "\n") != 1 {
+		t.Errorf("context: %q", got)
+	}
+	if strings.Count(errs, "\n") != 1 || !strings.HasPrefix(errs, "changes: ") || strings.Contains(errs, "(unclosed") {
+		t.Errorf("stderr should be one line without the pattern: %q", errs)
+	}
+}
+
+// A denylist that is a directory (unreadable as a file) is the same.
+func TestHook_UnreadableDenylistFailsClosed(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	cfg, _ := loadDistillConfig(cfgPath)
+	ignoreState(t, cfg.SyncDir)
+	if err := os.Mkdir(cfg.DenylistPath(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	in := hookJSON("sess-dirden", "/home/alice/src/app", "UserPromptSubmit")
+	runHook(t, in, "--config", cfgPath, "--hook")
+	addNotes(t, cfgPath, map[string]string{"-home-alice-src-app/memory/fine.md": "x"})
+	_, out, errs := runHook(t, in, "--config", cfgPath, "--hook")
+	if strings.Contains(out, "fine.md") || !strings.Contains(out, "1 changed file(s)") || strings.Count(errs, "\n") != 1 {
+		t.Errorf("stdout %q stderr %q", out, errs)
+	}
+}
+
+// No denylist file: nothing is hidden.
+func TestHook_NoDenylistListsEverything(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	cfg, _ := loadDistillConfig(cfgPath)
+	ignoreState(t, cfg.SyncDir)
+	in := hookJSON("sess-noden", "/home/alice/src/app", "UserPromptSubmit")
+	runHook(t, in, "--config", cfgPath, "--hook")
+	addNotes(t, cfgPath, map[string]string{"-home-alice-src-app/memory/acmecorp.md": "x"})
+	code, out, errs := runHook(t, in, "--config", cfgPath, "--hook")
+	if code != 0 || errs != "" || !strings.Contains(out, "acmecorp.md") || strings.Contains(out, "denylist") {
+		t.Errorf("exit %d stdout %q stderr %q", code, out, errs)
+	}
+}

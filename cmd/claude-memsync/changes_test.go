@@ -253,3 +253,43 @@ func TestChangesCmd_Synced(t *testing.T) {
 		t.Errorf("--synced: total = %d head = %s, want 0 and %s", total, head, base)
 	}
 }
+
+// The CLI applies the same filter: text gets a count line, JSON leaves the
+// entries out and says how many with "hidden".
+func TestChangesCmd_DenylistHidesNames(t *testing.T) {
+	cfgPath, base := changesRepo(t)
+	cfg, _ := loadDistillConfig(cfgPath)
+	ignoreState(t, cfg.SyncDir)
+	os.WriteFile(cfg.DenylistPath(), []byte("c\\.md\n"), 0600) // c.md from the fixture
+	run := func(args ...string) string {
+		var out, errb bytes.Buffer
+		if code := changesCmd(strings.NewReader(""), &out, &errb, append([]string{"--config", cfgPath, "--since", base}, args...)); code != 0 {
+			t.Fatalf("exit %d: %s", code, errb.String())
+		}
+		return out.String()
+	}
+	txt := run()
+	if strings.Contains(txt, "c.md") || !strings.Contains(txt, "b.md") ||
+		!strings.Contains(txt, "1 changed file(s) whose name matches your denylist are not listed") {
+		t.Errorf("text:\n%s", txt)
+	}
+	var res struct {
+		Total   int `json:"total"`
+		Hidden  int `json:"hidden"`
+		Changes []struct{ File string }
+	}
+	js := run("--json")
+	if err := json.Unmarshal([]byte(js), &res); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(js, "c.md") || res.Hidden != 1 || res.Total != 1 || len(res.Changes) != 1 {
+		t.Errorf("json:\n%s", js)
+	}
+	// An unusable denylist hides every name.
+	os.WriteFile(cfg.DenylistPath(), []byte("(\\n"), 0600)
+	var out, errb bytes.Buffer
+	changesCmd(strings.NewReader(""), &out, &errb, []string{"--config", cfgPath, "--since", base, "--json"})
+	if strings.Contains(out.String(), ".md") || !strings.Contains(out.String(), `"hidden": 2`) || errb.Len() == 0 {
+		t.Errorf("fail closed: stdout %s stderr %s", out.String(), errb.String())
+	}
+}

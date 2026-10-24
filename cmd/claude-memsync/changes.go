@@ -2,13 +2,17 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 
 	"github.com/MarimerLLC/claude-utils/internal/changes"
+	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
+	"github.com/MarimerLLC/claude-utils/internal/scrub"
 	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
 
@@ -80,9 +84,12 @@ func changesCmd(stdin io.Reader, stdout, stderr io.Writer, args []string) (code 
 	if *synced {
 		upper = syncedUpper(cfg.SyncDir)
 	}
+	hide, hideAll := denylistFilter(cfg, stderr)
 	res, err := changes.Compute(changes.Options{
 		SyncDir:      cfg.SyncDir,
 		Upper:        upper,
+		Hide:         hide,
+		HideAll:      hideAll,
 		ClaudeDir:    cfg.ClaudeProjectsDir,
 		Since:        *since,
 		Marker:       *marker,
@@ -110,6 +117,31 @@ func changesCmd(stdin io.Reader, stdout, stderr io.Writer, args []string) (code 
 	}
 	fmt.Fprint(stdout, res.Text())
 	return 0
+}
+
+// denylistFilter builds the filter that keeps denylisted names out of the
+// report, from the same file and parser the daemon uses. A name is hidden when
+// its repo path or its local path matches. No denylist file: nothing is hidden.
+// A file that exists but cannot be read or parsed hides every name (hideAll)
+// and costs one line on stderr: it cannot vouch for any of them.
+func denylistFilter(cfg config.Config, stderr io.Writer) (hide func(changes.Change) bool, hideAll bool) {
+	f, err := os.Open(cfg.DenylistPath())
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false
+	}
+	var deny []scrub.DenylistPattern
+	if err == nil {
+		deny, err = scrub.ParseDenylist(f)
+		f.Close()
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "changes: cannot use denylist %s (%v); listing no file names\n", cfg.DenylistPath(), err)
+		return nil, true
+	}
+	sc := scrub.New(deny)
+	return func(c changes.Change) bool {
+		return sc.MatchesPath(c.Path) || sc.MatchesPath(c.Local)
+	}, false
 }
 
 // syncedUpper is the commit the daemon last copied into ~/.claude, for use as

@@ -42,6 +42,12 @@ type Options struct {
 	// about a file that is not there yet. Empty, or naming no commit: HEAD.
 	Upper string
 
+	// Hide drops every change it returns true for before the Limit applies:
+	// the change is counted in Result.Hidden and never listed. HideAll hides
+	// every change (the caller could not read the rules Hide would apply).
+	Hide    func(Change) bool
+	HideAll bool
+
 	// Limit caps how many changes are listed; the rest are only counted.
 	// Zero means no cap.
 	Limit int
@@ -90,9 +96,23 @@ type Result struct {
 	Since   string   `json:"since"`   // the commit Since or Marker resolved to
 	Busy    bool     `json:"busy"`    // the repo is mid-rebase/merge; nothing was reported
 	Reset   bool     `json:"reset"`   // the marker named a lost commit and was reset to Head
-	Total   int      `json:"total"`   // number of changed files
+	Total   int      `json:"total"`   // number of changed files, not counting the hidden ones
+	Hidden  int      `json:"hidden"`  // changes left out because Options.Hide or HideAll dropped them
 	More    int      `json:"more"`    // changes not listed because of Limit
 	Changes []Change `json:"changes"` // never nil
+
+	hideAll bool // Hidden counts everything because the rules were unusable
+}
+
+// HiddenLine is the one line that stands in for the hidden changes, or "".
+func (r Result) HiddenLine() string {
+	switch {
+	case r.Hidden == 0:
+		return ""
+	case r.hideAll:
+		return fmt.Sprintf("%d changed file(s) are not listed (the denylist could not be read)", r.Hidden)
+	}
+	return fmt.Sprintf("%d changed file(s) whose name matches your denylist are not listed", r.Hidden)
 }
 
 // Compute lists the memory files that changed between opts.Since and HEAD (or
@@ -161,6 +181,19 @@ func Compute(opts Options) (Result, error) {
 	}
 	all := parse(out, opts.ClaudeDir)
 	sort.Slice(all, func(i, j int) bool { return all[i].Path < all[j].Path })
+
+	res.hideAll = opts.HideAll
+	if opts.HideAll || opts.Hide != nil {
+		shown := all[:0]
+		for _, c := range all {
+			if opts.HideAll || opts.Hide(c) {
+				res.Hidden++
+			} else {
+				shown = append(shown, c)
+			}
+		}
+		all = shown
+	}
 
 	res.Total = len(all)
 	res.Changes = all
@@ -397,6 +430,10 @@ func (r Result) Text() string {
 		return b.String()
 	}
 	if r.Total == 0 {
+		if r.Hidden > 0 {
+			fmt.Fprintf(&b, "%s (since %s, head %s)\n", r.HiddenLine(), short(r.Since), short(r.Head))
+			return b.String()
+		}
 		fmt.Fprintf(&b, "no memory changes since %s (head %s)\n", short(r.Since), short(r.Head))
 		return b.String()
 	}
@@ -410,6 +447,9 @@ func (r Result) Text() string {
 	}
 	if r.More > 0 {
 		fmt.Fprintf(&b, "  ...%d more\n", r.More)
+	}
+	if r.Hidden > 0 {
+		fmt.Fprintf(&b, "  %s\n", r.HiddenLine())
 	}
 	return b.String()
 }

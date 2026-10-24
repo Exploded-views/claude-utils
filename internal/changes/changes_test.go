@@ -383,7 +383,7 @@ func TestResult_JSONShape(t *testing.T) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"head", "since", "total", "more", "busy", "reset", "changes"} {
+	for _, k := range []string{"head", "since", "total", "hidden", "more", "busy", "reset", "changes"} {
 		if _, ok := m[k]; !ok {
 			t.Errorf("JSON missing %q: %s", k, b)
 		}
@@ -840,5 +840,30 @@ func TestCompute_UpperBehindSinceReportsNothing(t *testing.T) {
 	o.Upper = older
 	if r, err := Compute(o); err != nil || r.Total != 0 {
 		t.Errorf("--since ahead of the bound: %+v %v", r, err)
+	}
+}
+
+func TestCompute_HideDropsBeforeTheLimit(t *testing.T) {
+	f := newFixture(t)
+	base := f.commit(map[string]string{mem(appHash, "a.md"): "a\n"})
+	f.commit(map[string]string{mem(appHash, "secret1.md"): "1", mem(appHash, "secret2.md"): "2", mem(appHash, "x.md"): "x", mem(appHash, "y.md"): "y"})
+	o := f.opts(base)
+	o.Limit = 1
+	o.Hide = func(c Change) bool { return strings.HasPrefix(c.File, "secret") }
+	r, err := Compute(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Hidden != 2 || r.Total != 2 || r.More != 1 || len(r.Changes) != 1 || r.Changes[0].File != "x.md" {
+		t.Errorf("hidden %d total %d more %d %+v", r.Hidden, r.Total, r.More, r.Changes)
+	}
+	if !strings.Contains(r.Text(), "2 changed file(s) whose name matches your denylist are not listed") {
+		t.Errorf("text: %s", r.Text())
+	}
+
+	o.HideAll = true
+	r, _ = Compute(o)
+	if r.Hidden != 4 || r.Total != 0 || len(r.Changes) != 0 || !strings.Contains(r.Text(), "4 changed file(s) are not listed") {
+		t.Errorf("HideAll: %+v / %s", r, r.Text())
 	}
 }

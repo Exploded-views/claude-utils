@@ -72,11 +72,14 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, project str
 		project = in.Cwd
 	}
 	pruneMarkers(markerDir, in.SessionID, markerMaxAge)
+	hide, hideAll := denylistFilter(cfg, stderr)
 	res, err := changes.Compute(changes.Options{
 		SyncDir:      cfg.SyncDir,
 		ClaudeDir:    cfg.ClaudeProjectsDir,
 		Marker:       marker,
 		Upper:        syncedUpper(cfg.SyncDir),
+		Hide:         hide,
+		HideAll:      hideAll,
 		Project:      project,
 		Limit:        limit,
 		UpdateMarker: true,
@@ -91,13 +94,16 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, project str
 	if res.Reset {
 		fmt.Fprintf(stderr, "changes: marker for session %s named a commit that no longer exists; reset it\n", in.SessionID)
 	}
-	if res.Total > 0 {
+	if res.Total > 0 || res.Hidden > 0 {
 		lines := []string{hookFraming}
 		for _, c := range res.Changes {
 			lines = append(lines, c.Status+" "+c.Display())
 		}
 		if res.More > 0 {
 			lines = append(lines, fmt.Sprintf("… and %d more", res.More))
+		}
+		if res.Hidden > 0 {
+			lines = append(lines, res.HiddenLine())
 		}
 		var reply struct {
 			Out struct {
