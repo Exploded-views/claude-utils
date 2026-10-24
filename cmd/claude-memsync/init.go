@@ -29,6 +29,7 @@ func runInit(args []string) int {
 	syncDir := flags.String("sync-dir", "", "override sync work-tree (default: ~/.claudesync)")
 	claudeDir := flags.String("claude-dir", "", "override Claude projects directory (default: ~/.claude/projects)")
 	force := flags.Bool("force", false, "re-init even if sync-dir already exists")
+	archiveDeletes := flags.Bool("archive-deletes", false, "archive instead of delete: a note removed from a Claude folder moves to archive/ in the repo (sets archiveDeletes in config.json)")
 	denylist := flags.String("denylist", "", "UTF-8 file of regexes (one per line) to install as the denylist before the first commit")
 
 	if err := flags.Parse(args); err != nil {
@@ -59,6 +60,7 @@ func runInit(args []string) int {
 		cfg.ClaudeProjectsDir = *claudeDir
 	}
 	cfg.RemoteURL = *remote
+	cfg.ArchiveDeletes = *archiveDeletes
 
 	driver, err := config.DiscoverMergeDriver()
 	if err != nil {

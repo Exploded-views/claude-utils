@@ -19,7 +19,7 @@ import (
 func runDistill(args []string) int {
 	flags := flag.NewFlagSet("distill", flag.ContinueOnError)
 	cfgPath := flags.String("config", "", "path to config.json (default: ~/.claudesync/config.json)")
-	prune := flags.Bool("prune", false, "remove catalog entries whose source memory lost the marker or vanished")
+	prune := flags.Bool("prune", false, "remove catalog entries whose source memory lost the marker or vanished (archived instead when archiveDeletes is on)")
 	dryRun := flags.Bool("dry-run", false, "report what would change without writing the index or pruning")
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -44,6 +44,9 @@ func runDistill(args []string) int {
 		return 1
 	}
 	opts.Keep = keep
+	if cfg.ArchiveDeletes {
+		opts.ArchiveRoot = cfg.SyncDir
+	}
 
 	var res distill.Result
 	if *dryRun {
@@ -56,7 +59,7 @@ func runDistill(args []string) int {
 		return 1
 	}
 
-	report(res, *dryRun)
+	report(res, *dryRun, cfg.ArchiveDeletes)
 	return 0
 }
 
@@ -99,14 +102,18 @@ func loadDistillConfig(cfgPath string) (config.Config, error) {
 	return cfg, err
 }
 
-func report(res distill.Result, dryRun bool) {
+func report(res distill.Result, dryRun, archived bool) {
 	verb := "indexed"
 	if dryRun {
 		verb = "would index"
 	}
 	fmt.Printf("%s %d distilled %s\n", verb, res.Indexed, plural(res.Indexed, "entry", "entries"))
 	if res.Pruned > 0 {
-		fmt.Printf("pruned %d stale %s\n", res.Pruned, plural(res.Pruned, "entry", "entries"))
+		verb := "pruned"
+		if archived {
+			verb = "archived"
+		}
+		fmt.Printf("%s %d stale %s\n", verb, res.Pruned, plural(res.Pruned, "entry", "entries"))
 	}
 	if len(res.Pending) > 0 {
 		fmt.Printf("\n%d marked %s awaiting distillation (run /distill to generalize):\n",

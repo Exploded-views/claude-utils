@@ -346,7 +346,7 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	}
 	clearPaused(repo)
 	if includeLocal {
-		_, err := CommitMirror(repo, l.Cfg, fmt.Sprintf("auto: %s @ %s", l.Hostname, time.Now().UTC().Format(time.RFC3339)))
+		_, err := CommitMirrorOwned(repo, l.Cfg, fmt.Sprintf("auto: %s @ %s", l.Hostname, time.Now().UTC().Format(time.RFC3339)), roots.Owns)
 		if err != nil {
 			return fmt.Errorf("commit: %w", err)
 		}

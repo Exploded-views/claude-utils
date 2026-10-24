@@ -1,6 +1,9 @@
 package distill
 
 import (
+	"time"
+
+	"github.com/MarimerLLC/claude-utils/internal/archive"
 	"os"
 	"path/filepath"
 	"strings"
@@ -269,5 +272,49 @@ func TestKeepFiltersWorklistAndPrune(t *testing.T) {
 	all, _ := BuildIndex(Options{ProjectsDir: projects, DistilledDir: distilled})
 	if len(all.Pending) != 2 {
 		t.Fatalf("control without Keep: %d pending", len(all.Pending))
+	}
+}
+
+// With ArchiveRoot set, prune moves an entry to archive/<date>/distilled/ and
+// indexes it; nothing is removed for good.
+func TestReconcileArchivesInsteadOfPruning(t *testing.T) {
+	dir := t.TempDir()
+	projects := filepath.Join(dir, "projects")
+	distilled := filepath.Join(dir, "sync", "distilled")
+	root := filepath.Join(dir, "sync")
+	old := archive.Now
+	archive.Now = func() time.Time { return time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { archive.Now = old })
+
+	writeFile(t, filepath.Join(projects, "P1", "memory", "live.md"), sourceMemory("live", true, "x"))
+	writeFile(t, filepath.Join(distilled, "live.md"), catalogEntry("live", "d", "feedback", "P1", "live.md", "x"))
+	entry := catalogEntry("gone", "d", "feedback", "P1", "missing.md", "z")
+	writeFile(t, filepath.Join(distilled, "gone.md"), entry)
+
+	res, err := Reconcile(Options{DistilledDir: distilled, ProjectsDir: projects, ArchiveRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Pruned != 1 {
+		t.Fatalf("Pruned = %d, want 1", res.Pruned)
+	}
+	if _, err := os.Stat(filepath.Join(distilled, "gone.md")); !os.IsNotExist(err) {
+		t.Error("gone.md should have left the catalog")
+	}
+	got, err := os.ReadFile(filepath.Join(root, "archive", "2026-10-25", "distilled", "gone.md"))
+	if err != nil || string(got) != entry {
+		t.Fatalf("archived entry: %q %v", got, err)
+	}
+	idx, _ := os.ReadFile(filepath.Join(root, "archive", "INDEX.md"))
+	if !strings.Contains(string(idx), "distilled | gone.md") {
+		t.Errorf("INDEX.md: %q", idx)
+	}
+	// The index and worklist never see the archive.
+	if _, err := os.Stat(filepath.Join(distilled, "..", "archive")); err != nil {
+		t.Fatal(err)
+	}
+	r, err := BuildIndex(Options{DistilledDir: distilled, ProjectsDir: projects})
+	if err != nil || r.Indexed != 1 {
+		t.Errorf("index counted the archive: %+v %v", r, err)
 	}
 }
