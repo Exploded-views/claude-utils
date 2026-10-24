@@ -125,11 +125,13 @@ func bootstrap(cfg config.Config, force bool) error {
 	}
 
 	// Step 5: bidirectional reconcile of Claude tree ↔ mirror.
-	mirrorProjects := filepath.Join(cfg.SyncDir, "projects")
-	if err := os.MkdirAll(mirrorProjects, 0700); err != nil {
+	if err := os.MkdirAll(filepath.Join(cfg.SyncDir, "projects"), 0700); err != nil {
 		return err
 	}
-	roots := syncpkg.Roots{Claude: cfg.ClaudeProjectsDir, Mirror: mirrorProjects}
+	roots, err := syncpkg.NewRoots(cfg)
+	if err != nil {
+		return fmt.Errorf("resolve project keys: %w", err)
+	}
 	// First-time init: no manifest yet. Pass nil so Reconcile doesn't try
 	// to propagate deletes (with no prior state, "missing in Claude" can't
 	// be distinguished from "this PC never had it").

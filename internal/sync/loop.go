@@ -26,6 +26,11 @@ type Loop struct {
 	Branch   string
 	Hostname string
 	OnFlush  func(localChanges bool, err error) // optional, for tests/observability
+
+	// needReconcile is set when a change needs the full two-way pass, not just
+	// the single-file copy: a new project folder appeared, or several local
+	// folders share one repo-side directory (remote mode).
+	needReconcile bool
 }
 
 // Run blocks until ctx is canceled. Returns the first fatal error or nil
@@ -44,8 +49,10 @@ func (l *Loop) Run(ctx context.Context) error {
 		return fmt.Errorf("sync dir %s is not a git repo — run `claude-memsync init` first", l.Cfg.SyncDir)
 	}
 
-	mirrorProjects := filepath.Join(l.Cfg.SyncDir, "projects")
-	roots := Roots{Claude: l.Cfg.ClaudeProjectsDir, Mirror: mirrorProjects}
+	roots, err := NewRoots(l.Cfg)
+	if err != nil {
+		return fmt.Errorf("resolve project keys: %w", err)
+	}
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -121,6 +128,10 @@ func (l *Loop) Run(ctx context.Context) error {
 			log.Println("watcher error:", err)
 
 		case <-debounce.C:
+			if l.needReconcile {
+				l.needReconcile = false
+				l.reconcile(roots)
+			}
 			err := l.flush(repo, roots, true)
 			if err != nil {
 				log.Println("flush (local):", err)
@@ -141,15 +152,11 @@ func (l *Loop) Run(ctx context.Context) error {
 			// in rapid succession before the new dir's watcher was registered).
 			// Using the on-disk manifest also lets us propagate deletes the
 			// watcher missed.
-			m, err := LoadManifest(l.Cfg.SyncDir)
-			if err != nil {
-				log.Println("load manifest:", err)
-				m = NewManifest()
+			if roots.Remote != nil {
+				roots.Remote.Refresh() // pick up moved checkouts and new remotes
 			}
-			if _, err := Reconcile(roots, m); err != nil {
-				log.Println("reconcile:", err)
-			}
-			err = l.flush(repo, roots, true)
+			l.reconcile(roots)
+			err := l.flush(repo, roots, true)
 			if err != nil {
 				log.Println("flush (pull):", err)
 			}
@@ -159,6 +166,18 @@ func (l *Loop) Run(ctx context.Context) error {
 				l.OnFlush(false, err)
 			}
 		}
+	}
+}
+
+// reconcile runs the full two-way pass against the on-disk manifest.
+func (l *Loop) reconcile(roots Roots) {
+	m, err := LoadManifest(l.Cfg.SyncDir)
+	if err != nil {
+		log.Println("load manifest:", err)
+		m = NewManifest()
+	}
+	if _, err := Reconcile(roots, m); err != nil {
+		log.Println("reconcile:", err)
 	}
 }
 
@@ -178,6 +197,13 @@ func (l *Loop) handleEvent(watcher *fsnotify.Watcher, roots Roots, ev fsnotify.E
 			// either a new <hash>/ dir or a new memory/ inside one we already watched.
 			_ = watcher.Add(ev.Name) // best-effort
 			_ = refreshMemoryWatches(watcher, roots.Claude)
+			if roots.Remote != nil {
+				// A project folder Claude just created may already have memory
+				// waiting in the sync repo under its remote key.
+				roots.Remote.Key(parts[0])
+				l.needReconcile = true
+				return true, nil
+			}
 			return false, nil
 		}
 	}
@@ -189,6 +215,11 @@ func (l *Loop) handleEvent(watcher *fsnotify.Watcher, roots Roots, ev fsnotify.E
 	hash, name := parts[0], parts[2]
 	if shouldIgnoreFile(name) {
 		return false, nil
+	}
+	if roots.Remote != nil {
+		if key := roots.Remote.Key(hash); key != "" && len(roots.Remote.Members(key)) > 1 {
+			l.needReconcile = true // fan the change out to the sibling folders
+		}
 	}
 
 	switch {
@@ -295,28 +326,49 @@ func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string) error {
 		// as the canonical post-image; mark old as removed.
 		var path string
 		if strings.HasPrefix(status, "R") && len(fields) >= 3 {
-			oldPath := fields[1]
 			path = fields[2]
-			if hash, name, ok := splitMirrorPath(oldPath); ok {
-				_ = os.Remove(filepath.Join(roots.Claude, hash, "memory", name))
+			for _, t := range propagationTargets(roots, fields[1]) {
+				_ = os.Remove(filepath.Join(roots.Claude, t.hash, "memory", t.name))
 			}
 		} else {
 			path = fields[1]
 		}
-		hash, name, ok := splitMirrorPath(path)
-		if !ok {
-			continue
-		}
-		switch {
-		case strings.HasPrefix(status, "D"):
-			_ = os.Remove(filepath.Join(roots.Claude, hash, "memory", name))
-		default:
-			if err := CopyToClaude(roots, hash, name); err != nil {
+		for _, t := range propagationTargets(roots, path) {
+			if strings.HasPrefix(status, "D") {
+				_ = os.Remove(filepath.Join(roots.Claude, t.hash, "memory", t.name))
+			} else if err := CopyToClaude(roots, t.hash, t.name); err != nil {
 				log.Printf("propagate %s: %v", path, err)
 			}
 		}
 	}
 	return nil
+}
+
+// target is one local file a repo path propagates to.
+type target struct{ hash, name string }
+
+// propagationTargets maps a repo path to the local project folders and file
+// name it belongs to: the one folder for projects/<hash>/memory/<file>, every
+// local folder sharing the key for remotes/<key>/memory/<file>.
+func propagationTargets(roots Roots, p string) []target {
+	if hash, name, ok := splitMirrorPath(p); ok {
+		if roots.Remote != nil && roots.Remote.Key(hash) != "" {
+			return nil // superseded by its remote-keyed folder
+		}
+		return []target{{hash, name}}
+	}
+	if roots.Remote == nil {
+		return nil
+	}
+	key, name, ok := splitRemotePath(p)
+	if !ok {
+		return nil
+	}
+	var out []target
+	for _, h := range roots.Remote.Members(key) {
+		out = append(out, target{h, name})
+	}
+	return out
 }
 
 // splitMirrorPath converts a path of the form "projects/<hash>/memory/<file>"
