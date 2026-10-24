@@ -33,6 +33,9 @@ func (p *program) Start(s service.Service) error {
 	if err != nil {
 		return fmt.Errorf("load config %s: %w", p.configPath, err)
 	}
+	if err := daemonGuard(cfg, log.Printf); err != nil {
+		return fmt.Errorf("private-only check failed, refusing to sync: %w", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
 	p.done = make(chan struct{})

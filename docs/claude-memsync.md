@@ -797,6 +797,63 @@ git -C ~/.claudesync push
 
 If that works without prompting, the daemon will too.
 
+## Private repos only
+
+Nothing on GitHub stops an org owner from making a repo public, so the tool
+enforces privacy itself.
+
+- **Names.** The tool only creates, joins or checks repos named `mem-registry`,
+  `mem-personal`, `mem-project-<x>`, `mem-infra-<x>`, `mem-client-<x>`,
+  `mem-orch-<x>` or `mem-orch-all`. Anything else is refused, so it can never
+  touch a public project repo.
+- **Create.** `claude-memsync repo create [--org <org>] <name>` is the only
+  create path. It sends `"private": true` and `"visibility": "private"`
+  explicitly, then reads the repo back and reports success only if it is
+  private.
+- **Verify.** A repo must report `private: true` and `visibility: "private"`.
+  Public, `internal`, a missing field or any API error is a refusal (fail
+  closed).
+- **Remote URLs.** ssh (`git@host:Owner/repo.git`), `ssh://` and https URLs are
+  parsed to owner/repo, including per-repo SSH host aliases such as
+  `git@gh-mem-personal:Org/mem-personal.git`.
+
+### Where the check runs
+
+A deploy key cannot call the GitHub API, so the check needs a token (a
+read-only fine-grained token with Metadata read is enough for checks; creating
+a repo needs more). Configure it with the `MEMSYNC_GITHUB_TOKEN` env var, a
+different var via `githubTokenEnv`, or a file via `githubTokenFile` (or
+`init --token-file`). The token is never written to `config.json`, logs or
+error messages.
+
+| When | Token required | Behaviour |
+|---|---|---|
+| `init` | yes | Refuses before cloning or pushing if the remote is not a private `mem-*` repo, or if it cannot check. |
+| `doctor` | yes | Non-zero exit if it cannot check. |
+| daemon start | no | With a token: refuses to start on a non-private repo. Without one: logs once that visibility was verified only at init and by `doctor`, and starts. |
+
+The daemon does not re-check while running; schedule `doctor` for that.
+
+### doctor
+
+```sh
+claude-memsync doctor --org <org>
+```
+
+Lists the org's repos and exits non-zero, naming each one, if any `mem-*` repo
+is public or internal, or if the repo this host joined is not private or lacks
+the `mem-` prefix. Public repos without the prefix are ignored. Output is repo
+names only. `--org` defaults to `githubOrg` in `config.json`, else the owner of
+the remote.
+
+`claude-memsync doctor --install-timer` writes a daily systemd user timer
+(Linux) or launchd agent (macOS) into `~/.config/systemd/user` or
+`~/Library/LaunchAgents` (override with `--unit-dir`). It does not enable it;
+it prints the command. The timer needs the token in its environment or
+`githubTokenFile`.
+
+Config keys: `githubTokenEnv`, `githubTokenFile`, `githubApiUrl`, `githubOrg`.
+
 ## Limitations / known issues
 
 - **Path consistency required**: Claude derives the per-project memory directory

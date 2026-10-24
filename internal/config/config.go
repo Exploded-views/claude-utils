@@ -46,6 +46,21 @@ type Config struct {
 	// is false.
 	RequireDenylist bool `json:"requireDenylist"`
 
+	// GitHubTokenEnv names the env var holding a GitHub API token used only
+	// for the private-only visibility check (default MEMSYNC_GITHUB_TOKEN).
+	GitHubTokenEnv string `json:"githubTokenEnv,omitempty"`
+
+	// GitHubTokenFile is a file holding that token; it wins over the env
+	// var. The token itself is never stored in config.json.
+	GitHubTokenFile string `json:"githubTokenFile,omitempty"`
+
+	// GitHubAPIURL overrides the API base URL (GitHub Enterprise, tests).
+	GitHubAPIURL string `json:"githubApiUrl,omitempty"`
+
+	// GitHubOrg is the org `doctor` lists when --org is not given. Empty
+	// means the owner parsed from RemoteURL.
+	GitHubOrg string `json:"githubOrg,omitempty"`
+
 	// DebounceMs is how long to wait after a file change before committing.
 	DebounceMs int `json:"debounceMs"`
 
