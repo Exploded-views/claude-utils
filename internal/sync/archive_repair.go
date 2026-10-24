@@ -98,7 +98,7 @@ func repairEditedArchives(repo *gitwt.Repo, cfg config.Config, pre, post string)
 	if len(bad) == 0 {
 		return 0, nil
 	}
-	var stage []string
+	var stage, mustStage []string
 	for _, p := range bad {
 		parts := strings.Split(p, "/")
 		date, folder, name := parts[1], parts[2], parts[3]
@@ -127,10 +127,36 @@ func repairEditedArchives(repo *gitwt.Repo, cfg config.Config, pre, post string)
 			return 0, err
 		}
 		stage = append(stage, gitwt.Literal(live), gitwt.Literal(p))
+		mustStage = append(mustStage, live, p)
 	}
 	stage = append(stage, gitwt.Literal(path.Join(archive.Dir, archive.IndexName)))
 	if _, err := repo.Run(append([]string{"add", "-A", "--"}, stage...)...); err != nil {
 		return 0, err
+	}
+	// Like every commit, this one is scrubbed. The restore is all or nothing: a
+	// note without its archive fix (or the reverse) must not be committed, so
+	// anything held back fails the repair and the caller undoes the pull.
+	if cfg.Scrub {
+		ok, err := holdBack(repo, cfg)
+		if err != nil {
+			return 0, err
+		}
+		if !ok {
+			return 0, fmt.Errorf("the scrub allows no commit now")
+		}
+		staged, err := repo.StagedChanges()
+		if err != nil {
+			return 0, err
+		}
+		in := map[string]bool{}
+		for _, c := range staged {
+			in[c.Path] = true
+		}
+		for _, p := range mustStage {
+			if !in[p] {
+				return 0, fmt.Errorf("the scrub held back a restored note")
+			}
+		}
 	}
 	if _, err := repo.Commit("auto: restore edited notes @ " + time.Now().UTC().Format(time.RFC3339)); err != nil {
 		return 0, err

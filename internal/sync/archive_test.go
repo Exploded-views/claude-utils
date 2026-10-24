@@ -720,3 +720,35 @@ func TestArchive_IndexConflictIsNeverAutoResolved(t *testing.T) {
 		t.Fatalf("got %v, in progress %v", err, b.repo.RebaseInProgress())
 	}
 }
+
+// The restore commit goes through the scrub like every other commit: an edit
+// that holds a secret is held back, nothing is committed, and the caller
+// undoes the pull instead of pushing a mismatched copy.
+func TestRepairEditedArchives_ScrubHoldsARestoredSecretBack(t *testing.T) {
+	archClock(t)
+	logs := captureLog(t)
+	f := newPullFixture(t, map[string]string{"keep.md": "k\n"})
+	f.loop.Cfg.ArchiveDeletes = true
+	v0, v1 := bigNote+"v0\n", bigNote+"token: "+fakeSecret()+"\n"
+	p := archPath("p1", "x.md", v0)
+	writeRepoFile(t, f.repo, p, v0)
+	mustGit(t, f.repo, "add", "-A")
+	mustGit(t, f.repo, "commit", "-q", "-m", "archive")
+	pre := strings.TrimSpace(mustGit(t, f.repo, "rev-parse", "HEAD"))
+	writeRepoFile(t, f.repo, p, v1) // as a pull would bring it, unscrubbed
+	mustGit(t, f.repo, "commit", "-qam", "edit merged into the copy")
+	post := strings.TrimSpace(mustGit(t, f.repo, "rev-parse", "HEAD"))
+
+	if n, err := repairEditedArchives(f.repo, f.loop.Cfg, pre, post); err == nil {
+		t.Fatalf("a held-back restore must fail the repair, got n=%d", n)
+	}
+	if head := strings.TrimSpace(mustGit(t, f.repo, "rev-parse", "HEAD")); head != post {
+		t.Error("the restore was committed despite the scrub")
+	}
+	if strings.Contains(headTree(t, f.repo), "projects/p1/memory/x.md") {
+		t.Error("the secret-bearing note reached the tree")
+	}
+	if strings.Contains(logs.String(), fakeSecret()) {
+		t.Error("the secret was logged")
+	}
+}
