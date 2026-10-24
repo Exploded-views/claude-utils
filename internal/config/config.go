@@ -62,6 +62,16 @@ type Config struct {
 	// GitHubAPIURL overrides the API base URL (GitHub Enterprise, tests).
 	GitHubAPIURL string `json:"githubApiUrl,omitempty"`
 
+	// GitHubHost is the git host remotes must use (default github.com, or
+	// the host of githubApiUrl). Set it for GitHub Enterprise.
+	GitHubHost string `json:"githubHost,omitempty"`
+
+	// RecheckMaxFailures and RecheckMaxAgeHours bound how long the daemon
+	// keeps pushing without a successful visibility check (defaults 24 and
+	// 24). Past either, pushing stops until a check succeeds.
+	RecheckMaxFailures int `json:"recheckMaxFailures,omitempty"`
+	RecheckMaxAgeHours int `json:"recheckMaxAgeHours,omitempty"`
+
 	// GitHubOrg is the org `doctor` lists when --org is not given. Empty
 	// means the owner parsed from RemoteURL.
 	GitHubOrg string `json:"githubOrg,omitempty"`

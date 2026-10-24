@@ -857,10 +857,20 @@ the remote. `repo create` resolves the org the same way and refuses if none is s
 `claude-memsync doctor --install-timer` writes a daily systemd user timer
 (Linux) or launchd agent (macOS) into `~/.config/systemd/user` or
 `~/Library/LaunchAgents` (override with `--unit-dir`). It does not enable it;
-it prints the command. The timer needs the token in its environment or
-`githubTokenFile`.
+it prints the command. The timer needs `githubTokenFile`.
 
-Config keys: `privateOnly`, `githubTokenEnv`, `githubTokenFile`, `githubApiUrl`, `githubOrg`.
+Remotes must also be on the allowed git host: `github.com`, or `githubHost`
+(or the host of `githubApiUrl`) for GitHub Enterprise. https must name it
+directly; ssh forms, including aliases like `gh-mem-personal`, are resolved with
+`ssh -G` and must land on it. The push URL git actually uses
+(`git remote get-url --push origin`, after `insteadOf` rewrites) must equal the
+configured remote, checked at `init` and daemon start. Without a token the
+daemon still runs the name, host and push-URL checks and skips only the API
+check. The hourly re-check also stops pushing after `recheckMaxFailures`
+consecutive failures or `recheckMaxAgeHours` without a success (defaults 24 and
+24). The timer needs `githubTokenFile` set; install refuses otherwise.
+
+Config keys: `githubHost`, `recheckMaxFailures`, `recheckMaxAgeHours`, `privateOnly`, `githubTokenEnv`, `githubTokenFile`, `githubApiUrl`, `githubOrg`.
 
 ## Limitations / known issues
 

@@ -10,9 +10,11 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/ghguard"
+	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
 
 // guardClient builds an API client from config. A nil client with a nil error
@@ -25,7 +27,43 @@ func guardClient(cfg config.Config) (*ghguard.Client, error) {
 	if tok == "" {
 		return nil, nil
 	}
-	return &ghguard.Client{BaseURL: cfg.GitHubAPIURL, Token: tok}, nil
+	return &ghguard.Client{BaseURL: cfg.GitHubAPIURL, Token: tok, Host: cfg.GitHubHost, Resolve: hostResolver}, nil
+}
+
+// hostResolver maps ssh aliases to real hostnames; nil means `ssh -G`. Tests
+// replace it so they need no ssh.
+var hostResolver ghguard.HostResolver
+
+func allowedHost(cfg config.Config) string {
+	return ghguard.AllowedHost(cfg.GitHubHost, cfg.GitHubAPIURL)
+}
+
+// validateRemoteOffline needs no token or network: a mem-* name on the allowed
+// git host.
+func validateRemoteOffline(cfg config.Config) error {
+	_, _, err := ghguard.ValidateRemote(cfg.RemoteURL, allowedHost(cfg), hostResolver)
+	if err != nil {
+		return fmt.Errorf("remote refused: %w", err)
+	}
+	return nil
+}
+
+func normURL(s string) string {
+	s = strings.TrimRight(strings.TrimSpace(s), "/")
+	return strings.ToLower(strings.TrimSuffix(s, ".git"))
+}
+
+// checkPushURL refuses when git would push somewhere other than cfg.RemoteURL
+// (insteadOf / pushInsteadOf rewrites, or a changed origin).
+func checkPushURL(cfg config.Config, repoDir string) error {
+	out, err := gitwt.New(repoDir).Run("remote", "get-url", "--push", "origin")
+	if err != nil {
+		return fmt.Errorf("cannot read the push URL: %w", err)
+	}
+	if normURL(out) != normURL(cfg.RemoteURL) {
+		return errors.New("git would push to a different URL than the configured remote (an insteadOf or pushInsteadOf rule?); refusing")
+	}
+	return nil
 }
 
 var errNoToken = errors.New("no GitHub token configured (set " + ghguard.DefaultTokenEnv + " or githubTokenFile); a deploy key cannot call the API, so the private-only check needs one")
@@ -35,6 +73,9 @@ var errNoToken = errors.New("no GitHub token configured (set " + ghguard.Default
 func guardRemote(cfg config.Config) error {
 	if !cfg.PrivateOnly {
 		return nil
+	}
+	if err := validateRemoteOffline(cfg); err != nil {
+		return err
 	}
 	c, err := guardClient(cfg)
 	if err != nil {
@@ -51,6 +92,12 @@ func guardRemote(cfg config.Config) error {
 func daemonGuard(cfg config.Config, logf func(format string, args ...any)) error {
 	if !cfg.PrivateOnly {
 		return nil
+	}
+	if err := validateRemoteOffline(cfg); err != nil {
+		return err
+	}
+	if err := checkPushURL(cfg, cfg.SyncDir); err != nil {
+		return err
 	}
 	c, err := guardClient(cfg)
 	if err != nil {
@@ -147,14 +194,25 @@ func runDoctor(args []string) int {
 			fmt.Fprintln(os.Stderr, "doctor:", err)
 			return 1
 		}
-		return installTimerRun(runtime.GOOS, exe, o, *unitDir, os.Stdout, os.Stderr)
+		cp := *cfgPath
+		if cp == "" {
+			cp = defaultConfigPath()
+		}
+		if abs, err := filepath.Abs(cp); err == nil {
+			cp = abs
+		}
+		return installTimerRun(runtime.GOOS, exe, o, cp, cfg.GitHubTokenFile, *unitDir, os.Stdout, os.Stderr)
 	}
 	return doctorRun(cfg, *org, os.Stdout, os.Stderr)
 }
 
 // installTimerRun writes the generated unit files. It never enables or starts
 // anything; it prints the command for the user to run.
-func installTimerRun(goos, exe, org, dir string, out, errw io.Writer) int {
+func installTimerRun(goos, exe, org, cfgPath, tokenFile, dir string, out, errw io.Writer) int {
+	if tokenFile == "" {
+		fmt.Fprintln(errw, "doctor: the timer runs without your environment, so it needs githubTokenFile set in config.json (a file holding the token); refusing to install")
+		return 1
+	}
 	home, _ := os.UserHomeDir()
 	if dir == "" {
 		switch goos {
@@ -167,11 +225,16 @@ func installTimerRun(goos, exe, org, dir string, out, errw io.Writer) int {
 			return 1
 		}
 	}
+	units, err := ghguard.TimerUnits(goos, exe, org, home, cfgPath)
+	if err != nil {
+		fmt.Fprintln(errw, "doctor:", err)
+		return 1
+	}
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		fmt.Fprintln(errw, "doctor:", err)
 		return 1
 	}
-	for name, text := range ghguard.TimerUnits(goos, exe, org, home) {
+	for name, text := range units {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0644); err != nil {
 			fmt.Fprintln(errw, "doctor:", err)
 			return 1
@@ -179,11 +242,10 @@ func installTimerRun(goos, exe, org, dir string, out, errw io.Writer) int {
 		fmt.Fprintln(out, "wrote", filepath.Join(dir, name))
 	}
 	if goos == "linux" {
-		fmt.Fprintln(out, "enable with: systemctl --user enable --now claude-memsync-doctor.timer")
+		fmt.Fprintln(out, "enable with: systemctl --user daemon-reload && systemctl --user enable --now claude-memsync-doctor.timer")
 	} else {
-		fmt.Fprintln(out, "enable with: launchctl load ~/Library/LaunchAgents/claude-memsync-doctor.plist")
+		fmt.Fprintln(out, "enable with: launchctl load "+filepath.Join(dir, "claude-memsync-doctor.plist"))
 	}
-	fmt.Fprintln(out, "the timer needs a GitHub token in the environment or githubTokenFile in config.json")
 	return 0
 }
 
@@ -248,7 +310,8 @@ func pushWatch(cfg config.Config, logf func(string, ...any)) func() bool {
 	if err != nil {
 		return nil
 	}
-	w := &ghguard.Watch{C: c, Owner: owner, Name: name, StateDir: filepath.Join(cfg.SyncDir, ".state"), Logf: logf}
+	w := &ghguard.Watch{C: c, Owner: owner, Name: name,
+		MaxFailures: cfg.RecheckMaxFailures, MaxAge: time.Duration(cfg.RecheckMaxAgeHours) * time.Hour, StateDir: filepath.Join(cfg.SyncDir, ".state"), Logf: logf}
 	return w.Allowed
 }
 
@@ -257,8 +320,8 @@ func visibilityLine(cfg config.Config) string {
 	if !cfg.PrivateOnly {
 		return ""
 	}
-	if s := ghguard.ReadState(filepath.Join(cfg.SyncDir, ".state")); strings.HasPrefix(s, "not private") {
-		return "pushing stopped: the repo is " + s + "; commits stay local"
+	if s := ghguard.ReadState(filepath.Join(cfg.SyncDir, ".state")); strings.HasPrefix(s, "not private") || strings.HasPrefix(s, "unverifiable") {
+		return "pushing stopped: repo " + s + "; commits stay local"
 	}
 	return ""
 }

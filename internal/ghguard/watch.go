@@ -20,8 +20,9 @@ const (
 
 // Watch re-checks a repo's visibility at most once an hour, with an ETag so an
 // unchanged repo costs a 304. Allowed reports whether pushing may continue.
-// A repo that is no longer private stops pushing (commits stay local); an API
-// failure keeps the last known state and never blocks by itself.
+// A repo that is no longer private stops pushing (commits stay local). A single
+// API failure keeps the last known state, but pushing also stops (fail closed)
+// after MaxFailures consecutive failures or MaxAge without a successful check.
 type Watch struct {
 	C        *Client
 	Owner    string
@@ -30,11 +31,18 @@ type Watch struct {
 	StateDir string           // where the status file goes (e.g. <sync>/.state)
 	Logf     func(format string, args ...any)
 
+	MaxFailures int           // default 24
+	MaxAge      time.Duration // default 24h
+
 	mu         sync.Mutex
 	last       time.Time
+	lastOK     time.Time
 	etag       string
 	notPrivate bool
+	stale      bool
+	fails      int
 	failLogged bool
+	wrote      bool
 }
 
 func (w *Watch) now() time.Time {
@@ -50,41 +58,71 @@ func (w *Watch) logf(f string, a ...any) {
 	}
 }
 
+func (w *Watch) ok() bool { return !w.notPrivate && !w.stale }
+
 // Allowed returns true while pushing is permitted.
 func (w *Watch) Allowed() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	now := w.now()
+	if w.lastOK.IsZero() {
+		w.lastOK = now // the daemon-start check is the baseline
+	}
 	if !w.last.IsZero() && now.Sub(w.last) < RecheckEvery {
-		return !w.notPrivate
+		return w.ok()
 	}
 	w.last = now
+	maxF, maxAge := w.MaxFailures, w.MaxAge
+	if maxF <= 0 {
+		maxF = 24
+	}
+	if maxAge <= 0 {
+		maxAge = 24 * time.Hour
+	}
 
 	repo, etag, unchanged, err := w.C.getRepoCond(w.Owner, w.Name, w.etag)
 	if err != nil {
+		w.fails++
 		if !w.failLogged {
 			w.failLogged = true
 			w.logf("private-only recheck failed (keeping last known state): %v", err)
 		}
-		return !w.notPrivate
+		if !w.stale && (w.fails >= maxF || now.Sub(w.lastOK) >= maxAge) {
+			w.stale = true
+			w.logf("repo %s/%s could not be verified private for too long: pushing stopped, commits stay local", w.Owner, w.Name)
+			w.writeState("unverifiable since " + now.UTC().Format(time.RFC3339))
+			w.wrote = true
+		}
+		return w.ok()
 	}
 	w.failLogged = false
-	if unchanged {
-		return !w.notPrivate
-	}
-	w.etag = etag
-	bad := repo.verifyPrivate() != nil
-	if bad != w.notPrivate {
-		w.notPrivate = bad
-		if bad {
-			w.logf("repo %s/%s is no longer private: pushing stopped, commits stay local", w.Owner, w.Name)
-			w.writeState("not private since " + now.UTC().Format(time.RFC3339))
-		} else {
-			w.logf("repo %s/%s is private again: pushing resumed", w.Owner, w.Name)
-			w.writeState("private")
+	w.fails = 0
+	w.lastOK = now
+	wasStale := w.stale
+	w.stale = false
+	changed := false
+	if !unchanged {
+		w.etag = etag
+		bad := repo.verifyPrivate() != nil
+		if bad != w.notPrivate {
+			changed = true
+			w.notPrivate = bad
+			if bad {
+				w.logf("repo %s/%s is no longer private: pushing stopped, commits stay local", w.Owner, w.Name)
+			} else {
+				w.logf("repo %s/%s is private again: pushing resumed", w.Owner, w.Name)
+			}
 		}
 	}
-	return !w.notPrivate
+	if changed || wasStale || !w.wrote {
+		if w.notPrivate {
+			w.writeState("not private since " + now.UTC().Format(time.RFC3339))
+		} else {
+			w.writeState("private")
+		}
+		w.wrote = true
+	}
+	return w.ok()
 }
 
 func (w *Watch) writeState(s string) {

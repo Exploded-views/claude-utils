@@ -67,7 +67,7 @@ func newServer(t *testing.T, h http.HandlerFunc) *Client {
 	t.Helper()
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	return &Client{BaseURL: srv.URL, Token: testToken}
+	return &Client{BaseURL: srv.URL, Token: testToken, Host: "github.com", Resolve: func(a string) (string, error) { return "github.com", nil }}
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -316,28 +316,179 @@ func TestLoadToken(t *testing.T) {
 }
 
 func TestTimerUnitText(t *testing.T) {
-	u := TimerUnits("linux", "/opt/bin/claude-memsync", "example-org", "/home/u")
+	u, err := TimerUnits("linux", "/opt/my bin/claude-memsync", "example-org", "/home/u", "/home/u/.claudesync/config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
 	svc, tim := u["claude-memsync-doctor.service"], u["claude-memsync-doctor.timer"]
-	if !strings.Contains(svc, "ExecStart=/opt/bin/claude-memsync doctor --org example-org") {
+	want := `ExecStart="/opt/my bin/claude-memsync" "doctor" "--org" "example-org" "--config" "/home/u/.claudesync/config.json"`
+	if !strings.Contains(svc, want) {
 		t.Errorf("service:\n%s", svc)
 	}
 	if !strings.Contains(tim, "OnCalendar=daily") || !strings.Contains(tim, "Persistent=true") {
 		t.Errorf("timer:\n%s", tim)
 	}
-	m := TimerUnits("darwin", "/opt/bin/claude-memsync", "example-org", "/Users/u")
+	q, _ := TimerUnits("linux", `/o/we"ird%h$x`, "example-org", "/h", "/c")
+	if !strings.Contains(q["claude-memsync-doctor.service"], `"/o/we\"ird%%h$$x"`) {
+		t.Errorf("systemd escaping:\n%s", q["claude-memsync-doctor.service"])
+	}
+	m, err := TimerUnits("darwin", "/opt/a&b/claude-memsync", "example-org", "/Users/u", "/Users/u/c<1>.json")
+	if err != nil {
+		t.Fatal(err)
+	}
 	var plist string
 	for k, v := range m {
 		if strings.HasSuffix(k, ".plist") {
 			plist = v
 		}
 	}
-	if !strings.Contains(plist, "StartCalendarInterval") || !strings.Contains(plist, "<string>doctor</string>") || !strings.Contains(plist, "example-org") {
-		t.Errorf("plist:\n%s", plist)
+	for _, w := range []string{"StartCalendarInterval", "<string>doctor</string>", "example-org", "/opt/a&amp;b/claude-memsync", "c&lt;1&gt;.json", "--config"} {
+		if !strings.Contains(plist, w) {
+			t.Errorf("plist lacks %q:\n%s", w, plist)
+		}
 	}
 	for _, v := range u {
-		if strings.Contains(v, "token") && strings.Contains(v, testToken) {
+		if strings.Contains(v, testToken) {
 			t.Error("unit must not embed a token")
 		}
+	}
+}
+
+func TestTimerRejectsBadOrg(t *testing.T) {
+	for _, org := range []string{"", "a b", "a;b", "a/b", "a\nExecStart=x", "<x>"} {
+		if _, err := TimerUnits("linux", "/x", org, "/h", "/c"); err == nil {
+			t.Errorf("org %q must be refused", org)
+		}
+		if _, err := TimerUnits("darwin", "/x", org, "/h", "/c"); err == nil {
+			t.Errorf("org %q must be refused (darwin)", org)
+		}
+	}
+}
+
+func TestValidateRemoteHost(t *testing.T) {
+	res := func(m map[string]string) HostResolver {
+		return func(a string) (string, error) {
+			if h, ok := m[a]; ok {
+				return h, nil
+			}
+			return "", fmt.Errorf("no such host")
+		}
+	}
+	r := res(map[string]string{"gh-mem-personal": "github.com", "github.com": "github.com", "evil": "gitlab.com",
+		"gl": "gitlab.com", "gh443": "ssh.github.com"})
+	ok := []string{"git@github.com:Org/mem-personal.git", "git@gh-mem-personal:Org/mem-personal.git",
+		"https://github.com/Org/mem-personal.git", "ssh://git@gh-mem-personal/Org/mem-personal.git",
+		"git@gh443:Org/mem-personal.git", "https://GitHub.com:443/Org/mem-personal.git"}
+	for _, in := range ok {
+		if _, _, err := ValidateRemote(in, "github.com", r); err != nil {
+			t.Errorf("%s should pass: %v", in, err)
+		}
+	}
+	bad := []string{"https://gitlab.com/Org/mem-personal.git", "git@gitlab.com:Org/mem-personal.git",
+		"ssh://git@gitlab.com/Org/mem-personal.git", "git@gl:Org/mem-personal.git", "git@evil:Org/mem-personal.git",
+		"git@unknown:Org/mem-personal.git", "http://github.com/Org/mem-personal.git",
+		"https://github.com.evil.example/Org/mem-personal.git", "git@-oProxyCommand=x:Org/mem-personal.git",
+		"git@github.com:Org/widgets.git"}
+	for _, in := range bad {
+		if _, _, err := ValidateRemote(in, "github.com", r); err == nil {
+			t.Errorf("%s must be refused", in)
+		}
+	}
+}
+
+func TestAllowedHost(t *testing.T) {
+	if AllowedHost("", "") != "github.com" || AllowedHost("", "https://api.github.com") != "github.com" {
+		t.Error("default host")
+	}
+	if AllowedHost("ghe.example", "") != "ghe.example" {
+		t.Error("explicit host wins")
+	}
+	if AllowedHost("", "https://ghe.example/api/v3") != "ghe.example" {
+		t.Error("derive from API URL")
+	}
+}
+
+func TestDoctorPrefixCaseInsensitive(t *testing.T) {
+	c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, []fakeRepo{{Name: "MEM-Personal", Private: bp(false), Visibility: "public"}})
+	})
+	bad, _ := c.Doctor("Org", nil)
+	if len(bad) != 1 {
+		t.Fatalf("bad=%v", bad)
+	}
+}
+
+func TestWatchFailsClosedAfterTooManyFailures(t *testing.T) {
+	ok := true
+	c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if !ok {
+			writeJSON(w, 500, map[string]string{})
+			return
+		}
+		w.Header().Set("ETag", `"a"`)
+		writeJSON(w, 200, fakeRepo{Name: "mem-personal", Private: bp(true), Visibility: "private"})
+	})
+	dir := t.TempDir()
+	clk := &clock{time.Unix(1000000, 0)}
+	w := &Watch{C: c, Owner: "Org", Name: "mem-personal", Now: clk.now, StateDir: dir, MaxFailures: 3, MaxAge: 1000 * time.Hour}
+	if !w.Allowed() {
+		t.Fatal("first")
+	}
+	ok = false
+	for i := 1; i <= 2; i++ {
+		clk.t = clk.t.Add(61 * time.Minute)
+		if !w.Allowed() {
+			t.Fatalf("failure %d must not block", i)
+		}
+	}
+	clk.t = clk.t.Add(61 * time.Minute)
+	if w.Allowed() {
+		t.Fatal("3 consecutive failures must block")
+	}
+	if !strings.Contains(ReadState(dir), "unverifiable") {
+		t.Errorf("state %q", ReadState(dir))
+	}
+	ok = true
+	clk.t = clk.t.Add(61 * time.Minute)
+	if !w.Allowed() || ReadState(dir) != "private" {
+		t.Fatalf("recovers on success: %q", ReadState(dir))
+	}
+}
+
+func TestWatchFailsClosedAfterMaxAge(t *testing.T) {
+	ok := true
+	c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if !ok {
+			writeJSON(w, 500, map[string]string{})
+			return
+		}
+		writeJSON(w, 200, fakeRepo{Name: "mem-personal", Private: bp(true), Visibility: "private"})
+	})
+	clk := &clock{time.Unix(1000000, 0)}
+	w := &Watch{C: c, Owner: "Org", Name: "mem-personal", Now: clk.now, StateDir: t.TempDir(), MaxFailures: 1000, MaxAge: 24 * time.Hour}
+	w.Allowed()
+	ok = false
+	clk.t = clk.t.Add(23 * time.Hour)
+	if !w.Allowed() {
+		t.Fatal("under 24h must not block")
+	}
+	clk.t = clk.t.Add(2 * time.Hour)
+	if w.Allowed() {
+		t.Fatal("over 24h without success must block")
+	}
+}
+
+func TestWatchFirstSuccessWritesStateAndClearsStale(t *testing.T) {
+	c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, fakeRepo{Name: "mem-personal", Private: bp(true), Visibility: "private"})
+	})
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/visibility", []byte("not private since long ago\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	w := &Watch{C: c, Owner: "Org", Name: "mem-personal", StateDir: dir}
+	if !w.Allowed() || ReadState(dir) != "private" {
+		t.Fatalf("state %q", ReadState(dir))
 	}
 }
 

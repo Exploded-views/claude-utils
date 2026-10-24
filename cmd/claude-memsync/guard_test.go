@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,15 +27,29 @@ func tb(b bool) *bool { return &b }
 
 func guardCfg(t *testing.T, h http.HandlerFunc, withToken bool) config.Config {
 	t.Helper()
+	initEnv(t)
 	t.Setenv("MEMSYNC_GITHUB_TOKEN", "")
 	t.Setenv("HOME", t.TempDir())
+	old := hostResolver
+	hostResolver = func(a string) (string, error) {
+		if strings.Contains(a, "evil") {
+			return "gitlab.com", nil
+		}
+		if strings.Contains(a, ".") {
+			return a, nil // a real hostname resolves to itself
+		}
+		return "github.com", nil
+	}
+	t.Cleanup(func() { hostResolver = old })
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	cfg := config.Defaults()
 	cfg.SyncDir = t.TempDir()
 	cfg.GitHubAPIURL = srv.URL
 	cfg.PrivateOnly = true
+	cfg.GitHubHost = "github.com"
 	cfg.RemoteURL = "git@gh-mem-personal:Org/mem-personal.git"
+	gitInitRemote(t, cfg.SyncDir, cfg.RemoteURL)
 	if withToken {
 		f := filepath.Join(t.TempDir(), "tok")
 		if err := os.WriteFile(f, []byte(cmdTok+"\n"), 0600); err != nil {
@@ -170,7 +186,7 @@ func TestRepoCreateVerifies(t *testing.T) {
 func TestInstallTimerWritesUnits(t *testing.T) {
 	dir := t.TempDir()
 	var out, errb bytes.Buffer
-	if code := installTimerRun("linux", "/x/claude-memsync", "example-org", dir, &out, &errb); code != 0 {
+	if code := installTimerRun("linux", "/x/claude-memsync", "example-org", "/c.json", "/tok", dir, &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
 	b, err := os.ReadFile(filepath.Join(dir, "claude-memsync-doctor.timer"))
@@ -226,3 +242,146 @@ func TestRepoCreateOrgResolution(t *testing.T) {
 		t.Error("no org must refuse without a request")
 	}
 }
+
+func gitInitRemote(t *testing.T, dir, remote string) {
+	t.Helper()
+	for _, a := range [][]string{{"init", "-q", "-b", "main"}, {"remote", "add", "origin", remote}} {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, a...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", a, err, out)
+		}
+	}
+}
+
+func privateH() http.HandlerFunc {
+	return jsonH(200, repoJSON{Name: "mem-personal", Private: tb(true), Visibility: "private"})
+}
+
+func TestDaemonGuardNoTokenStillChecksRemote(t *testing.T) {
+	logf := func(string, ...any) {}
+	for name, remote := range map[string]string{
+		"non-mem":   "git@github.com:Org/claude-memories.git",
+		"gitlab":    "https://gitlab.com/Org/mem-personal.git",
+		"alias":     "git@evil:Org/mem-personal.git",
+		"local":     "/tmp/x.git",
+		"other-ssh": "git@gitlab.com:Org/mem-personal.git",
+	} {
+		cfg := guardCfg(t, privateH(), false)
+		cfg.RemoteURL = remote
+		if err := daemonGuard(cfg, logf); err == nil {
+			t.Errorf("%s: must be refused even without a token", name)
+		}
+	}
+}
+
+func TestHostRefusals(t *testing.T) {
+	for _, remote := range []string{"https://gitlab.com/Org/mem-personal.git", "git@gitlab.com:Org/mem-personal.git", "git@evil:Org/mem-personal.git"} {
+		cfg := guardCfg(t, privateH(), true)
+		cfg.RemoteURL = remote
+		if err := guardRemote(cfg); err == nil {
+			t.Errorf("%s: init must refuse", remote)
+		}
+	}
+}
+
+func TestPushURLMustMatchRemote(t *testing.T) {
+	cfg := guardCfg(t, privateH(), true)
+	// A global insteadOf silently sends pushes elsewhere.
+	g := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(g, []byte("[url \"https://example.invalid/x/\"]\n\tinsteadOf = git@gh-mem-personal:Org/\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", g)
+	if err := daemonGuard(cfg, func(string, ...any) {}); err == nil || !strings.Contains(err.Error(), "push") {
+		t.Errorf("daemon must refuse a rewritten push URL: %v", err)
+	}
+	if err := checkPushURL(cfg, cfg.SyncDir); err == nil {
+		t.Error("init-side check must refuse too")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	if err := checkPushURL(cfg, cfg.SyncDir); err != nil {
+		t.Errorf("unrewritten URL must pass: %v", err)
+	}
+	cfg.RemoteURL = "git@gh-mem-personal:Org/mem-personal"
+	if err := checkPushURL(cfg, cfg.SyncDir); err != nil {
+		t.Errorf("normalisation (.git suffix) must pass: %v", err)
+	}
+}
+
+// Wiring: init --private-only against a public repo pushes nothing.
+func TestRunInitPrivateOnlyPublicPushesNothing(t *testing.T) {
+	root := t.TempDir()
+	bare := filepath.Join(root, "origin.git")
+	if out, err := exec.Command("git", "init", "-q", "--bare", "-b", "main", bare).CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+	cfg := guardCfg(t, jsonH(200, repoJSON{Name: "mem-personal", Private: tb(false), Visibility: "public"}), true)
+	remote := "git@gh-mem-personal:Org/mem-personal.git"
+	g := filepath.Join(root, "gitconfig")
+	if err := os.WriteFile(g, []byte("[url \""+bare+"/\"]\n\tinsteadOf = git@gh-mem-personal:Org/mem-personal.git/\n[url \""+bare+"\"]\n\tinsteadOf = "+remote+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", g)
+	claude := filepath.Join(root, "claude")
+	_ = os.MkdirAll(filepath.Join(claude, "p1", "memory"), 0700)
+	_ = os.WriteFile(filepath.Join(claude, "p1", "memory", "a.md"), []byte("x\n"), 0600)
+	// runInit needs a merge driver sibling; fake one next to the test binary.
+	exe, _ := os.Executable()
+	drv := filepath.Join(filepath.Dir(exe), "claude-memmerge")
+	if _, err := os.Stat(drv); err != nil {
+		if werr := os.WriteFile(drv, []byte("#!/bin/sh\n"), 0755); werr != nil {
+			t.Skip("cannot place merge driver")
+		}
+		t.Cleanup(func() { os.Remove(drv) })
+	}
+	ef, err := os.CreateTemp(root, "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldErr := os.Stderr
+	os.Stderr = ef
+	code := runInit([]string{"--remote", remote, "--private-only", "--token-file", cfg.GitHubTokenFile,
+		"--github-api-url", cfg.GitHubAPIURL, "--github-host", "github.com",
+		"--sync-dir", filepath.Join(root, "sync"), "--claude-dir", claude})
+	os.Stderr = oldErr
+	eb, _ := os.ReadFile(ef.Name())
+	var errb bytes.Buffer
+	errb.Write(eb)
+	if code == 0 {
+		t.Fatalf("init must refuse a public repo: %s", errb.String())
+	}
+	if !strings.Contains(errb.String(), "not private") {
+		t.Errorf("refusal must come from the visibility check: %s", errb.String())
+	}
+	if out, _ := exec.Command("git", "-C", bare, "rev-list", "--all", "--count").Output(); strings.TrimSpace(string(out)) != "0" {
+		t.Errorf("nothing may be pushed, origin has %s commits", out)
+	}
+}
+
+// Wiring: program.Start with a public repo refuses.
+func TestProgramStartRefusesPublicRepo(t *testing.T) {
+	cfg := guardCfg(t, jsonH(200, repoJSON{Name: "mem-personal", Private: tb(false), Visibility: "public"}), true)
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	p := &program{configPath: cfg.Path()}
+	err := p.Start(nil)
+	if err == nil {
+		_ = p.Stop(nil)
+		t.Fatal("Start must refuse a public repo")
+	}
+	if !strings.Contains(err.Error(), "not private") {
+		t.Errorf("wrong refusal: %v", err)
+	}
+}
+
+func TestTimerNeedsTokenFile(t *testing.T) {
+	var out, errb bytes.Buffer
+	if code := installTimerRun("linux", "/x/m", "example-org", "/c.json", "", t.TempDir(), &out, &errb); code == 0 || !strings.Contains(errb.String(), "githubTokenFile") {
+		t.Errorf("must refuse without a token file: %d %s", code, errb.String())
+	}
+	if code := installTimerRun("linux", "/x/m", "bad org", "/c.json", "/tok", t.TempDir(), &out, &errb); code == 0 {
+		t.Error("bad org must be refused")
+	}
+}
+
+var _ = url.PathEscape

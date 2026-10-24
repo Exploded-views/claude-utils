@@ -14,6 +14,7 @@ package ghguard
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -88,6 +89,12 @@ type Client struct {
 	BaseURL string // defaults to DefaultBaseURL; tests point it at httptest
 	Token   string
 	HTTP    *http.Client
+
+	// Host is the git host remotes must use (default: derived from BaseURL,
+	// github.com for the public API). Resolve maps an ssh alias to its real
+	// hostname (default: `ssh -G`); tests inject one.
+	Host    string
+	Resolve HostResolver
 }
 
 // Repo holds the fields the guard reads. Pointers/empty strings distinguish
@@ -206,7 +213,7 @@ func (c *Client) CheckPrivate(owner, name string) error {
 
 // CheckRemote parses a remote URL and runs CheckPrivate on it.
 func (c *Client) CheckRemote(remote string) error {
-	owner, name, err := ParseRemote(remote)
+	owner, name, err := ValidateRemote(remote, c.allowedHost(), c.Resolve)
 	if err != nil {
 		return fmt.Errorf("remote refused: %w", err)
 	}
@@ -287,7 +294,7 @@ func (c *Client) Doctor(org string, joined []string) ([]string, error) {
 	}
 	var bad []string
 	for _, r := range repos {
-		if !strings.HasPrefix(r.Name, "mem-") {
+		if !strings.HasPrefix(strings.ToLower(r.Name), "mem-") {
 			continue
 		}
 		if err := r.verifyPrivate(); err != nil {
@@ -306,12 +313,34 @@ func (c *Client) Doctor(org string, joined []string) ([]string, error) {
 	return bad, nil
 }
 
+var orgRE = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
+
+func sdQuote(s string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, "%", "%%", "$", "$$", "\n", `\n`).Replace(s) + `"`
+}
+
+func xmlEsc(s string) string {
+	var b bytes.Buffer
+	_ = xml.EscapeText(&b, []byte(s))
+	return b.String()
+}
+
 // TimerUnits returns file name -> text for a daily doctor timer: a systemd
 // user service+timer on linux, a launchd plist on darwin. It only generates
-// text; the caller decides whether to write it.
-func TimerUnits(goos, exe, org, home string) map[string]string {
+// text; the caller decides whether to write it. org is validated, arguments are
+// quoted for systemd or XML-escaped for the plist, and --config is passed.
+func TimerUnits(goos, exe, org, home, cfgPath string) (map[string]string, error) {
+	if !orgRE.MatchString(org) {
+		return nil, errors.New("org must match [A-Za-z0-9-]+")
+	}
+	args := []string{exe, "doctor", "--org", org, "--config", cfgPath}
 	if goos == "darwin" {
 		const label = "claude-memsync-doctor"
+		var pa strings.Builder
+		for _, a := range args {
+			pa.WriteString("    <string>" + xmlEsc(a) + "</string>\n")
+		}
+		log := xmlEsc(home + "/.claudesync/doctor.log")
 		return map[string]string{label + ".plist": fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -319,27 +348,27 @@ func TimerUnits(goos, exe, org, home string) map[string]string {
   <key>Label</key><string>%s</string>
   <key>ProgramArguments</key>
   <array>
-    <string>%s</string>
-    <string>doctor</string>
-    <string>--org</string>
-    <string>%s</string>
-  </array>
+%s  </array>
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
-  <key>StandardErrorPath</key><string>%s/.claudesync/doctor.log</string>
-  <key>StandardOutPath</key><string>%s/.claudesync/doctor.log</string>
+  <key>StandardErrorPath</key><string>%s</string>
+  <key>StandardOutPath</key><string>%s</string>
 </dict>
 </plist>
-`, label, exe, org, home, home)}
+`, label, pa.String(), log, log)}, nil
+	}
+	q := make([]string, len(args))
+	for i, a := range args {
+		q[i] = sdQuote(a)
 	}
 	return map[string]string{
-		"claude-memsync-doctor.service": fmt.Sprintf(`[Unit]
+		"claude-memsync-doctor.service": `[Unit]
 Description=claude-memsync doctor (private-only check)
 
 [Service]
 Type=oneshot
-ExecStart=%s doctor --org %s
-`, exe, org),
+ExecStart=` + strings.Join(q, " ") + `
+`,
 		"claude-memsync-doctor.timer": `[Unit]
 Description=Daily claude-memsync doctor
 
@@ -350,5 +379,5 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 `,
-	}
+	}, nil
 }
