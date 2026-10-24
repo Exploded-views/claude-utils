@@ -117,3 +117,23 @@ func TestReadDenylistFlag(t *testing.T) {
 		t.Error("missing file should fail")
 	}
 }
+
+// status says so when syncing is paused for a rebase being resolved by hand, and
+// says nothing otherwise.
+func TestPausedLine(t *testing.T) {
+	cfg, _ := initFixture(t)
+	if got := pausedLine(cfg); got != "" {
+		t.Fatalf("paused with nothing stopped: %q", got)
+	}
+	dir := filepath.Join(cfg.SyncDir, ".state")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "paused"), []byte("2026-10-24T04:00:00Z\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got := pausedLine(cfg)
+	if !strings.Contains(got, "syncing paused since") || !strings.Contains(got, "rebase --abort") {
+		t.Errorf("got %q", got)
+	}
+}

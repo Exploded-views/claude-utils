@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/proc"
 )
@@ -37,9 +36,17 @@ func (r *Repo) Run(args ...string) (string, error) {
 // or `cat-file --batch`, instead of putting a long or untrusted list of paths
 // on the command line.
 func (r *Repo) RunStdin(stdin []byte, args ...string) (string, error) {
+	return r.run(nil, stdin, args...)
+}
+
+// run is RunStdin with extra environment variables for git (KEY=VALUE).
+func (r *Repo) run(env []string, stdin []byte, args ...string) (string, error) {
 	full := append([]string{"-C", r.Dir}, args...)
 	cmd := exec.Command("git", full...)
 	proc.HideWindow(cmd)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
@@ -295,6 +302,31 @@ func (r *Repo) Pull(branch string) error {
 	return err
 }
 
+// Fetch does `git fetch origin <branch>`, which also moves origin/<branch>.
+func (r *Repo) Fetch(branch string) error {
+	_, err := r.Run("fetch", "origin", branch)
+	return err
+}
+
+// RebaseOnto does `git rebase --autostash origin/<branch>`, the second half of
+// Pull. The rebase's reflog entries are named reflogAction, so that the
+// reflog says who started it (see ReflogSubjects).
+func (r *Repo) RebaseOnto(branch, reflogAction string) error {
+	_, err := r.run([]string{"GIT_REFLOG_ACTION=" + reflogAction}, nil, "rebase", "--autostash", "origin/"+branch)
+	return err
+}
+
+// ReflogSubjects returns the subjects of the newest n entries of HEAD's
+// reflog, newest first. A rebase's start is recorded as
+// "<GIT_REFLOG_ACTION> (start): checkout <upstream>".
+func (r *Repo) ReflogSubjects(n int) ([]string, error) {
+	out, err := r.Run("reflog", "-n", strconv.Itoa(n), "--format=%gs", "HEAD")
+	if err != nil {
+		return nil, err
+	}
+	return strings.Split(strings.TrimRight(out, "\n"), "\n"), nil
+}
+
 // RebaseInProgress reports whether a rebase is stopped in this work-tree, as a
 // conflicting `pull --rebase` leaves it.
 func (r *Repo) RebaseInProgress() bool {
@@ -331,32 +363,6 @@ func (r *Repo) gitPath(name string) string {
 func (r *Repo) HeadDetached() bool {
 	_, err := r.Run("symbolic-ref", "-q", "HEAD")
 	return err != nil
-}
-
-// StoppedOp is a rebase or merge left unfinished: the commit HEAD was at when
-// it started (the orig-head of a rebase, ORIG_HEAD of a merge) and when its
-// state was last written.
-type StoppedOp struct {
-	StartHead string
-	Modified  time.Time
-}
-
-// StoppedOps lists the rebase and the merge in progress, if any.
-func (r *Repo) StoppedOps() []StoppedOp {
-	var ops []StoppedOp
-	for _, c := range []struct{ state, head string }{
-		{"rebase-merge", "rebase-merge/orig-head"},
-		{"rebase-apply", "rebase-apply/orig-head"},
-		{"MERGE_HEAD", "ORIG_HEAD"},
-	} {
-		info, err := os.Stat(r.gitPath(c.state))
-		if err != nil {
-			continue
-		}
-		b, _ := os.ReadFile(r.gitPath(c.head))
-		ops = append(ops, StoppedOp{StartHead: strings.TrimSpace(string(b)), Modified: info.ModTime()})
-	}
-	return ops
 }
 
 // HasUnmerged reports whether the index holds unmerged (conflicted) entries.

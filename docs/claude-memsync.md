@@ -162,6 +162,12 @@ commits.
   `git pull` are written back atomically.
 - The custom merge driver is registered in the local repo config and invoked by
   git via `.gitattributes` (`MEMORY.md merge=claude-memory-index`).
+- `MEMORY.md` edited on both PCs is merged by section on every cycle (Reconcile),
+  not only at init. A merge that is clean is written to both sides. When it
+  conflicts, e.g. a section edited on one side only, which has no common base,
+  the `~/.claude` copy wins and the mirror copy is kept as
+  `<name>.from-remote-<random>`, once however often the same copy is set aside.
+  Conflict markers are never written.
 - Two PCs editing the same lines of the same committed file is rare in practice
   (each memory file has a unique filename per topic). When it happens the pull
   never leaves conflict markers in your files; see
@@ -349,13 +355,21 @@ cannot see a rebase you start in between. While the rebase is stopped halfway
 the work-tree holds conflict markers and `HEAD` is detached at some commit in
 the middle of your resolution. Stopping the daemon takes it out of that race, so
 that nothing is staged, parked, recorded or aborted behind your back. What the
-daemon does guard, in case you did not: it records no synced `HEAD` (see below)
-while a rebase or merge is stopped or `HEAD` is detached, and it aborts only a
-rebase its own pull started, never one that existed before the pull (it writes
-`~/.claudesync/.state/pull-running`, holding the commit it started from, around
-the pull; a rebase counts as its own only if it began from that commit after the
-marker was written, so a marker left by a crash cannot claim a rebase you start
-later).
+daemon does guard, in case you did not, is this. It records no synced `HEAD` (see
+below) while a rebase or merge is stopped or `HEAD` is detached, and logs a
+detached `HEAD` once. It aborts only a rebase its own pull started. The pull is
+a `git fetch`, then a marker, `~/.claudesync/.state/pull-running`, holding a
+random nonce, then `git rebase --autostash origin/<branch>` run with
+`GIT_REFLOG_ACTION="memsync-pull <nonce>"`, which git writes into the reflog of
+`HEAD` as the start of that rebase. A stopped rebase is the daemon's only if the
+newest rebase start in that reflog (`git -C ~/.claudesync reflog`) carries the
+marker's nonce. With no marker, or with a nonce that is not the newest start, it
+is yours, whatever the timing: that holds for a marker a kill left behind, and
+for a rebase you start during the daemon's fetch or after it. A merge is always
+yours, since the daemon never merges. The daemon then skips the cycle, logs it
+(the log names `git -C ~/.claudesync rebase --abort` and points here), and
+`claude-memsync status` shows `syncing paused`. `claude-memsync stop` removes the
+marker unless a rebase or merge is stopped.
 
 ```
 git -C ~/.claudesync pull --rebase --autostash origin main   # stops on the conflict again

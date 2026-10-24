@@ -1,8 +1,11 @@
 package sync
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,23 +14,33 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
 
-// pullMarkerFile is written to .state before the daemon's own pull and removed
-// after it. It holds the commit HEAD was at, and its modification time is when
-// the pull began. A rebase or merge found stopped is the daemon's (a crash in
-// the pull left it) only if the marker exists and the rebase or merge began
-// from that commit, no earlier than the marker; one without the marker, or one
-// that predates it or began elsewhere, was started by the user, who is
-// resolving it by hand. That also covers a marker a crash left behind and a
-// rebase started by hand afterwards.
+// pullMarkerFile is written to .state before the rebase of the daemon's own
+// pull and removed after it. It holds a random nonce, and the daemon starts the
+// rebase with GIT_REFLOG_ACTION set to "memsync-pull <nonce>", which git
+// records in HEAD's reflog as "memsync-pull <nonce> (start): checkout ...". A
+// rebase found stopped is the daemon's only if the newest rebase start in the
+// reflog carries the marker's nonce. One without a marker, or whose start has
+// another name (a rebase you ran by hand) is yours, however the timing falls:
+// that covers a marker a crash left behind, and a rebase you start by hand
+// while the daemon is fetching or after it.
 const pullMarkerFile = "pull-running"
 
 func pullMarkerPath(repo *gitwt.Repo) string {
 	return filepath.Join(repo.Dir, manifestStateDir, pullMarkerFile)
 }
 
-// markPull records that a pull is about to start from HEAD, which is head.
-func markPull(repo *gitwt.Repo, head string) error {
-	return writeSynced(pullMarkerPath(repo), []byte(head+"\n"))
+// pullAction is the GIT_REFLOG_ACTION of the rebase that nonce marks.
+func pullAction(nonce string) string { return "memsync-pull " + nonce }
+
+// markPull records that the rebase of a pull is about to start, and returns the
+// nonce that names it in the reflog.
+func markPull(repo *gitwt.Repo) (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	nonce := hex.EncodeToString(b[:])
+	return nonce, writeSynced(pullMarkerPath(repo), []byte(nonce+"\n"))
 }
 
 func pullMarked(repo *gitwt.Repo) bool {
@@ -35,27 +48,64 @@ func pullMarked(repo *gitwt.Repo) bool {
 	return err == nil
 }
 
-// stoppedByMarkedPull reports whether a rebase or merge is stopped and every
-// one was started by the pull the marker records: from the commit the marker
-// names, and not before the marker was written. Without a marker (or one that
-// names no commit) nothing qualifies.
+// reflogDepth is how many reflog entries are searched for the start of a
+// rebase: the picks of a long rebase come after it.
+const reflogDepth = 2000
+
+// runPull is `git pull --rebase --autostash` as the daemon runs it, in two
+// steps: the fetch, then the marker, then the rebase named by the marker's
+// nonce. The marker is left for the caller to clear (see clearPullMark).
+func runPull(repo *gitwt.Repo, branch string) error {
+	if err := repo.Fetch(branch); err != nil {
+		return err
+	}
+	afterFetch(repo)
+	nonce, err := markPull(repo)
+	if err != nil {
+		return fmt.Errorf("mark pull: %w", err)
+	}
+	return repo.RebaseOnto(branch, pullAction(nonce))
+}
+
+// afterFetch runs between the fetch and the marker; a variable so a test can
+// start a rebase there.
+var afterFetch = func(*gitwt.Repo) {}
+
+// stoppedByMarkedPull reports whether a rebase is stopped and the daemon's
+// marked pull started it: the newest rebase start in HEAD's reflog is the one
+// that carries the marker's nonce. A merge is never the daemon's, as its pull
+// is a rebase. Without a marker nothing qualifies.
 func stoppedByMarkedPull(repo *gitwt.Repo) bool {
-	info, err := os.Stat(pullMarkerPath(repo))
+	b, err := os.ReadFile(pullMarkerPath(repo))
+	nonce := strings.TrimSpace(string(b))
+	if err != nil || nonce == "" || !repo.RebaseInProgress() || repo.MergeInProgress() {
+		return false
+	}
+	subjects, err := repo.ReflogSubjects(reflogDepth)
 	if err != nil {
 		return false
 	}
-	b, _ := os.ReadFile(pullMarkerPath(repo))
-	head := strings.TrimSpace(string(b))
-	ops := repo.StoppedOps()
-	if head == "" || len(ops) == 0 {
-		return false
-	}
-	for _, op := range ops {
-		if op.StartHead != head || op.Modified.Before(info.ModTime()) {
-			return false
+	for _, s := range subjects {
+		if strings.Contains(s, " (start): ") {
+			return strings.HasPrefix(s, pullAction(nonce)+" (start): ")
 		}
 	}
-	return true
+	return false
+}
+
+// ClearStalePullMarker removes the pull marker of the sync repo in dir unless a
+// rebase or merge is stopped there: `claude-memsync stop` calls it once the
+// daemon is down, so a marker a kill left cannot outlive the pull it was for.
+// With one stopped it stays, for the next start to judge.
+func ClearStalePullMarker(dir string) error {
+	repo := gitwt.New(dir)
+	if !repo.IsRepo() || handResolving(repo) {
+		return nil
+	}
+	if err := os.Remove(pullMarkerPath(repo)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // clearPullMark removes the marker, unless a rebase or merge the pull started
@@ -69,7 +119,7 @@ func clearPullMark(repo *gitwt.Repo) {
 
 // errHandResolving ends a cycle early: a rebase or merge is stopped in the sync
 // repo and the daemon did not start it.
-var errHandResolving = errors.New("a rebase or merge is in progress in the sync repo and the daemon did not start it; assuming you are resolving it by hand, this cycle stages, reconciles, pulls and pushes nothing until it is finished")
+var errHandResolving = errors.New("a rebase or merge is in progress in the sync repo and the daemon did not start it; assuming you are resolving it by hand, this cycle stages, reconciles, pulls and pushes nothing until it is finished (to give it up: git -C ~/.claudesync rebase --abort, or merge --abort; see docs: Rebase conflicts)")
 
 // handResolving reports whether a rebase or merge is stopped in the sync repo.
 // Where the daemon checks it, nothing of its own can be: what its pull left

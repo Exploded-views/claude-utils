@@ -96,7 +96,9 @@ func (l *Loop) Run(ctx context.Context) error {
 		}
 	}
 	if err := l.flush(repo, roots, true); err != nil {
-		log.Println("initial flush:", newPathGuard(l.Cfg).Err(err))
+		if !errors.Is(err, errHandResolving) { // already logged
+			log.Println("initial flush:", newPathGuard(l.Cfg).Err(err))
+		}
 		if l.OnFlush != nil {
 			l.OnFlush(true, err)
 		}
@@ -134,7 +136,7 @@ func (l *Loop) Run(ctx context.Context) error {
 
 		case <-debounce.C:
 			err := l.flush(repo, roots, true)
-			if err != nil {
+			if err != nil && !errors.Is(err, errHandResolving) {
 				log.Println("flush (local):", newPathGuard(l.Cfg).Err(err))
 			}
 			l.refreshManifest(roots)
@@ -227,7 +229,7 @@ func (l *Loop) pullTick(repo *gitwt.Repo, roots Roots) {
 		}
 	}
 	err = l.flush(repo, roots, true)
-	if err != nil {
+	if err != nil && !errors.Is(err, errHandResolving) {
 		log.Println("flush (pull):", newPathGuard(l.Cfg).Err(err))
 	}
 	l.refreshManifest(roots)
@@ -307,13 +309,22 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	// committed, or parked over, while files are still away.
 	if err := l.takeRecovery(repo, roots); err != nil {
 		if errors.Is(err, errHandResolving) {
-			return nil // already logged, once for the cycle
+			markPaused(repo)
+			return err // already logged, once for the cycle
 		}
 		return err
 	}
 	// The cycle's HEAD is recorded once it is reflected in the Claude tree
 	// (see catchUp). A propagate that failed leaves the older record.
 	settled := true
+	// A cycle that cannot go on says so in its result (and in .state/paused),
+	// not as a success.
+	pause := func() error {
+		settled = false
+		markPaused(repo)
+		log.Println(errHandResolving)
+		return errHandResolving
+	}
 	defer func() {
 		if settled {
 			if rerr := recordHead(repo); rerr != nil {
@@ -325,10 +336,9 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	// been long ago: the user may have started a rebase since. Staging or
 	// committing in the middle of it would corrupt it.
 	if handResolving(repo) {
-		settled = false
-		log.Println(errHandResolving)
-		return nil
+		return pause()
 	}
+	clearPaused(repo)
 	if includeLocal {
 		_, err := CommitMirror(repo, l.Cfg, fmt.Sprintf("auto: %s @ %s", l.Hostname, time.Now().UTC().Format(time.RFC3339)))
 		if err != nil {
@@ -353,9 +363,7 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	// Once more right before the pull, ahead of the park, which resets files.
 	beforePullCheck(repo)
 	if handResolving(repo) {
-		settled = false
-		log.Println(errHandResolving)
-		return nil
+		return pause()
 	}
 	st, err := parkUncommitted(repo)
 	if err != nil {
@@ -363,12 +371,9 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	}
 	preRev, _ := repo.Run("rev-parse", "HEAD")
 	var conflictErr error
-	// The marker tells the next start that a rebase found stopped is ours to
-	// abort, if it began from this HEAD after the marker; it stays while one is.
-	if err := markPull(repo, strings.TrimSpace(preRev)); err != nil {
-		return fmt.Errorf("mark pull: %w", err)
-	}
-	if err := repo.Pull(l.Branch); err != nil {
+	// The marker names the rebase for the reflog, so the next start knows a
+	// rebase found stopped is ours to abort; it stays while one is.
+	if err := runPull(repo, l.Branch); err != nil {
 		if repo.RebaseInProgress() {
 			conflictErr = abortRebaseConflict(repo)
 		} else {
@@ -378,10 +383,7 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	}
 	clearPullMark(repo)
 	if errors.Is(conflictErr, errHandResolving) {
-		settled = false
-		log.Println(errHandResolving)
-		conflictErr = nil
-		return nil
+		return pause()
 	}
 	postRev, _ := repo.Run("rev-parse", "HEAD")
 	if conflictErr == nil && strings.TrimSpace(preRev) != strings.TrimSpace(postRev) && strings.TrimSpace(preRev) != "" {
