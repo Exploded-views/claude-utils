@@ -132,9 +132,6 @@ func loadRouted(path string) (*routedSet, error) {
 	}
 	s.Router = route.New(f, func(repo string) bool { _, ok := s.Cfgs[repo]; return ok })
 	s.Router.StatePath = filepath.Join(filepath.Dir(path), "owners.json")
-	// Only the daemon records owners and identities; status, distill and the
-	// hooks just look. Start (the daemon) turns this off.
-	s.Router.ReadOnly = true
 	return s, nil
 }
 
@@ -254,7 +251,7 @@ func (s *routedSet) Start(ctx context.Context) (*running, error) {
 	if len(s.Cfgs) == 0 {
 		return nil, fmt.Errorf("%s: this host has none of the repos", s.Path)
 	}
-	s.Router.ReadOnly = false
+	s.Router.Writable()
 	ctx, cancel := context.WithCancel(ctx)
 	r := &running{cancel: cancel}
 	for _, name := range s.names() {

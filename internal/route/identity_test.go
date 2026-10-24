@@ -33,6 +33,7 @@ func newIDEnv(t *testing.T, f File) *idEnv {
 func (e *idEnv) router(f File) *Router {
 	r := New(f, func(n string) bool { return e.have == nil || e.have(n) })
 	r.StatePath = e.state
+	r.Writable()
 	r.Resolve = func(folder string) (string, resolution) {
 		if k, ok := e.remotes[folder]; ok {
 			return k, resolutionOK
@@ -470,9 +471,13 @@ func TestCorruptIdentityFileDeniesRecordedFoldersAndIsNeverOverwritten(t *testin
 	if err := os.WriteFile(e.idFile(), []byte("{not json"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	r2 := e.router(f)
+	r2 := e.router(idFile(Rule{Remote: "github.com/o/**", Repo: "client-a"})) // would move it
 	if d := r2.Decide("-f"); d.Repo != "" || d.Reason != ReasonIdentityUnreadable {
 		t.Fatalf("recorded folder must be held: %+v", d)
+	}
+	r2 = e.router(f)
+	if d := r2.Decide("-f"); d.Repo != "projects" {
+		t.Fatalf("staying put must continue: %+v", d)
 	}
 	// A folder that was never recorded is not affected, and nothing is written.
 	e.remotes["-new"], e.roots["-new"] = "github.com/o/n", []string{"3"}
@@ -494,7 +499,7 @@ func TestReadOnlyRouterWritesNothing(t *testing.T) {
 	f := idFile(Rule{Remote: "github.com/o/**", Repo: "projects"})
 	e := newIDEnv(t, f)
 	r := e.router(f)
-	r.ReadOnly = true
+	r.ReadOnly = true // (New alone is read-only too; see TestNewIsReadOnlyByDefault)
 	e.remotes["-f"], e.roots["-f"] = "github.com/o/f", []string{"1"}
 	if d := r.Decide("-f"); d.Repo != "projects" {
 		t.Fatal(d)
@@ -746,5 +751,83 @@ func TestFileCorruptedWhileRunningIsNotOverwritten(t *testing.T) {
 	}
 	if e.r.IdentityProblem() == "" {
 		t.Fatal("not reported")
+	}
+}
+
+func TestNewIsReadOnlyByDefault(t *testing.T) {
+	if r := New(File{}, func(string) bool { return true }); !r.ReadOnly {
+		t.Fatal("route.New must default to read-only")
+	}
+	r := New(File{}, func(string) bool { return true })
+	r.Writable()
+	if r.ReadOnly {
+		t.Fatal("Writable did not take effect")
+	}
+}
+
+func TestProbeCorruptMidSaveRecovers(t *testing.T) {
+	f := idFile(Rule{Remote: "github.com/old/x", Repo: "projects"}, Rule{Remote: "github.com/old/y", Repo: "projects"})
+	e := newIDEnv(t, f)
+	p := e.idFile()
+	e.remotes["-a"], e.roots["-a"] = "github.com/old/x", []string{"aaa"}
+	e.r.Decide("-a")
+	e.remotes["-b"], e.roots["-b"] = "github.com/old/y", []string{"bbb"}
+	e.r.afterCompute = func() { os.WriteFile(p, []byte("{garbage"), 0600) }
+	e.r.Decide("-b")
+	e.r.afterCompute = nil
+	os.Remove(p) // the user fixes it by removing it
+	e.r.Refresh()
+	if d := e.r.Decide("-a"); d.Repo != "projects" {
+		t.Fatalf("wedged after fix: %+v problem=%q", d, e.r.IdentityProblem())
+	}
+	if e.r.IdentityProblem() != "" {
+		t.Fatal("problem still reported")
+	}
+	// The entry that was waiting to be saved is merged into the new file.
+	if raw, _ := os.ReadFile(p); !strings.Contains(string(raw), "github.com/old/y") {
+		t.Fatalf("pending record lost: %s", raw)
+	}
+}
+
+func TestUnreadableDeniesOnlyWouldBeMoves(t *testing.T) {
+	f := idFile(Rule{Remote: "github.com/old/x", Repo: "projects"})
+	e := newIDEnv(t, f)
+	e.remotes["-a"], e.roots["-a"] = "github.com/old/x", []string{"aaa"}
+	e.r.Decide("-a")
+	os.WriteFile(e.idFile(), []byte("{garbage"), 0600)
+	e.r.Refresh()
+	if d := e.r.Decide("-a"); d.Repo != "projects" {
+		t.Fatalf("unrenamed folder denied: %+v", d)
+	}
+	// A route edit that would move the folder is held while the file is bad.
+	g := idFile(Rule{Remote: "github.com/old/x", Repo: "client-a"})
+	if d := e.router(g).Decide("-a"); d.Repo != "" || d.Reason != ReasonIdentityUnreadable {
+		t.Fatalf("move not held: %+v", d)
+	}
+}
+
+// With the key unchanged a routes edit or reorder is the user's doing, as it
+// was before root-commit identities: the folder moves, and a move out of a
+// client repo is logged.
+func TestSameKeyRetargetMovesAndLogs(t *testing.T) {
+	f := idFile(
+		Rule{Remote: "github.com/client/**", Repo: "client-a"},
+		Rule{Remote: "github.com/client/x", Repo: "projects"},
+	)
+	e := newIDEnv(t, f)
+	e.remotes["-c"], e.roots["-c"] = "github.com/client/x", []string{"bbb"}
+	if d := e.r.Decide("-c"); d.Repo != "client-a" {
+		t.Fatal(d)
+	}
+	e.log.Reset()
+	e.r.Replace(idFile( // reordered: the older, narrower rule now wins
+		Rule{Remote: "github.com/client/x", Repo: "projects"},
+		Rule{Remote: "github.com/client/**", Repo: "client-a"},
+	))
+	if d := e.r.Decide("-c"); d.Repo != "projects" {
+		t.Fatalf("same-key retarget was held: %+v", d)
+	}
+	if !strings.Contains(e.log.String(), "moved from client repo") {
+		t.Fatalf("log: %q", e.log.String())
 	}
 }

@@ -242,6 +242,7 @@ func TestMoveFromClientToNonClientLogged(t *testing.T) {
 	f1 := fileOf(Rule{Folder: "-w-x", Repo: "client-a"})
 	r1 := New(f1, func(string) bool { return true })
 	r1.StatePath, r1.Logf = state, logf
+	r1.Writable()
 	if d := r1.Decide("-w-x"); d.Repo != "client-a" {
 		t.Fatal(d)
 	}
@@ -250,6 +251,7 @@ func TestMoveFromClientToNonClientLogged(t *testing.T) {
 	f2 := fileOf(Rule{Folder: "-w-x", Repo: "projects"})
 	r2 := New(f2, func(string) bool { return true })
 	r2.StatePath, r2.Logf = state, logf
+	r2.Writable()
 	if d := r2.Decide("-w-x"); d.Repo != "projects" {
 		t.Fatal(d)
 	}
@@ -485,6 +487,7 @@ func TestOwnersFileUsesUniqueTempAndLeavesNone(t *testing.T) {
 	dir := t.TempDir()
 	r := New(fileOf(Rule{Folder: "-w", Repo: "projects"}), func(string) bool { return true })
 	r.StatePath, r.Logf = filepath.Join(dir, "owners.json"), func(string, ...any) {}
+	r.Writable()
 	r.Decide("-w")
 	entries, _ := os.ReadDir(dir)
 	if len(entries) != 1 || entries[0].Name() != "owners.json" {

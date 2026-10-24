@@ -74,6 +74,9 @@ func readIDs(p string) (map[string]identity, error) {
 
 func (r *Router) loadIDsLocked() {
 	if r.ids != nil {
+		if r.idBad != "" {
+			r.recoverIDsLocked()
+		}
 		return
 	}
 	r.ids = map[string]identity{}
@@ -96,6 +99,25 @@ func (r *Router) reloadIDsLocked() {
 		r.ids, r.idBad = nil, ""
 		delete(r.logged, "\x00idbad")
 	}
+}
+
+// recoverIDsLocked retries a file that did not parse, so a fix needs no
+// restart. Records changed here and not yet saved are kept and merged in.
+func (r *Router) recoverIDsLocked() {
+	p := r.identityPath()
+	if p == "" {
+		return
+	}
+	m, err := readIDs(p)
+	if err != nil {
+		return
+	}
+	for f := range r.dirty {
+		m[f] = r.ids[f]
+	}
+	r.ids, r.idBad = m, ""
+	delete(r.logged, "\x00idbad")
+	r.saveIDsLocked()
 }
 
 // IdentityProblem says why identity.json could not be read, "" when it can.
@@ -261,10 +283,10 @@ func (r *Router) identityLocked(folder string, d Decision, key string, keyOK boo
 	r.loadIDsLocked()
 	f := r.cur()
 	if r.idBad != "" {
-		// Fail closed: with the records unreadable, a folder that was routed
-		// before cannot be told from a renamed one.
+		// Fail closed: with the records unreadable, a move of a folder that was
+		// routed before cannot be told from a rename. Staying put is fine.
 		r.loadOwnersLocked()
-		if _, was := r.owners[folder]; was && d.Repo != "" {
+		if owner, was := r.owners[folder]; was && d.Repo != "" && owner != d.Repo {
 			return Decision{Rule: d.Rule, Reason: ReasonIdentityUnreadable}
 		}
 		return d

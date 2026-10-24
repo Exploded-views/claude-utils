@@ -298,7 +298,8 @@ type Router struct {
 	Now func() time.Time
 
 	// ReadOnly keeps the router from writing owners.json and identity.json:
-	// status, distill and the hooks only look.
+	// status, distill and the hooks only look. New sets it; the daemon calls
+	// Writable.
 	ReadOnly bool
 	// Git runs git for the root-commit lookup (default: cleaned-env git).
 	Git func(dir string, args ...string) (string, error)
@@ -325,8 +326,13 @@ func New(f File, have func(repo string) bool) *Router {
 	r.Resolve = r.defaultResolve
 	r.Roots = r.defaultRoots
 	r.Now = time.Now
+	r.ReadOnly = true
 	return r
 }
+
+// Writable lets the router record owners and root-commit identities. Only the
+// daemon should call it.
+func (r *Router) Writable() { r.ReadOnly = false }
 
 func (r *Router) cur() File { return *r.cur_.Load() }
 
