@@ -21,7 +21,17 @@ func runChanges(args []string) int {
 	return changesCmd(os.Stdin, os.Stdout, os.Stderr, args)
 }
 
-func changesCmd(stdin io.Reader, stdout, stderr io.Writer, args []string) int {
+func changesCmd(stdin io.Reader, stdout, stderr io.Writer, args []string) (code int) {
+	if hookRequested(args) {
+		// Claude Code treats exit 2 as "block the prompt", which is what an
+		// uncaught panic would give.
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(stderr, "changes: internal error: %v\n", r)
+				code = 0
+			}
+		}()
+	}
 	flags := flag.NewFlagSet("changes", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	cfgPath := flags.String("config", "", "path to config.json (default: ~/.claudesync/config.json)")
@@ -32,19 +42,18 @@ func changesCmd(stdin io.Reader, stdout, stderr io.Writer, args []string) int {
 	limit := flags.Int("limit", defaultChangesLimit, "list at most N changes, then \"...N more\" (0 = no limit)")
 	update := flags.Bool("update-marker", false, "with --marker, rewrite the file to the current HEAD afterwards (a missing or stale marker only records the baseline)")
 	hook := flags.Bool("hook", false, "run as a Claude Code hook: read its JSON from stdin, keep a per-session marker, print additionalContext JSON")
-	hookCleanup := flags.Bool("hook-cleanup", false, "run as a SessionEnd hook: delete this session's --hook marker")
 	if err := flags.Parse(args); err != nil {
 		if hookRequested(args) {
 			return 0 // a hook must never block a prompt
 		}
 		return 2
 	}
-	if *hook || *hookCleanup {
-		if flagsSet(flags, "since", "marker", "update-marker", "json") || (*hook && *hookCleanup) || *limit < 0 {
-			fmt.Fprintln(stderr, "changes: --hook and --hook-cleanup take only --config, --project and --limit, and are mutually exclusive")
+	if *hook {
+		if flagsSet(flags, "since", "marker", "update-marker", "json") || *limit < 0 {
+			fmt.Fprintln(stderr, "changes: --hook takes only --config, --project and --limit")
 			return 0
 		}
-		return changesHook(stdin, stdout, stderr, *cfgPath, *project, *limit, *hookCleanup)
+		return changesHook(stdin, stdout, stderr, *cfgPath, *project, *limit)
 	}
 	if (*since == "") == (*marker == "") {
 		fmt.Fprintln(stderr, "changes: exactly one of --since and --marker is required")
@@ -79,7 +88,7 @@ func changesCmd(stdin io.Reader, stdout, stderr io.Writer, args []string) int {
 	}
 
 	if res.Reset {
-		fmt.Fprintf(stderr, "changes: marker %s named a commit that no longer exists; reset it to %s\n", *marker, res.Head)
+		fmt.Fprintf(stderr, "changes: marker %s was empty or named a commit that no longer exists; reset it to %s\n", *marker, res.Head)
 	}
 
 	if *asJSON {
@@ -99,7 +108,7 @@ func changesCmd(stdin io.Reader, stdout, stderr io.Writer, args []string) int {
 // they did not even parse.
 func hookRequested(args []string) bool {
 	for _, a := range args {
-		if a == "--hook" || a == "-hook" || a == "--hook-cleanup" || a == "-hook-cleanup" {
+		if a == "--hook" || a == "-hook" {
 			return true
 		}
 	}

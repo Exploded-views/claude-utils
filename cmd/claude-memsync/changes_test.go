@@ -26,6 +26,12 @@ func changesRepo(t *testing.T) (cfgPath, base string) {
 	t.Setenv("GIT_AUTHOR_EMAIL", "t@example.com")
 	t.Setenv("GIT_COMMITTER_NAME", "t")
 	t.Setenv("GIT_COMMITTER_EMAIL", "t@example.com")
+	// Nothing here may reach the real ~/.claudesync or ~/.claude, and the
+	// hook's project default must not depend on the caller's environment.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("CLAUDE_PROJECT_DIR", "")
 
 	cfg := config.Defaults()
 	cfg.SyncDir = filepath.Join(t.TempDir(), "sync")
@@ -194,5 +200,26 @@ func TestChangesCmd_MarkerReset(t *testing.T) {
 	errb.Reset()
 	if code := changesCmd(nil, &out, &errb, []string{"--config", cfgPath, "--marker", marker}); code != 1 {
 		t.Errorf("exit %d, want 1", code)
+	}
+}
+
+// --update-marker pointed at a note must leave it alone and say so without
+// echoing it.
+func TestChangesCmd_UpdateMarkerNeverOverwritesANote(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	const note = "# My notes\nimportant-4c1d\n"
+	marker := filepath.Join(t.TempDir(), "MEMORY.md")
+	if err := os.WriteFile(marker, []byte(note), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	if code := changesCmd(nil, &out, &errb, []string{"--config", cfgPath, "--marker", marker, "--update-marker"}); code != 1 {
+		t.Errorf("exit %d, want 1", code)
+	}
+	if b, _ := os.ReadFile(marker); string(b) != note {
+		t.Errorf("note was overwritten: %q", b)
+	}
+	if out.Len() != 0 || strings.Contains(errb.String(), "important-4c1d") || !strings.Contains(errb.String(), "does not contain a commit id") {
+		t.Errorf("stdout %q stderr %q", out.String(), errb.String())
 	}
 }

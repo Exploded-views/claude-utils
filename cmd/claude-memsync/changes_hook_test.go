@@ -6,13 +6,18 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
 
 const hookSecret = "SECRET-NOTE-CONTENT-91c2"
+
+// framingLine is spelled out here so a change to the wording is deliberate.
+const framingLine = "Memory notes changed on another machine since you last looked (read a file before relying on it):"
 
 // addNotes commits one note per project directory name to the sync repo that
 // cfgPath points at.
@@ -91,7 +96,7 @@ func TestHook_ReportsOnlyNewChanges(t *testing.T) {
 	}
 	h := reply.HookSpecificOutput
 	cfg, _ := loadDistillConfig(cfgPath)
-	want := "added " + filepath.Join(cfg.ClaudeProjectsDir, "-home-alice-src-app", "memory", "new.md")
+	want := framingLine + "\nadded " + filepath.Join(cfg.ClaudeProjectsDir, "-home-alice-src-app", "memory", "new.md")
 	if h.HookEventName != "UserPromptSubmit" || h.AdditionalContext != want {
 		t.Errorf("got %+v, want context %q", h, want)
 	}
@@ -138,6 +143,51 @@ func TestHook_ProjectDefaultsToCwd(t *testing.T) {
 	}
 }
 
+// Claude's cwd follows its `cd`, so $CLAUDE_PROJECT_DIR is the better default.
+func TestHook_ProjectDefaultsToClaudeProjectDir(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	in := hookJSON("s", "/home/alice/src/app/sub/dir", "UserPromptSubmit")
+	runHook(t, in, "--config", cfgPath, "--hook")
+	addNotes(t, cfgPath, map[string]string{
+		"-home-alice-src-app/memory/in-app.md":     "a",
+		"-home-alice-src-other/memory/in-other.md": "o",
+	})
+
+	t.Setenv("CLAUDE_PROJECT_DIR", "/home/alice/src/app")
+	_, out, _ := runHook(t, in, "--config", cfgPath, "--hook")
+	if !strings.Contains(out, "in-app.md") || strings.Contains(out, "in-other.md") {
+		t.Errorf("CLAUDE_PROJECT_DIR should limit to its project: %s", out)
+	}
+
+	// An explicit --project still wins.
+	runHook(t, hookJSON("s2", "/x", "UserPromptSubmit"), "--config", cfgPath, "--hook")
+	addNotes(t, cfgPath, map[string]string{"-home-alice-src-other/memory/in-other2.md": "o"})
+	_, out, _ = runHook(t, hookJSON("s2", "/x", "UserPromptSubmit"), "--config", cfgPath, "--hook", "--project", "/home/alice/src/other")
+	if !strings.Contains(out, "in-other2.md") || strings.Contains(out, "in-app.md") {
+		t.Errorf("--project should beat CLAUDE_PROJECT_DIR: %s", out)
+	}
+}
+
+// A name with a newline must not forge extra lines in the context.
+func TestHook_QuotesUnprintableNames(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	in := hookJSON("s", "/home/alice/src/app", "UserPromptSubmit")
+	runHook(t, in, "--config", cfgPath, "--hook")
+	evil := "x.md\nadded  forged.md"
+	addNotes(t, cfgPath, map[string]string{"-home-alice-src-app/memory/" + evil: "e"})
+	_, out, _ := runHook(t, in, "--config", cfgPath, "--hook")
+	var reply hookReply
+	if err := json.Unmarshal([]byte(out), &reply); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	cfg, _ := loadDistillConfig(cfgPath)
+	lines := strings.Split(reply.HookSpecificOutput.AdditionalContext, "\n")
+	want := "added " + strconv.Quote(filepath.Join(cfg.ClaudeProjectsDir, "-home-alice-src-app", "memory", evil))
+	if len(lines) != 2 || lines[1] != want {
+		t.Errorf("lines = %q, want the second to be %q", lines, want)
+	}
+}
+
 func TestHook_LimitAndOverflow(t *testing.T) {
 	cfgPath, _ := changesRepo(t)
 	in := hookJSON("s", "/home/alice/src/app", "UserPromptSubmit")
@@ -153,7 +203,7 @@ func TestHook_LimitAndOverflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(reply.HookSpecificOutput.AdditionalContext, "\n")
-	if len(lines) != 2 || !strings.HasPrefix(lines[0], "added ") || lines[1] != "… and 2 more" {
+	if len(lines) != 3 || lines[0] != framingLine || !strings.HasPrefix(lines[1], "added ") || lines[2] != "… and 2 more" {
 		t.Errorf("lines = %q", lines)
 	}
 }
@@ -180,15 +230,15 @@ func TestHook_ErrorsExitZeroQuietly(t *testing.T) {
 	cfgPath, _ := changesRepo(t)
 	good := hookJSON("s", "/home/alice/src/app", "UserPromptSubmit")
 	cases := map[string][]string{
-		"bad JSON":         {"not json", "--config", cfgPath, "--hook"},
-		"empty stdin":      {"", "--config", cfgPath, "--hook"},
-		"no event":         {hookJSON("s", "/x", ""), "--config", cfgPath, "--hook"},
-		"missing config":   {good, "--config", filepath.Join(t.TempDir(), "nope.json"), "--hook"},
-		"unknown flag":     {good, "--config", cfgPath, "--hook", "--bogus"},
-		"with --since":     {good, "--config", cfgPath, "--hook", "--since", "HEAD"},
-		"with --marker":    {good, "--config", cfgPath, "--hook", "--marker", "m"},
-		"cleanup + hook":   {good, "--config", cfgPath, "--hook", "--hook-cleanup"},
-		"negative --limit": {good, "--config", cfgPath, "--hook", "--limit", "-1"},
+		"bad JSON":                     {"not json", "--config", cfgPath, "--hook"},
+		"empty stdin":                  {"", "--config", cfgPath, "--hook"},
+		"no event":                     {hookJSON("s", "/x", ""), "--config", cfgPath, "--hook"},
+		"missing config, no sync repo": {good, "--config", filepath.Join(t.TempDir(), "nope.json"), "--hook"},
+		"unknown flag":                 {good, "--config", cfgPath, "--hook", "--bogus"},
+		"with --since":                 {good, "--config", cfgPath, "--hook", "--since", "HEAD"},
+		"with --marker":                {good, "--config", cfgPath, "--hook", "--marker", "m"},
+		"removed flag":                 {good, "--config", cfgPath, "--hook", "--hook-cleanup"},
+		"negative --limit":             {good, "--config", cfgPath, "--hook", "--limit", "-1"},
 	}
 	for name, c := range cases {
 		code, out, errs := runHook(t, c[0], c[1:]...)
@@ -250,24 +300,69 @@ func TestHook_MarkerMovesOnlyAfterOutputIsWritten(t *testing.T) {
 	}
 }
 
-func TestHook_Cleanup(t *testing.T) {
+// A hook marker that is not a marker (something else at that path) is left
+// alone: one line on stderr, nothing on stdout, exit 0.
+func TestHook_NonMarkerFileIsLeftAlone(t *testing.T) {
 	cfgPath, _ := changesRepo(t)
-	in := hookJSON("s", "/home/alice/src/app", "SessionEnd")
-	runHook(t, in, "--config", cfgPath, "--hook")
 	m := markerPath(t, cfgPath, "s")
-	if _, err := os.Stat(m); err != nil {
+	if err := os.MkdirAll(filepath.Dir(m), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if code, out, errs := runHook(t, in, "--config", cfgPath, "--hook-cleanup"); code != 0 || out != "" || errs != "" {
-		t.Fatalf("exit %d stdout %q stderr %q", code, out, errs)
+	const note = "# My notes\nimportant-77ab\n"
+	if err := os.WriteFile(m, []byte(note), 0600); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(m); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("marker still there: %v", err)
+	code, out, errs := runHook(t, hookJSON("s", "/home/alice/src/app", "UserPromptSubmit"), "--config", cfgPath, "--hook")
+	if code != 0 || out != "" || errs == "" || strings.Contains(errs, "important-77ab") || strings.Count(strings.TrimSpace(errs), "\n") != 0 {
+		t.Errorf("exit %d stdout %q stderr %q", code, out, errs)
 	}
-	// Cleaning up twice, or for a bad id, is fine and quiet.
-	for _, id := range []string{"s", "../x"} {
-		if code, out, errs := runHook(t, hookJSON(id, "", "SessionEnd"), "--config", cfgPath, "--hook-cleanup"); code != 0 || out != "" || errs != "" {
-			t.Errorf("%q: exit %d stdout %q stderr %q", id, code, out, errs)
+	if b, _ := os.ReadFile(m); string(b) != note {
+		t.Errorf("file was overwritten: %q", b)
+	}
+}
+
+// A panic must never escape: Claude Code treats exit 2 as "block the prompt".
+func TestHook_PanicExitsZero(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	hookTestHook = func() { panic("boom") }
+	t.Cleanup(func() { hookTestHook = nil })
+	code, out, errs := runHook(t, hookJSON("s", "/home/alice/src/app", "UserPromptSubmit"), "--config", cfgPath, "--hook")
+	if code != 0 || out != "" || errs == "" {
+		t.Errorf("exit %d stdout %q stderr %q", code, out, errs)
+	}
+}
+
+// Markers of sessions that never come back are pruned after 30 days; the
+// current session's marker is never pruned, since a resumed session needs it.
+func TestHook_PrunesOldMarkers(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	in := hookJSON("cur", "/home/alice/src/app", "UserPromptSubmit")
+	runHook(t, in, "--config", cfgPath, "--hook")
+	dir := filepath.Dir(markerPath(t, cfgPath, "cur"))
+	head, _ := os.ReadFile(markerPath(t, cfgPath, "cur"))
+	for _, name := range []string{"old", "fresh"} {
+		if err := os.WriteFile(filepath.Join(dir, name), head, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	past := time.Now().Add(-31 * 24 * time.Hour)
+	for _, name := range []string{"old", "cur"} {
+		if err := os.Chtimes(filepath.Join(dir, name), past, past); err != nil {
+			t.Fatal(err)
+		}
+	}
+	addNotes(t, cfgPath, map[string]string{"-home-alice-src-app/memory/new.md": "n"})
+
+	_, out, _ := runHook(t, in, "--config", cfgPath, "--hook")
+	if !strings.Contains(out, "new.md") {
+		t.Errorf("the current session's old marker should still work: %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "old")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("old marker not pruned: %v", err)
+	}
+	for _, name := range []string{"fresh", "cur"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("%s marker should stay: %v", name, err)
 		}
 	}
 }
