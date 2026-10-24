@@ -228,6 +228,63 @@ func gone(p string) bool {
 	return errors.Is(err, fs.ErrNotExist)
 }
 
+// claimedKey is the key hash holds a claim on, whether or not its Claude folder
+// still exists; "" if it holds none.
+func (m *RemoteMap) claimedKey(hash string) string {
+	for k, h := range m.owner {
+		if h == hash {
+			return k
+		}
+	}
+	return ""
+}
+
+// Vanished lists the remote keys (sorted) whose holder's Claude project folder
+// is gone: still-held claims with a missing folder, and claims released since
+// the last ReleaseStale. The notes under such a key are intact in the sync repo
+// and must stay that way, whatever deletes the vanished folder's files looked
+// like to the watcher.
+func (m *RemoteMap) Vanished() []string {
+	seen := map[string]bool{}
+	for k, h := range m.owner {
+		if !isDir(filepath.Join(m.claudeRoot, h)) {
+			seen[k] = true
+		}
+	}
+	for k := range m.vanished {
+		seen[k] = true
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ReleaseStale drops every claim that staleClaim says is stale, and forgets
+// the keys Vanished reported: the caller has restored their notes.
+func (m *RemoteMap) ReleaseStale() {
+	for _, k := range sortedKeys(m.owner) {
+		h := m.owner[k]
+		if m.staleClaim(h, m.cache.Projects[h]) {
+			delete(m.owner, k)
+			m.release(h, k)
+		}
+	}
+	m.vanished = map[string]string{}
+	m.save()
+}
+
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // release drops a stale claim and its cache entry. The key is remembered in
 // vanished until the daemon has restored its notes (see Vanished).
 func (m *RemoteMap) release(hash, key string) {

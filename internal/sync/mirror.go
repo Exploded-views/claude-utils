@@ -159,6 +159,9 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 	}
 
 	for _, hash := range hashes {
+		if r.folderVanished(hash) {
+			continue // its notes are under remotes/ and are not touched here
+		}
 		claudeMem := filepath.Join(r.Claude, hash, "memory")
 		mirrorMem := r.MirrorMemDir(hash)
 		if err := os.MkdirAll(mirrorMem, 0700); err != nil {
@@ -298,8 +301,16 @@ func CopyToClaude(r Roots, hash, name string) error {
 }
 
 // RemoveFromMirror handles a Claude-side delete: remove the corresponding
-// mirror file so the next commit propagates the deletion.
+// mirror file so the next commit propagates the deletion. Except when the whole
+// Claude project folder of a remote-keyed folder is gone (an old clone's
+// folder was deleted): its files' remove events say nothing about the notes,
+// which are shared with other PCs. The flush restores them (see
+// RemoteMap.Vanished); `rm -rf memory/` alone, with the project folder still
+// there, is still a delete, as in path mode.
 func RemoveFromMirror(r Roots, hash, name string) error {
+	if r.folderVanished(hash) {
+		return nil // the folder is gone, not its notes
+	}
 	if err := r.JoinIfNeeded(hash); err != nil {
 		return err
 	}
@@ -323,6 +334,12 @@ func isBackupName(name string) bool {
 		}
 	}
 	return false
+}
+
+// folderVanished reports whether hash holds a remote key but its Claude project
+// folder no longer exists.
+func (r Roots) folderVanished(hash string) bool {
+	return r.Remote != nil && r.Remote.claimedKey(hash) != "" && !isDir(filepath.Join(r.Claude, hash))
 }
 
 // joinPending reports whether the folder has just gained its remote key (a new

@@ -1,12 +1,15 @@
 package sync
 
 import (
+	"context"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 
@@ -500,6 +503,151 @@ func TestRemoteSync_MixedFleetDeleteIsNotCarriedOverByALaterSwitch(t *testing.T)
 	b.sync()
 	if got := files(t, remoteDir(b.cfg.SyncDir, appKey)); !eq(got, "x.md", "y.md") {
 		t.Errorf("B's switch should push its local-only x.md and delete nothing: shared = %v", got)
+	}
+}
+
+// Deleting an old clone's Claude project folder while the daemon runs must not
+// delete the repo's shared notes for every PC; with the folder gone, a remove
+// event for one of its files is not a delete.
+func TestHandleEvent_RemovingAnOldCloneFolderDoesNotWipeSharedNotes(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	old := mkRepo(t, filepath.Join(a.home, "src", "old-app"), "git@github.com:acme/app.git")
+	a.write(old, "n1.md", "1\n")
+	a.write(old, "n2.md", "2\n")
+	a.sync()
+	roots, err := NewRoots(a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := &Loop{Cfg: a.cfg}
+	_ = os.RemoveAll(old)
+	folder := filepath.Join(a.claude, a.hash(old))
+	_ = os.RemoveAll(folder)
+	for _, n := range []string{"n1.md", "n2.md"} { // what inotify reports for the rm -rf
+		ev := fsnotify.Event{Name: filepath.Join(folder, "memory", n), Op: fsnotify.Remove}
+		if _, err := l.handleEvent(nil, roots, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := files(t, remoteDir(a.cfg.SyncDir, appKey)); !eq(got, "n1.md", "n2.md") {
+		t.Errorf("shared notes after removing an old clone's folder = %v", got)
+	}
+}
+
+// The same through the real loop: rm -rf of a remote-keyed folder's Claude
+// project folder, with whatever order the watcher reports it in, leaves the
+// shared notes in the working tree and in what the loop commits and pushes.
+// (rm -rf of just memory/, with the project folder still there, stays a
+// delete: see TestRemoteSync_DeleteAndRmRfAreTheSameAsInPathMode.)
+func TestLoopRun_RemovingAFolderWithTheLoopRunningKeepsTheSharedNotes(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	a.cfg.DebounceMs = 150
+	a.cfg.PullIntervalSec = 3600
+	old := mkRepo(t, filepath.Join(a.home, "src", "old-app"), "git@github.com:acme/app.git")
+	a.write(old, "n1.md", "1\n")
+	a.write(old, "n2.md", "2\n")
+	a.write(old, "n3.md", "3\n")
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	if out, err := exec.Command("git", "init", "-q", "--bare", "-b", "main", origin).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+	sr := gitwt.New(a.cfg.SyncDir)
+	if err := sr.Init("main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sr.SetRemote(origin); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.cfg.SyncDir, ".gitignore"), []byte(".state/\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	flushed := make(chan error, 64)
+	l := &Loop{Cfg: a.cfg, OnFlush: func(_ bool, err error) { flushed <- err }}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- l.Run(ctx) }()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	wait := func(what string) {
+		t.Helper()
+		select {
+		case err := <-flushed:
+			if err != nil {
+				t.Fatalf("%s: flush: %v", what, err)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatalf("%s: no flush", what)
+		}
+	}
+	wait("initial flush")
+	shared := remoteDir(a.cfg.SyncDir, appKey)
+	if !eq(files(t, shared), "n1.md", "n2.md", "n3.md") {
+		t.Fatalf("setup: shared = %v", files(t, shared))
+	}
+	time.Sleep(300 * time.Millisecond) // let the watches settle
+
+	if err := os.RemoveAll(old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(a.claude, a.hash(old))); err != nil {
+		t.Fatal(err)
+	}
+	wait("after rm -rf")
+	time.Sleep(500 * time.Millisecond) // a late event may cause one more flush
+	for len(flushed) > 0 {
+		<-flushed
+	}
+
+	if got := files(t, shared); !eq(got, "n1.md", "n2.md", "n3.md") {
+		t.Errorf("shared notes in the working tree after rm -rf = %v", got)
+	}
+	tree, err := sr.Run("ls-tree", "-r", "--name-only", "HEAD", "--", "remotes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"n1.md", "n2.md", "n3.md"} {
+		if !strings.Contains(tree, "remotes/"+appKey+"/memory/"+n) {
+			t.Errorf("%s is no longer in the committed notes: %q", n, tree)
+		}
+	}
+	if out, _ := sr.Run("status", "--porcelain", "--", "remotes"); strings.TrimSpace(out) != "" {
+		t.Errorf("remotes/ should match HEAD, status: %q", out)
+	}
+	// With the folder and the checkout both gone the claim is released too.
+	if c, err := LoadProjectCache(a.cfg.SyncDir); err != nil {
+		t.Fatal(err)
+	} else if e, ok := c.Projects[a.hash(old)]; ok {
+		t.Errorf("the vanished folder still holds its claim: %+v", e)
+	}
+}
+
+// A remote-keyed folder that vanished leaves the old projects/<hash> copy in
+// the repo alone too: that copy is no longer this PC's to touch.
+func TestRemoteSync_VanishedFolderLeavesTheSupersededCopyAlone(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	old := mkRepo(t, filepath.Join(a.home, "src", "old-app"), "git@github.com:acme/app.git")
+	a.write(old, "n1.md", "1\n")
+	a.sync()
+	if err := os.MkdirAll(a.pathDir(old), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.pathDir(old), "n1.md"), []byte("1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(a.claude, a.hash(old))); err != nil {
+		t.Fatal(err)
+	}
+	a.sync()
+	if !eq(files(t, a.pathDir(old)), "n1.md") || !eq(files(t, remoteDir(a.cfg.SyncDir, appKey)), "n1.md") {
+		t.Errorf("a vanished folder's repo copies changed: old %v, shared %v",
+			files(t, a.pathDir(old)), files(t, remoteDir(a.cfg.SyncDir, appKey)))
 	}
 }
 
