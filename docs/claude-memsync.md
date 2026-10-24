@@ -179,6 +179,8 @@ commits.
 - `~/.claudesync/config.json` — per-PC (paths embed your machine layout)
 - `~/.claudesync/.state/manifest.json` — per-PC (delete-detection state)
 - `~/.claudesync/.state/projects.json` — per-PC (remote mode's folder cache)
+- `~/.claudesync/.state/mode` — per-PC (the `projectKey` mode the sync dir was
+  set up for)
 - `~/.claudesync/daemon.pid` — runtime state
 - `~/.claudesync/distilled/DISTILLED.md` — derived index, regenerated per-PC
   (the distilled `<slug>.md` entry files themselves **are** synced)
@@ -193,9 +195,9 @@ which is the project's absolute path with every non-alphanumeric character
 replaced by `-`. `/home/alice/src/app` on one PC and `/home/bob/code/app` on
 another are different projects and never share memory.
 
-Run `claude-memsync init --remote <url> --project-key remote`, or set
-`"projectKey": "remote"` in `~/.claudesync/config.json` (per PC, then restart
-the daemon), to identify a project by its git `origin` remote instead:
+Run `claude-memsync init --remote <url> --project-key remote` to identify a
+project by its git `origin` remote instead. The mode is chosen when the sync
+dir is created and stays (see [Switching modes](#switching-modes)):
 
 ```json
 { "projectKey": "remote" }
@@ -203,7 +205,7 @@ the daemon), to identify a project by its git `origin` remote instead:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `projectKey` | `"path"` | `"path"`: today's behavior. `"remote"`: a project whose directory is a git checkout with an `origin` remote is stored by remote. Any other value is rejected at startup. |
+| `projectKey` | `"path"` | `"path"`: today's behavior. `"remote"`: a project whose directory is a git checkout with an `origin` remote is stored by remote. Any other value is rejected at startup. It must match the mode the sync dir was initialised with, see [Switching modes](#switching-modes). |
 
 ### Repo layout
 
@@ -322,11 +324,9 @@ edited by hand:
   for moving a claim (see
   [Worktrees and several clones](#worktrees-and-several-clones)).
 - `candidates` is written by the daemon and informational.
-- `leftAt` is written by the daemon: for each repo directory the folder used to
-  be stored in, the sync repo's HEAD commit when it left. See
-  [Changing a folder's key](#changing-a-folders-key).
-- `joinPending` is written by the daemon while a folder that gained a key waits
-  for its join. See [Joining a key](#joining-a-key).
+- `joinPending` and `resetJoin` are written by the daemon while a folder that
+  gained or changed its key waits for its join, and for a reset-join when the
+  folder had another key before. See [Joining a key](#joining-a-key).
 
 **Stop the daemon before editing `projects.json`.** The cache is read at
 startup, and the daemon rewrites the file whenever resolution changes, so an
@@ -392,9 +392,10 @@ the new clone in `.state/projects.json`, and start it again.
 
 ### Joining a key
 
-A folder **gains** a key when it claims it for the first time (a new clone, or a
-PC switching to `remote`), when its key changes, or when a claim is moved to it
-as above. Before the daemon acts on anything for that folder (a watcher event, a
+A folder **gains** a key when it claims it for the first time (a new clone), or
+when a claim is moved to it as above. (A folder whose key changes from one
+remote key to another is reset instead, see
+[Changing a folder's key](#changing-a-folders-key).) Before the daemon acts on anything for that folder (a watcher event, a
 copy to the repo, a pulled change), it **joins** the folder to the notes already
 stored under the key, once. Otherwise a fresh clone's first `MEMORY.md` would
 overwrite the shared index, and a moved claim would let the new holder's stale
@@ -419,96 +420,77 @@ reconcile of it. The daemon clears the flag; leave it alone.
 
 ### Changing a folder's key
 
-When a folder leaves a repo directory (its key changes from X to Y, including
-from a remote key to the path key) the daemon logs the change with the folder
-name and both keys, and records in `projects.json` the sync repo's HEAD at that
-moment (`leftAt`, one per directory it left). If the folder later uses that
-directory again, a file that only the repo has is imported into Claude **only if
-`git diff leftAt..HEAD` shows it changed since** the folder left. Anything else
-is indistinguishable from a note that was deleted on this PC while the folder
-was elsewhere (the old copy is not updated while a folder is stored under
-another key), so importing it would bring the delete back. This holds in both
-directions: a folder that comes back to a `remotes/<key>/` directory, and a PC
-that is switched back from `remote` to `path` (its folders' old
-`projects/<hash>/` copies hold the notes as they were when the folder left, so
-a note deleted in `remote` mode does not come back). A folder that has no
-`leftAt` entry, which is every folder of a PC that never used `remote`, imports
-whatever it finds, as it always did.
+When a folder that holds a remote key gets another one (the repo's `origin`
+changed, say after a rename or a transfer, or the key was edited by hand), the
+daemon logs the change with the folder name and both keys, and **resets** the
+folder to the new key's notes instead of joining it. The folder's own notes may
+have been deleted, or may be stale, in ways nothing can tell from a note that is
+new, so none of them is pushed:
 
-Three details:
+- A file only the repo has (under the new key) is copied into Claude.
+- A file that differs, `MEMORY.md` included, takes the shared version in Claude
+  and the repo; the folder's own copy is saved next to the shared one as
+  `<name>.local-before-join-<random>`.
+- A file only the folder has is **not** pushed. It is moved out of the Claude
+  folder into a `<name>.local-before-join-<random>` backup next to the shared
+  notes, so it cannot be imported again either.
+- The daemon logs one line per reset folder, with the number of local files set
+  aside.
 
-- If the sync repo had no commit when the folder left, the anchor is empty and
-  everything in the directory counts as new: nothing could have been deleted
-  before the first commit.
-- When git cannot say what changed (the anchor commit is gone, say because it
-  was garbage collected, or git fails) the anchor is unknown: nothing that only
-  the repo has is imported for that directory, and the daemon logs why, once.
-  Remove the folder's `leftAt` entry in `.state/projects.json` (daemon stopped)
-  to import them anyway.
-- The entry for a `remotes/<key>/` directory is dropped when the folder has
-  re-joined that key, unless the join held back a file that only the repo had;
-  then it stays, so that file is not mistaken for a note from another PC later.
-  The entry for a `projects/<hash>/` directory stays until you remove it: it
-  costs one `git diff` per pass and only ever holds back unchanged leftovers.
+Nothing is lost: it all stays on this PC as local backups, which you can look at
+and copy back by hand. The old key's directory in the repo is not touched and is
+never removed by the daemon. Because the reset takes the shared notes as they
+are, update `origin` on every PC that shares the project at about the same time
+and let them sync; a PC that has not updated yet stays on `remotes/<old key>/`
+and sees none of the others' changes.
 
-The same resurrection happens when a repo's **origin URL changes** (a rename or
-a transfer) and the PCs pick the change up at different times. The key is
-derived from the URL, so a PC that has updated its `origin` moves to the new
-`remotes/<new key>/` while one that has not stays on `remotes/<old key>/`, and
-they see none of each other's changes. A note deleted on one of them is
-deleted in its directory only; when the other updates its `origin` and joins
-the new key, the join cannot tell its copy from a new note and pushes it back.
-So update `origin` on every PC that shares the project at about the same time,
-let them sync, and delete no notes in between. The old `remotes/<old key>/`
-directory is never removed by the daemon.
+A folder going from the path key to a remote key, or a new claim, is not a reset
+(it had no remote key before) and joins the ordinary way.
 
-The daemon never removes such a leftover from the repo. A `projects/<hash>/`
-copy may be the live notes of a PC that is still on `path`, and removing it
-would delete them there. Clean up old copies by hand once every PC has switched.
+The daemon never removes an old `projects/<hash>/` copy from the repo. It may be
+the live notes of another sync dir that is still in `path` mode, and removing it
+would delete them there. Clean up old copies by hand.
 
 `*.from-remote-*` backups (made when a file differs between a PC and the repo
 copy) and `*.local-before-join-*` backups (made by a join) exist only on the PC
 that produced them, are never synced, and are never cleaned up by the daemon;
 delete them by hand once you've looked. They are kept out of git by the sync
-repo's `.git/info/exclude`, which is per-PC and never committed: the daemon
-adds the patterns to it at every start, and `claude-memsync init` does too. The
-tracked `.gitignore` lists them as well, but a sync dir made before
+repo's `.git/info/exclude`, which is per-PC and never committed: in `remote`
+mode `init` and the daemon add the patterns to it (at every start), but only
+when the sync dir is itself the top of a git work tree, never to the file of a
+repo that merely encloses it. If that file already negates a pattern (say
+`!*.from-remote-*`) the pattern is not appended after it; the daemon logs that
+and carries on. The tracked `.gitignore` lists them as well, but a sync dir made before
 `*.local-before-join-*` existed has an older one, so the daemon does not rely on
 it. As a second line of defence a file with a backup name is never copied from
 the repo into a Claude folder, and reconcile and joins skip such names in the
 Claude folder too, so a backup that an older client pushed does not spread.
 
-### Switching an existing setup
+### Switching modes
 
-There is **no automatic migration**. When a PC switches to `remote`, each
-remote-keyed folder's notes are copied from the local folder (the source of
-truth) into `remotes/...`. The old `projects/<hash>/` copies stay in the repo and
-are no longer updated by that PC. On startup the daemon logs one line per
-remote-keyed folder whose old `projects/<hash>/memory` copy is still in the
-repo, saying that copy is superseded. Remove the old `projects/` copies (with
-`git rm`) only after **every** PC has switched. Switch all PCs that share a
-repo: a PC left on `path` keeps writing to `projects/` and won't see the others'
-memory.
+A sync dir is set up for one mode, `path` or `remote`, and keeps it. `init`
+records the mode in `~/.claudesync/.state/mode` (per-PC, written atomically). The
+daemon refuses to start if `projectKey` in `config.json` differs from it, and so
+does `init --force` into the same sync dir with another `--project-key`. The
+error says what to do. A sync dir made by an older version has no record and
+counts as `path`, so starting it in `remote` is refused too.
+
+**Switching means `init` into a fresh sync dir.** There is no migration: run
+`claude-memsync init --remote <url> --project-key remote --sync-dir <new dir>`
+on every PC that shares the project, and stop using the old sync dir. A remote-
+keyed folder's notes in the new sync dir are filled from the local Claude folder
+(the source of truth) and from what other PCs have pushed under `remotes/`. The
+old `projects/<hash>/` copies stay in the repo and are not updated by a
+remote-mode PC; the daemon logs one line per remote-keyed folder whose old
+`projects/<hash>/memory` copy is still in the repo. A PC left in `path` mode
+keeps writing to `projects/` and won't see the notes of the others, so switch
+every PC that shares a repo and delete no notes until all of them have.
 
 A fresh clone on a new PC is joined to the shared notes (see
 [Joining a key](#joining-a-key)): once Claude Code has created the project
 folder (opening the repo does that), the next reconcile, or the first watcher
 event for it if that comes first, copies the shared notes into it, with or
 without a `memory/` directory yet, and merges what the folder already had.
-
-**Switch every PC that shares a project at the same time, and delete no notes
-until all of them have switched.** While some PCs are on `path` and others on
-`remote`, they write to different places (`projects/<hash>/` and
-`remotes/<key>/`) and see none of each other's changes. A delete is the worst
-case. A `remote` PC's delete removes the file from `remotes/<key>/` only; a PC
-still on `path` keeps the note in its Claude folder, and when it switches it
-joins and pushes that note back. A join cannot tell it from a new note, because
-it never infers a delete from the manifest. The reverse holds too: a note
-deleted on a `path` PC stays in the `remotes/` copy and is copied back into the
-folders of PCs that switch later. The old `projects/<hash>/` copies are
-likewise never removed by the daemon, since a PC that has not switched may be
-using them. So: switch all PCs first, let them sync, and only then delete notes
-or the old `projects/` copies.
 
 ## Deletes
 
@@ -540,8 +522,9 @@ This means:
   (`~/.claude/projects/<hash>`, say because the clone is gone) is not a delete
   of its notes, which other PCs share. The files' remove events are ignored.
   While its claim is still held (the checkout is there), the daemon restores
-  `remotes/<key>/memory` from HEAD before the next commit, once per
-  disappearance. When the claim is released (nothing of its holder is left),
+  `remotes/<key>/memory` from HEAD before the next commit, once per run of the
+  daemon (a folder that comes back and goes away again is a new disappearance).
+  When the claim is released (nothing of its holder is left),
   the restore happens at that moment, before any other clone can claim the key
   in the same pass, and only if no live folder holds the key: a new holder's
   join must not be undone by a restore from HEAD. (Path mode is unchanged:
@@ -595,7 +578,7 @@ If that works without prompting, the daemon will too.
 - **Path consistency required (by default)**: Claude derives the per-project
   memory directory name by escaping the project's absolute path. PCs that open
   the same repo at different paths (e.g. `C:\src\foo` vs. `D:\dev\foo`) will see
-  them as different projects. Set `projectKey` to `remote` to match git
+  them as different projects. Initialise with `--project-key remote` to match git
   checkouts by their `origin` remote instead; see
   [Matching projects by git remote](#matching-projects-by-git-remote-instead-of-path).
 - **No live conflict UI**: when the merge driver emits actual conflict markers
