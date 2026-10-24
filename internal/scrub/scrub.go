@@ -43,7 +43,7 @@ var builtin = []rule{
 	// Hyphens are only allowed after the sk-proj-, sk-svcacct- and sk-admin-
 	// prefixes, so kebab-case prose that happens to start with "sk-" is not
 	// flagged.
-	{name: "openai-api-key", re: regexp.MustCompile(`\bsk-(?:(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}|[A-Za-z0-9]{20,})`)},
+	{name: "openai-api-key", re: regexp.MustCompile(tokenStart + `sk-(?:(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}|[A-Za-z0-9]{20,})`)},
 	{name: "stripe-key", re: regexp.MustCompile(tokenStart + `[sr]k_live_[A-Za-z0-9]{16,}`)},
 	{name: "google-api-key", re: regexp.MustCompile(tokenStart + `AIza[0-9A-Za-z_-]{35}`)},
 	{name: "gitlab-token", re: regexp.MustCompile(tokenStart + `glpat-[A-Za-z0-9_-]{20,}`)},

@@ -290,7 +290,7 @@ Built-in rules:
 | `private-key` | a `-----BEGIN ... PRIVATE KEY-----` header |
 | `github-token` | `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` tokens and `github_pat_` tokens, also directly after `_` (for example `MY_TOKEN_ghp_...`) |
 | `anthropic-api-key` | `sk-ant-...`, also directly after `_` |
-| `openai-api-key` | `sk-...`, `sk-proj-...`, `sk-svcacct-...` and `sk-admin-...` |
+| `openai-api-key` | `sk-...`, `sk-proj-...`, `sk-svcacct-...` and `sk-admin-...`, also directly after `_` |
 | `stripe-key` | `sk_live_...` and `rk_live_...` (live keys only; `sk_test_` is not flagged) |
 | `google-api-key` | `AIza` followed by 35 characters |
 | `gitlab-token` | `glpat-...` personal access tokens |

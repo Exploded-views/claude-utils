@@ -386,3 +386,28 @@ func TestScan_CredentialAssignmentPlaceholders(t *testing.T) {
 		}
 	}
 }
+
+// The openai rule uses the same token boundary as the other vendor rules: a
+// key directly after "_" is still a key.
+func TestScan_OpenAIKeyAfterUnderscore(t *testing.T) {
+	s := New(nil)
+	for name, text := range map[string]string{
+		"env var":      "MY_KEY_" + rep("sk-", 32, "a"),
+		"project key":  "OPENAI_KEY_" + rep("sk-proj-", 30, "a"),
+		"after dash":   "x-" + rep("sk-", 32, "a"),
+		"line start":   rep("sk-", 32, "a"),
+		"after equals": "KEY=" + rep("sk-", 32, "a"),
+	} {
+		if !hasRule(s, text, "openai-api-key") {
+			t.Errorf("%s: not flagged", name)
+		}
+	}
+	for name, text := range map[string]string{
+		"inside a word": rep("task-", 32, "a"),
+		"too short":     rep("sk-", 10, "a"),
+	} {
+		if hasRule(s, text, "openai-api-key") {
+			t.Errorf("%s: wrongly flagged", name)
+		}
+	}
+}
