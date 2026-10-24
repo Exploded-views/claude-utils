@@ -190,8 +190,7 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 					// only (with base "" that is a conflict, and the merge text
 					// then holds conflict markers): the Claude copy wins and the
 					// mirror copy is kept beside it.
-					backup := fmt.Sprintf("%s.from-remote-%s", mp, randSuffix())
-					if err := writeAtomic(backup, mBytes); err != nil {
+					if err := writeBackup(mp, mBytes); err != nil {
 						return rep, err
 					}
 					if err := writeAtomic(mp, cBytes); err != nil {
@@ -204,6 +203,24 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 		}
 	}
 	return rep, nil
+}
+
+// writeBackup keeps content as mp.from-remote-<id>, unless a file of that name
+// already holds the same bytes: the same incoming copy is then kept once, however
+// many times it is set aside.
+func writeBackup(mp string, content []byte) error {
+	prefix := filepath.Base(mp) + ".from-remote-"
+	if entries, err := os.ReadDir(filepath.Dir(mp)); err == nil {
+		for _, e := range entries {
+			if !strings.HasPrefix(e.Name(), prefix) {
+				continue
+			}
+			if b, err := os.ReadFile(filepath.Join(filepath.Dir(mp), e.Name())); err == nil && bytes.Equal(b, content) {
+				return nil
+			}
+		}
+	}
+	return writeAtomic(fmt.Sprintf("%s.from-remote-%s", mp, randSuffix()), content)
 }
 
 // CopyToMirror copies a single Claude-side file into the mirror, creating

@@ -2,7 +2,6 @@ package sync
 
 import (
 	"bytes"
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -62,9 +61,15 @@ func recordHead(repo *gitwt.Repo) error {
 //   - Otherwise propagateChanges(record, HEAD) runs as for a pull, whether HEAD
 //     descends from the record or not (history rewritten by a rebase done by
 //     hand; that is logged). A path that is dirty in the work-tree (held back,
-//     parked) is skipped, and so is one whose Claude copy no longer equals the
-//     record's version: it holds a change of yours that was never committed.
-//     The incoming version of that one is kept as .from-remote-* in the mirror.
+//     parked) is skipped without a backup: autostash already merged it with
+//     the incoming change, or the park did. A path whose Claude copy no longer
+//     equals the record's version is skipped too: it holds a change of yours
+//     that was never committed. The incoming version of that one is kept as
+//     .from-remote-* in the mirror, written once the propagate and the record
+//     write have succeeded (so a catch-up that fails is retried without
+//     leaving another backup), and not at all if the same bytes are already
+//     kept there. A Claude copy that already equals the version at HEAD (a
+//     crash before the record write) is not a change of yours.
 func (l *Loop) catchUp(repo *gitwt.Repo, roots Roots) error {
 	head := headRev(repo)
 	if head == "" {
@@ -91,39 +96,55 @@ func (l *Loop) catchUp(repo *gitwt.Repo, roots Roots) error {
 	if !descends {
 		log.Println("sync repo history was rewritten outside the daemon; propagating the difference for files you have not changed since")
 	}
-	skip, kept, err := catchUpSkips(repo, roots, rec, head)
+	skip, keep, err := catchUpSkips(repo, roots, rec, head)
 	if err != nil {
 		return err
 	}
-	if kept > 0 {
-		// Count only: a path may itself match the denylist.
-		log.Printf("catch-up: %d file(s) changed in ~/.claude since the last sync; incoming copies kept as .from-remote-*", kept)
-	}
-	if err := propagate(repo, roots, rec, head, skip, newPathGuard(l.Cfg)); err != nil {
+	g := newPathGuard(l.Cfg)
+	if err := propagate(repo, roots, rec, head, skip, g); err != nil {
 		return err
 	}
-	return recordHead(repo)
+	if err := recordHead(repo); err != nil {
+		return err
+	}
+	for _, k := range keep {
+		if err := writeBackup(k.mirror, k.incoming); err != nil {
+			return g.PathErr("write backup", k.rel, err)
+		}
+	}
+	if len(keep) > 0 {
+		// Count only: a path may itself match the denylist.
+		log.Printf("catch-up: %d file(s) changed in ~/.claude since the last sync; incoming copies kept as .from-remote-*", len(keep))
+	}
+	return nil
+}
+
+// keptCopy is an incoming version that catchUp keeps beside the mirror file.
+type keptCopy struct {
+	rel      string // sync-repo path
+	mirror   string // the mirror file; the backup is named after it
+	incoming []byte
 }
 
 // catchUpSkips is the set of paths in rec..head that catchUp must not copy
 // into the Claude tree: those dirty in the work-tree, and those whose Claude
-// copy differs from the version at rec. For the latter the version at head is
-// written beside the mirror file as .from-remote-* (nothing, for a deletion).
-// It returns how many were kept.
-func catchUpSkips(repo *gitwt.Repo, roots Roots, rec, head string) (map[string]bool, int, error) {
+// copy differs from the version at rec (and from the one at head). For the
+// latter it also returns the version at head, to be written beside the mirror
+// file as .from-remote-* (nothing, for a deletion).
+func catchUpSkips(repo *gitwt.Repo, roots Roots, rec, head string) (map[string]bool, []keptCopy, error) {
 	skip := map[string]bool{}
 	dirty, err := repo.DirtyPaths("")
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, err
 	}
 	for _, p := range dirty {
 		skip[p] = true
 	}
 	out, err := repo.Run("diff", "--name-status", "-z", "--no-renames", rec, head)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, err
 	}
-	kept := 0
+	var keep []keptCopy
 	fields := strings.Split(out, "\x00")
 	for i := 0; i+1 < len(fields); i += 2 {
 		status, p := fields[i], fields[i+1]
@@ -131,23 +152,22 @@ func catchUpSkips(repo *gitwt.Repo, roots Roots, rec, head string) (map[string]b
 		if !ok || skip[p] || status == "" {
 			continue
 		}
-		recBytes, recOK := blobAt(repo, rec, p)
 		curOK, cur := readIfExists(filepath.Join(roots.Claude, hash, "memory", name))
+		recBytes, recOK := blobAt(repo, rec, p)
 		if curOK == recOK && bytes.Equal(cur, recBytes) {
 			continue
+		}
+		incoming, headOK := blobAt(repo, head, p)
+		if curOK == headOK && bytes.Equal(cur, incoming) {
+			continue // already there: the record write was missed
 		}
 		skip[p] = true
 		if status[0] == 'D' {
 			continue
 		}
-		incoming, _ := blobAt(repo, head, p)
-		backup := fmt.Sprintf("%s.from-remote-%s", filepath.Join(roots.Mirror, hash, "memory", name), randSuffix())
-		if err := writeAtomic(backup, incoming); err != nil {
-			return nil, kept, err
-		}
-		kept++
+		keep = append(keep, keptCopy{p, filepath.Join(roots.Mirror, hash, "memory", name), incoming})
 	}
-	return skip, kept, nil
+	return skip, keep, nil
 }
 
 // blobAt is the content of p at rev; false if it does not exist there.

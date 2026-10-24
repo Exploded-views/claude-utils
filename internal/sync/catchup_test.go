@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -278,6 +279,102 @@ func TestCatchUp_ChangedClaudeCopyKeptAndBackedUp(t *testing.T) {
 	}
 	if b := f.backups("mine.md"); len(b) != 1 {
 		t.Errorf("want one backup of the incoming mine.md, got %v", b)
+	}
+}
+
+// A kill after the daemon's own commit (or after a propagate) but before the
+// deferred recordHead leaves the record behind HEAD. On restart the Claude
+// copies differ from the record's version because they ARE the new version:
+// catch-up carries on with no skip and no .from-remote-* backup, and does not
+// log "changed in ~/.claude since the last sync".
+func TestCatchUp_CrashBeforeRecordWriteMakesNoBackup(t *testing.T) {
+	f := newPullFixture(t, map[string]string{"a.md": "a\n", "b.md": "b\n"})
+	logs := captureLog(t)
+	f.loop.pullTick(f.repo, f.roots)
+	if f.syncedHead() != f.head() {
+		t.Fatal("record not set")
+	}
+	// Daemon commits a local edit, then dies before the record write.
+	f.editLocal("a.md", "a\nlocal\n")
+	mustGit(t, f.repo, "add", "-A")
+	mustGit(t, f.repo, "commit", "-q", "-m", "auto")
+	// ...or pulls a peer edit and propagates it, then dies.
+	f.peerPush("b.md", "b\npeer\n")
+	mustGit(t, f.repo, "pull", "-q", "--rebase", "origin", "main")
+	if err := CopyToClaude(f.roots, "p1", "b.md"); err != nil {
+		t.Fatal(err)
+	}
+
+	logs.Reset()
+	f.loop.startCycle(f.repo, f.roots)
+	if b := f.backups("a.md"); len(b) != 0 {
+		t.Errorf("spurious backup of own committed a.md: %v", b)
+	}
+	if b := f.backups("b.md"); len(b) != 0 {
+		t.Errorf("spurious backup of already-propagated b.md: %v", b)
+	}
+	if strings.Contains(logs.String(), "changed in ~/.claude since the last sync") {
+		t.Errorf("misleading log: %s", logs)
+	}
+}
+
+
+// The backups are written once the propagate and the record write succeeded: a
+// catch-up that fails halfway is retried whole, and must not leave one more
+// backup of the same incoming bytes each time.
+func TestCatchUp_BackupsWaitForPropagateAndRecord(t *testing.T) {
+	f := newPullFixture(t, map[string]string{"mine.md": "m\n", "other.md": "o\n"})
+	captureLog(t)
+	f.loop.pullTick(f.repo, f.roots)
+	f.peerPush("mine.md", "m\npeer\n")
+	f.peerPush("other.md", "o\npeer edit\n")
+	mustGit(t, f.repo, "pull", "-q", "--rebase", "origin", "main")
+	writeMem(t, f.roots.Claude, "p1", "mine.md", "m\nuser edit\n")
+
+	orig := propagate
+	t.Cleanup(func() { propagate = orig })
+	propagate = func(*gitwt.Repo, Roots, string, string, map[string]bool, *pathGuard) error {
+		return errors.New("boom")
+	}
+	for i := 0; i < 2; i++ {
+		if err := f.loop.catchUp(f.repo, f.roots); err == nil {
+			t.Fatal("want the propagate error")
+		}
+	}
+	if b := f.backups("mine.md"); len(b) != 0 {
+		t.Errorf("backup written before the propagate succeeded: %v", b)
+	}
+	propagate = orig
+	for i := 0; i < 2; i++ {
+		f.loop.catchUp(f.repo, f.roots)
+	}
+	if b := f.backups("mine.md"); len(b) != 1 {
+		t.Errorf("want one backup after the retry, got %v", b)
+	}
+	if f.syncedHead() != f.head() {
+		t.Error("record not advanced")
+	}
+}
+
+// A file catch-up skipped is backed up once: the Reconcile that follows in the
+// same cycle sees the mirror (the incoming copy) differ from the Claude copy
+// and would back it up again.
+func TestCatchUp_FollowingReconcileWritesNoDuplicateBackup(t *testing.T) {
+	f := newPullFixture(t, map[string]string{"mine.md": "m\n", "other.md": "o\n"})
+	captureLog(t)
+	f.loop.pullTick(f.repo, f.roots)
+	f.peerPush("mine.md", "m\npeer\n")
+	f.peerPush("other.md", "o\npeer edit\n")
+	mustGit(t, f.repo, "pull", "-q", "--rebase", "origin", "main")
+	writeMem(t, f.roots.Claude, "p1", "mine.md", "m\nuser edit\n")
+
+	f.loop.pullTick(f.repo, f.roots)
+	f.loop.pullTick(f.repo, f.roots)
+	if b := f.backups("mine.md"); len(b) != 1 {
+		t.Errorf("want one backup of the incoming mine.md, got %v", b)
+	}
+	if got, _ := f.claudeCopy("mine.md"); got != "m\nuser edit\n" {
+		t.Errorf("user's edit lost: %q", got)
 	}
 }
 
