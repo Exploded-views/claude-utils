@@ -446,3 +446,104 @@ func TestPushWatchBlocksOnMidRunInsteadOf(t *testing.T) {
 		t.Fatal("an insteadOf rule added mid-run must block the next push")
 	}
 }
+
+func TestPushWatchWithoutTokenStillRunsLocalChecks(t *testing.T) {
+	cfg := guardCfg(t, privateH(), false)
+	allowed := pushWatch(cfg, func(string, ...any) {})
+	if allowed == nil {
+		t.Fatal("private-only without a token must still install the local precheck")
+	}
+	if !allowed() {
+		t.Fatal("clean state must allow")
+	}
+	g := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(g, []byte("[url \"https://example.invalid/x/\"]\n\tinsteadOf = git@gh-mem-personal:Org/\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", g)
+	if allowed() {
+		t.Fatal("insteadOf added mid-run must block even without a token")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_SSH_COMMAND", "ssh -F /x")
+	if allowed() {
+		t.Fatal("ssh override must block even without a token")
+	}
+	off := guardCfg(t, privateH(), false)
+	off.PrivateOnly = false
+	if pushWatch(off, func(string, ...any) {}) != nil {
+		t.Error("off means no hook")
+	}
+}
+
+func TestProgramStartWiresPushAllowed(t *testing.T) {
+	cfg := guardCfg(t, privateH(), true)
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	p := &program{configPath: cfg.Path()}
+	if err := p.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Stop(nil)
+	if p.loop == nil || p.loop.PushAllowed == nil {
+		t.Fatal("Start must give the loop a PushAllowed hook")
+	}
+	legacy := guardCfg(t, privateH(), false)
+	legacy.PrivateOnly = false
+	if err := config.Save(legacy); err != nil {
+		t.Fatal(err)
+	}
+	q := &program{configPath: legacy.Path()}
+	if err := q.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	defer q.Stop(nil)
+	if q.loop.PushAllowed != nil {
+		t.Error("off must leave the loop unchanged")
+	}
+}
+
+// Wiring: a private repo but an insteadOf rule sending pushes elsewhere; init must push nothing.
+func TestRunInitInsteadOfPushesNothing(t *testing.T) {
+	root := t.TempDir()
+	bare := filepath.Join(root, "origin.git")
+	if out, err := exec.Command("git", "init", "-q", "--bare", "-b", "main", bare).CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+	cfg := guardCfg(t, privateH(), true)
+	remote := "git@gh-mem-personal:Org/mem-personal.git"
+	g := filepath.Join(root, "gitconfig")
+	if err := os.WriteFile(g, []byte("[url \""+bare+"\"]\n\tinsteadOf = "+remote+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", g)
+	claude := filepath.Join(root, "claude")
+	_ = os.MkdirAll(filepath.Join(claude, "p1", "memory"), 0700)
+	_ = os.WriteFile(filepath.Join(claude, "p1", "memory", "a.md"), []byte("x\n"), 0600)
+	exe, _ := os.Executable()
+	drv := filepath.Join(filepath.Dir(exe), "claude-memmerge")
+	if _, err := os.Stat(drv); err != nil {
+		if werr := os.WriteFile(drv, []byte("#!/bin/sh\n"), 0755); werr != nil {
+			t.Skip("cannot place merge driver")
+		}
+		t.Cleanup(func() { os.Remove(drv) })
+	}
+	ef, err := os.CreateTemp(root, "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldErr := os.Stderr
+	os.Stderr = ef
+	code := runInit([]string{"--remote", remote, "--private-only", "--token-file", cfg.GitHubTokenFile,
+		"--github-api-url", cfg.GitHubAPIURL, "--github-host", "github.com",
+		"--sync-dir", filepath.Join(root, "sync"), "--claude-dir", claude})
+	os.Stderr = oldErr
+	eb, _ := os.ReadFile(ef.Name())
+	if code == 0 || !strings.Contains(string(eb), "different URL") {
+		t.Fatalf("init must refuse on the push URL (code %d): %s", code, eb)
+	}
+	if out, _ := exec.Command("git", "-C", bare, "rev-list", "--all", "--count").Output(); strings.TrimSpace(string(out)) != "0" {
+		t.Errorf("nothing may be pushed, origin has %s commits", out)
+	}
+}

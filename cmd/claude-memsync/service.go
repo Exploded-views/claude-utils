@@ -26,6 +26,7 @@ type program struct {
 	cancel     context.CancelFunc
 	done       chan struct{}
 	loopErr    error
+	loop       *syncpkg.Loop // set by Start; tests inspect it
 }
 
 func (p *program) Start(s service.Service) error {
@@ -39,9 +40,10 @@ func (p *program) Start(s service.Service) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
 	p.done = make(chan struct{})
+	loop := &syncpkg.Loop{Cfg: cfg, PushAllowed: pushWatch(cfg, log.Printf)}
+	p.loop = loop
 	go func() {
 		defer close(p.done)
-		loop := &syncpkg.Loop{Cfg: cfg, PushAllowed: pushWatch(cfg, log.Printf)}
 		p.loopErr = loop.Run(ctx)
 	}()
 	return nil

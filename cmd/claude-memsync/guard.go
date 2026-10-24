@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
@@ -341,22 +342,35 @@ func pushWatch(cfg config.Config, logf func(string, ...any)) func() bool {
 	if !cfg.PrivateOnly {
 		return nil
 	}
-	c, err := guardClient(cfg)
-	if err != nil || c == nil {
-		return nil
-	}
-	owner, name, err := ghguard.ParseRemote(cfg.RemoteURL)
-	if err != nil {
-		return nil
-	}
 	pre := func() error {
 		if err := checkSSHOverride(cfg); err != nil {
 			return err
 		}
 		return checkPushURL(cfg, cfg.SyncDir)
 	}
+	c, err := guardClient(cfg)
+	owner, name, perr := ghguard.ParseRemote(cfg.RemoteURL)
+	if err != nil || c == nil || perr != nil {
+		// No token: nothing to re-check against the API, but the local
+		// checks still run before every push.
+		var mu sync.Mutex
+		bad := false
+		return func() bool {
+			e := pre()
+			mu.Lock()
+			defer mu.Unlock()
+			if e != nil && !bad {
+				logf("pushing stopped: %v", e)
+			} else if e == nil && bad {
+				logf("push target check passes again")
+			}
+			bad = e != nil
+			return e == nil
+		}
+	}
 	w := &ghguard.Watch{C: c, Owner: owner, Name: name, Precheck: pre,
-		MaxFailures: cfg.RecheckMaxFailures, MaxAge: time.Duration(cfg.RecheckMaxAgeHours) * time.Hour, StateDir: filepath.Join(cfg.SyncDir, ".state"), Logf: logf}
+		MaxFailures: cfg.RecheckMaxFailures, MaxAge: time.Duration(cfg.RecheckMaxAgeHours) * time.Hour,
+		StateDir: filepath.Join(cfg.SyncDir, ".state"), Logf: logf}
 	return w.Allowed
 }
 
