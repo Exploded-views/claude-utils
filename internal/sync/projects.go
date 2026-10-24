@@ -29,25 +29,20 @@ import (
 //     first).
 //   - Candidates is written by the daemon when the folder name decodes to
 //     several directories; set Dir to the right one.
-//   - LeftAt and JoinPending are written by the daemon (see the fields).
+//   - JoinPending and ResetJoin are written by the daemon (see the fields).
 type ProjectEntry struct {
 	Dir        string   `json:"dir,omitempty"`
 	Key        string   `json:"key,omitempty"`
 	LastKey    string   `json:"lastKey,omitempty"`
 	Candidates []string `json:"candidates,omitempty"`
-	// LeftAt records, per repo directory this folder used to be stored in
-	// ("projects/<hash>/memory", "remotes/<key>/memory"), the sync repo's HEAD
-	// when the folder left it ("" if the repo had no commit: everything in the
-	// directory then counts as new). A file only the repo has in a directory the
-	// folder comes back to is imported only if it changed since. An anchor that
-	// no longer resolves imports nothing. The entry for a remote directory goes
-	// when the folder re-joins it (see joined). Written by the daemon.
-	LeftAt map[string]string `json:"leftAt,omitempty"`
 	// JoinPending is set when the folder gains or changes its key and cleared
 	// once it has been joined to that key's notes (see Joining a key in the
-	// docs), so a crash in between still joins on the next start. Written by
+	// docs), so a crash in between still joins on the next start. ResetJoin
+	// says the join is a reset: the folder had another key before, so its own
+	// notes are set aside instead of being added to the new key's. Written by
 	// the daemon.
 	JoinPending bool `json:"joinPending,omitempty"`
+	ResetJoin   bool `json:"resetJoin,omitempty"`
 }
 
 // ProjectCache maps Claude project folder names to what the daemon worked out
@@ -164,9 +159,7 @@ type RemoteMap struct {
 
 	restored map[string]bool // keys whose vanished holder's notes were restored from HEAD, until the holder's folder returns
 	join     map[string]bool // folders that gained their key and are not joined to its notes yet
-
-	changed    map[string]map[string]bool // "anchor dir" -> paths git says changed since (nil: unknown)
-	diffFailed map[string]bool            // folders already logged as unable to compare, by folder name
+	reset    map[string]bool // the subset of join that is a reset (the folder had another key before)
 }
 
 // NewRemoteMap loads the per-PC cache and resolves every project folder.
@@ -179,6 +172,7 @@ func NewRemoteMap(syncDir, claudeRoot string) (*RemoteMap, error) {
 	for h, e := range c.Projects {
 		if e.JoinPending {
 			m.join[h] = true // claimed on an earlier run, never joined
+			m.reset[h] = e.ResetJoin
 		}
 	}
 	m.Refresh()
@@ -187,8 +181,7 @@ func NewRemoteMap(syncDir, claudeRoot string) (*RemoteMap, error) {
 
 func newRemoteMap(syncDir, claudeRoot string, c *ProjectCache) *RemoteMap {
 	return &RemoteMap{syncDir: syncDir, claudeRoot: claudeRoot, Lookup: gitOrigin, Why: gitFailure, cache: c,
-		keys: map[string]string{}, owner: map[string]string{}, warned: map[string]bool{}, failed: map[string]bool{}, denied: map[string]bool{}, restored: map[string]bool{}, join: map[string]bool{},
-		changed: map[string]map[string]bool{}, diffFailed: map[string]bool{}}
+		keys: map[string]string{}, owner: map[string]string{}, warned: map[string]bool{}, failed: map[string]bool{}, denied: map[string]bool{}, restored: map[string]bool{}, join: map[string]bool{}, reset: map[string]bool{}}
 }
 
 // Refresh re-resolves every project folder under the Claude root and saves
@@ -312,6 +305,7 @@ func sortedKeys(m map[string]string) []string {
 func (m *RemoteMap) release(hash, key string) {
 	delete(m.cache.Projects, hash)
 	delete(m.join, hash)
+	delete(m.reset, hash)
 	delete(m.restored, key)
 	m.dirty = true
 	logFolder(hash, "claim on remotes/%s released: its Claude folder and checkout are gone", key)
@@ -340,7 +334,7 @@ func (m *RemoteMap) restore(repo *gitwt.Repo, key string) {
 	if m.head() == "" {
 		return
 	}
-	dir := repoDir(key, "")
+	dir := remotesDir + "/" + key + "/memory"
 	if _, err := repo.Run("checkout", "HEAD", "--", dir); err != nil && !strings.Contains(err.Error(), "did not match") {
 		logFolder(key, "cannot restore %s from HEAD after its Claude folder went away (%s)", dir, classifyGitFailure(err))
 	}
@@ -361,39 +355,18 @@ func (m *RemoteMap) Key(hash string) string {
 }
 
 // joined records that the folder's notes have been merged with its key's, and
-// saves that, so a restart does not join it again. The folder's LeftAt entry for
-// the key's directory goes with it, unless the join held back a file that only
-// the repo had (refused): such a file is still indistinguishable from a note the
-// folder deleted, and would be imported by the next reconcile once the entry
-// is gone.
-func (m *RemoteMap) joined(hash string, refused bool) {
+// saves that, so a restart does not join it again.
+func (m *RemoteMap) joined(hash string) {
 	delete(m.join, hash)
+	delete(m.reset, hash)
 	e, ok := m.cache.Projects[hash]
-	if !ok {
+	if !ok || !e.JoinPending && !e.ResetJoin {
 		return
 	}
-	changed := e.JoinPending
-	e.JoinPending = false
-	if dir := repoDir(lastKey(e), hash); !refused {
-		if _, left := e.LeftAt[dir]; left {
-			out := make(map[string]string, len(e.LeftAt))
-			for k, v := range e.LeftAt {
-				if k != dir {
-					out[k] = v
-				}
-			}
-			if len(out) == 0 {
-				out = nil
-			}
-			e.LeftAt = out
-			changed = true
-		}
-	}
-	if changed {
-		m.cache.Projects[hash] = e
-		m.dirty = true
-		m.save()
-	}
+	e.JoinPending, e.ResetJoin = false, false
+	m.cache.Projects[hash] = e
+	m.dirty = true
+	m.save()
 }
 
 // MemoryDir is the repo-side memory directory for a remote key.
@@ -437,14 +410,21 @@ func (m *RemoteMap) resolve(hash string) string {
 	key := m.claim(hash, m.wantedKey(hash, &e))
 	if old := lastKey(prev); key != old {
 		logFolder(hash, "key changed from %s to %s", keyLabel(old), keyLabel(key))
-		e.LeftAt = m.leave(e.LeftAt, repoDir(old, hash), repoDir(key, hash))
 	}
 	if key != "" && key != lastKey(prev) {
 		m.join[hash] = true // a new claim, a key change or a moved claim
 		e.JoinPending = true
+		// A folder that had a key and now has another is re-keyed, and is reset
+		// to the new key's notes. One with none before (a first claim, or a claim
+		// moved to it) adds its notes to the key's.
+		if lastKey(prev) != "" {
+			m.reset[hash] = true
+			e.ResetJoin = true
+		}
 	} else if key == "" {
 		delete(m.join, hash)
-		e.JoinPending = false
+		delete(m.reset, hash)
+		e.JoinPending, e.ResetJoin = false, false
 	}
 	e.LastKey = key
 	if key != "" {
@@ -473,32 +453,6 @@ func keyLabel(k string) string {
 	return k
 }
 
-// repoDir is the memory directory, relative to the sync repo, that a folder is
-// stored in under key ("" for the path key).
-func repoDir(key, hash string) string {
-	if key == "" {
-		return remotesPathDir(hash)
-	}
-	return remotesDir + "/" + key + "/memory"
-}
-
-func remotesPathDir(hash string) string { return "projects/" + hash + "/memory" }
-
-// leave notes in left (a copy, so the cache entry it came from is not changed
-// behind its back) that the folder stopped using from, at the sync repo's
-// current HEAD.
-func (m *RemoteMap) leave(left map[string]string, from, to string) map[string]string {
-	if from == to {
-		return left
-	}
-	out := make(map[string]string, len(left)+1)
-	for k, v := range left {
-		out[k] = v
-	}
-	out[from] = m.head()
-	return out
-}
-
 // head is the sync repo's HEAD commit, or "" if that cannot be read (not a
 // repo, no commit yet).
 func (m *RemoteMap) head() string {
@@ -508,49 +462,6 @@ func (m *RemoteMap) head() string {
 	}
 	return strings.TrimSpace(out)
 }
-
-// mayImport reports whether a file that only the repo has, in the directory dir
-// that hash is stored in, may be copied into the folder. A folder that never
-// left dir imports anything: that is a note from another PC. One that came back
-// to dir imports only what changed since it left; the rest cannot be told
-// from a copy that was deleted here while the folder was elsewhere. An anchor
-// of "" (the repo had no commit when it left) means everything is new. When git
-// cannot say (the anchor no longer resolves, say because it was garbage
-// collected, or git fails), nothing is imported and the daemon logs why once.
-func (m *RemoteMap) mayImport(hash, dir, name string) bool {
-	anchor, left := m.cache.Projects[hash].LeftAt[dir]
-	if !left {
-		return true
-	}
-	if anchor == "" {
-		return true // the repo had no commit yet: nothing could have been deleted
-	}
-	set, ok := m.changed[anchor+" "+dir]
-	if !ok {
-		out, err := gitwt.New(m.syncDir).Run("diff", "--name-only", "-z", anchor+"..HEAD", "--", dir)
-		if err != nil {
-			if !m.diffFailed[hash] {
-				m.diffFailed[hash] = true
-				logFolder(hash, "cannot tell what changed in %s since the folder left it (%s); not importing files that only the repo has there",
-					dir, classifyGitFailure(err))
-			}
-			set = nil
-		} else {
-			set = map[string]bool{}
-			for _, p := range strings.Split(out, "\x00") {
-				if p != "" {
-					set[p] = true
-				}
-			}
-		}
-		m.changed[anchor+" "+dir] = set
-	}
-	return set[dir+"/"+name]
-}
-
-// forgetChanges drops the repo comparisons mayImport has cached; call it
-// before a pass that should see the repo as it is now.
-func (m *RemoteMap) forgetChanges() { m.changed = map[string]map[string]bool{} }
 
 // claim grants want to hash unless another folder holds it, and releases
 // whatever hash held before. "" (the path key) is always granted.

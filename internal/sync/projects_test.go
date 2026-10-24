@@ -436,9 +436,8 @@ func TestRemoteMap_RefusalSaysTheHoldersClaudeFolderIsGoneAndHowToMoveTheClaim(t
 	}
 }
 
-// Every key change is logged with the folder and both keys, and remembered as
-// the directory the folder left.
-func TestRemoteMap_KeyChangeIsLoggedAndRemembersWhereTheFolderWas(t *testing.T) {
+// Every key change is logged with the folder and both keys.
+func TestRemoteMap_KeyChangeIsLogged(t *testing.T) {
 	gitEnv(t)
 	a := newMachine(t, "alice")
 	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
@@ -456,17 +455,6 @@ func TestRemoteMap_KeyChangeIsLoggedAndRemembersWhereTheFolderWas(t *testing.T) 
 	}
 	if strings.Contains(out, a.home) {
 		t.Errorf("the log leaks a path: %q", out)
-	}
-	c, err := LoadProjectCache(a.cfg.SyncDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	left := c.Projects[hash].LeftAt
-	if _, ok := left["projects/"+hash+"/memory"]; !ok {
-		t.Errorf("the path-key directory should be recorded as left, got %v", left)
-	}
-	if _, ok := left["remotes/"+appKey+"/memory"]; !ok {
-		t.Errorf("the remote directory should be recorded as left, got %v", left)
 	}
 }
 

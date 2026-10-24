@@ -371,144 +371,6 @@ func (m *machine) commitSyncRepo(msg string) string {
 	return strings.TrimSpace(head)
 }
 
-// A folder that comes back to a directory it left imports a file only the
-// repo has when that file changed after it left, and leaves a stale one
-// alone: nothing but the repo's history can tell it from a note a deleted
-// copy left behind. Nothing is removed from the repo: a path-keyed copy may
-// still be live on a PC that has not switched.
-func TestRemoteSync_ReturningToAMirrorDirImportsOnlyWhatChangedSinceItLeft(t *testing.T) {
-	gitEnv(t)
-	a := newMachine(t, "alice")
-	a.cfg.ProjectKey = "path"
-	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
-	a.write(app, "x.md", "x\n")
-	a.write(app, "z.md", "z\n")
-	a.sync()
-	a.commitSyncRepo("path mode")
-
-	a.cfg.ProjectKey = "remote"
-	a.sync()
-	a.commitSyncRepo("remote mode")
-	a.remove(app, "z.md")
-	a.sync()
-	oldCopy := a.pathDir(app)
-	if err := os.WriteFile(filepath.Join(oldCopy, "new.md"), []byte("from a path-mode PC\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	a.commitSyncRepo("a path-mode PC pushes")
-
-	setCacheKey(t, a, app, "path")
-	a.sync()
-	if got, ok := a.read(app, "new.md"); !ok || got != "from a path-mode PC\n" {
-		t.Errorf("a file added to the old copy after the folder left must be imported, got %q,%v", got, ok)
-	}
-	if _, ok := a.read(app, "z.md"); ok {
-		t.Error("z.md was deleted on this PC and is unchanged in the old copy: it must not come back")
-	}
-	if !eq(files(t, oldCopy), "new.md", "x.md", "z.md") {
-		t.Errorf("nothing may be removed from the old copy, got %v", files(t, oldCopy))
-	}
-	a.sync() // and it stays that way on the next pass
-	if _, ok := a.read(app, "z.md"); ok {
-		t.Error("z.md came back on a later pass")
-	}
-}
-
-// When the repo cannot say what changed since the folder left, nothing that
-// only the repo has is imported, and the log says why without a path.
-func TestRemoteSync_UnknownLeftAtImportsNothing(t *testing.T) {
-	gitEnv(t)
-	a := newMachine(t, "alice")
-	a.cfg.ProjectKey = "path"
-	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
-	a.write(app, "x.md", "x\n")
-	a.sync()
-	a.commitSyncRepo("one")
-	hash := a.hash(app)
-	// The folder left projects/<hash>/memory at a commit that no longer exists.
-	c, _ := LoadProjectCache(a.cfg.SyncDir)
-	c.Projects[hash] = ProjectEntry{LeftAt: map[string]string{"projects/" + hash + "/memory": strings.Repeat("ab", 20)}}
-	if err := c.Save(a.cfg.SyncDir); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(a.pathDir(app), "other.md"), []byte("o\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	logs := captureLog(t)
-	a.cfg.ProjectKey = "remote"
-	setCacheKey(t, a, app, "path")
-	a.sync()
-	if _, ok := a.read(app, "other.md"); ok {
-		t.Error("imported a file although it cannot be told from a stale leftover")
-	}
-	out := logs.String()
-	if !strings.Contains(out, hash) || !strings.Contains(out, "not importing") || strings.Contains(out, a.home) {
-		t.Errorf("want a path-free line naming the folder, got %q", out)
-	}
-}
-
-// A key flip remote -> path -> remote does not resurrect a deleted note
-// through the stale projects/<hash> copy left behind by the first switch.
-func TestRemoteSync_KeyFlipDoesNotResurrectADelete(t *testing.T) {
-	gitEnv(t)
-	a := newMachine(t, "alice")
-	a.cfg.ProjectKey = "path"
-	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
-	a.write(app, "x.md", "x\n")
-	a.write(app, "z.md", "z\n")
-	a.sync()                      // projects/<hash> has x, z
-	a.commitSyncRepo("path mode") // a folder that leaves a directory with no commit yet has nothing to resurrect
-
-	a.cfg.ProjectKey = "remote"
-	a.sync() // remotes/<key> has x, z; the old copy stays
-	a.commitSyncRepo("remote mode")
-	a.remove(app, "z.md")
-	a.sync()
-	a.commitSyncRepo("deleted")
-	if !eq(files(t, remoteDir(a.cfg.SyncDir, appKey)), "x.md") {
-		t.Fatalf("setup: shared = %v", files(t, remoteDir(a.cfg.SyncDir, appKey)))
-	}
-
-	setCacheKey(t, a, app, "path") // e.g. the documented claim move, or origin removed
-	a.sync()
-	setCacheKey(t, a, app, "")
-	a.sync()
-	if got := files(t, remoteDir(a.cfg.SyncDir, appKey)); !eq(got, "x.md") {
-		t.Errorf("deleted z.md came back in the shared notes: %v", got)
-	}
-}
-
-// In a mixed fleet a delete made on the remote-mode PC does not reach a
-// path-mode PC that still has the note, and when that PC switches later its
-// copy is pushed back. A join never infers a delete from the manifest (the
-// folder has no history with the key), so this is the documented reason to
-// switch every PC together and to delete no notes until all have switched.
-func TestRemoteSync_MixedFleetDeleteIsNotCarriedOverByALaterSwitch(t *testing.T) {
-	gitEnv(t)
-	a := newMachine(t, "alice")
-	b := newMachine(t, "bob")
-	a.cfg.ProjectKey, b.cfg.ProjectKey = "path", "path"
-	app := mkRepo(t, filepath.Join(t.TempDir(), "src", "app"), "git@github.com:acme/app.git") // same path on both PCs
-	a.write(app, "x.md", "x\n")
-	a.write(app, "y.md", "y\n")
-	a.sync()
-	b.open(app)
-	b.pullFrom(a)
-	b.sync()
-
-	a.cfg.ProjectKey = "remote"
-	a.sync()
-	a.remove(app, "x.md")
-	a.sync()
-
-	b.pullFrom(a)
-	b.cfg.ProjectKey = "remote"
-	b.sync()
-	if got := files(t, remoteDir(b.cfg.SyncDir, appKey)); !eq(got, "x.md", "y.md") {
-		t.Errorf("B's switch should push its local-only x.md and delete nothing: shared = %v", got)
-	}
-}
-
 // Deleting an old clone's Claude project folder while the daemon runs must not
 // delete the repo's shared notes for every PC; with the folder gone, a remove
 // event for one of its files is not a delete.
@@ -1398,71 +1260,112 @@ func TestRemoteSync_CrashBetweenClaimAndJoinStillJoinsOnRestart(t *testing.T) {
 	}
 }
 
-// A LeftAt anchor of "" (the sync repo had no commit when the folder left)
-// means everything in the directory is new: nothing could have been deleted
-// before the first commit.
-func TestRemoteSync_EmptyAnchorImportsEverything(t *testing.T) {
+const otherKey = "github.com/acme/other"
+
+// resetFixture: alice's folder is stored under appKey with a MEMORY.md, a
+// colliding note and a note only it has; bob keeps otherKey's notes, which
+// alice has pulled. Nothing has switched yet.
+func resetFixture(t *testing.T) (a *machine, app string) {
+	t.Helper()
 	gitEnv(t)
-	a := newMachine(t, "alice")
-	a.cfg.ProjectKey = "path"
-	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
-	a.write(app, "x.md", "x\n")
-	a.sync() // no git repo in the sync dir: no HEAD
-	a.cfg.ProjectKey = "remote"
-	a.sync() // leaves projects/<hash>/memory with anchor ""
-	c, _ := LoadProjectCache(a.cfg.SyncDir)
-	if anchor, ok := c.Projects[a.hash(app)].LeftAt["projects/"+a.hash(app)+"/memory"]; !ok || anchor != "" {
-		t.Fatalf("setup: want an empty anchor, got %q,%v", anchor, ok)
-	}
-	if err := os.WriteFile(filepath.Join(a.pathDir(app), "other.md"), []byte("o\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	setCacheKey(t, a, app, "path")
+	a = newMachine(t, "alice")
+	b := newMachine(t, "bob")
+	otherB := mkRepo(t, filepath.Join(b.home, "src", "other"), "git@github.com:acme/other.git")
+	b.write(otherB, "MEMORY.md", "# Mem\n\n## From Bob\nb\n")
+	b.write(otherB, "diff.md", "shared\n")
+	b.write(otherB, "only-shared.md", "s\n")
+	b.write(otherB, "same.md", "same\n")
+	b.sync()
+
+	app = mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(app, "MEMORY.md", "# Mem\n\n## From A\na\n")
+	a.write(app, "diff.md", "local\n")
+	a.write(app, "local.md", "mine\n")
+	a.write(app, "same.md", "same\n")
 	a.sync()
-	if got, ok := a.read(app, "other.md"); !ok || got != "o\n" {
-		t.Errorf("an empty anchor must not block imports, got %q,%v", got, ok)
+	a.pullFrom(b)
+	return a, app
+}
+
+// A folder re-keyed from one remote key to another is reset to the shared
+// notes of the new key: nothing of its own reaches them, and everything of its
+// own that differs from them stays on this PC as a local backup.
+func TestRemoteSync_ReKeyedFolderIsResetToTheSharedNotes(t *testing.T) {
+	a, app := resetFixture(t)
+	logs := captureLog(t)
+	setCacheKey(t, a, app, otherKey)
+	rep := a.sync()
+
+	shared := remoteDir(a.cfg.SyncDir, otherKey)
+	if !eq(files(t, shared), "MEMORY.md", "diff.md", "only-shared.md", "same.md") {
+		t.Errorf("a local-only file reached the new key's notes: %v", files(t, shared))
+	}
+	if got := readFile(t, filepath.Join(shared, "MEMORY.md")); !strings.Contains(got, "From Bob") || strings.Contains(got, "From A") {
+		t.Errorf("shared MEMORY.md must stay as it was: %q", got)
+	}
+	if got := readFile(t, filepath.Join(shared, "diff.md")); got != "shared\n" {
+		t.Errorf("shared diff.md = %q", got)
+	}
+	for name, want := range map[string]string{"diff.md": "shared\n", "only-shared.md": "s\n", "same.md": "same\n"} {
+		if got, ok := a.read(app, name); !ok || got != want {
+			t.Errorf("Claude's %s = %q,%v; want %q", name, got, ok, want)
+		}
+	}
+	if got, _ := a.read(app, "MEMORY.md"); !strings.Contains(got, "From Bob") || strings.Contains(got, "From A") {
+		t.Errorf("Claude's MEMORY.md = %q; the shared one must win", got)
+	}
+	if _, ok := a.read(app, "local.md"); ok {
+		t.Error("a local-only file stayed in the Claude folder, to be re-imported")
+	}
+	for name, want := range map[string]string{"MEMORY.md": "# Mem\n\n## From A\na\n", "diff.md": "local\n", "local.md": "mine\n"} {
+		got, _ := filepath.Glob(filepath.Join(shared, name+".local-before-join-*"))
+		if len(got) != 1 || readFile(t, got[0]) != want {
+			t.Errorf("want %s saved once as a local backup with %q, got %v", name, want, got)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(remoteDir(a.cfg.SyncDir, appKey), "local.md")); err != nil {
+		t.Errorf("the old key's notes must be left alone: %v", err)
+	}
+	if len(rep.BackedUp) == 0 {
+		t.Errorf("report.BackedUp is empty")
+	}
+
+	out := logs.String()
+	if want := a.hash(app) + ": "; !strings.Contains(out, want) || !strings.Contains(out, "3 local file") || strings.Contains(out, a.home) {
+		t.Errorf("want one path-free line naming the folder and 3 files set aside, got %q", out)
+	}
+	if n := strings.Count(out, "set aside"); n != 1 {
+		t.Errorf("want one line about the reset, got %d: %q", n, out)
+	}
+	c, _ := LoadProjectCache(a.cfg.SyncDir)
+	if e := c.Projects[a.hash(app)]; e.JoinPending || e.ResetJoin {
+		t.Errorf("the reset is done but the cache still says it is pending: %+v", e)
+	}
+
+	// From now on it is a normal folder: a new note goes out, a delete goes out.
+	a.write(app, "new.md", "n\n")
+	a.remove(app, "same.md")
+	a.sync()
+	if !eq(files(t, shared), "MEMORY.md", "diff.md", "new.md", "only-shared.md") {
+		t.Errorf("after the reset the folder syncs normally, got %v", files(t, shared))
 	}
 }
 
-// Once the folder has re-joined a directory its LeftAt entry for it goes; with
-// a repo-only file the gate held back it stays, or the next reconcile would
-// take that file for a note from another PC.
-func TestRemoteSync_LeftAtIsClearedByARejoinThatRefusedNothing(t *testing.T) {
-	gitEnv(t)
-	flip := func(t *testing.T, deleteInPathMode bool) (*machine, string, ProjectEntry) {
-		a := newMachine(t, "alice")
-		app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
-		a.write(app, "x.md", "x\n")
-		a.write(app, "z.md", "z\n")
-		a.sync()
-		a.commitSyncRepo("remote mode")
-		setCacheKey(t, a, app, "path") // leaves remotes/<key>/memory
-		a.sync()
-		if deleteInPathMode {
-			a.remove(app, "z.md")
-			a.sync()
-		}
-		setCacheKey(t, a, app, "") // and comes back: a rejoin
-		a.sync()
-		a.sync()
-		c, _ := LoadProjectCache(a.cfg.SyncDir)
-		return a, app, c.Projects[a.hash(app)]
+// A crash between the key change and the reset still resets on the next start.
+func TestRemoteSync_ResetIsPersistedSoACrashCannotSkipIt(t *testing.T) {
+	a, app := resetFixture(t)
+	setCacheKey(t, a, app, otherKey)
+	if _, err := NewRoots(a.cfg); err != nil { // the change is saved, then the process dies
+		t.Fatal(err)
 	}
-	dir := "remotes/" + appKey + "/memory"
-
-	a, app, e := flip(t, false)
-	if _, ok := e.LeftAt[dir]; ok {
-		t.Errorf("the rejoin refused nothing; LeftAt should be cleared: %v", e.LeftAt)
+	if c, _ := LoadProjectCache(a.cfg.SyncDir); !c.Projects[a.hash(app)].JoinPending || !c.Projects[a.hash(app)].ResetJoin {
+		t.Fatalf("want a pending reset-join saved: %+v", c.Projects[a.hash(app)])
 	}
-	if _, ok := e.LeftAt["projects/"+a.hash(app)+"/memory"]; !ok {
-		t.Errorf("the other directory's entry must stay: %v", e.LeftAt)
+	a.sync()
+	if _, ok := a.read(app, "local.md"); ok {
+		t.Error("after a crash before the reset, the local-only file was not set aside")
 	}
-
-	a, app, e = flip(t, true)
-	if _, ok := e.LeftAt[dir]; !ok {
-		t.Errorf("a file was held back; LeftAt must stay: %v", e.LeftAt)
-	}
-	if _, ok := a.read(app, "z.md"); ok {
-		t.Error("z.md was deleted in path mode and came back from the shared notes")
+	if _, err := os.Stat(filepath.Join(remoteDir(a.cfg.SyncDir, otherKey), "local.md")); err == nil {
+		t.Error("after a crash before the reset, the local-only file was pushed")
 	}
 }

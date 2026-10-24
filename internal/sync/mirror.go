@@ -159,9 +159,6 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 	if err != nil {
 		return rep, err
 	}
-	if r.Remote != nil {
-		r.Remote.forgetChanges()
-	}
 
 	for _, hash := range hashes {
 		if r.folderVanished(hash) {
@@ -229,11 +226,7 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 				rep.RemovedFromMirror = append(rep.RemovedFromMirror, rel)
 
 			case !cExists && mExists:
-				// Not in manifest → new from another PC (or, in remote mode, a
-				// leftover the folder has no business importing).
-				if !r.mayImport(hash, name) {
-					continue
-				}
+				// Not in manifest → new from another PC.
 				if err := os.MkdirAll(claudeMem, 0700); err != nil {
 					return rep, err
 				}
@@ -441,13 +434,20 @@ func (r Roots) JoinIfNeeded(hash string) error {
 //
 // The manifest is not consulted: the folder has no history with this key, so
 // "missing here" says nothing about a delete.
+//
+// A reset-join is for a folder that had another key before (see
+// ProjectEntry.ResetJoin): it takes on the shared notes as they are and adds
+// nothing of its own. MEMORY.md is not merged but replaced like any other
+// differing file, and a file only the folder has is moved out of the Claude
+// folder into a .local-before-join-* backup next to the shared notes, so it is
+// neither pushed nor imported again. Everything stays on this PC.
 func (r Roots) joinFolder(hash string, rep *SyncReport) error {
 	claudeMem := filepath.Join(r.Claude, hash, "memory")
 	mirrorMem := r.MirrorMemDir(hash)
 	if err := os.MkdirAll(mirrorMem, 0700); err != nil {
 		return err
 	}
-	r.Remote.forgetChanges()
+	reset := r.Remote.reset[hash]
 	names := map[string]struct{}{}
 	for _, dir := range []string{claudeMem, mirrorMem} {
 		entries, err := os.ReadDir(dir)
@@ -470,23 +470,28 @@ func (r Roots) joinFolder(hash string, rep *SyncReport) error {
 	}
 	sort.Strings(sorted)
 
-	refused := false // a file only the repo has was held back by the LeftAt gate
+	setAside := 0 // local files a reset kept out of the shared notes
 	for _, name := range sorted {
 		cp, mp := filepath.Join(claudeMem, name), filepath.Join(mirrorMem, name)
 		rel := filepath.ToSlash(filepath.Join(hash, "memory", name))
 		cExists, cBytes := readIfExists(cp)
 		mExists, mBytes := readIfExists(mp)
+		backup := fmt.Sprintf("%s.local-before-join-%s", mp, randSuffix())
 		switch {
+		case cExists && !mExists && reset:
+			if err := writeAtomic(backup, cBytes); err != nil {
+				return err
+			}
+			if err := os.Remove(cp); err != nil {
+				return err
+			}
+			setAside++
 		case cExists && !mExists:
 			if err := writeAtomic(mp, cBytes); err != nil {
 				return fmt.Errorf("write mirror %s: %w", mp, err)
 			}
 			rep.CopiedToMirror = append(rep.CopiedToMirror, rel)
 		case !cExists && mExists:
-			if !r.mayImport(hash, name) {
-				refused = true
-				continue
-			}
 			if err := os.MkdirAll(claudeMem, 0700); err != nil {
 				return err
 			}
@@ -495,7 +500,7 @@ func (r Roots) joinFolder(hash string, rep *SyncReport) error {
 			}
 			rep.CopiedToClaude = append(rep.CopiedToClaude, rel)
 		case bytes.Equal(cBytes, mBytes):
-		case name == "MEMORY.md":
+		case name == "MEMORY.md" && !reset:
 			merged, _ := merge.Merge("", string(cBytes), string(mBytes))
 			if err := writeAtomic(cp, []byte(merged)); err != nil {
 				return err
@@ -505,7 +510,6 @@ func (r Roots) joinFolder(hash string, rep *SyncReport) error {
 			}
 			rep.Merged = append(rep.Merged, rel)
 		default:
-			backup := fmt.Sprintf("%s.local-before-join-%s", mp, randSuffix())
 			if err := writeAtomic(backup, cBytes); err != nil {
 				return err
 			}
@@ -513,19 +517,17 @@ func (r Roots) joinFolder(hash string, rep *SyncReport) error {
 				return err
 			}
 			rep.BackedUp = append(rep.BackedUp, rel)
+			if reset {
+				setAside++
+			}
 		}
 	}
-	r.Remote.joined(hash, refused)
-	return nil
-}
-
-// mayImport reports whether a file that only the mirror has may be copied into
-// the folder.
-func (r Roots) mayImport(hash, name string) bool {
-	if r.Remote == nil {
-		return true
+	if reset {
+		logFolder(hash, "joined remotes/%s again after its key changed: reset to the shared notes; %d local file(s) set aside as .local-before-join-* backups next to them",
+			r.Remote.keys[hash], setAside)
 	}
-	return r.Remote.mayImport(hash, repoDir(r.Remote.Key(hash), hash), name)
+	r.Remote.joined(hash)
+	return nil
 }
 
 func readIfExists(p string) (bool, []byte) {
