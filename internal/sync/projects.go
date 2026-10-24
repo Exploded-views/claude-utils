@@ -151,7 +151,7 @@ type RemoteMap struct {
 	denied map[string]bool   // folders already logged as refused a key, by folder name
 	dirty  bool              // cache changed since it was last saved
 
-	vanished map[string]string // key -> folder whose claim was just released
+	restored map[string]bool   // keys whose vanished holder's notes were restored from HEAD, until the holder's folder returns
 	join     map[string]bool   // folders that gained their key and are not joined to its notes yet
 
 	changed    map[string]map[string]bool // "anchor dir" -> paths git says changed since (nil: unknown)
@@ -165,7 +165,7 @@ func NewRemoteMap(syncDir, claudeRoot string) (*RemoteMap, error) {
 		return nil, err
 	}
 	m := &RemoteMap{syncDir: syncDir, claudeRoot: claudeRoot, Lookup: gitOrigin, Why: gitFailure, cache: c,
-		keys: map[string]string{}, owner: map[string]string{}, warned: map[string]bool{}, failed: map[string]bool{}, denied: map[string]bool{}, vanished: map[string]string{}, join: map[string]bool{},
+		keys: map[string]string{}, owner: map[string]string{}, warned: map[string]bool{}, failed: map[string]bool{}, denied: map[string]bool{}, restored: map[string]bool{}, join: map[string]bool{},
 		changed: map[string]map[string]bool{}, diffFailed: map[string]bool{}}
 	m.Refresh()
 	return m, nil
@@ -240,30 +240,30 @@ func (m *RemoteMap) claimedKey(hash string) string {
 }
 
 // Vanished lists the remote keys (sorted) whose holder's Claude project folder
-// is gone: still-held claims with a missing folder, and claims released since
-// the last ReleaseStale. The notes under such a key are intact in the sync repo
-// and must stay that way, whatever deletes the vanished folder's files looked
-// like to the watcher.
+// is gone while the claim is still held, and whose notes Restored has not been
+// told about since the folder went. The notes under such a key are intact in
+// the sync repo and must stay that way, whatever deletes the vanished folder's
+// files looked like to the watcher. (The notes of a claim that is released are
+// restored by the release itself, see release.)
 func (m *RemoteMap) Vanished() []string {
-	seen := map[string]bool{}
+	var out []string
 	for k, h := range m.owner {
-		if !isDir(filepath.Join(m.claudeRoot, h)) {
-			seen[k] = true
+		if isDir(filepath.Join(m.claudeRoot, h)) {
+			delete(m.restored, k) // back again: a later disappearance is a new one
+		} else if !m.restored[k] {
+			out = append(out, k)
 		}
-	}
-	for k := range m.vanished {
-		seen[k] = true
-	}
-	out := make([]string, 0, len(seen))
-	for k := range seen {
-		out = append(out, k)
 	}
 	sort.Strings(out)
 	return out
 }
 
-// ReleaseStale drops every claim that staleClaim says is stale, and forgets
-// the keys Vanished reported: the caller has restored their notes.
+// Restored records that the notes of key, which Vanished reported, have been
+// restored, so that the next flush does not do it again.
+func (m *RemoteMap) Restored(key string) { m.restored[key] = true }
+
+// ReleaseStale drops every claim that staleClaim says is stale. Each release
+// restores the key's notes (see release).
 func (m *RemoteMap) ReleaseStale() {
 	for _, k := range sortedKeys(m.owner) {
 		h := m.owner[k]
@@ -272,7 +272,6 @@ func (m *RemoteMap) ReleaseStale() {
 			m.release(h, k)
 		}
 	}
-	m.vanished = map[string]string{}
 	m.save()
 }
 
@@ -285,13 +284,46 @@ func sortedKeys(m map[string]string) []string {
 	return out
 }
 
-// release drops a stale claim and its cache entry. The key is remembered in
-// vanished until the daemon has restored its notes (see Vanished).
+// release drops a stale claim and its cache entry, and puts back the key's
+// notes from HEAD: the holder's files may have gone out of the working tree as
+// deletes before its folder did. It happens here, before anyone can claim the
+// key (a new holder's join writes into the same directory, and a restore after
+// it would throw the join away), and not at all if a live folder holds the key.
 func (m *RemoteMap) release(hash, key string) {
 	delete(m.cache.Projects, hash)
+	delete(m.join, hash)
+	delete(m.restored, key)
 	m.dirty = true
-	m.vanished[key] = hash
 	logFolder(hash, "claim on remotes/%s released: its Claude folder and checkout are gone", key)
+	if m.liveHolder(key) {
+		return
+	}
+	m.restore(gitwt.New(m.syncDir), key)
+}
+
+// liveHolder reports whether a folder whose Claude folder exists holds key.
+func (m *RemoteMap) liveHolder(key string) bool {
+	if h, ok := m.owner[key]; ok && isDir(filepath.Join(m.claudeRoot, h)) {
+		return true
+	}
+	for h, e := range m.cache.Projects {
+		if lastKey(e) == key && isDir(filepath.Join(m.claudeRoot, h)) {
+			return true
+		}
+	}
+	return false
+}
+
+// restore checks the notes of key out from HEAD in repo (the sync repo). A repo
+// with no commit has nothing to restore.
+func (m *RemoteMap) restore(repo *gitwt.Repo, key string) {
+	if m.head() == "" {
+		return
+	}
+	dir := repoDir(key, "")
+	if _, err := repo.Run("checkout", "HEAD", "--", dir); err != nil && !strings.Contains(err.Error(), "did not match") {
+		logFolder(key, "cannot restore %s from HEAD after its Claude folder went away (%s)", dir, classifyGitFailure(err))
+	}
 }
 
 // Key returns the repo-side key for a project folder, or "" for the path
@@ -360,6 +392,9 @@ func (m *RemoteMap) resolve(hash string) string {
 		delete(m.join, hash)
 	}
 	e.LastKey = key
+	if key != "" {
+		delete(m.restored, key) // its folder is here: a later disappearance is a new one
+	}
 
 	m.keys[hash] = key
 	switch {
@@ -474,11 +509,11 @@ func (m *RemoteMap) claim(hash, want string) string {
 	if h, taken := m.owner[want]; taken && h != hash {
 		if !m.denied[hash] {
 			m.denied[hash] = true
-			if e := m.cache.Projects[h]; e.Dir != "" && gone(e.Dir) {
-				logFolder(hash, "would be stored as remotes/%s, which %s holds on this PC, but that folder's checkout is gone; "+
+			if why := m.holderGone(h); why != "" {
+				logFolder(hash, "would be stored as remotes/%s, which %s holds on this PC, but that folder's %s; "+
 					"a claim never moves by itself. To move it, stop the daemon and in .state/projects.json set \"key\": \"path\" on %s "+
 					"and \"key\": \"%s\" on %s; keeping the path key meanwhile",
-					want, h, h, want, hash)
+					want, h, why, h, want, hash)
 			} else {
 				logFolder(hash, "would be stored as remotes/%s, which %s already holds on this PC; keeping its path key",
 					want, h)
@@ -488,6 +523,18 @@ func (m *RemoteMap) claim(hash, want string) string {
 	}
 	m.owner[want] = hash
 	return want
+}
+
+// holderGone says what is missing of the folder h holding a claim: "checkout is
+// gone", "Claude folder is gone", or "" if both are there.
+func (m *RemoteMap) holderGone(h string) string {
+	if e := m.cache.Projects[h]; e.Dir != "" && gone(e.Dir) {
+		return "checkout is gone"
+	}
+	if !isDir(filepath.Join(m.claudeRoot, h)) {
+		return "Claude folder is gone"
+	}
+	return ""
 }
 
 // wantedKey is the key hash should have, whoever else holds it. It updates e's

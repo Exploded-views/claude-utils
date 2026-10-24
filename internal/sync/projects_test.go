@@ -409,6 +409,33 @@ func TestRemoteMap_RefusalSaysTheHoldersCheckoutIsGoneAndHowToMoveTheClaim(t *te
 	}
 }
 
+// The same hint when the holder's checkout is still there but its Claude
+// folder is gone: the claim does not move by itself then either.
+func TestRemoteMap_RefusalSaysTheHoldersClaudeFolderIsGoneAndHowToMoveTheClaim(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	old := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(old, "n.md", "1\n")
+	a.remoteMap()
+	if err := os.RemoveAll(filepath.Join(a.claude, a.hash(old))); err != nil {
+		t.Fatal(err)
+	}
+	fresh := mkRepo(t, filepath.Join(a.home, "work", "app"), "git@github.com:acme/app.git")
+	a.open(fresh)
+	logs := captureLog(t)
+	a.remoteMap()
+	out := logs.String()
+	for _, want := range []string{a.hash(fresh), a.hash(old), "Claude folder is gone", ".state/projects.json",
+		`"key": "path"`, `"key": "` + appKey + `"`, "stop the daemon"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("refusal log lacks %q: %q", want, out)
+		}
+	}
+	if strings.Contains(out, a.home) {
+		t.Errorf("the log leaks a path: %q", out)
+	}
+}
+
 // Every key change is logged with the folder and both keys, and remembered as
 // the directory the folder left.
 func TestRemoteMap_KeyChangeIsLoggedAndRemembersWhereTheFolderWas(t *testing.T) {

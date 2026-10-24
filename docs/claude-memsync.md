@@ -499,11 +499,14 @@ This means:
   other PC when they pull. Do it only when you mean it.
 - Removing a remote-keyed folder's whole **project folder**
   (`~/.claude/projects/<hash>`, say because the clone is gone) is not a delete
-  of its notes, which other PCs share. The files' remove events are ignored, and
-  before each commit the daemon restores `remotes/<key>/memory` from HEAD for
-  every remote-keyed folder whose Claude folder is missing, then releases the
-  claim if nothing of its holder is left. (Path mode is unchanged: there the
-  same `rm -rf` deletes the notes.)
+  of its notes, which other PCs share. The files' remove events are ignored.
+  While its claim is still held (the checkout is there), the daemon restores
+  `remotes/<key>/memory` from HEAD before the next commit, once per
+  disappearance. When the claim is released (nothing of its holder is left),
+  the restore happens at that moment, before any other clone can claim the key
+  in the same pass, and only if no live folder holds the key: a new holder's
+  join must not be undone by a restore from HEAD. (Path mode is unchanged:
+  there the same `rm -rf` deletes the notes.)
 
 ## On-disk layout
 

@@ -264,21 +264,22 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) error {
 }
 
 // restoreVanished puts back, from HEAD, the notes of every remote key whose
-// Claude project folder is gone, then releases the claims that nothing is left
-// of. Deleting an old clone's project folder is not deleting its notes, which
-// other PCs share; whatever the watcher took for deletes while the folder went
-// away is undone here, before anything is committed.
+// holder's Claude project folder is gone but whose claim is still held, once
+// per disappearance, and releases the claims that nothing is left of (a release
+// restores its own notes). Deleting an old clone's project folder is not
+// deleting its notes, which other PCs share; whatever the watcher took for
+// deletes while the folder went away is undone here, before anything is
+// committed. A key that another folder has claimed since is not touched: its
+// holder's join has written into it.
 func restoreVanished(repo *gitwt.Repo, roots Roots) {
 	if roots.Remote == nil {
 		return
 	}
-	for _, key := range roots.Remote.Vanished() {
-		dir := remotesDir + "/" + key + "/memory"
-		if _, err := repo.Run("checkout", "HEAD", "--", dir); err != nil && !strings.Contains(err.Error(), "did not match") {
-			logFolder(key, "cannot restore %s from HEAD after its Claude folder went away (%s)", dir, classifyGitFailure(err))
-		}
-	}
 	roots.Remote.ReleaseStale()
+	for _, key := range roots.Remote.Vanished() {
+		roots.Remote.restore(repo, key)
+		roots.Remote.Restored(key)
+	}
 }
 
 // remoteAndLocalIdle reports whether there is nothing to do: origin's branch

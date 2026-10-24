@@ -1209,3 +1209,148 @@ func TestReconcile_BackupNamesInClaudeAreNotCopiedToTheMirror(t *testing.T) {
 		}
 	}
 }
+
+// A claim released by Refresh and re-claimed by another clone in the same
+// Refresh: the join merges into the mirror, and the flush's restore must not
+// check remotes/<key>/memory out from HEAD over it. A later pulled change to
+// MEMORY.md then must not overwrite the clone's Claude copy.
+func TestRemoteSync_RestoreVanishedDoesNotUndoTheJoinOfTheNewHolder(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	first := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	second := mkRepo(t, filepath.Join(a.home, "src", "app-copy"), "git@github.com:acme/app.git")
+	a.write(first, "MEMORY.md", "# Mem\n\n## From first\nf\n")
+	a.write(second, "MEMORY.md", "# Mem\n\n## From second\ns\n")
+	a.sync()
+	a.commitSyncRepo("c1")
+
+	// The old clone goes away entirely while the daemon is off.
+	_ = os.RemoveAll(first)
+	_ = os.RemoveAll(filepath.Join(a.claude, a.hash(first)))
+
+	// Daemon start: NewRoots releases first's claim, second claims the key.
+	roots, err := NewRoots(a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if roots.Remote.Key(a.hash(second)) != appKey {
+		t.Fatalf("setup: second should now hold the key, got %q", roots.Remote.Key(a.hash(second)))
+	}
+	man, _ := LoadManifest(a.stateDir())
+	if _, err := Reconcile(roots, man); err != nil {
+		t.Fatal(err)
+	}
+	shared := filepath.Join(remoteDir(a.cfg.SyncDir, appKey), "MEMORY.md")
+	if !strings.Contains(readFile(t, shared), "From second") {
+		t.Fatalf("setup: join did not merge: %q", readFile(t, shared))
+	}
+	repo := gitwt.New(a.cfg.SyncDir)
+	restoreVanished(repo, roots) // first step of the flush
+	if got := readFile(t, shared); !strings.Contains(got, "From second") {
+		t.Errorf("flush reverted the join's merged MEMORY.md in the mirror: %q", got)
+	}
+	pre := a.commitSyncRepo("flush")
+
+	// Another PC changes MEMORY.md; the pull brings it and propagateChanges runs.
+	if err := os.WriteFile(shared, []byte(readFile(t, shared)+"\n## From bob\nb\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	post := a.commitSyncRepo("bob")
+	if err := propagateChanges(repo, roots, pre, post); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := a.read(second, "MEMORY.md"); !strings.Contains(got, "From second") {
+		t.Errorf("second clone's own MEMORY.md section is lost from Claude: %q", got)
+	}
+}
+
+// The same inside one Refresh of a running daemon: the claim is released and
+// re-claimed in a single pass, and what gets committed is the join's merge.
+func TestRemoteSync_ReleaseAndReclaimInOneRefreshKeepsTheJoinCommitted(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	first := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(first, "MEMORY.md", "# Mem\n\n## From first\nf\n")
+	a.write(first, "n.md", "n\n")
+	a.sync()
+	a.commitSyncRepo("c1")
+	roots, err := NewRoots(a.cfg) // the daemon is running with first as the holder
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_ = os.RemoveAll(first)
+	_ = os.RemoveAll(filepath.Join(a.claude, a.hash(first)))
+	shared := remoteDir(a.cfg.SyncDir, appKey)
+	if err := os.Remove(filepath.Join(shared, "n.md")); err != nil { // what a racing watcher could have done
+		t.Fatal(err)
+	}
+	second := mkRepo(t, filepath.Join(a.home, "src", "app-copy"), "git@github.com:acme/app.git")
+	a.write(second, "MEMORY.md", "# Mem\n\n## From second\ns\n")
+
+	roots.Remote.Refresh() // pull tick: release, then the new clone claims
+	man, _ := LoadManifest(a.stateDir())
+	if _, err := Reconcile(roots, man); err != nil {
+		t.Fatal(err)
+	}
+	repo := gitwt.New(a.cfg.SyncDir)
+	restoreVanished(repo, roots)
+	if err := repo.AddAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Commit("flush"); err != nil {
+		t.Fatal(err)
+	}
+	head, err := repo.Run("show", "HEAD:remotes/"+appKey+"/memory/MEMORY.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(head, "From first") || !strings.Contains(head, "From second") {
+		t.Errorf("the committed MEMORY.md is not the join's merge: %q", head)
+	}
+	if got, _ := a.read(second, "n.md"); got != "n\n" {
+		t.Errorf("the note deleted by the vanishing folder was not restored before the join, got %q", got)
+	}
+}
+
+// A holder whose Claude folder is gone but whose checkout is still there has
+// its notes restored once, not on every flush; coming back resets that.
+func TestRemoteSync_VanishedHolderWithACheckoutIsRestoredOnce(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(app, "n.md", "n\n")
+	a.sync()
+	a.commitSyncRepo("c1")
+	roots, err := NewRoots(a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := gitwt.New(a.cfg.SyncDir)
+	note := filepath.Join(remoteDir(a.cfg.SyncDir, appKey), "n.md")
+	folder := filepath.Join(a.claude, a.hash(app))
+
+	if err := os.RemoveAll(folder); err != nil { // the checkout stays
+		t.Fatal(err)
+	}
+	_ = os.Remove(note)
+	restoreVanished(repo, roots)
+	if got := readFile(t, note); got != "n\n" {
+		t.Fatalf("the first flush must restore the note, got %q", got)
+	}
+	_ = os.Remove(note) // a later change in the working tree is left alone
+	restoreVanished(repo, roots)
+	if _, err := os.Stat(note); err == nil {
+		t.Error("the restore ran again on a later flush")
+	}
+
+	a.write(app, "n.md", "n\n") // the folder comes back, then goes again
+	roots.Remote.Refresh()
+	if err := os.RemoveAll(folder); err != nil {
+		t.Fatal(err)
+	}
+	restoreVanished(repo, roots)
+	if got := readFile(t, note); got != "n\n" {
+		t.Errorf("a second disappearance must be restored too, got %q", got)
+	}
+}
