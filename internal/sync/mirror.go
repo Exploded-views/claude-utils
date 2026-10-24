@@ -40,28 +40,21 @@ type Roots struct {
 	// under remotes/<host>/<owner>/<repo>/ instead of projects/<hash>/. Nil
 	// means every project is keyed by its path (the default).
 	Remote *RemoteMap
-
-	// leftGate, in path mode, holds back the repo-only files of a folder that
-	// used to be stored under a remote key (see newLeftGate). nil: path mode
-	// as it always was.
-	leftGate *RemoteMap
 }
 
 // NewRoots builds the Roots for a config, resolving project keys when
 // cfg.ProjectKey is "remote".
 func NewRoots(cfg config.Config) (Roots, error) {
-	if err := EnsureLocalExcludes(cfg.SyncDir); err != nil {
-		log.Println("keep backups out of git:", err)
-	}
 	r := Roots{Claude: cfg.ClaudeProjectsDir, Mirror: filepath.Join(cfg.SyncDir, "projects")}
 	if cfg.ProjectKey == config.ProjectKeyRemote {
+		if err := EnsureLocalExcludes(cfg.SyncDir); err != nil {
+			log.Println("keep backups out of git:", err)
+		}
 		m, err := NewRemoteMap(cfg.SyncDir, cfg.ClaudeProjectsDir)
 		if err != nil {
 			return r, err
 		}
 		r.Remote = m
-	} else {
-		r.leftGate = newLeftGate(cfg.SyncDir)
 	}
 	return r, nil
 }
@@ -169,9 +162,6 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 	if r.Remote != nil {
 		r.Remote.forgetChanges()
 	}
-	if r.leftGate != nil {
-		r.leftGate.forgetChanges()
-	}
 
 	for _, hash := range hashes {
 		if r.folderVanished(hash) {
@@ -193,7 +183,7 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 		// Walk Claude side
 		if entries, err := os.ReadDir(claudeMem); err == nil {
 			for _, e := range entries {
-				if e.IsDir() || strings.HasPrefix(e.Name(), ".") || isBackupName(e.Name()) {
+				if e.IsDir() || strings.HasPrefix(e.Name(), ".") || r.isBackup(e.Name()) {
 					continue
 				}
 				files[e.Name()] = struct{}{}
@@ -207,8 +197,8 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 				if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 					continue
 				}
-				if isBackupName(e.Name()) {
-					continue
+				if r.isBackup(e.Name()) || strings.Contains(e.Name(), ".from-remote-") {
+					continue // the second test is main's own, for path mode
 				}
 				files[e.Name()] = struct{}{}
 			}
@@ -394,6 +384,13 @@ func EnsureLocalExcludes(syncDir string) error {
 	return err
 }
 
+// isBackup reports whether name is a local-only conflict backup that must not
+// be synced. Only in remote mode: path mode treats every name as main did (the
+// mirror's .from-remote-* aside, which Reconcile checks itself).
+func (r Roots) isBackup(name string) bool {
+	return r.Remote != nil && isBackupName(name)
+}
+
 func isBackupName(name string) bool {
 	for _, m := range backupMarkers {
 		if strings.Contains(name, m) {
@@ -526,9 +523,6 @@ func (r Roots) joinFolder(hash string, rep *SyncReport) error {
 // the folder.
 func (r Roots) mayImport(hash, name string) bool {
 	if r.Remote == nil {
-		if r.leftGate != nil {
-			return r.leftGate.mayImport(hash, remotesPathDir(hash), name)
-		}
 		return true
 	}
 	return r.Remote.mayImport(hash, repoDir(r.Remote.Key(hash), hash), name)

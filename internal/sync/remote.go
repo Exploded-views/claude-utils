@@ -382,7 +382,7 @@ func splitRemotePath(p string) (key, name string, ok bool) {
 // projects/<hash> copy of a folder that is remote-keyed now, or a conflict
 // backup (see isBackupName) that an older client pushed.
 func claudeFolderFor(roots Roots, repoPath string) (hash, name string, ok bool) {
-	if isBackupName(filepath.Base(filepath.FromSlash(repoPath))) {
+	if roots.isBackup(filepath.Base(filepath.FromSlash(repoPath))) {
 		return "", "", false // a local-only backup that reached the repo anyway
 	}
 	if hash, name, ok := splitMirrorPath(repoPath); ok {

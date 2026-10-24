@@ -13,9 +13,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/merge"
 )
+
+// pathRoots builds a path-mode tree's Roots the way the daemon does, through
+// NewRoots, with the sync dir at syncDir.
+func pathRoots(t *testing.T, claude, syncDir string) Roots {
+	t.Helper()
+	for _, p := range []string{claude, filepath.Join(syncDir, "projects")} {
+		if err := os.MkdirAll(p, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config.Defaults()
+	cfg.SyncDir, cfg.ClaudeProjectsDir, cfg.ProjectKey = syncDir, claude, config.ProjectKeyPath
+	r, err := NewRoots(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
 
 // mainReconcile is Reconcile exactly as it was on main, before remote keys:
 // the oracle that path mode must stay identical to.
@@ -183,7 +202,8 @@ func sortedReport(rep SyncReport) map[string][]string {
 // rewrite shows. It returns the roots and the manifest to reconcile with.
 func pathFixture(t *testing.T) (Roots, *Manifest) {
 	t.Helper()
-	r, _ := reconcileFixture(t)
+	root := t.TempDir()
+	r := pathRoots(t, filepath.Join(root, "claude"), filepath.Join(root, "sync"))
 	old := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
 	put := func(root, hash, name, content string) {
 		writeMem(t, root, hash, name, content)
@@ -208,6 +228,11 @@ func pathFixture(t *testing.T) (Roots, *Manifest) {
 	put(r.Claude, "proj1", ".hidden", "h\n")
 	put(r.Mirror, "proj1", ".hidden2", "h\n")
 	put(r.Mirror, "proj1", "old.md.from-remote-deadbeef", "b\n")
+	// Names that look like backups are ordinary notes in path mode: only the
+	// mirror's .from-remote-* is skipped, as on main.
+	put(r.Claude, "proj1", "notes.from-remote-team.md", "team note\n")
+	put(r.Claude, "proj1", "notes.local-before-join-x.md", "joined note\n")
+	put(r.Mirror, "proj1", "peer.local-before-join-y.md", "peer\n")
 	// A subdirectory in memory/ is not a memory file.
 	if err := os.MkdirAll(filepath.Join(r.Claude, "proj1", "memory", "sub"), 0700); err != nil {
 		t.Fatal(err)
@@ -368,6 +393,7 @@ func TestPropagateChanges_PathModeMatchesMain(t *testing.T) {
 	for _, f := range []struct{ hash, name, content string }{
 		{"proj1", "keep.md", "keep\n"}, {"proj1", "edit.md", "before\n"}, {"proj1", "drop.md", "drop\n"},
 		{"proj1", "old-name.md", body}, {"proj2", "other.md", "other\n"}, {"proj3", "unseen.md", "u\n"},
+		{"proj1", "notes.from-remote-team.md", "team note\n"},
 	} {
 		writeMem(t, shared, "projects/"+f.hash, f.name, f.content)
 	}
@@ -381,6 +407,7 @@ func TestPropagateChanges_PathModeMatchesMain(t *testing.T) {
 	}
 	rewrite("proj1", "edit.md", "after\n")                                                 // M
 	rewrite("proj1", "new.md", "new\n")                                                    // A
+	rewrite("proj1", "notes.from-remote-team.md", "team note v2\n")                       // M of a backup-like name
 	rewrite("proj2", "added-elsewhere.md", "x\n")                                          // A in another project
 	if err := os.Remove(filepath.Join(mirror, "proj1", "memory", "drop.md")); err != nil { // D
 		t.Fatal(err)
@@ -410,10 +437,11 @@ func TestPropagateChanges_PathModeMatchesMain(t *testing.T) {
 		for _, f := range []struct{ hash, name, content string }{
 			{"proj1", "keep.md", "keep\n"}, {"proj1", "edit.md", "before\n"}, {"proj1", "drop.md", "drop\n"},
 			{"proj1", "old-name.md", body}, {"proj1", "local-only.md", "mine\n"}, {"proj2", "other.md", "other\n"},
+			{"proj1", "notes.from-remote-team.md", "old team note\n"},
 		} {
 			writeMem(t, claude, f.hash, f.name, f.content)
 		}
-		return Roots{Claude: claude, Mirror: mirror}
+		return pathRoots(t, claude, shared)
 	}
 	ours, main := claudeTree(), claudeTree()
 	if err := propagateChanges(sr, ours, pre, post); err != nil {

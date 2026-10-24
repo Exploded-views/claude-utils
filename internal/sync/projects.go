@@ -191,28 +191,6 @@ func newRemoteMap(syncDir, claudeRoot string, c *ProjectCache) *RemoteMap {
 		changed: map[string]map[string]bool{}, diffFailed: map[string]bool{}}
 }
 
-// newLeftGate is the part of a RemoteMap that path mode needs: it answers
-// mayImport for the folders the cache says left a repo directory (a PC that was
-// on remote and is back on path). nil if there is no cache or no folder has
-// left anywhere, which is every PC that never used remote keys: path mode then
-// is what it always was. It never resolves, claims or writes anything.
-func newLeftGate(syncDir string) *RemoteMap {
-	if _, err := os.Stat(ProjectCachePath(syncDir)); err != nil {
-		return nil
-	}
-	c, err := LoadProjectCache(syncDir)
-	if err != nil {
-		return nil
-	}
-	for _, e := range c.Projects {
-		if len(e.LeftAt) > 0 {
-			c.readOnly = true
-			return newRemoteMap(syncDir, "", c)
-		}
-	}
-	return nil
-}
-
 // Refresh re-resolves every project folder under the Claude root and saves
 // the cache if anything changed.
 func (m *RemoteMap) Refresh() {

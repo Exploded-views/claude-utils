@@ -1395,52 +1395,6 @@ func TestRemoteSync_CrashBetweenClaimAndJoinStillJoinsOnRestart(t *testing.T) {
 	}
 }
 
-// A PC switched back from remote to path imports from projects/<hash>/ only
-// what changed since the folder left it: a note deleted while in remote mode
-// does not come back from the old copy. A folder that never left behaves as in
-// path mode on main.
-func TestRemoteSync_SwitchingBackToPathDoesNotResurrectDeletedNotes(t *testing.T) {
-	gitEnv(t)
-	a := newMachine(t, "alice")
-	a.cfg.ProjectKey = "path"
-	app := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
-	plain := mkdirs(t, a.home, "notes")[0]
-	for _, d := range []string{app, plain} {
-		a.write(d, "x.md", "x\n")
-		a.write(d, "z.md", "z\n")
-	}
-	a.sync()
-	a.commitSyncRepo("path mode")
-
-	a.cfg.ProjectKey = "remote"
-	a.sync()
-	a.commitSyncRepo("remote mode")
-	a.remove(app, "z.md") // deleted while in remote mode; the old copy keeps it
-	a.sync()
-	a.commitSyncRepo("deleted")
-	if err := os.WriteFile(filepath.Join(a.pathDir(app), "new.md"), []byte("from a path-mode PC\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	// A path-keyed folder that never left: its repo-only file is a note from another PC.
-	if err := os.WriteFile(filepath.Join(a.pathDir(plain), "peer.md"), []byte("p\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	a.commitSyncRepo("a path-mode PC pushes")
-
-	a.cfg.ProjectKey = "path" // the switch back
-	a.sync()
-	a.sync()
-	if _, ok := a.read(app, "z.md"); ok {
-		t.Error("z.md was deleted in remote mode and is unchanged in the old copy: it must not come back")
-	}
-	if got, ok := a.read(app, "new.md"); !ok || got != "from a path-mode PC\n" {
-		t.Errorf("a file added to the old copy after the folder left must be imported, got %q,%v", got, ok)
-	}
-	if got, ok := a.read(plain, "peer.md"); !ok || got != "p\n" {
-		t.Errorf("a folder that never left must import repo-only files as before, got %q,%v", got, ok)
-	}
-}
-
 // A LeftAt anchor of "" (the sync repo had no commit when the folder left)
 // means everything in the directory is new: nothing could have been deleted
 // before the first commit.
