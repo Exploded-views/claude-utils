@@ -410,6 +410,11 @@ side wins and nothing is deleted.
 - The manifest is **not** used: the folder has no history with this key, so a
   file missing on one side says nothing about a delete.
 
+A folder that is waiting for its join is recorded in `.state/projects.json` as
+`"joinPending": true` from the moment it gains the key until the join has run.
+If the daemon dies in between, the next start joins the folder before any normal
+reconcile of it. The daemon clears the flag; leave it alone.
+
 ### Changing a folder's key
 
 When a folder leaves a repo directory (its key changes from X to Y, including

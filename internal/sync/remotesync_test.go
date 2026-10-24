@@ -1354,3 +1354,40 @@ func TestRemoteSync_VanishedHolderWithACheckoutIsRestoredOnce(t *testing.T) {
 		t.Errorf("a second disappearance must be restored too, got %q", got)
 	}
 }
+
+// A crash after the claim is saved and before the join: the next start still
+// joins the folder, so its stale local copy does not beat the shared one. The
+// flag is cleared, and saved, once the join is done.
+func TestRemoteSync_CrashBetweenClaimAndJoinStillJoinsOnRestart(t *testing.T) {
+	gitEnv(t)
+	a := newMachine(t, "alice")
+	b := newMachine(t, "bob")
+	appA := mkRepo(t, filepath.Join(a.home, "src", "app"), "git@github.com:acme/app.git")
+	a.write(appA, "diff.md", "shared\n")
+	a.sync()
+
+	b.pullFrom(a)
+	appB := mkRepo(t, filepath.Join(b.home, "code", "app"), "git@github.com:acme/app.git")
+	b.write(appB, "diff.md", "stale local\n")
+	if _, err := NewRoots(b.cfg); err != nil { // claim persisted, then the process dies
+		t.Fatal(err)
+	}
+	if c, _ := LoadProjectCache(b.cfg.SyncDir); !c.Projects[b.hash(appB)].JoinPending {
+		t.Fatalf("the claim should be saved as a pending join: %+v", c.Projects[b.hash(appB)])
+	}
+	b.sync()
+	if got := readFile(t, filepath.Join(remoteDir(b.cfg.SyncDir, appKey), "diff.md")); got != "shared\n" {
+		t.Errorf("after a crash before the join, shared diff.md = %q (local won)", got)
+	}
+	if got, _ := b.read(appB, "diff.md"); got != "shared\n" {
+		t.Errorf("after a crash before the join, local diff.md = %q", got)
+	}
+	if c, _ := LoadProjectCache(b.cfg.SyncDir); c.Projects[b.hash(appB)].JoinPending {
+		t.Error("the join is done but the cache still says it is pending")
+	}
+	b.remove(appB, "diff.md") // and it is a normal folder from now on: this is a delete
+	b.sync()
+	if _, err := os.Stat(filepath.Join(remoteDir(b.cfg.SyncDir, appKey), "diff.md")); err == nil {
+		t.Error("the joined folder's delete did not reach the shared notes")
+	}
+}

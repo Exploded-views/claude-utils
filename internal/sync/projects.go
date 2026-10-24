@@ -29,7 +29,7 @@ import (
 //     first).
 //   - Candidates is written by the daemon when the folder name decodes to
 //     several directories; set Dir to the right one.
-//   - LeftAt is written by the daemon (see the field).
+//   - LeftAt and JoinPending are written by the daemon (see the fields).
 type ProjectEntry struct {
 	Dir        string   `json:"dir,omitempty"`
 	Key        string   `json:"key,omitempty"`
@@ -41,6 +41,11 @@ type ProjectEntry struct {
 	// repo has in a directory the folder comes back to is imported only if it
 	// changed since. Written by the daemon.
 	LeftAt map[string]string `json:"leftAt,omitempty"`
+	// JoinPending is set when the folder gains or changes its key and cleared
+	// once it has been joined to that key's notes (see Joining a key in the
+	// docs), so a crash in between still joins on the next start. Written by
+	// the daemon.
+	JoinPending bool `json:"joinPending,omitempty"`
 }
 
 // ProjectCache maps Claude project folder names to what the daemon worked out
@@ -167,6 +172,11 @@ func NewRemoteMap(syncDir, claudeRoot string) (*RemoteMap, error) {
 	m := &RemoteMap{syncDir: syncDir, claudeRoot: claudeRoot, Lookup: gitOrigin, Why: gitFailure, cache: c,
 		keys: map[string]string{}, owner: map[string]string{}, warned: map[string]bool{}, failed: map[string]bool{}, denied: map[string]bool{}, restored: map[string]bool{}, join: map[string]bool{},
 		changed: map[string]map[string]bool{}, diffFailed: map[string]bool{}}
+	for h, e := range c.Projects {
+		if e.JoinPending {
+			m.join[h] = true // claimed on an earlier run, never joined
+		}
+	}
 	m.Refresh()
 	return m, nil
 }
@@ -340,8 +350,17 @@ func (m *RemoteMap) Key(hash string) string {
 	return k
 }
 
-// joined records that the folder's notes have been merged with its key's.
-func (m *RemoteMap) joined(hash string) { delete(m.join, hash) }
+// joined records that the folder's notes have been merged with its key's, and
+// saves that, so a restart does not join it again.
+func (m *RemoteMap) joined(hash string) {
+	delete(m.join, hash)
+	if e, ok := m.cache.Projects[hash]; ok && e.JoinPending {
+		e.JoinPending = false
+		m.cache.Projects[hash] = e
+		m.dirty = true
+		m.save()
+	}
+}
 
 // MemoryDir is the repo-side memory directory for a remote key.
 func (m *RemoteMap) MemoryDir(key string) string {
@@ -388,8 +407,10 @@ func (m *RemoteMap) resolve(hash string) string {
 	}
 	if key != "" && key != lastKey(prev) {
 		m.join[hash] = true // a new claim, a key change or a moved claim
+		e.JoinPending = true
 	} else if key == "" {
 		delete(m.join, hash)
+		e.JoinPending = false
 	}
 	e.LastKey = key
 	if key != "" {
