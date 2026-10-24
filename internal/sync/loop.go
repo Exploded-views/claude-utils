@@ -340,40 +340,49 @@ func remoteAndLocalIdle(repo *gitwt.Repo, branch string) (bool, error) {
 }
 
 // propagateChanges replays the file changes between pre and post revisions
-// from the mirror back into Claude's tree.
+// from the mirror back into Claude's tree. Paths in skip (parked, so the
+// mirror copy is not the user's) are left alone; that test is on the sync-repo
+// path and comes before any mapping to a Claude folder.
 func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string, skip map[string]bool) error {
-	out, err := repo.Run("diff", "--name-status", pre+".."+post)
+	// -z: "<status>\0<path>\0", or "<status>\0<old>\0<new>\0" for a rename
+	// or copy. Unlike the line format, it never quotes or splits a name.
+	out, err := repo.Run("diff", "--name-status", "-z", "--find-renames", pre+".."+post)
 	if err != nil {
 		return err
 	}
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	fields := strings.Split(out, "\x00")
+	for i := 0; i < len(fields); {
+		status := fields[i]
+		i++
+		if status == "" {
 			continue
 		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
+		want := 1
+		if status[0] == 'R' || status[0] == 'C' {
+			want = 2
 		}
-		status := fields[0]
-		// For renames the format is "R<score> oldpath newpath". Treat newpath
-		// as the canonical post-image; mark old as removed.
-		var path string
-		if strings.HasPrefix(status, "R") && len(fields) >= 3 {
-			oldPath := fields[1]
-			path = fields[2]
-			if hash, name, ok := splitMirrorPath(oldPath); ok && !skip[oldPath] {
+		if i+want > len(fields) {
+			break
+		}
+		paths := fields[i : i+want]
+		i += want
+
+		// A rename's old path is removed; its new path is the post-image.
+		path := paths[want-1]
+		if status[0] == 'R' && !skip[paths[0]] {
+			if hash, name, ok := splitMirrorPath(paths[0]); ok {
 				_ = os.Remove(filepath.Join(roots.Claude, hash, "memory", name))
 			}
-		} else {
-			path = fields[1]
 		}
-		hash, name, ok := splitMirrorPath(path)
-		if !ok || skip[path] {
+		if skip[path] {
 			continue
 		}
-		switch {
-		case strings.HasPrefix(status, "D"):
+		hash, name, ok := splitMirrorPath(path)
+		if !ok {
+			continue
+		}
+		switch status[0] {
+		case 'D':
 			_ = os.Remove(filepath.Join(roots.Claude, hash, "memory", name))
 		default:
 			if err := CopyToClaude(roots, hash, name); err != nil {
