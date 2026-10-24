@@ -3,6 +3,7 @@ package sync
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -206,5 +207,53 @@ func TestBuildFromClaudeTree(t *testing.T) {
 	}
 	if m.Len() != len(want) {
 		t.Errorf("len=%d want %d", m.Len(), len(want))
+	}
+}
+
+// A MEMORY.md section edited on one side only (say in ~/.claude while the
+// daemon was stopped) is a conflict against the empty base. The Claude copy
+// wins and the mirror copy is kept beside it; conflict markers are never
+// written to either side.
+func TestReconcile_MemoryIndexConflictKeepsClaudeCopy(t *testing.T) {
+	r, _ := reconcileFixture(t)
+	writeMem(t, r.Claude, "proj1", "MEMORY.md", "# Memory\n\n## Notes\nThe build uses ninja.\n")
+	writeMem(t, r.Mirror, "proj1", "MEMORY.md", "# Memory\n\n## Notes\nThe build uses make.\n")
+
+	rep, err := Reconcile(r, NewManifest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, side := range []string{r.Claude, r.Mirror} {
+		b, _ := os.ReadFile(filepath.Join(side, "proj1", "memory", "MEMORY.md"))
+		if string(b) != "# Memory\n\n## Notes\nThe build uses ninja.\n" {
+			t.Errorf("%s MEMORY.md = %q", side, b)
+		}
+	}
+	matches, _ := filepath.Glob(filepath.Join(r.Mirror, "proj1", "memory", "MEMORY.md.from-remote-*"))
+	if len(matches) != 1 {
+		t.Fatalf("want one backup, got %v", matches)
+	}
+	if b, _ := os.ReadFile(matches[0]); string(b) != "# Memory\n\n## Notes\nThe build uses make.\n" {
+		t.Errorf("backup = %q", b)
+	}
+	if len(rep.Merged) != 0 || len(rep.BackedUp) != 1 {
+		t.Errorf("report: merged %v, backed up %v", rep.Merged, rep.BackedUp)
+	}
+}
+
+// The same through a daemon cycle: nothing with markers reaches ~/.claude or
+// origin.
+func TestReconcile_MemoryIndexProseEditNeverShipsMarkers(t *testing.T) {
+	f := newPullFixture(t, map[string]string{"MEMORY.md": "# Memory\n\n## Notes\nThe build uses make.\n"})
+	captureLog(t)
+	f.loop.pullTick(f.repo, f.roots)
+	// Edited in ~/.claude with no watcher event (daemon stopped).
+	writeMem(t, f.roots.Claude, "p1", "MEMORY.md", "# Memory\n\n## Notes\nThe build uses ninja.\n")
+	f.loop.pullTick(f.repo, f.roots)
+	if got, _ := f.claudeCopy("MEMORY.md"); strings.Contains(got, "<<<<<<<") {
+		t.Errorf("conflict markers in ~/.claude MEMORY.md:\n%s", got)
+	}
+	if got := f.originFile("MEMORY.md"); strings.Contains(got, "<<<<<<<") || !strings.Contains(got, "ninja") {
+		t.Errorf("origin MEMORY.md:\n%s", got)
 	}
 }

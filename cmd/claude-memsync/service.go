@@ -157,6 +157,13 @@ func runStop(args []string) int {
 		fmt.Fprintln(os.Stderr, "stop:", err)
 		return 1
 	}
+	// A pull the stop cut short leaves its marker; one that no stopped rebase
+	// or merge needs must not outlive the pull.
+	if cfg, err := loadDistillConfig(""); err == nil {
+		if err := syncpkg.ClearStalePullMarker(cfg.SyncDir); err != nil {
+			fmt.Fprintln(os.Stderr, "stop: clear pull marker:", err)
+		}
+	}
 	fmt.Fprintln(os.Stderr, "stopped")
 	return 0
 }
@@ -168,7 +175,27 @@ func runStatus(args []string) int {
 		return 1
 	}
 	fmt.Println(st)
+	if cfg, err := loadDistillConfig(""); err == nil {
+		if line := pausedLine(cfg); line != "" {
+			fmt.Println(line)
+		}
+	}
 	return 0
+}
+
+// pausedLine says that syncing is paused for a rebase or merge being resolved by
+// hand, or is "" if it is not. The service can be running and syncing nothing.
+func pausedLine(cfg config.Config) string {
+	since, ok := syncpkg.PausedSince(cfg.SyncDir)
+	if !ok {
+		return ""
+	}
+	when := ""
+	if !since.IsZero() {
+		when = " since " + since.Local().Format("2006-01-02 15:04")
+	}
+	return "syncing paused" + when + ": a rebase or merge is in progress in " + cfg.SyncDir +
+		"; finish it, or give it up with git -C " + cfg.SyncDir + " rebase --abort (see docs: Rebase conflicts)"
 }
 
 // runService is the entry point for `claude-memsync run`. It wraps the loop

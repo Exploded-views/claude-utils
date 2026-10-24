@@ -35,6 +35,17 @@ type Config struct {
 	// work-tree so the daemon's git sync carries it across workstations.
 	DistilledDir string `json:"distilledDir,omitempty"`
 
+	// Scrub holds back, at commit time, any memory file that looks like it
+	// holds a secret or matches the denylist (default: true). The Claude copy
+	// of a held-back file is never touched; the mirror copy is re-checked on
+	// the next cycle (and parked around each pull).
+	Scrub bool `json:"scrub"`
+
+	// RequireDenylist makes the daemon commit nothing while the denylist file
+	// (see DenylistPath) is missing. Default false. Has no effect when Scrub
+	// is false.
+	RequireDenylist bool `json:"requireDenylist"`
+
 	// DebounceMs is how long to wait after a file change before committing.
 	DebounceMs int `json:"debounceMs"`
 
@@ -49,6 +60,7 @@ func Defaults() Config {
 	return Config{
 		SyncDir:           filepath.Join(home, ".claudesync"),
 		ClaudeProjectsDir: filepath.Join(home, ".claude", "projects"),
+		Scrub:             true,
 		DebounceMs:        3000,
 		PullIntervalSec:   3600,
 	}
@@ -76,6 +88,12 @@ func DiscoverMergeDriver() (string, error) {
 // Path returns the absolute path to the config file inside SyncDir.
 func (c Config) Path() string {
 	return filepath.Join(c.SyncDir, "config.json")
+}
+
+// DenylistPath returns the user's denylist file: one case-insensitive regular
+// expression per line, kept next to config.json and never synced.
+func (c Config) DenylistPath() string {
+	return filepath.Join(c.SyncDir, "denylist.txt")
 }
 
 // DistilledPath returns the distilled-memory catalog directory, defaulting to

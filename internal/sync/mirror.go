@@ -169,8 +169,15 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 				// already matched — nothing to do
 
 			case cExists && mExists && !bytes.Equal(cBytes, mBytes):
+				merged, conflict := "", true
 				if name == "MEMORY.md" {
-					merged, _ := merge.Merge("", string(cBytes), string(mBytes))
+					// The base is "" on purpose. The mirror copy is normally
+					// HEAD's, and a base equal to it would make every section
+					// "unchanged" on that side: the Claude copy would win
+					// outright and the peer's sections would be dropped.
+					merged, conflict = merge.Merge("", string(cBytes), string(mBytes))
+				}
+				if !conflict {
 					if err := writeAtomic(cp, []byte(merged)); err != nil {
 						return rep, err
 					}
@@ -179,8 +186,11 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 					}
 					rep.Merged = append(rep.Merged, rel)
 				} else {
-					backup := fmt.Sprintf("%s.from-remote-%s", mp, randSuffix())
-					if err := writeAtomic(backup, mBytes); err != nil {
+					// Any other file, or a MEMORY.md section edited on one side
+					// only (with base "" that is a conflict, and the merge text
+					// then holds conflict markers): the Claude copy wins and the
+					// mirror copy is kept beside it.
+					if err := writeBackup(mp, mBytes); err != nil {
 						return rep, err
 					}
 					if err := writeAtomic(mp, cBytes); err != nil {
@@ -193,6 +203,24 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 		}
 	}
 	return rep, nil
+}
+
+// writeBackup keeps content as mp.from-remote-<id>, unless a file of that name
+// already holds the same bytes: the same incoming copy is then kept once, however
+// many times it is set aside.
+func writeBackup(mp string, content []byte) error {
+	prefix := filepath.Base(mp) + ".from-remote-"
+	if entries, err := os.ReadDir(filepath.Dir(mp)); err == nil {
+		for _, e := range entries {
+			if !strings.HasPrefix(e.Name(), prefix) {
+				continue
+			}
+			if b, err := os.ReadFile(filepath.Join(filepath.Dir(mp), e.Name())); err == nil && bytes.Equal(b, content) {
+				return nil
+			}
+		}
+	}
+	return writeAtomic(fmt.Sprintf("%s.from-remote-%s", mp, randSuffix()), content)
 }
 
 // CopyToMirror copies a single Claude-side file into the mirror, creating

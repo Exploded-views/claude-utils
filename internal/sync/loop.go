@@ -26,7 +26,14 @@ type Loop struct {
 	Branch   string
 	Hostname string
 	OnFlush  func(localChanges bool, err error) // optional, for tests/observability
+
+	// recovered is the outcome of a recoverLeftovers the cycle already ran
+	// before flush, so flush does not repeat it: a path whose restore keeps
+	// failing is counted once per cycle.
+	recovered *recovery
 }
+
+type recovery struct{ err error }
 
 // Run blocks until ctx is canceled. Returns the first fatal error or nil
 // when ctx ends. Recoverable errors (transient git failures) are logged.
@@ -60,7 +67,7 @@ func (l *Loop) Run(ctx context.Context) error {
 		return fmt.Errorf("watch %s: %w", roots.Claude, err)
 	}
 	if err := refreshMemoryWatches(watcher, roots.Claude); err != nil {
-		log.Println("refresh memory watches:", err)
+		log.Println("refresh memory watches:", newPathGuard(l.Cfg).Err(err))
 	}
 
 	debounce := time.NewTimer(time.Hour)
@@ -77,14 +84,21 @@ func (l *Loop) Run(ctx context.Context) error {
 	// to detect deletes that happened while the daemon was off), then flush.
 	manifest, err := LoadManifest(l.Cfg.SyncDir)
 	if err != nil {
-		log.Println("load manifest (continuing without delete detection):", err)
+		log.Println("load manifest (continuing without delete detection):", newPathGuard(l.Cfg).Err(err))
 		manifest = NewManifest()
 	}
-	if _, err := Reconcile(roots, manifest); err != nil {
-		log.Println("initial reconcile:", err)
+	// What a crash left behind is undone before Reconcile compares the trees: a
+	// stopped rebase or merge holds conflict markers, and the parked mirror
+	// copies of an unfinished park differ from the Claude ones.
+	if l.startCycle(repo, roots) {
+		if _, err := Reconcile(roots, manifest); err != nil {
+			log.Println("initial reconcile:", newPathGuard(l.Cfg).Err(err))
+		}
 	}
 	if err := l.flush(repo, roots, true); err != nil {
-		log.Println("initial flush:", err)
+		if !errors.Is(err, errHandResolving) { // already logged
+			log.Println("initial flush:", newPathGuard(l.Cfg).Err(err))
+		}
 		if l.OnFlush != nil {
 			l.OnFlush(true, err)
 		}
@@ -105,7 +119,7 @@ func (l *Loop) Run(ctx context.Context) error {
 			}
 			handled, err := l.handleEvent(watcher, roots, ev)
 			if err != nil {
-				log.Println("event:", err)
+				log.Println("event:", newPathGuard(l.Cfg).Err(err))
 				continue
 			}
 			if !handled {
@@ -118,12 +132,12 @@ func (l *Loop) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			log.Println("watcher error:", err)
+			log.Println("watcher error:", newPathGuard(l.Cfg).Err(err))
 
 		case <-debounce.C:
 			err := l.flush(repo, roots, true)
-			if err != nil {
-				log.Println("flush (local):", err)
+			if err != nil && !errors.Is(err, errHandResolving) {
+				log.Println("flush (local):", newPathGuard(l.Cfg).Err(err))
 			}
 			l.refreshManifest(roots)
 			l.rebuildDistilledIndex()
@@ -136,29 +150,92 @@ func (l *Loop) Run(ctx context.Context) error {
 			if pendingLocal {
 				continue // debounce will handle it
 			}
-			// Safety net: re-walk the Claude tree to catch any watcher events
-			// missed by races (e.g., a new project dir and memory file created
-			// in rapid succession before the new dir's watcher was registered).
-			// Using the on-disk manifest also lets us propagate deletes the
-			// watcher missed.
-			m, err := LoadManifest(l.Cfg.SyncDir)
-			if err != nil {
-				log.Println("load manifest:", err)
-				m = NewManifest()
-			}
-			if _, err := Reconcile(roots, m); err != nil {
-				log.Println("reconcile:", err)
-			}
-			err = l.flush(repo, roots, true)
-			if err != nil {
-				log.Println("flush (pull):", err)
-			}
-			l.refreshManifest(roots)
-			l.rebuildDistilledIndex()
-			if l.OnFlush != nil {
-				l.OnFlush(false, err)
-			}
+			l.pullTick(repo, roots)
 		}
+	}
+}
+
+// recoverLeftovers undoes what a crash or an earlier failed cycle left: a
+// rebase or merge the daemon's own pull left stopped, then an unfinished park.
+// A rebase or merge the daemon did not start is the user's: it returns
+// errHandResolving and nothing else is done. Last, it copies into the
+// Claude tree whatever moved the sync repo's HEAD outside a cycle (catchUp).
+func (l *Loop) recoverLeftovers(repo *gitwt.Repo, roots Roots) error {
+	if err := abortDaemonInterrupted(repo); err != nil {
+		if errors.Is(err, errHandResolving) {
+			return err
+		}
+		return fmt.Errorf("abort interrupted rebase or merge: %w", err)
+	}
+	if err := finishParked(repo, roots); err != nil {
+		return fmt.Errorf("finish earlier park: %w", err)
+	}
+	if err := l.catchUp(repo, roots); err != nil {
+		return fmt.Errorf("catch up with the sync repo: %w", err)
+	}
+	return nil
+}
+
+// takeRecovery is recoverLeftovers for flush, unless the cycle already ran it.
+func (l *Loop) takeRecovery(repo *gitwt.Repo, roots Roots) error {
+	if r := l.recovered; r != nil {
+		l.recovered = nil
+		return r.err
+	}
+	err := l.recoverLeftovers(repo, roots)
+	if errors.Is(err, errHandResolving) {
+		log.Println(err)
+	}
+	return err
+}
+
+// startCycle runs recoverLeftovers ahead of a Reconcile and keeps the result
+// for the flush that follows. It reports whether Reconcile may run: not while
+// a park is unfinished (the parked mirror copies are not the user's, and
+// Reconcile would merge them into the Claude tree), nor while a rebase or
+// merge is still stopped.
+func (l *Loop) startCycle(repo *gitwt.Repo, roots Roots) bool {
+	err := l.recoverLeftovers(repo, roots)
+	l.recovered = &recovery{err}
+	if errors.Is(err, errHandResolving) {
+		log.Println(err)
+		return false
+	}
+	if err != nil {
+		log.Println("recover earlier cycle:", newPathGuard(l.Cfg).Err(err))
+	}
+	if parkedExists(repo) || repo.RebaseInProgress() || repo.MergeInProgress() {
+		log.Println("reconcile skipped: held-back files are still parked or a rebase/merge is unresolved; retrying next cycle")
+		return false
+	}
+	return true
+}
+
+// pullTick is the periodic cycle: re-walk the Claude tree, then flush.
+func (l *Loop) pullTick(repo *gitwt.Repo, roots Roots) {
+	// Safety net: re-walk the Claude tree to catch any watcher events
+	// missed by races (e.g., a new project dir and memory file created
+	// in rapid succession before the new dir's watcher was registered).
+	// Using the on-disk manifest also lets us propagate deletes the
+	// watcher missed.
+	m, err := LoadManifest(l.Cfg.SyncDir)
+	if err != nil {
+		log.Println("load manifest:", newPathGuard(l.Cfg).Err(err))
+		m = NewManifest()
+	}
+	if l.startCycle(repo, roots) {
+		if _, err := Reconcile(roots, m); err != nil {
+			log.Println("reconcile:", newPathGuard(l.Cfg).Err(err))
+		}
+	}
+	err = l.flush(repo, roots, true)
+	if err != nil && !errors.Is(err, errHandResolving) {
+		log.Println("flush (pull):", newPathGuard(l.Cfg).Err(err))
+	}
+	l.refreshManifest(roots)
+	l.rebuildDistilledIndex()
+	if l.OnFlush != nil {
+		l.OnFlush(false, err)
 	}
 }
 
@@ -196,15 +273,18 @@ func (l *Loop) handleEvent(watcher *fsnotify.Watcher, roots Roots, ev fsnotify.E
 		if err := CopyToMirror(roots, hash, name); err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				// Race: file vanished between event and read. Treat as remove.
-				return true, RemoveFromMirror(roots, hash, name)
+				if err := RemoveFromMirror(roots, hash, name); err != nil {
+					return true, newPathGuard(l.Cfg).PathErr("remove from mirror", "projects/"+hash+"/memory/"+name, err)
+				}
+				return true, nil
 			}
-			return false, fmt.Errorf("copy to mirror %s/%s: %w", hash, name, err)
+			return false, newPathGuard(l.Cfg).PathErr("copy to mirror", "projects/"+hash+"/memory/"+name, err)
 		}
 		return true, nil
 
 	case ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0:
 		if err := RemoveFromMirror(roots, hash, name); err != nil {
-			return false, fmt.Errorf("remove from mirror %s/%s: %w", hash, name, err)
+			return false, newPathGuard(l.Cfg).PathErr("remove from mirror", "projects/"+hash+"/memory/"+name, err)
 		}
 		return true, nil
 	}
@@ -218,12 +298,49 @@ func (l *Loop) handleEvent(watcher *fsnotify.Watcher, roots Roots, ev fsnotify.E
 // (a single ls-remote round-trip). If origin's SHA matches our cached
 // refs/remotes/origin/<branch> AND we have no unpushed commits, it returns
 // early — skipping the full pull/push churn that dominates idle ticks.
-func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) error {
-	if includeLocal {
-		if err := repo.AddAll(); err != nil {
-			return fmt.Errorf("add: %w", err)
+func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err error) {
+	// Registered first, so it runs last: whatever the cycle returns (including
+	// the restore error below) is stripped of denylisted names.
+	g := newPathGuard(l.Cfg)
+	defer func() { err = g.Err(err) }()
+	// A rebase or merge the daemon left stopped goes first (one the user is
+	// resolving ends the cycle), before anything is staged, and then
+	// a park an earlier cycle (or a crashed run) did not finish: nothing may be
+	// committed, or parked over, while files are still away.
+	if err := l.takeRecovery(repo, roots); err != nil {
+		if errors.Is(err, errHandResolving) {
+			markPaused(repo)
+			return err // already logged, once for the cycle
 		}
-		_, err := repo.Commit(fmt.Sprintf("auto: %s @ %s", l.Hostname, time.Now().UTC().Format(time.RFC3339)))
+		return err
+	}
+	// The cycle's HEAD is recorded once it is reflected in the Claude tree
+	// (see catchUp). A propagate that failed leaves the older record.
+	settled := true
+	// A cycle that cannot go on says so in its result (and in .state/paused),
+	// not as a success.
+	pause := func() error {
+		settled = false
+		markPaused(repo)
+		log.Println(errHandResolving)
+		return errHandResolving
+	}
+	defer func() {
+		if settled {
+			if rerr := recordHead(repo); rerr != nil {
+				log.Println("record synced head:", g.Err(rerr))
+			}
+		}
+	}()
+	// The check in takeRecovery ran at the start of the cycle, which may have
+	// been long ago: the user may have started a rebase since. Staging or
+	// committing in the middle of it would corrupt it.
+	if handResolving(repo) {
+		return pause()
+	}
+	clearPaused(repo)
+	if includeLocal {
+		_, err := CommitMirror(repo, l.Cfg, fmt.Sprintf("auto: %s @ %s", l.Hostname, time.Now().UTC().Format(time.RFC3339)))
 		if err != nil {
 			return fmt.Errorf("commit: %w", err)
 		}
@@ -233,22 +350,87 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) error {
 		return nil
 	}
 
+	// Whatever CommitMirror left uncommitted (held back by the scrub, or
+	// everything when the denylist policy blocks the commit) is parked: reset
+	// to HEAD so the pull runs on a clean tree, skipped by propagateChanges,
+	// and put back afterwards (see park.go). The deferred finish runs whatever
+	// happens below, and tries every path.
+	defer func() {
+		if ferr := finishParked(repo, roots); ferr != nil {
+			err = errors.Join(err, fmt.Errorf("restore held-back files: %w", ferr))
+		}
+	}()
+	// Once more right before the pull, ahead of the park, which resets files.
+	beforePullCheck(repo)
+	if handResolving(repo) {
+		return pause()
+	}
+	st, err := parkUncommitted(repo)
+	if err != nil {
+		return fmt.Errorf("park held-back files: %w", err)
+	}
 	preRev, _ := repo.Run("rev-parse", "HEAD")
-	if err := repo.Pull(l.Branch); err != nil {
-		// Don't propagate first-time failure (no upstream yet); push will create it.
-		log.Println("pull:", err)
+	var conflictErr error
+	// The marker names the rebase for the reflog, so the next start knows a
+	// rebase found stopped is ours to abort; it stays while one is.
+	if err := runPull(repo, l.Branch); err != nil {
+		if repo.RebaseInProgress() {
+			conflictErr = abortRebaseConflict(repo)
+		} else {
+			// Don't propagate first-time failure (no upstream yet); push will create it.
+			log.Println("pull:", g.Err(err))
+		}
+	}
+	clearPullMark(repo)
+	if errors.Is(conflictErr, errHandResolving) {
+		return pause()
 	}
 	postRev, _ := repo.Run("rev-parse", "HEAD")
-	if strings.TrimSpace(preRev) != strings.TrimSpace(postRev) && strings.TrimSpace(preRev) != "" {
-		if err := propagateChanges(repo, roots, strings.TrimSpace(preRev), strings.TrimSpace(postRev)); err != nil {
+	if conflictErr == nil && strings.TrimSpace(preRev) != strings.TrimSpace(postRev) && strings.TrimSpace(preRev) != "" {
+		if err := propagate(repo, roots, strings.TrimSpace(preRev), strings.TrimSpace(postRev), st.skip(), g); err != nil {
+			settled = false
 			return fmt.Errorf("propagate: %w", err)
 		}
+	}
+	if conflictErr != nil {
+		return conflictErr // nothing to push: origin is ahead
 	}
 
 	if err := repo.Push(l.Branch); err != nil {
 		return fmt.Errorf("push: %w", err)
 	}
 	return nil
+}
+
+// propagate is propagateChanges; a variable so a test can make it fail.
+var propagate = propagateChanges
+
+// beforePullCheck runs just before the check for a rebase or merge ahead of the
+// pull; a variable so a test can start one there.
+var beforePullCheck = func(*gitwt.Repo) {}
+
+// abortRebaseConflict deals with a `pull --rebase` that stopped on a conflict
+// (both PCs edited the same lines of a committed file). It aborts the rebase, so
+// the work-tree never holds conflict markers for propagateChanges to copy into
+// the Claude tree. Nothing decides the conflict for the user: the local commits
+// are kept, nothing is propagated or pushed, and every cycle fails the same way
+// until the user resolves it (see "Rebase conflicts" in the docs). The error is
+// the cycle's one log line; it gives the count only, as the paths may match the
+// denylist.
+//
+// Only a rebase this pull started is aborted (see stoppedByMarkedPull). One the
+// user started in the meantime makes the pull fail without touching it; that
+// is errHandResolving.
+func abortRebaseConflict(repo *gitwt.Repo) error {
+	if !stoppedByMarkedPull(repo) {
+		return errHandResolving
+	}
+	conflicted, _ := repo.UnmergedPaths()
+	n := len(conflicted)
+	if err := repo.RebaseAbort(); err != nil {
+		return fmt.Errorf("pull: rebase conflict in %d file(s) and abort failed; resolve in %s", n, repo.Dir)
+	}
+	return fmt.Errorf("pull: rebase conflict in %d file(s); rebase aborted, local commits kept, nothing propagated or pushed until you resolve it (see docs: Rebase conflicts)", n)
 }
 
 // remoteAndLocalIdle reports whether there is nothing to do: origin's branch
@@ -275,44 +457,53 @@ func remoteAndLocalIdle(repo *gitwt.Repo, branch string) (bool, error) {
 }
 
 // propagateChanges replays the file changes between pre and post revisions
-// from the mirror back into Claude's tree.
-func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string) error {
-	out, err := repo.Run("diff", "--name-status", pre+".."+post)
+// from the mirror back into Claude's tree. Paths in skip (parked, so the
+// mirror copy is not the user's) are left alone; that test is on the sync-repo
+// path and comes before any mapping to a Claude folder.
+func propagateChanges(repo *gitwt.Repo, roots Roots, pre, post string, skip map[string]bool, g *pathGuard) error {
+	// -z: "<status>\0<path>\0", or "<status>\0<old>\0<new>\0" for a rename
+	// or copy. Unlike the line format, it never quotes or splits a name.
+	out, err := repo.Run("diff", "--name-status", "-z", "--find-renames", pre+".."+post)
 	if err != nil {
 		return err
 	}
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	fields := strings.Split(out, "\x00")
+	for i := 0; i < len(fields); {
+		status := fields[i]
+		i++
+		if status == "" {
 			continue
 		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
+		want := 1
+		if status[0] == 'R' || status[0] == 'C' {
+			want = 2
 		}
-		status := fields[0]
-		// For renames the format is "R<score> oldpath newpath". Treat newpath
-		// as the canonical post-image; mark old as removed.
-		var path string
-		if strings.HasPrefix(status, "R") && len(fields) >= 3 {
-			oldPath := fields[1]
-			path = fields[2]
-			if hash, name, ok := splitMirrorPath(oldPath); ok {
+		if i+want > len(fields) {
+			break
+		}
+		paths := fields[i : i+want]
+		i += want
+
+		// A rename's old path is removed; its new path is the post-image.
+		path := paths[want-1]
+		if status[0] == 'R' && !skip[paths[0]] {
+			if hash, name, ok := splitMirrorPath(paths[0]); ok {
 				_ = os.Remove(filepath.Join(roots.Claude, hash, "memory", name))
 			}
-		} else {
-			path = fields[1]
+		}
+		if skip[path] {
+			continue
 		}
 		hash, name, ok := splitMirrorPath(path)
 		if !ok {
 			continue
 		}
-		switch {
-		case strings.HasPrefix(status, "D"):
+		switch status[0] {
+		case 'D':
 			_ = os.Remove(filepath.Join(roots.Claude, hash, "memory", name))
 		default:
 			if err := CopyToClaude(roots, hash, name); err != nil {
-				log.Printf("propagate %s: %v", path, err)
+				log.Printf("propagate %s: %v", g.Path(path), g.Err(err))
 			}
 		}
 	}
@@ -357,11 +548,11 @@ func refreshMemoryWatches(w *fsnotify.Watcher, claudeRoot string) error {
 func (l *Loop) refreshManifest(roots Roots) {
 	m, err := BuildFromClaudeTree(roots.Claude)
 	if err != nil {
-		log.Println("build manifest:", err)
+		log.Println("build manifest:", newPathGuard(l.Cfg).Err(err))
 		return
 	}
 	if err := m.Save(l.Cfg.SyncDir); err != nil {
-		log.Println("save manifest:", err)
+		log.Println("save manifest:", newPathGuard(l.Cfg).Err(err))
 	}
 }
 
@@ -379,7 +570,7 @@ func (l *Loop) rebuildDistilledIndex() {
 		ProjectsDir:  l.Cfg.ClaudeProjectsDir,
 		DistilledDir: dir,
 	}); err != nil {
-		log.Println("rebuild distilled index:", err)
+		log.Println("rebuild distilled index:", newPathGuard(l.Cfg).Err(err))
 	}
 }
 
