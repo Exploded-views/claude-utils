@@ -171,3 +171,105 @@ func TestMultiRepo_RepoOwningNothingIgnoresClaudeTree(t *testing.T) {
 		t.Fatalf("files: %q", files)
 	}
 }
+
+// The tests below call the gated functions directly, so each fails when its
+// own Owns check is removed.
+
+func TestOwnsGate_RefreshMirrorSkipsUnownedPath(t *testing.T) {
+	roots := Roots{Claude: filepath.Join(t.TempDir(), "c"), Mirror: filepath.Join(t.TempDir(), "m"), Owns: only("po")}
+	writeMem(t, roots.Claude, "pc", "x.md", "client\n")
+	writeMem(t, roots.Claude, "po", "y.md", "own\n")
+	refreshMirror(roots, []parkedPath{
+		{Path: "projects/pc/memory/x.md", Kind: parkFile},
+		{Path: "projects/po/memory/y.md", Kind: parkFile},
+	})
+	if _, err := os.Stat(filepath.Join(roots.Mirror, "pc", "memory", "x.md")); err == nil {
+		t.Fatal("refreshMirror copied an unowned folder into the mirror")
+	}
+	if _, err := os.Stat(filepath.Join(roots.Mirror, "po", "memory", "y.md")); err != nil {
+		t.Fatalf("owned folder not refreshed: %v", err)
+	}
+}
+
+func TestOwnsGate_KeepIncomingDoesNotMergeIntoUnownedClaudeCopy(t *testing.T) {
+	f := newPullFixture(t, map[string]string{})
+	rel := "projects/pc/memory/MEMORY.md"
+	base := "# Index\n- a\n- b\n- c\n- d\n- e\n- f\n"
+	f.peerWrite(rel, base)
+	mustGit(t, f.repo, "pull", "-q", "origin", "main")
+	pre := strings.TrimSpace(mustGit(t, f.repo, "rev-parse", "HEAD"))
+	f.peerWrite(rel, base+"- incoming\n")
+	mustGit(t, f.repo, "pull", "-q", "origin", "main")
+
+	saved := "- mine\n" + base
+	writeMem(t, f.roots.Claude, "pc", "MEMORY.md", saved)
+	for _, c := range []struct {
+		name   string
+		owns   func(string) bool
+		merged bool
+	}{{"control (no gate)", nil, true}, {"unowned", only("po"), false}} {
+		writeMem(t, f.roots.Claude, "pc", "MEMORY.md", saved)
+		roots := f.roots
+		roots.Owns = c.owns
+		if _, _, err := keepIncoming(f.repo, roots, pre, rel, []byte(saved), true); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := os.ReadFile(filepath.Join(f.roots.Claude, "pc", "memory", "MEMORY.md"))
+		if got := string(b) != saved; got != c.merged {
+			t.Errorf("%s: Claude copy changed=%v, want %v", c.name, got, c.merged)
+		}
+	}
+}
+
+func TestOwnsGate_CatchUpSkipsKeepsNothingForUnownedPath(t *testing.T) {
+	f := newPullFixture(t, map[string]string{})
+	rec := strings.TrimSpace(mustGit(t, f.repo, "rev-parse", "HEAD"))
+	f.peerWrite("projects/pc/memory/k.md", "incoming\n")
+	mustGit(t, f.repo, "pull", "-q", "origin", "main")
+	head := strings.TrimSpace(mustGit(t, f.repo, "rev-parse", "HEAD"))
+	writeMem(t, f.roots.Claude, "pc", "k.md", "local edit\n")
+
+	for _, c := range []struct {
+		owns func(string) bool
+		keep int
+	}{{nil, 1}, {only("po"), 0}} {
+		roots := f.roots
+		roots.Owns = c.owns
+		_, keep, err := catchUpSkips(f.repo, roots, rec, head)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(keep) != c.keep {
+			t.Errorf("owns=%v: kept %d copies, want %d", c.owns != nil, len(keep), c.keep)
+		}
+	}
+}
+
+// A rename from a folder this repo does not own into one it owns removes
+// nothing from the unowned folder's Claude copy.
+func TestOwnsGate_RenameOldPathInUnownedFolderLeftAlone(t *testing.T) {
+	f := newPullFixture(t, map[string]string{})
+	captureLog(t)
+	body := strings.Repeat("a line long enough for rename detection\n", 8)
+	f.peerWrite("projects/pc/memory/a.md", body)
+	mustGit(t, f.repo, "pull", "-q", "origin", "main")
+	f.roots.Owns = only("po")
+	writeMem(t, f.roots.Claude, "pc", "a.md", body)
+
+	mustGit(t, f.peer, "pull", "-q", "origin", "main")
+	if err := os.MkdirAll(filepath.Join(f.peer.Dir, "projects", "po", "memory"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, f.peer, "mv", "projects/pc/memory/a.md", "projects/po/memory/a.md")
+	mustGit(t, f.peer, "commit", "-q", "-m", "move")
+	mustGit(t, f.peer, "push", "-q", "origin", "main")
+	if err := f.loop.flush(f.repo, f.roots, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(f.roots.Claude, "po", "memory", "a.md")); err != nil {
+		t.Fatalf("owned rename target not propagated: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(f.roots.Claude, "pc", "memory", "a.md")); err != nil {
+		t.Fatal("the rename's old path in an unowned folder was deleted from the Claude tree")
+	}
+}

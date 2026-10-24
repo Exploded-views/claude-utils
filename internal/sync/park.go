@@ -479,7 +479,7 @@ func keepIncoming(repo *gitwt.Repo, roots Roots, preRev, p string, saved []byte,
 	if existed && bytes.Equal(saved, incoming) {
 		return false, saved, nil
 	}
-	if hash, name, ok := splitMirrorPath(p); ok && name == "MEMORY.md" && existed {
+	if hash, name, ok := splitMirrorPath(p); ok && roots.owns(hash) && name == "MEMORY.md" && existed {
 		cp := filepath.Join(roots.Claude, hash, "memory", name)
 		if cur, err := os.ReadFile(cp); err == nil && bytes.Equal(cur, saved) {
 			base, _ := repo.Run("show", preRev+":"+p) // "" when it did not exist
