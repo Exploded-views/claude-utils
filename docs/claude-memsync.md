@@ -178,7 +178,8 @@ commits.
 - `~/.claudesync/config.json` — per-PC (paths embed your machine layout)
 - `~/.claudesync/.state/manifest.json` — per-PC (delete-detection state)
 - `~/.claudesync/.state/parked.json` and `.state/parked/` — per-PC (in-flight
-  [parking](#parking-held-back-files-around-the-pull) state, normally absent)
+  [parking](#parking-held-back-files-around-the-pull) state, normally absent;
+  `.state/parked.broken-*/` holds a park that was set aside)
 - `~/.claudesync/denylist.txt` — per-PC (your [denylist](#secret-scrub-and-denylist))
 - `~/.claudesync/daemon.pid` — runtime state
 - `~/.claudesync/distilled/DISTILLED.md` — derived index, regenerated per-PC
@@ -218,21 +219,36 @@ parked too.
 3. Each path is reset to the last commit, or removed if it was never committed.
 4. The pull runs on a clean tree. Pulled changes are copied into `~/.claude`
    except for parked paths, which are skipped by their sync-repo path.
-5. Each parked path is put back. If the pull changed it, the incoming version
-   is kept first: a `MEMORY.md` is merged 3-way with your copy (the same
-   section-level merge as everywhere else, against the version from before the
-   pull), and if that conflicts, or for any other file, the peer's version is
-   kept as `<name>.from-remote-<id>` next to it, so committing your version
-   later doesn't silently revert it. Then your version is restored: for a memory
-   file the mirror is refilled from your `~/.claude` copy; for any other path
-   from the saved bytes.
+5. Each parked path is put back from its saved bytes, whatever the path. If the
+   pull changed it, the incoming version is kept first: a `MEMORY.md` is merged
+   3-way with the saved bytes (the same section-level merge as everywhere else,
+   against the version from before the pull), and the result is written to the
+   mirror and, only if your `~/.claude` copy still equals the saved bytes, to
+   `~/.claude` too. Otherwise (a conflicting merge, a `MEMORY.md` you changed
+   since, a deleted file, any other file) the peer's version is kept as
+   `<name>.from-remote-<id>` next to it, so committing your version later
+   doesn't silently revert it. The `~/.claude` copy is not consulted for the
+   restore: a later watcher event or reconcile syncs it to the mirror as usual.
 6. The state is deleted last.
 
 Step 5 runs in a `defer`, so it happens even if the pull or the copy back into
 `~/.claude` fails, and it tries every path rather than stopping at the first
 error. A path that cannot be restored stays recorded in `parked.json`; the next
 cycle retries it before doing anything else, and nothing is committed or parked
-over it meanwhile.
+over it meanwhile. The startup reconcile and the one on every pull tick are
+skipped while a park is unfinished (the log says `reconcile skipped`), because
+the parked mirror copies are not your versions.
+
+That would block sync for good if the restore never works, so it gives up in
+two cases (see [Recovering parked files](#recovering-parked-files)):
+
+- `parked.json` cannot be parsed, or holds an invalid path or kind: it is moved,
+  with `parked/`, to `~/.claudesync/.state/parked.broken-<unix time>/`, logged
+  once as `PARKED STATE UNUSABLE`, and the cycle goes on.
+- The restore of the same path fails on 3 consecutive cycles (the count is in
+  `parked.json`): that path's saved bytes are moved to a new
+  `.state/parked.broken-<unix time>/parked/<path>`, logged once as
+  `PARKED FILES STUCK`, and sync resumes.
 
 In practice:
 
@@ -242,11 +258,49 @@ In practice:
 - If the daemon dies mid-cycle, nothing is lost: your `~/.claude` copies are
   never touched, and the parked bytes and `parked.json` are on disk before the
   work-tree is changed. On the next start, before the startup reconcile, the
-  daemon finishes the leftover park the same way (and aborts a pull rebase the
-  crash left stopped). Whether the crash came before the reset, between the
-  reset and the pull, or after the pull, the files return as you had them, and
-  a file the pull did not change gets no spurious `.from-remote-*` backup.
+  daemon finishes the leftover park the same way. Whether the crash came before
+  the reset, between the reset and the pull, or after the pull, the files
+  return as you had them, and a file the pull did not change gets no spurious
+  `.from-remote-*` backup.
+- A rebase or merge a crash left stopped is aborted on start in all cases, and
+  again at the start of every cycle, whether or not anything is parked: its
+  work-tree holds conflict markers, which must never be staged. As a safety net
+  the commit step also refuses to stage a file with conflict marker lines
+  (`<<<<<<< `, `=======`, `>>>>>>> `) while a merge, a rebase or unmerged
+  entries exist. Your local commits are kept.
 - The denylist file itself is never parked.
+
+### Recovering parked files
+
+Nothing is deleted when a park is set aside. Look in
+`~/.claudesync/.state/parked.broken-<unix time>/`:
+
+- `parked.json` there lists the paths and whether each was a `file` or a
+  `deleted` entry. A corrupt one may be unreadable; the saved bytes are still
+  under `parked/`.
+- `parked/<path>` holds the bytes of each file, with the path it had in
+  `~/.claudesync` (for example `parked/projects/<hash>/memory/notes.md`).
+
+For a memory file, your `~/.claude/projects/<hash>/memory/notes.md` is the
+authoritative copy and normally still holds your version, so you only need the
+saved bytes if that copy was changed afterwards. Compare, and keep what you want:
+
+```
+diff ~/.claudesync/.state/parked.broken-<unix time>/parked/projects/<hash>/memory/notes.md \
+     ~/.claude/projects/<hash>/memory/notes.md
+```
+
+For a path outside `projects/` (the `distilled/` catalog, say) there is no
+`~/.claude` copy, so copy the file back:
+
+```
+cp ~/.claudesync/.state/parked.broken-<unix time>/parked/distilled/entry.md \
+   ~/.claudesync/distilled/entry.md
+```
+
+Then delete the `parked.broken-*` directory. If a path keeps landing there,
+the cause is whatever stops it being written back (a file where a directory
+should be, a permission, a full disk); fix that first.
 
 ### Rebase conflicts
 
@@ -266,11 +320,12 @@ match your denylist:
 pull: rebase conflict in 1 file(s); rebase aborted, local commits kept, nothing propagated or pushed until you resolve it (see docs: Rebase conflicts)
 ```
 
-To resolve it, with `claude-memsync stop` run first so the daemon does not
-abort your rebase again:
+To resolve it, run `claude-memsync stop` first: the daemon aborts any stopped
+rebase at the start of every cycle, so it would undo your resolution halfway.
 
 ```
 git -C ~/.claudesync pull --rebase origin main    # stops on the conflict again
+                                                  # (or: git -C ~/.claudesync pull --rebase)
 git -C ~/.claudesync status                       # lists the conflicted files
 # edit each conflicted file in ~/.claudesync, keeping what you want
 git -C ~/.claudesync add <file>
@@ -283,7 +338,7 @@ result and pulls everything that was waiting. Edit the resolved note in
 version into it for any file you did not change since. If the file is a
 deletion on one side, `git add` keeps it and `git rm` removes it.
 
-Built-in rules:
+### Built-in rules
 
 | Rule name | Matches |
 |---|---|
@@ -350,8 +405,14 @@ scrub: <held back: path matches denylist> (2)
 The same rule covers error messages: an error from copying a file, from the
 park, or from git (a failed pull or checkout names files in its output) that
 mentions a path matching the denylist is logged with `<path redacted>` in place
-of the path, keeping the rest of the message. If the denylist exists but cannot
-be parsed, no path is logged at all.
+of just that part. The rest of the message stays, including the exit status and
+git's reason. Each word is tried on its own after splitting on whitespace,
+quotes and colons (a leading `:(literal)` from git is ignored), and so are
+quoted strings, runs of words and each whole line, so a name with spaces is
+caught; there is no limit on the number of words. A word in your denylist that
+also appears in the remote URL redacts the URL in the message, not the error.
+If the denylist exists but cannot be parsed, no path or file name is logged at
+all.
 
 The file is per-PC, never committed (the daemon refuses to stage it, in any
 letter case, even if your `.gitignore` predates it) and read on every cycle, so
@@ -418,6 +479,8 @@ This means:
     ├── .gitattributes                    # MEMORY.md merge=claude-memory-index
     ├── .gitignore                        # excludes config.json, .state/, etc.
     ├── .state/manifest.json              # per-PC delete-detection state
+    ├── .state/parked.json, parked/       # per-PC, only during an unfinished park
+    ├── .state/parked.broken-<ts>/        # per-PC, a park that was set aside
     ├── distilled/                        # shared distilled-memory catalog
     │   ├── DISTILLED.md                  # derived index (gitignored)
     │   └── <slug>.md ...                 # distilled entries (synced)
