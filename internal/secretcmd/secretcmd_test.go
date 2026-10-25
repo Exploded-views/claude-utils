@@ -2,6 +2,7 @@ package secretcmd
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"reflect"
 	"runtime"
@@ -137,5 +138,43 @@ func TestFeedFailureAndTimeoutHideInput(t *testing.T) {
 	err = Feed(bg(), []string{"sleep", "30"}, []byte("x"), 200*time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Errorf("err = %v", err)
+	}
+}
+
+// The same table drives scripts/bootstrap_test.sh against the bootstrap's
+// shell implementation of these rules.
+func TestSplitArgsSharedTable(t *testing.T) {
+	b, err := os.ReadFile("testdata/splitargs.tsv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, line := range strings.Split(string(b), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		in, want, ok := strings.Cut(line, "\t")
+		if !ok {
+			t.Fatalf("bad row %q", line)
+		}
+		got, err := SplitArgs(in)
+		if want == "ERR" {
+			if err == nil {
+				t.Errorf("%q: want an error, got %q", in, got)
+			}
+			n++
+			continue
+		}
+		var exp []string
+		if jerr := json.Unmarshal([]byte(want), &exp); jerr != nil {
+			t.Fatalf("%q: %v", want, jerr)
+		}
+		if err != nil || !reflect.DeepEqual(append([]string{}, got...), append([]string{}, exp...)) {
+			t.Errorf("%q = %q, %v; want %q", in, got, err, exp)
+		}
+		n++
+	}
+	if n < 10 {
+		t.Fatalf("table too short: %d rows", n)
 	}
 }

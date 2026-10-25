@@ -10,9 +10,10 @@
 # wrapper that execs the real binary for every subcommand except:
 #   install, start, stop  stubbed (they would register a real service)
 #   doctor                stubbed (it calls the live GitHub API)
-# and for `init`, which would also call the live GitHub API, the wrapper drops
-# --private-only and the token flags before it execs the real binary (the
-# recorded log line keeps the original arguments, which the checks assert on).
+# and for `init`, whose --private-only check would call the live GitHub API, the
+# wrapper drops --private-only before it execs the real binary (the recorded
+# log line keeps the original arguments, which the checks assert on). The token
+# flags go through, so init saves them in config.json like the real thing.
 # app-token is real too: it talks to a loopback fake of the GitHub App API.
 set -euo pipefail
 
@@ -65,6 +66,11 @@ case "$1" in
   api)
     if [ "$2" = user/orgs ]; then
       if [ "$m" = org ]; then printf '%s\n' "${STUB_ORG_ORGS:-Exploded-views}"; else printf '%s\n' "${STUB_ORGS:-Exploded-views}"; fi
+      exit 0
+    fi
+    if [ "$2" = installation/repositories ]; then
+      need_org
+      printf '%s\n' "${STUB_INSTALL_OWNERS:-Exploded-views}"
       exit 0
     fi
     need_org
@@ -126,18 +132,20 @@ echo "memsync $*" >>"$STUB_DIR/memsync.log"
 case "$1" in
   install | start | stop | doctor) exit 0 ;;
   init)
-    # init would call the live GitHub API for --private-only; drop it and the
-    # token flags (their values were recorded above).
+    # init would call the live GitHub API for --private-only; drop it.
+    sd=""; prev=""
+    for x in "$@"; do [ "$prev" = --sync-dir ] && sd="$x"; prev="$x"; done
     n=$#; i=0
     while [ "$i" -lt "$n" ]; do
       x="$1"; shift; i=$((i + 1))
       case "$x" in
         --private-only) ;;
-        --token-file | --token-cmd) shift; i=$((i + 1)) ;;
         *) set -- "$@" "$x" ;;
       esac
     done
-    exec "$REAL_DIR/claude-memsync" "$@" ;;
+    "$REAL_DIR/claude-memsync" "$@"; rc=$?
+    if grep -qE 'githubToken(File|Cmd)' "$sd/config.json" 2>/dev/null; then echo "init-saved-token $sd" >>"$STUB_DIR/memsync.log"; fi
+    exit "$rc" ;;
   join)
     if [ "$2" = request ] && { [ "${STUB_NOFP:-0}" = 1 ] || [ "${STUB_OLDFP:-0}" = 1 ]; }; then
       "$REAL_DIR/claude-memsync" "$@" | if [ "${STUB_NOFP:-0}" = 1 ]; then grep -v '^fingerprint:'; else sed 's/^fingerprint: .*/fingerprint: 0123456789abcdef/'; fi
@@ -283,6 +291,10 @@ check "join request issued for existing repo" has "$STUB_DIR/memsync.log" 'join 
 check "init passes the org token file" has "$STUB_DIR/memsync.log" 'init .*--token-file .*/orgtoken'
 check "join accept one-liner printed with the grouped fingerprint" bash -c "printf '%s' \"\$1\" | grep -qE 'claude-memsync join accept testhost --repo personal --fingerprint \"([0-9a-f]{4} ){7}[0-9a-f]{4}\"'" _ "$OUT"
 check "real init made an encrypted, keyless clone and the join request is in the remote" bash -c "[ -f '$H/.claudesync.d/personal/.age-recipients' ] && git -C '$BASE/remotes/mem-personal.git' ls-tree -r main --name-only | grep -q '^joins/testhost'"
+check "init gets the host label and a marked recovery recipient" has "$STUB_DIR/memsync.log" 'init .*--host-label testhost --recipient age1d6jhrdfc0q3symtxzs6ay8efyvnx7g4mln9jvxckzstkaz4re9vqysptau # recovery --archive-deletes'
+check "first host of a new repo is labelled in its recipients and config" bash -c "grep -q '# host:testhost' '$H/.claudesync.d/infra-homelab/.age-recipients' && grep -q '# recovery' '$H/.claudesync.d/infra-homelab/.age-recipients' && grep -q '\"hostLabel\": \"testhost\"' '$H/.claudesync.d/infra-homelab/config.json'"
+check "the real init did save the token source (so its removal below means something)" has "$STUB_DIR/memsync.log" '^init-saved-token '
+check "after a real init with a token file, no daemon-read config keeps githubTokenCmd or githubTokenFile" bash -c "! grep -rIlE 'githubTokenCmd|githubTokenFile' '$H/.claudesync.d'"
 check "real route home pinned the home folder" jsonok '
 import json,sys
 d=json.load(open(sys.argv[1])); assert d["routes"][0]["repo"]=="infra-homelab" and "folder" in d["routes"][0]' "$H/.config/claude-memsync/routes.json"
@@ -295,6 +307,7 @@ check "re-run exits 0" [ "$RC" -eq 0 ]
 check "re-run keeps keys" [ "$K1" = "$(ssh-keygen -lf "$H/.ssh/mem-personal_ed25519.pub")" ]
 check "re-run does not init again" [ "$INITS1" = "$(grep -c ' init ' "$STUB_DIR/memsync.log")" ]
 check "re-run does not create repos again" [ "$CREATES1" = "$(grep -c 'repo create' "$STUB_DIR/gh.log")" ]
+check "re-run leaves routes.json alone (no .bak)" bash -c "[ ! -e '$H/.config/claude-memsync/routes.json.bak' ]"
 check "re-run does not add deploy keys again" [ "$DK1" = "$(grep -c deploy-key "$STUB_DIR/gh.log")" ]
 
 echo "--- dry run"
@@ -392,6 +405,10 @@ check "app variant: ambient banner, org-token banner computed after the build" b
 check "app variant: init and doctor get --token-cmd with the app-token command" bash -c "grep -qE 'init .*--token-cmd .*/claude-memsync app-token --app testapp' '$STUB_DIR/memsync.log' && grep -qE 'doctor --org Exploded-views --token-cmd .*/claude-memsync app-token --app testapp' '$STUB_DIR/memsync.log'"
 check "app variant: org token not on disk, output or other envs" bash -c "! grep -rIl -- '$ORGTOK' '$H' '$STUB_DIR/gh.log' '$STUB_DIR/gh.who' '$STUB_DIR/memsync.log' && ! printf '%s' \"\$1\" | grep -qF -- '$ORGTOK' && [ \$(grep -v ':0\$' '$STUB_DIR/env.log' | wc -l) -eq 0 ]" _ "$OUT"
 check "app variant: no token command left in a daemon-read config" bash -c "! grep -rIlE 'githubTokenCmd|app-token' '$H/.claudesync.d'"
+newhome oa5
+appsetup
+STUB_INSTALL_OWNERS="$(printf 'Exploded-views\nAcme-Client')" runboot --host testhost --role homelab --yes --org-app testapp
+check "app reach: owners of the installation's repositories, not /user/orgs, and it warns" bash -c "grep -q '^api installation/repositories .*|org' '$STUB_DIR/gh.who' && ! grep 'user/orgs' '$STUB_DIR/gh.who' | grep -q '|org' && printf '%s' \"\$1\" | grep -q \"org token can reach Acme-Client\"" _ "$OUT"
 newhome oa2
 appsetup
 ORGARGS=(--org-app testapp)
@@ -409,6 +426,50 @@ ORGARGS=(--org-token-file "$BASE/orgtoken")
 ORGARGS=(--org-token-file "$BASE/does-not-exist")
 runboot --host testhost --role homelab --yes
 check "unreadable org token stops clearly" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'cannot read the org token'" _ "$OUT"
+ORGARGS=(--org-token-file "$BASE/orgtoken")
+
+echo "--- host label, org, xtrace, denylist, quoting"
+newhome hl
+for bad in TestHost a_b -x "$(printf 'a%.0s' $(seq 1 33))"; do
+  runboot --host "$bad" --role homelab --yes
+  check "bad --host '$bad' refused before anything is created" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'bad --host label' && [ ! -s '$STUB_DIR/gh.log' ] && [ ! -e '$H/.ssh' ]" _ "$OUT"
+done
+runboot --host testhost --role homelab --yes --org acme-client
+check "--org equal to a --deny-owner (any case) is refused in preflight" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'also a --deny-owner' && [ ! -s '$STUB_DIR/gh.log' ]" _ "$OUT"
+
+newhome xt
+for how in "bash -x" "env SHELLOPTS=xtrace bash"; do
+  set +e
+  XOUT="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" $how "$ROOT/scripts/bootstrap.sh" --sha "$SHA" --org-token-file "$BASE/orgtoken" --host testhost --role homelab --yes </dev/null 2>&1)"
+  XRC=$?
+  set -e
+  check "xtrace ($how): refused, and the org token is nowhere in the output" bash -c "[ $XRC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'refusing to run with xtrace' && ! printf '%s' \"\$1\" | grep -qF -- '$ORGTOK' && [ ! -s '$STUB_DIR/gh.log' ]" _ "$XOUT"
+done
+
+newhome dl
+runboot --host testhost --role homelab --yes --deny-term 'c++' --deny-term '#x' --deny-term 'a.b(c)'
+check "deny terms are written as literal RE2 regexes; a leading # is escaped" bash -c "[ $RC -eq 0 ] && grep -qxF 'c\\+\\+' '$H/.config/claude-memsync/denylist-personal.txt' && grep -qxF '\\#x' '$H/.config/claude-memsync/denylist-personal.txt' && grep -qxF 'a\\.b\\(c\\)' '$H/.config/claude-memsync/denylist-personal.txt' && ! grep -q '^#' '$H/.config/claude-memsync/denylist-personal.txt'"
+check "the real init accepted that denylist" bash -c "grep -q 'c\\\\+\\\\+' '$H/.claudesync.d/personal/denylist.txt'"
+
+echo "--- shell-style quoting, one table with the Go test"
+while IFS="$(printf '\t')" read -r input want; do
+  case "$input$want" in '#'*) continue ;; esac
+  [ -n "$want" ] || continue
+  set +e; got="$(bash "$ROOT/scripts/bootstrap.sh" --split-args-json "$input" 2>/dev/null)"; grc=$?; set -e
+  if [ "$want" = ERR ]; then
+    check "split '$input' is an error" [ "$grc" -ne 0 ]
+  else
+    check "split '$input'" python3 -I -c 'import json,sys; sys.exit(0 if json.loads(sys.argv[1]) == json.loads(sys.argv[2]) else 1)' "$got" "$want"
+  fi
+done <"$ROOT/internal/secretcmd/testdata/splitargs.tsv"
+newhome qc
+: >"$BASE/tool.log" 2>/dev/null || true
+ORGARGS=(--org-token-cmd "secret-tool read 'vault://My Vault/item'")
+runboot --host testhost --role homelab --yes
+check "quoted --org-token-cmd: the argument with a space reaches the tool whole" bash -c "[ $RC -eq 0 ] && grep -qx 'secret-tool read vault://My Vault/item' '$STUB_DIR/tool.log'"
+ORGARGS=(--org-token-cmd "secret-tool read 'unbalanced")
+runboot --host testhost --role homelab --yes
+check "unbalanced quote in --org-token-cmd is refused" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'unbalanced quote'" _ "$OUT"
 ORGARGS=(--org-token-file "$BASE/orgtoken")
 
 echo "--- deny flags"
@@ -490,6 +551,34 @@ check "no client/orch/acmeclient repo names" bash -c "! grep -rIiE 'mem-(client|
 check "related suggestions placeholder printed" bash -c "printf '%s' \"\$1\" | grep -q 'related suggestions: not built yet'" _ "$OUT"
 check "non-tty without --yes refuses" bash -c "
   HOME='$H' PATH='$STUBS:$PATH' STUB_DIR='$STUB_DIR' STUB_TOKEN=x STUB_ORG_TOKEN=$ORGTOK CLAUDE_UTILS_URL=https://example.invalid/claude-utils.git bash '$ROOT/scripts/bootstrap.sh' --sha $SHA --org-token-file '$BASE/orgtoken' --host m2 --role personal-dev --workspace '$H/code' </dev/null >/dev/null 2>&1; [ \$? -ne 0 ]"
+
+echo "--- personal-dev re-run with a new project"
+mkgit "$H/code/extra" "git@github.com:gitgat/extra.git"
+git init -q --bare -b main "$BASE/remotes/mem-project-extra.git"
+git config --file "$H/.gitconfig" "url.$BASE/remotes/mem-project-extra.git.insteadOf" "git@gh-mem-project-extra:$ORG/mem-project-extra.git"
+CREATES2="$(grep -c 'repo create' "$STUB_DIR/gh.log")"
+runboot --host testmac --role personal-dev --workspace "$H/code" --yes
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+check "re-run with a new project exits 0" [ "$RC" -eq 0 ]
+check "routes.json regenerated from the plan: new repo and remote route, old ones kept, backup kept" jsonok '
+import json,sys,os
+d=json.load(open(sys.argv[1]))
+rem={r["remote"]:r["repo"] for r in d["routes"] if "remote" in r}
+assert rem=={"github.com/gitgat/ownproj":"project-ownproj","github.com/gitgat/extra":"project-extra"}, rem
+assert set(d["repos"])=={"personal","project-code-workspace","project-ownproj","project-extra"}, set(d["repos"])
+assert os.path.exists(sys.argv[1]+".bak")' "$H/.config/claude-memsync/routes.json"
+check "the home pin is back after the regeneration" jsonok '
+import json,sys,re,os
+d=json.load(open(sys.argv[1]))
+pins={r["folder"]:r["repo"] for r in d["routes"] if "folder" in r}
+assert pins[re.sub(r"[^A-Za-z0-9]","-",os.environ["H"])]=="personal", pins' "$H/.config/claude-memsync/routes.json"
+check "only the new project repo was created, private, and inited" bash -c "[ \$(grep -c 'repo create' '$STUB_DIR/gh.log') -eq $((CREATES2 + 1)) ] && grep -q 'create Exploded-views/mem-project-extra --private' '$STUB_DIR/gh.log' && grep -q 'init --remote git@gh-mem-project-extra' '$STUB_DIR/memsync.log' && [ -d '$H/.claudesync.d/project-extra' ]"
+newhome rtdiff
+mkdir -p "$H/.config/claude-memsync"; echo '{"repos":{},"routes":[],"default":"deny"}' >"$H/.config/claude-memsync/routes.json"
+set +e
+RTOUT="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" bash "$ROOT/scripts/bootstrap.sh" --sha "$SHA" --org-token-file "$BASE/orgtoken" --host testhost --role homelab --yes --dry-run </dev/null 2>&1)"
+set -e
+check "dry run with a differing routes.json says what it would do and leaves the file alone" bash -c "printf '%s' \"\$1\" | grep -q 'writing .*routes.json' && [ \$(cat '$H/.config/claude-memsync/routes.json' | tr -d ' \n') = '{\"repos\":{},\"routes\":[],\"default\":\"deny\"}' ] && [ ! -e '$H/.config/claude-memsync/routes.json.bak' ]" _ "$RTOUT"
 
 echo
 echo "passed=$PASS failed=$FAIL pending=$PENDING"

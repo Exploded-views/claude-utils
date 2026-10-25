@@ -1523,7 +1523,7 @@ pushes is exactly one new commit on origin's tip that adds
 **On a member host** (one that can decrypt the repo):
 
     claude-memsync join list [--repo <name>]
-    claude-memsync join accept <host-label> --repo <name> --fingerprint <fp>
+    claude-memsync join accept <host-label> --repo <name> --fingerprint <fp> [--allow-unlabelled]
     claude-memsync join reject <host-label> [--repo <name>]
 
 `list` fetches and shows each pending request as label, fingerprint and time (a
@@ -1534,7 +1534,12 @@ grouped form or the same 32 characters without spaces; nothing else is
 forgiven); without one, or with a different one, it refuses. Compare it with what the new host
 printed, over a channel you trust. On success it adds the recipient (as
 `recipients add` does: re-encrypts HEAD to the new set), removes the request
-file in the same commit, and pushes. `reject` removes the file in its own commit
+file in the same commit, and pushes. The recipient is recorded with the requester's
+label (`# host:<label>`), as `recipients add --host` does. `accept` refuses a label that
+is this host's own `hostLabel` or is already bound in the pin, and refuses while any
+recipient other than a `# recovery` key has no host label (run
+`recipients label self --host <label>` on that host first, or pass `--allow-unlabelled`).
+`reject` removes the file in its own commit
 and pushes. Like `recipients`, these refuse while the daemon holds the sync dir.
 
 **Back on the new host:** its next pull brings the new `.age-recipients`. Its
@@ -1594,7 +1599,9 @@ config.json). The label ties together what a host leaves behind:
 - its **deploy keys** are titled with the label (`gh repo deploy-key add <key-file> -t <label>`);
 - its **age recipient** in each repo's `.age-recipients` carries a trailing comment
   `# host:<label>`. `init --encrypt --host-label` writes it for the first host of a repo,
-  and `recipients add <public-key> --host <label>` for the next ones (a label already
+  and `recipients add <public-key> --host <label>` for the next ones; a host that
+  predates labels runs `recipients label self --host <label> [--repo <name> | --all]`,
+  which labels its own line, commits, pushes, re-pins and sets `hostLabel` (a label already
   bound to another key is refused). Lines without the comment stay valid and are treated
   as unlabelled. **The label is part of what the pin reviews**: it is recorded with the
   key in the set this host pinned, so a label changed or swapped upstream shows up as an

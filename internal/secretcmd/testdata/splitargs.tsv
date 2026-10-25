@@ -1,0 +1,17 @@
+# input<TAB>expected JSON argv, or ERR. Shared by the Go test and scripts/bootstrap_test.sh.
+	[]
+a b  c	["a","b","c"]
+'' x	["","x"]
+a "b c" 'd e'	["a","b c","d e"]
+a"b c"d	["ab cd"]
+"a\"b"	["a\"b"]
+"a\\b"	["a\\b"]
+"a\nb"	["a\\nb"]
+'a\b'	["a\\b"]
+C:\x\y z	["C:\\x\\y","z"]
+echo $HOME;ls|x ~ *	["echo","$HOME;ls|x","~","*"]
+secret-tool read "vault://My Vault/Item Name/field"	["secret-tool","read","vault://My Vault/Item Name/field"]
+'unterminated	ERR
+"unterminated	ERR
+"a\"	ERR
+é "ü ö"	["é","ü ö"]

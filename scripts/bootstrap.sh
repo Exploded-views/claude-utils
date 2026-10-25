@@ -15,6 +15,12 @@
 # docs/bootstrap.md.
 set -euo pipefail
 
+# The org token is read into variables and env of single commands; an xtrace
+# would print it. Refuse rather than rely on every read being wrapped.
+case $- in
+  *x*) printf 'ERROR: refusing to run with xtrace (set -x, bash -x, SHELLOPTS=xtrace): it would print the org token\n' >&2; exit 1 ;;
+esac
+
 # ---------------------------------------------------------------------------
 # Role table. Edit here. A role lists repos as "key:kind:repo-name" and names
 # the repo key the home folder is pinned to. personal-dev also discovers one
@@ -87,6 +93,52 @@ add_repo() { # key kind name
   R_KEYS+=("$1"); R_KINDS+=("$2"); R_NAMES+=("$3")
 }
 
+# split_args <json|nul> <line>: split a command line exactly as claude-memsync
+# does (internal/secretcmd.SplitArgs): whitespace separates arguments,
+# "double quotes" group with \" and \\ as the only escapes, 'single quotes'
+# group literally, nothing is expanded, a backslash elsewhere is literal.
+# Exits 1 on an unterminated quote. The shared test table is
+# internal/secretcmd/testdata/splitargs.tsv.
+split_args() {
+  python3 -I -c '
+import json, sys
+mode, line = sys.argv[1], sys.argv[2]
+args, cur, have, i = [], [], False, 0
+while i < len(line):
+    c = line[i]
+    if c in " \t\n\r":
+        if have:
+            args.append("".join(cur)); cur, have = [], False
+    elif c == "\x27":
+        have = True
+        j = line.find("\x27", i + 1)
+        if j < 0:
+            sys.exit(1)
+        cur.append(line[i + 1:j]); i = j
+    elif c == "\"":
+        have = True
+        j, closed = i + 1, False
+        while j < len(line):
+            if line[j] == "\\" and j + 1 < len(line) and line[j + 1] in "\"\\":
+                cur.append(line[j + 1]); j += 2; continue
+            if line[j] == "\"":
+                closed = True; break
+            cur.append(line[j]); j += 1
+        if not closed:
+            sys.exit(1)
+        i = j
+    else:
+        have = True; cur.append(c)
+    i += 1
+if have:
+    args.append("".join(cur))
+if mode == "json":
+    print(json.dumps(args, ensure_ascii=False))
+else:
+    sys.stdout.write("".join(a + "\0" for a in args))
+' "$1" "$2"
+}
+
 # ---------------------------------------------------------------------------
 # Arguments
 # ---------------------------------------------------------------------------
@@ -105,6 +157,7 @@ while [ $# -gt 0 ]; do
     --org-token-cmd)  [ $# -ge 2 ] || usage; ORG_TOKEN_CMD="$2"; shift 2 ;;
     --org-app)        [ $# -ge 2 ] || usage; ORG_APP="$2"; shift 2 ;;
     --allow-org)  [ $# -ge 2 ] || usage; ALLOW_ORGS+=("$(lower "$2")"); shift 2 ;;
+    --split-args-json) [ $# -ge 2 ] || usage; split_args json "$2"; exit $? ;;   # test hook
     --dry-run)    DRY_RUN=1; shift ;;
     --yes)        YES=1; shift ;;
     -h | --help)  usage ;;
@@ -121,12 +174,21 @@ if [ -n "$ORG_APP" ]; then
   case "$HOME" in *[[:space:]\'\"\\]*) die "--org-app needs a HOME without spaces or quotes (the token command is passed as one string)" ;; esac
   ORG_TOKEN_CMD="$HOME/.local/bin/claude-memsync app-token --app $ORG_APP"
 fi
+ORG_TOKEN_ARGV=()
+if [ -n "$ORG_TOKEN_CMD" ]; then
+  split_args json "$ORG_TOKEN_CMD" >/dev/null || die "unbalanced quote in --org-token-cmd"
+  while IFS= read -r -d '' a; do ORG_TOKEN_ARGV+=("$a"); done < <(split_args nul "$ORG_TOKEN_CMD")
+  [ ${#ORG_TOKEN_ARGV[@]} -gt 0 ] || die "--org-token-cmd is empty"
+fi
 # Arguments that hand the same token to claude-memsync (a file path or a command, never the token).
 # An app is handed over as its app-token command, which claude-memsync runs per request.
 if [ -n "$ORG_TOKEN_FILE" ]; then ORG_TOKEN_ARGS=(--token-file "$ORG_TOKEN_FILE"); else ORG_TOKEN_ARGS=(--token-cmd "$ORG_TOKEN_CMD"); fi
 [ -n "$ROLE" ] || die "--role is required"
-printf '%s' "$HOST" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' || die "bad --host label '$HOST'"
+printf '%s' "$HOST" | grep -Eq '^[a-z0-9][a-z0-9-]{0,31}$' || die "bad --host label '$HOST' (it is the host's label in recipients, deploy keys and join requests: 1-32 characters of a-z, 0-9 and '-', starting with a letter or digit)"
 printf '%s' "$ORG" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9-]*$' || die "bad --org '$ORG'"
+for o in ${DENY_OWNERS[@]+"${DENY_OWNERS[@]}"}; do
+  [ "$o" != "$(lower "$ORG")" ] || die "--org '$ORG' is also a --deny-owner; refusing"
+done
 if [ -z "$SHA" ]; then
   SHA="$(git -C "$(dirname "$0")" rev-parse HEAD 2>/dev/null || true)"
   [ -n "$SHA" ] || die "--sha is required when the script is not run from a git checkout"
@@ -169,11 +231,9 @@ org_token() {
     [ -r "$ORG_TOKEN_FILE" ] || return 1
     tr -d '\r\n' <"$ORG_TOKEN_FILE"
   else
-    local -a argv
     if [ -n "$ORG_APP" ] && [ ! -x "$BIN/claude-memsync" ]; then return 1; fi
-    read -r -a argv <<<"$ORG_TOKEN_CMD"
-    [ ${#argv[@]} -gt 0 ] || return 1
-    "${argv[@]}" | tr -d '\r\n'
+    [ ${#ORG_TOKEN_ARGV[@]} -gt 0 ] || return 1
+    "${ORG_TOKEN_ARGV[@]}" | tr -d '\r\n'
     [ "${PIPESTATUS[0]}" -eq 0 ]
   fi
 }
@@ -226,7 +286,15 @@ check_ambient_scope() {
 }
 check_token_scope() {
   local orgs
-  if orgs="$(org_gh api user/orgs --paginate --jq '.[].login' 2>/dev/null)"; then
+  if [ -n "$ORG_APP" ]; then
+    # An installation token cannot list /user/orgs; the owners of the repos the
+    # installation reaches are the orgs it can touch.
+    if orgs="$(org_gh api installation/repositories --paginate --jq '.repositories[].owner.login' 2>/dev/null | sort -u)"; then
+      BANNER_TOKEN="$(reach_banner "org token" "$orgs")"
+    else
+      warn "cannot list the repositories the app installation reaches"
+    fi
+  elif orgs="$(org_gh api user/orgs --paginate --jq '.[].login' 2>/dev/null)"; then
     BANNER_TOKEN="$(reach_banner "org token" "$orgs")"
   else
     warn "cannot list the orgs the org token can see"
@@ -347,11 +415,14 @@ discover_projects() {
   [ -z "$ws" ] || add_repo project-code-workspace project "$WORKSPACE_REPO"
 
   local roots="$HOME
-$ws" seen=""
-  while IFS= read -r d; do
-    [ -n "$d" ] || continue
-    find "$d" -maxdepth 3 \( -name '.?*' ! -name .git -type d \) -prune -o -name .git -print 2>/dev/null
-  done <<<"$roots" | sort -u | while IFS= read -r g; do dirname "$g"; done >"${TMPDIR:-/tmp}/bs-checkouts.$$" || true
+$ws" seen="" checkouts
+  # Held in a variable, not a temp file: nothing is written, dry run included.
+  checkouts="$(
+    while IFS= read -r d; do
+      [ -n "$d" ] || continue
+      find "$d" -maxdepth 3 \( -name '.?*' ! -name .git -type d \) -prune -o -name .git -print 2>/dev/null
+    done <<<"$roots" | sort -u | while IFS= read -r g; do dirname "$g"; done
+  )" || true
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     remote="$(git -C "$p" remote get-url origin 2>/dev/null || true)"
@@ -379,8 +450,7 @@ $ws" seen=""
     RULE_LINES="${RULE_LINES}remote|github.com/$owner/$repo|$key
 "
     seen="$seen $repo"
-  done <"${TMPDIR:-/tmp}/bs-checkouts.$$"
-  rm -f "${TMPDIR:-/tmp}/bs-checkouts.$$"
+  done <<<"$checkouts"
   say "  own projects found:${seen:- none}"
   if [ -n "$NOT_SYNCED" ]; then say "  not synced:"; printf '%s' "$NOT_SYNCED"; fi
   say "  related suggestions: not built yet"
@@ -553,31 +623,22 @@ step_keys() {
 # ---------------------------------------------------------------------------
 # e. routes.json and denylists
 # ---------------------------------------------------------------------------
-step_routes() {
-  step "e. routes.json and denylists"
-  local i k
-  for k in $(printf '%s\n' ${R_KINDS[@]+"${R_KINDS[@]}"} | sort -u); do
-    if [ -e "$CFG/denylist-$k.txt" ]; then
-      say "  denylist-$k.txt exists (kept)"
-    else
-      run mkdir -p "$CFG"
-      say "  writing $CFG/denylist-$k.txt (${#DENY_TERMS[@]} deny terms)"
-      [ "$DRY_RUN" -eq 1 ] || { { [ ${#DENY_TERMS[@]} -eq 0 ] || printf '%s\n' "${DENY_TERMS[@]}"; } >"$CFG/denylist-$k.txt"; chmod 600 "$CFG/denylist-$k.txt"; }
-    fi
-  done
-  if done_p routes; then say "  routes.json already written by this bootstrap"; return 0; fi
-  if [ -e "$ROUTES" ] && [ "$YES" -eq 0 ]; then
-    die "$ROUTES already exists; refusing to overwrite (pass --yes to replace it, a .bak is kept)"
-  fi
-  say "  writing $ROUTES (0600, default deny, foreignWriters for the old memsync)"
-  [ "$DRY_RUN" -eq 1 ] && return 0
-  mkdir -p "$CFG"
-  [ ! -e "$ROUTES" ] || cp -p "$ROUTES" "$ROUTES.bak"
-  local spec=""
+# re_escape <term>: the term as a literal Go (RE2) regex. A leading # is
+# escaped too, so the line is never read as a comment.
+re_escape() {
+  local e
+  e="$(printf '%s' "$1" | sed 's/[][\\.^$*+?(){}|]/\\&/g')"
+  case "$e" in '#'*) e="\\$e" ;; esac
+  printf '%s' "$e"
+}
+
+# plan_routes_json prints the routes.json this plan calls for.
+plan_routes_json() {
+  local i spec=""
   for i in "${!R_KEYS[@]}"; do spec="${spec}repo|${R_KEYS[$i]}|${R_NAMES[$i]}|${R_KINDS[$i]}
 "; done
   spec="$spec$RULE_LINES"
-  BS_SPEC="$spec" BS_SYNC_ROOT="$SYNC_ROOT" BS_HOME="$HOME" python3 -I - >"$ROUTES.tmp" <<'PY'
+  BS_SPEC="$spec" BS_SYNC_ROOT="$SYNC_ROOT" BS_HOME="$HOME" python3 -I - <<'PY'
 import json, os
 repos, routes, pins = {}, [], []
 personal = None
@@ -604,8 +665,62 @@ if personal:
     out["personal"] = personal
 print(json.dumps(out, indent=2))
 PY
+}
+
+# routes_same <plan-json>: the routes.json on disk already says this, apart
+# from the home-folder pin that `route home` adds later.
+routes_same() {
+  BS_NEW="$1" BS_OLD="$ROUTES" BS_HOMEPIN="$(esc_folder "$HOME")" python3 -I -c '
+import json, os
+try:
+    old = json.load(open(os.environ["BS_OLD"]))
+except Exception:
+    raise SystemExit(1)
+new = json.loads(os.environ["BS_NEW"])
+home = os.environ["BS_HOMEPIN"]
+key = lambda r: json.dumps(r, sort_keys=True)
+for d in (old, new):
+    d["routes"] = sorted((r for r in d.get("routes", []) if r.get("folder") != home), key=key)
+raise SystemExit(0 if old == new else 1)'
+}
+
+# Runs before any repo or key is created: a plan that no longer matches the
+# routes.json from an earlier run (a new project or workspace) is regenerated
+# here, or the run stops, rather than creating repos nothing routes to.
+step_routes() {
+  step "e. routes.json and denylists"
+  local k t new regen=0
+  for k in $(printf '%s\n' ${R_KINDS[@]+"${R_KINDS[@]}"} | sort -u); do
+    if [ -e "$CFG/denylist-$k.txt" ]; then
+      say "  denylist-$k.txt exists (kept)"
+    else
+      run mkdir -p "$CFG"
+      say "  writing $CFG/denylist-$k.txt (${#DENY_TERMS[@]} deny terms)"
+      if [ "$DRY_RUN" -eq 0 ]; then
+        : >"$CFG/denylist-$k.txt"; chmod 600 "$CFG/denylist-$k.txt"
+        for t in ${DENY_TERMS[@]+"${DENY_TERMS[@]}"}; do re_escape "$t" >>"$CFG/denylist-$k.txt"; printf '\n' >>"$CFG/denylist-$k.txt"; done
+      fi
+    fi
+  done
+  new="$(plan_routes_json)"
+  if [ -e "$ROUTES" ]; then
+    if routes_same "$new"; then say "  routes.json already matches the plan"; return 0; fi
+    if done_p routes; then
+      regen=1
+      say "  the plan differs from the routes.json written by an earlier run (a new project or workspace): regenerating it; the old one is kept as $ROUTES.bak"
+    elif [ "$YES" -eq 0 ]; then
+      die "$ROUTES already exists and differs from this plan; refusing to overwrite it (pass --yes to replace it, a .bak is kept)"
+    fi
+  fi
+  say "  writing $ROUTES (0600, default deny, foreignWriters for the old memsync)"
+  [ "$DRY_RUN" -eq 1 ] && return 0
+  mkdir -p "$CFG"
+  [ ! -e "$ROUTES" ] || cp -p "$ROUTES" "$ROUTES.bak"
+  printf '%s\n' "$new" >"$ROUTES.tmp"
   chmod 600 "$ROUTES.tmp"; mv "$ROUTES.tmp" "$ROUTES"
   mark routes
+  # The rewritten file has lost the home pin; step_home puts it back.
+  [ "$regen" -eq 0 ] || rm -f "$STATE/$HOST.home"
 }
 
 # ---------------------------------------------------------------------------
@@ -621,7 +736,7 @@ step_init() {
     if ! done_p "init.$k"; then
       [ "$DRY_RUN" -eq 1 ] || { git ls-remote "$url" 2>/dev/null | grep -q . && content=1; }
       run "$BIN/claude-memsync" init --remote "$url" --sync-dir "$SYNC_ROOT/$k" --encrypt \
-        --recipient "$AGE_RECOVERY" --archive-deletes --private-only \
+        --host-label "$HOST" --recipient "$AGE_RECOVERY # recovery" --archive-deletes --private-only \
         "${ORG_TOKEN_ARGS[@]}" --denylist "$CFG/denylist-$kind.txt"
       mark "init.$k"
       [ "$content" -eq 1 ] && mark "needjoin.$k"
@@ -748,9 +863,9 @@ check_sync_dirs
 confirm_plan
 step_build
 check_app_scope
+step_routes
 step_repos
 step_keys
-step_routes
 step_init
 step_token_split
 step_home
