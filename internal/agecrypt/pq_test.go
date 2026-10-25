@@ -419,3 +419,23 @@ func TestPQ_SchemeOfFallsBackToTheRecipientsFile(t *testing.T) {
 		t.Errorf("classic repo reads as %q", got)
 	}
 }
+
+// PushGuardCommit judges a commit that is not the branch tip yet.
+func TestPQ_PushGuardCommitJudgesAnUnmovedCommit(t *testing.T) {
+	gitEnv(t)
+	a := newHostPQ(t, bareRemote(t), true)
+	a.write(t, "n.md", "ok\n")
+	a.commit(t, "memsync: 1 files")
+	good := strings.TrimSpace(a.revHead(t))
+	if err := PushGuardCommit(a.repo, "main", good); err != nil {
+		t.Fatalf("hybrid commit refused: %v", err)
+	}
+	forgeClassic(t, a)
+	bad := strings.TrimSpace(a.revHead(t))
+	if _, err := a.repo.Run("reset", "-q", "--soft", good); err != nil {
+		t.Fatal(err)
+	}
+	if err := PushGuardCommit(a.repo, "main", bad); err == nil {
+		t.Fatal("a commit holding classic ciphertext must be refused before HEAD moves")
+	}
+}
