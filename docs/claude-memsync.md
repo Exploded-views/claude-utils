@@ -907,8 +907,16 @@ A deploy key cannot call the GitHub API, so the check needs a token (a
 read-only fine-grained token with Metadata read is enough for checks; creating
 a repo needs more). Configure it with the `MEMSYNC_GITHUB_TOKEN` env var, a
 different var via `githubTokenEnv`, or a file via `githubTokenFile` (or
-`init --token-file`). The token is never written to `config.json`, logs or
-error messages.
+`init --token-file`), or a command that prints the token on stdout, such as
+your password manager's CLI. The command is `githubTokenCmd`, a JSON array so
+that spaces survive (`["<cli>", "read", "<reference with spaces>"]`), or
+`--token-cmd "<cli> read '<reference with spaces>'"` on the command line, where
+"double" and 'single' quotes group words. It is run directly with no shell (no
+expansion of `$VAR`, backticks, globs or `;`), with a 10 second timeout, and its
+stderr is discarded. When several sources are set the first configured one is
+used, in the order file, command, env var; a configured source that fails is an
+error, never a silent fall-through to the next. The token is never written to
+`config.json`, logs or error messages.
 
 | When | Token required | Behaviour |
 |---|---|---|

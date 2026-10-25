@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/ghguard"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
+	"github.com/MarimerLLC/claude-utils/internal/secretcmd"
 )
 
 // guardClient builds an API client from config. A nil client with a nil error
@@ -25,26 +27,22 @@ func guardClient(cfg config.Config) (*ghguard.Client, error) {
 	if err := checkAPIHost(cfg); err != nil {
 		return nil, err
 	}
-	if cfg.GitHubTokenFile == "" && len(cfg.GitHubTokenCmd) > 0 {
+	src := ghguard.SelectSource(nil, cfg.GitHubTokenFile, cfg.GitHubTokenCmd, cfg.GitHubTokenEnv)
+	if _, isCmd := src.(ghguard.CmdSource); isCmd {
 		// The token comes from a command, run now to see that it works and
 		// again for every request; it is never kept on the client.
-		argv := cfg.GitHubTokenCmd
 		if !cfg.TokenCmdFromFlag {
 			if err := tokenCmdConfigTrusted(cfg); err != nil {
 				warnTokenCmdIgnored(err)
 				return nil, nil // ignored: no token
 			}
 		}
-		if _, err := ghguard.RunTokenCmd(argv, ghguard.TokenCmdTimeout); err != nil {
+		if _, err := src.Token(context.Background()); err != nil {
 			return nil, nil // failure means no token
 		}
-		fn := func() string {
-			t, _ := ghguard.RunTokenCmd(argv, ghguard.TokenCmdTimeout)
-			return t
-		}
-		return &ghguard.Client{BaseURL: cfg.GitHubAPIURL, TokenFn: fn, Host: cfg.GitHubHost, Resolve: hostResolver}, nil
+		return &ghguard.Client{BaseURL: cfg.GitHubAPIURL, Source: src, Host: cfg.GitHubHost, Resolve: hostResolver}, nil
 	}
-	tok, err := ghguard.LoadToken(cfg.GitHubTokenEnv, cfg.GitHubTokenFile)
+	tok, err := src.Token(context.Background())
 	if err != nil {
 		return nil, err
 	}
@@ -125,11 +123,15 @@ func checkPushURL(cfg config.Config, repoDir string) error {
 	return nil
 }
 
-// applyTokenCmdFlag sets the one-run token command from --token-cmd (split on
-// spaces, no shell); it wins over a token file and is not saved by doctor or
+// applyTokenCmdFlag sets the one-run token command from --token-cmd (shell-style
+// quotes, no shell); it wins over a token file and is not saved by doctor or
 // repo create.
 func applyTokenCmdFlag(cfg *config.Config, flagVal string) {
-	if argv := strings.Fields(flagVal); len(argv) > 0 {
+	argv, err := secretcmd.SplitArgs(flagVal)
+	if err != nil {
+		argv = nil // an unbalanced quote runs nothing; the caller reports "no token"
+	}
+	if len(argv) > 0 {
 		cfg.GitHubTokenCmd = argv
 		cfg.TokenCmdFromFlag = true
 		cfg.GitHubTokenFile = ""
@@ -258,7 +260,7 @@ func doctorCmd(stdout, stderr io.Writer, args []string) int {
 	org := flags.String("org", "", "GitHub org to check (default: config githubOrg, else owner of the remote)")
 	cfgPath := flags.String("config", "", "path to config.json")
 	tokenFile := flags.String("token-file", "", "file holding a GitHub token for this run (as for init; or set MEMSYNC_GITHUB_TOKEN); not saved")
-	tokenCmd := flags.String("token-cmd", "", "command (argv split on spaces, no shell) printing a GitHub token, e.g. \"gh auth token\"; run at call time, never saved")
+	tokenCmd := flags.String("token-cmd", "", "command (shell-style quotes, no shell) printing a GitHub token, e.g. \"gh auth token\"; run at call time, never saved")
 	routes := flags.String("routes", "", "path to routes.json: check every repo it routes (default: as for run, unless --config is given)")
 	timer := flags.Bool("install-timer", false, "write a daily user timer (systemd) or launchd agent for doctor; does not enable it")
 	unitDir := flags.String("unit-dir", "", "with --install-timer: directory to write units into")
@@ -398,7 +400,7 @@ func runRepo(args []string) int {
 	flags := flag.NewFlagSet("repo create", flag.ContinueOnError)
 	org := flags.String("org", "", "GitHub org to create the repo in")
 	cfgPath := flags.String("config", "", "path to config.json")
-	tokenCmd := flags.String("token-cmd", "", "command (argv split on spaces, no shell) printing a GitHub token, e.g. \"gh auth token\"; never saved")
+	tokenCmd := flags.String("token-cmd", "", "command (shell-style quotes, no shell) printing a GitHub token, e.g. \"gh auth token\"; never saved")
 	if err := flags.Parse(args[1:]); err != nil {
 		return 2
 	}

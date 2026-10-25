@@ -13,6 +13,7 @@ package ghguard
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -111,7 +112,10 @@ type Client struct {
 	// TokenFn, when set, supplies the token per request (e.g. from a token
 	// command); the value is never stored on the client.
 	TokenFn func() string
-	HTTP    *http.Client
+	// Source, when set, is asked for the token before every request (so a
+	// minted token can refresh); a failure stops the request.
+	Source TokenSource
+	HTTP   *http.Client
 
 	// Host is the git host remotes must use (default: derived from BaseURL,
 	// github.com for the public API). Resolve maps an ssh alias to its real
@@ -148,11 +152,18 @@ func (c *Client) base() string {
 	return strings.TrimRight(c.BaseURL, "/")
 }
 
-func (c *Client) tok() string {
-	if c.TokenFn != nil {
-		return c.TokenFn()
+func (c *Client) tok() (string, error) {
+	switch {
+	case c.Source != nil:
+		t, err := c.Source.Token(context.Background())
+		if err != nil {
+			return "", fmt.Errorf("token source: %w", err)
+		}
+		return t, nil
+	case c.TokenFn != nil:
+		return c.TokenFn(), nil
 	}
-	return c.Token
+	return c.Token, nil
 }
 
 func scrubTok(err error, tok string) error {
@@ -173,7 +184,10 @@ func (c *Client) do(method, target string, body any) (int, []byte, http.Header, 
 }
 
 func (c *Client) doH(method, target string, body any, ifNoneMatch string) (int, []byte, http.Header, error) {
-	tok := c.tok()
+	tok, terr := c.tok()
+	if terr != nil {
+		return 0, nil, nil, terr
+	}
 	scrub := func(e error) error { return scrubTok(e, tok) }
 	var rd io.Reader
 	if body != nil {
