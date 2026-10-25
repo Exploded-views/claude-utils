@@ -310,10 +310,19 @@ func Save(c Config) error {
 	if err := os.MkdirAll(c.SyncDir, 0700); err != nil {
 		return err
 	}
+	return SaveAt(c.Path(), c)
+}
+
+// SaveAt writes the config as pretty-printed JSON to path, which is the file
+// Load read it from when that is not <SyncDir>/config.json.
+func SaveAt(path string, c Config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
 	b = append(b, '\n')
-	return os.WriteFile(c.Path(), b, 0600)
+	return os.WriteFile(path, b, 0600)
 }

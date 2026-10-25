@@ -79,3 +79,14 @@ func TestDoctorAndRepoCreateFlagsBeatConfigApp(t *testing.T) {
 		t.Error("repo create --token-cmd must beat the config's app")
 	}
 }
+
+// init saves --github-app to the config; --token-cmd would silently drop it.
+func TestInit_RefusesGitHubAppWithTokenCmd(t *testing.T) {
+	var code int
+	out := captureStderr(t, func() {
+		code = runInit([]string{"--remote", "/nonexistent/x.git", "--github-app", "chk", "--token-cmd", "printf x"})
+	})
+	if code != 2 || !strings.Contains(out, "--github-app") || !strings.Contains(out, "--token-cmd") {
+		t.Fatalf("exit %d, %q", code, out)
+	}
+}

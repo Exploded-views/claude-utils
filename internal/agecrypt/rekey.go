@@ -29,6 +29,8 @@ type RekeyOpts struct {
 	// NewIdentityPath is where the new hybrid identity lives (created if
 	// missing, reused if it already is a hybrid identity file).
 	NewIdentityPath string
+	// Prior is the config.json state a rollback restores (recorded, public values).
+	Prior PriorConfig
 }
 
 // RekeyPlan is what a rekey would do (or did), counts only.
@@ -176,7 +178,8 @@ func PlanRekeyPQ(repo *gitwt.Repo, o RekeyOpts, fetch bool) (RekeyPlan, error) {
 //
 // Everything is prepared (identity file, encrypted blobs) before the first
 // change to a ref or the recipients file, and those two are put back if the
-// commit fails.
+// commit fails. The push guard looks at the built commit before HEAD moves. A
+// restore record (RekeyStateFile) is written first, for a resume or a rollback.
 func ApplyRekeyPQ(repo *gitwt.Repo, o RekeyOpts) (RekeyPlan, error) {
 	p, err := PlanRekeyPQ(repo, o, true)
 	if err != nil {
@@ -232,7 +235,17 @@ func ApplyRekeyPQ(repo *gitwt.Repo, o RekeyOpts) (RekeyPlan, error) {
 
 	recPath := filepath.Join(repo.Dir, RecipientsFile)
 	oldData, _ := os.ReadFile(recPath)
+	st := PreRekeyState{
+		Tip: p.Tip, ClassicIdentity: p.IdentityPath, NewIdentity: filepath.ToSlash(o.NewIdentityPath),
+		NewRecipient: p.NewRecipient, Label: o.Label, Recovery: strings.TrimSpace(o.Recovery), FreshRoot: o.FreshRoot,
+		Config: o.Prior,
+	}
+	st.PriorScheme, st.PriorSchemeSet = rawScheme(repo)
+	if err := writeRekeyState(repo, st); err != nil {
+		return p, err
+	}
 	undo := func() {
+		removeRekeyState(repo)
 		_, _ = repo.Run("update-ref", "-d", BackupRef)
 		if oldData != nil {
 			_ = os.WriteFile(recPath, oldData, 0o600)
@@ -246,17 +259,12 @@ func ApplyRekeyPQ(repo *gitwt.Repo, o RekeyOpts) (RekeyPlan, error) {
 		undo()
 		return p, err
 	}
-	if err := commitInfoMode(repo, p.Tip, "memsync: recipients updated", info, headOID, drop, o.FreshRoot); err != nil {
+	if err := commitInfoMode(repo, p.Tip, "memsync: recipients updated", info, headOID, drop, o.FreshRoot,
+		func(commit string) error { return PushGuardCommit(repo, "main", commit) }); err != nil {
 		undo()
 		return p, err
 	}
-	if err := repo.ConfigSet(IdentityConfigKey, filepath.ToSlash(o.NewIdentityPath)); err != nil {
-		return p, err
-	}
-	if err := SetScheme(repo, SchemePQ); err != nil {
-		return p, err
-	}
-	if err := PinCurrent(repo); err != nil {
+	if err := repointLocal(repo, o.NewIdentityPath); err != nil {
 		return p, err
 	}
 	head, err := repo.Run("rev-parse", "HEAD")
@@ -315,7 +323,8 @@ func VerifyHybridRemote(repo *gitwt.Repo, branch string, wantCommits int) (commi
 }
 
 // DropBackup removes the pre-migration backup ref and purges what only it kept
-// alive: the reflogs are expired and the object store pruned now.
+// alive: the reflogs of HEAD, main, origin/main and the backup are expired and
+// the object store pruned now. Other reflogs (the stash) are left alone.
 func DropBackup(repo *gitwt.Repo) error {
 	if SchemeOf(repo) != SchemePQ {
 		return errors.New("this repo is not post-quantum; there is no backup to drop")
@@ -323,12 +332,17 @@ func DropBackup(repo *gitwt.Repo) error {
 	if _, err := repo.Run("rev-parse", "--verify", "--quiet", BackupRef); err != nil {
 		return errors.New("no backup ref " + BackupRef)
 	}
+	// Only the refs that held the old history: `--all` would also expire the
+	// stash reflog (the daemon's autostash) and lose its entries.
+	for _, ref := range []string{"HEAD", "refs/heads/main", "refs/remotes/origin/main"} {
+		if _, err := repo.Run("reflog", "expire", "--expire=now", "--expire-unreachable=now", ref); err != nil {
+			return err
+		}
+	}
 	if _, err := repo.Run("update-ref", "-d", BackupRef); err != nil {
 		return err
 	}
-	if _, err := repo.Run("reflog", "expire", "--expire=now", "--all"); err != nil {
-		return err
-	}
+	removeRekeyState(repo)
 	_, err := repo.Run("gc", "-q", "--prune=now")
 	return err
 }

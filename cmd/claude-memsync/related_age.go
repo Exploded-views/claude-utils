@@ -59,7 +59,7 @@ func (o ageOpener) Readable(dir string) bool {
 			continue
 		}
 		for _, k := range keys {
-			if k == mine {
+			if agecrypt.CanonLine(k) == mine {
 				return true
 			}
 		}

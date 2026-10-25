@@ -59,7 +59,7 @@ Usage of init:
   -github-api-url string
     	GitHub API base URL (GitHub Enterprise); saved to config
   -github-app string
-    	apps.json entry to mint the GitHub token from (see app-token); saved to config
+    	apps.json entry to mint the GitHub token from (see app-token); saved to config; not with --token-cmd
   -github-host string
     	git host remotes must use (default github.com); saved to config
   -host-label string
@@ -83,7 +83,7 @@ Usage of init:
   -sync-dir string
     	override sync work-tree (default: ~/.claudesync)
   -token-cmd string
-    	command (shell-style quotes, no shell) printing a GitHub token, e.g. "gh auth token"; saved as githubTokenCmd (the command, never the token)
+    	command (shell-style quotes, no shell) printing a GitHub token, e.g. "gh auth token"; saved as githubTokenCmd (the command, never the token); not with --github-app
   -token-file string
     	file holding a GitHub token for the private-only check (or set MEMSYNC_GITHUB_TOKEN)
 ```
@@ -117,6 +117,30 @@ usage:
   claude-memsync app key-fingerprint --key-file <pem>
   claude-memsync app add --name <n> --app-id <id> --org <org> (--key-cmd "<cmd>" | --key-file <path>) [--api-url <url>] [--replace] [--verify]
   claude-memsync app register --name <n> --org <org> --url <homepage> --perm <p:level>... (--key-out <path> | --key-cmd-store "<cmd>" --key-cmd "<cmd>")
+```
+
+## `claude-memsync app add -h`
+
+```text
+Usage of app add:
+  -api-url string
+    	GitHub API base URL (default: public GitHub); recorded as apiBase
+  -app-id string
+    	numeric GitHub App ID (required)
+  -apps-file string
+    	apps.json path (default: ~/.config/claude-memsync/apps.json)
+  -key-cmd string
+    	command that prints the private key (shell-style quotes, no shell)
+  -key-file string
+    	private key file (mode 0600, yours, one hard link)
+  -name string
+    	apps.json entry name (required)
+  -org string
+    	org the app is installed on (required)
+  -replace
+    	overwrite an existing entry with this name
+  -verify
+    	mint a token against the org to prove the entry works (prints MINT-OK)
 ```
 
 ## `claude-memsync app register -h`
@@ -422,7 +446,7 @@ usage: claude-memsync related dismiss <from> <to> [--routes FILE]
 ## `claude-memsync recipients`
 
 ```text
-usage: claude-memsync recipients add <public-key> [--host <label>] | remove <public-key> | list | accept --yes | label self --host <label> | label recovery <public-key> [--all] | rekey-pq --recovery-recipient <age1pq1...> --host <label> [--all] [--fresh-root] [--apply] | rekey-pq --drop-backup  [--repo <name> | --config <path>] [--routes <path>]
+usage: claude-memsync recipients add <public-key> [--host <label>] | remove <public-key> | list | accept --yes | label self --host <label> | label recovery <public-key> [--all] | rekey-pq --recovery-recipient <age1pq1...> --host <label> [--all] [--fresh-root] [--apply] | rekey-pq (--repo <name> | --all) --rollback | rekey-pq --drop-backup  [--repo <name> | --config <path>] [--routes <path>]
 ```
 
 ## `claude-memsync join`
@@ -507,6 +531,42 @@ Usage of install:
     	path to routes.json to run several repos (default: $CLAUDE_MEMSYNC_ROUTES, then ~/.config/claude-memsync/routes.json if it exists)
 ```
 
-## Commands without flags
+## `claude-memsync start -h`
 
-`uninstall`, `start`, `stop`, `status` and `version` take no flags and act when run, so the generator does not run them; their one-line summaries are in the `--help` output above.
+```text
+usage: claude-memsync start
+
+Start the system service; takes no flags
+```
+
+## `claude-memsync stop -h`
+
+```text
+usage: claude-memsync stop
+
+Stop the system service and clear a stale pull marker; takes no flags
+```
+
+## `claude-memsync uninstall -h`
+
+```text
+usage: claude-memsync uninstall
+
+Remove the system service; takes no flags
+```
+
+## `claude-memsync status -h`
+
+```text
+usage: claude-memsync status
+
+Report the service state, the routing and each repo's state; takes no flags
+```
+
+## `claude-memsync version -h`
+
+```text
+usage: claude-memsync version
+
+Print the version; takes no flags
+```

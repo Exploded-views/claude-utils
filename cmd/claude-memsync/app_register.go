@@ -27,6 +27,9 @@ const appUsage = `usage:
   claude-memsync app add --name <n> --app-id <id> --org <org> (--key-cmd "<cmd>" | --key-file <path>) [--api-url <url>] [--replace] [--verify]
   claude-memsync app register --name <n> --org <org> --url <homepage> --perm <p:level>... (--key-out <path> | --key-cmd-store "<cmd>" --key-cmd "<cmd>")`
 
+// keyOutWrite writes the key to the --key-out file; tests replace it.
+var keyOutWrite = func(f *os.File, b []byte) (int, error) { return f.Write(b) }
+
 func runApp(args []string) int { return appCmd(os.Stdout, os.Stderr, args) }
 
 func appCmd(stdout, stderr io.Writer, args []string) int {
@@ -144,9 +147,12 @@ func appRegister(stdout, stderr io.Writer, args []string) int {
 	if *keyOut != "" {
 		f, err := os.OpenFile(*keyOut, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
-			_, err = f.Write(conv.PEM)
+			_, err = keyOutWrite(f, conv.PEM)
 			if cerr := f.Close(); err == nil {
 				err = cerr
+			}
+			if err != nil {
+				os.Remove(*keyOut) // we created it (O_EXCL); never leave a partial key
 			}
 		}
 		if err != nil {

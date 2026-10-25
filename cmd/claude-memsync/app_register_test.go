@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -417,5 +418,49 @@ func TestAppAddVerify(t *testing.T) {
 	}
 	if gh.mints != 1 {
 		t.Errorf("mints %d", gh.mints)
+	}
+}
+
+// A failed verify of a replacement must leave the old entry as it was.
+func TestAppAddReplaceVerifyFailureKeepsTheOldEntry(t *testing.T) {
+	apps := useApps(t)
+	kp := writeKey(t, 0o600)
+	var out, errb bytes.Buffer
+	if code := appCmd(&out, &errb, []string{"add", "--name", "chk", "--app-id", "42", "--org", "orga", "--key-file", kp}); code != 0 {
+		t.Fatalf("setup: %d %s", code, errb.String())
+	}
+	before, _ := os.ReadFile(apps)
+	dead := httptest.NewServer(http.NotFoundHandler())
+	dead.Close()
+	errb.Reset()
+	code := appCmd(&out, &errb, []string{"add", "--name", "chk", "--app-id", "43", "--org", "orgb", "--key-file", kp,
+		"--api-url", dead.URL, "--replace", "--verify"})
+	if code != 1 || !strings.Contains(errb.String(), "verify failed") {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	after, _ := os.ReadFile(apps)
+	if !bytes.Equal(before, after) {
+		t.Errorf("apps.json changed by a failed verify:\n%s\nvs\n%s", before, after)
+	}
+}
+
+// A --key-out file that could not be written completely must not stay behind.
+func TestAppRegisterKeyOutWriteErrorRemovesThePartialFile(t *testing.T) {
+	useApps(t)
+	api := convServer(t)
+	withCallback(t, "c0de")
+	old := keyOutWrite
+	keyOutWrite = func(f *os.File, b []byte) (int, error) {
+		n, _ := f.Write(b[:10])
+		return n, errors.New("disk full")
+	}
+	t.Cleanup(func() { keyOutWrite = old })
+	keyOut := filepath.Join(t.TempDir(), "host.pem")
+	var out, errb bytes.Buffer
+	if code := appCmd(&out, &errb, regArgs(api.URL, "--key-out", keyOut)); code == 0 {
+		t.Fatal("a failed write must fail the run")
+	}
+	if _, err := os.Stat(keyOut); err == nil {
+		t.Error("the partial --key-out file was left behind")
 	}
 }

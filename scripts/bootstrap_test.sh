@@ -2,7 +2,8 @@
 # End-to-end test of scripts/bootstrap.sh in a fake HOME with stub gh,
 # systemctl, claude, go and ssh-keyscan on PATH, and local bare repos standing
 # in for the GitHub remotes. It never touches the real HOME, ~/.ssh, systemd or
-# GitHub. Usage: scripts/bootstrap_test.sh [workdir]
+# GitHub. Usage: scripts/bootstrap_test.sh [workdir]   (default <tree>/.bin/bootstrap-test;
+# it is wiped, and must not be under TMPDIR or /tmp)
 #
 # claude-memsync is the REAL binary built from this tree (MEMSYNC_BIN and
 # MEMMERGE_BIN name prebuilt ones; otherwise it is built with go, or with docker
@@ -19,7 +20,9 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-BASE="${1:-${BOOTSTRAP_TEST_DIR:-${TMPDIR:-/tmp}/bootstrap-test}}"
+# The default work dir is inside the tree (untracked), not under TMPDIR: the upgrade
+# check needs binaries in a dir the daemon does not take for a throwaway.
+BASE="${1:-${BOOTSTRAP_TEST_DIR:-$ROOT/.bin/bootstrap-test}}"
 TOKEN="dummy-token-$$-do-not-persist"
 ORGTOK="dummy-orgtoken-$$-do-not-persist"
 ORG=example-org
@@ -198,9 +201,14 @@ s = http.server.HTTPServer(("127.0.0.1", 0), H)
 open(portp, "w").write(str(s.server_address[1]))
 s.serve_forever()
 PY
-FAKE_TOKEN="$ORGTOK" python3 "$BASE/fakeapi.py" "$BASE/fakeapi.log" "$BASE/fakeapi.port" &
+# The fake API server must not outlive the harness, and must not hold the pipe
+# the harness's output goes through (a reader of `bootstrap_test.sh | tee` would
+# wait for it forever): its output goes nowhere and one trap kills it.
+FAKE_TOKEN="$ORGTOK" python3 "$BASE/fakeapi.py" "$BASE/fakeapi.log" "$BASE/fakeapi.port" </dev/null >/dev/null 2>&1 &
 FAKE_PID=$!
-trap 'kill $FAKE_PID 2>/dev/null || true' EXIT
+cleanup() { kill "$FAKE_PID" 2>/dev/null || true; wait "$FAKE_PID" 2>/dev/null || true; }
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT TERM
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -s "$BASE/fakeapi.port" ] && break; sleep 0.25; done
 [ -s "$BASE/fakeapi.port" ] || { echo "fake GitHub App API did not start" >&2; exit 2; }
 APIPORT="$(cat "$BASE/fakeapi.port")"
@@ -721,6 +729,58 @@ check "registry configured: the run keeps it and exits 0" bash -c "[ $RC -eq 0 ]
 check "registry configured: host check-key called with the fingerprint and the app slug" has "$STUB_DIR/memsync.log" 'host check-key --fingerprint SHA256:[^ ]+ --app memsync-check'
 check "registry configured: hosts/testhost/check-key committed with the fingerprint, no key" bash -c "git -C '$H/registry' show HEAD:hosts/testhost/check-key | grep -qE 'SHA256:[A-Za-z0-9+/]{43}=' && git -C '$H/registry' show HEAD:hosts/testhost/check-key | grep -q memsync-check && ! git -C '$H/registry' log -p | grep -qF -- '$(sed -n 2p "$BASE/check.pem")'"
 
+# `recipients rekey-pq --all` over two classic repos, end to end with the real
+# binary: every note must read back, after the rekey, exactly as it was written,
+# from the work-tree re-smudged through the new hybrid filter, and the remotes
+# must hold one root commit of hybrid ciphertext.
+echo "--- rekey-pq --all: classic repos, plaintext equality"
+newhome rk
+RKC="$H/claude/projects"
+mkdir -p "$RKC/-p1/memory" "$RKC/-p2/memory"
+printf 'first note\n' >"$RKC/-p1/memory/one.md"
+printf 'second note\nwith two lines\n' >"$RKC/-p1/memory/two.md"
+printf -- '- [one](one.md)\n' >"$RKC/-p1/memory/MEMORY.md"
+printf 'other project\n' >"$RKC/-p2/memory/three.md"
+RKROUTES="$H/routes-rk.json"
+RKOK=1
+for n in alpha beta; do
+  git init -q --bare -b main "$BASE/remotes/rk-$n.git"
+  HOME="$H" GIT_CONFIG_NOSYSTEM=1 "$REAL/claude-memsync" init --remote "$BASE/remotes/rk-$n.git" \
+    --sync-dir "$H/.claudesync.d/$n" --claude-dir "$RKC" --encrypt --encryption-scheme classic \
+    --identity "$H/id-$n.txt" >"$BASE/rk-init-$n.log" 2>&1 || RKOK=0
+done
+check "rekey: two classic repos initialised with the real binary" [ "$RKOK" -eq 1 ]
+printf '{"repos":{"alpha":{"config":"%s","kind":"personal"},"beta":{"config":"%s","kind":"project"}},"routes":[],"default":"deny","personal":"alpha"}\n' \
+  "$H/.claudesync.d/alpha/config.json" "$H/.claudesync.d/beta/config.json" >"$RKROUTES"
+chmod 600 "$RKROUTES"
+rkhash() { # repo: hash of every note in the repo's work-tree
+  (cd "$H/.claudesync.d/$1/projects" && find . -type f | LC_ALL=C sort | while read -r f; do printf '%s ' "$f"; cksum <"$f"; done)
+}
+RKB_A="$(rkhash alpha)"; RKB_B="$(rkhash beta)"
+check "rekey: the work-trees hold the notes" bash -c "[ -n \"\$1\" ] && [ -n \"\$2\" ]" _ "$RKB_A" "$RKB_B"
+set +e
+RKOUT="$(HOME="$H" GIT_CONFIG_NOSYSTEM=1 CLAUDE_MEMSYNC_ROUTES="$RKROUTES" "$REAL/claude-memsync" recipients rekey-pq --all \
+  --recovery-recipient "$PQREC" --host rk --fresh-root --apply 2>&1)"
+RKRC=$?
+set -e
+[ "$RKRC" -eq 0 ] || echo "$RKOUT" | tail -20
+check "rekey --all exits 0" [ "$RKRC" -eq 0 ]
+for n in alpha beta; do
+  SY="$H/.claudesync.d/$n"; OR="$BASE/remotes/rk-$n.git"
+  check "rekey $n: scheme pq, new identity in use, classic identity retired" bash -c "[ \"\$(git -C '$SY' config memage.scheme)\" = pq ] && git -C '$SY' config memage.identity | grep -q 'id-$n-pq.txt' && [ -e '$H/id-$n.txt.classic-retired' ] && [ ! -e '$H/id-$n.txt' ]"
+  check "rekey $n: origin has one root commit" bash -c "[ \"\$(git -C '$OR' rev-list --count main)\" = 1 ]"
+  check "rekey $n: every note on origin is hybrid-only ciphertext" bash -c "
+    files=\$(git -C '$OR' ls-tree -r --name-only main | grep '^projects/'); [ -n \"\$files\" ] || exit 1
+    for f in \$files; do b=\$(git -C '$OR' cat-file blob main:\$f | head -c 600); printf '%s' \"\$b\" | grep -aq -- '-> mlkem768x25519' || exit 1; printf '%s' \"\$b\" | grep -aq -- '-> X25519' && exit 1; done; exit 0"
+  # re-smudge: remove the notes from the work-tree and check them out again,
+  # which decrypts the origin's ciphertext with the new identity.
+  rm -rf "$SY/projects"; git -C "$SY" checkout -q -- projects
+  if [ "$n" = alpha ]; then WANT="$RKB_A"; else WANT="$RKB_B"; fi
+  check "rekey $n: every note decrypts to exactly what it was" [ "$(rkhash "$n")" = "$WANT" ]
+  check "rekey $n: the work-tree is clean" bash -c "[ -z \"\$(git -C '$SY' status --porcelain)\" ]"
+done
+check "rekey: the notes read back byte for byte" bash -c "diff <(cat '$RKC/-p1/memory/two.md') '$H/.claudesync.d/alpha/projects/-p1/memory/two.md'"
+
 # An upgrade: a second build is bootstrapped over the first and the daemon
 # restarts. git runs whatever program the clone's config names, so the filters
 # must end up on the new build, or a newer on-disk format (host labels in
@@ -741,11 +801,15 @@ buildver() { # outdir version: claude-memsync and claude-memmerge reporting that
     return 1
   fi
 }
+under_temp() { # the daemon never repoints git config at a binary under a temp dir
+  case "$1" in /tmp | /tmp/* | "${TMPDIR:-/tmp}" | "${TMPDIR:-/tmp}"/*) return 0 ;; *) return 1 ;; esac
+}
 if ! command -v go >/dev/null && ! command -v docker >/dev/null; then
   pending "upgrade check needs go or docker to build two versions of claude-memsync"
+elif under_temp "$BASE"; then
+  bad "upgrade check needs the work dir outside TMPDIR and /tmp (the daemon treats binaries there as throwaways): pass one, e.g. scripts/bootstrap_test.sh \$PWD/.bin/bt"
 else
-  UPD="$(mktemp -d "$HOME/.memsync-harness.XXXXXX")"
-  trap 'rm -rf "$UPD"' EXIT
+  UPD="$BASE/upgrade"; mkdir -p "$UPD"
   for v in A B; do buildver "$UPD/real$v" "harness-$v"; done
   git clone -q "$BASE/utils.git" "$UPD/second"
   git -C "$UPD/second" -c user.name=tester -c user.email=tester@example.invalid commit -q --allow-empty -m "second build"
@@ -767,6 +831,26 @@ else
   HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" timeout 10 "$UPD/realB/claude-memsync" run --skip-quiet-window >"$UPD/run.log" 2>&1 || true
   check "upgrade: the restarted daemon repoints the filter at build B" bash -c "git -C '$SYNC' config --get filter.memage.process | grep -q '$UPD/realB/claude-memsync'"
   check "upgrade: the merge drivers follow" bash -c "git -C '$SYNC' config --get merge.memtext.driver | grep -q '$UPD/realB/claude-memmerge'"
+  # After the upgrade a commit and a sync must work end to end through the new
+  # build's filter, against recipients that carry "# host:" labels.
+  check "upgrade: the recipients file carries a host label" bash -c "grep -q '# host:testhost' '$SYNC/.age-recipients'"
+  check "upgrade: a note written through the filter commits" bash -c "
+    mkdir -p '$SYNC/projects/-upg/memory' && printf 'written after the upgrade\\n' >'$SYNC/projects/-upg/memory/after.md' &&
+    git -C '$SYNC' add -A && git -C '$SYNC' -c user.name=t -c user.email=t@example.invalid commit -q -m 'after upgrade' &&
+    git -C '$SYNC' cat-file blob HEAD:projects/-upg/memory/after.md | head -c 40 | grep -aq 'age-encryption.org'"
+  check "upgrade: ... and pushes (the push guard accepts it)" bash -c "export HOME='$H' GIT_CONFIG_NOSYSTEM=1; git -C '$SYNC' push -q origin main && git -C '$BASE/remotes/mem-infra-homelab.git' cat-file -e main:projects/-upg/memory/after.md"
+  check "upgrade: ... and a pull --rebase finds nothing to do, with the work-tree clean" bash -c "export HOME='$H' GIT_CONFIG_NOSYSTEM=1; git -C '$SYNC' pull -q --rebase origin main && [ -z \"\$(git -C '$SYNC' status --porcelain)\" ]"
+  # The daemon itself: a note dropped in the Claude tree is mirrored, committed and pushed.
+  FOLD="$(printf '%s' "$H" | sed 's/[^A-Za-z0-9]/-/g')"
+  mkdir -p "$H/.claude/projects/$FOLD/memory"
+  printf 'synced by the upgraded daemon\n' >"$H/.claude/projects/$FOLD/memory/daemon.md"
+  HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" timeout 25 "$UPD/realB/claude-memsync" run --skip-quiet-window >"$UPD/run2.log" 2>&1 || true
+  check "upgrade: the daemon on build B syncs a new note to the remote as ciphertext" bash -c "
+    git -C '$BASE/remotes/mem-infra-homelab.git' cat-file -e main:projects/$FOLD/memory/daemon.md &&
+    git -C '$BASE/remotes/mem-infra-homelab.git' cat-file blob main:projects/$FOLD/memory/daemon.md | head -c 40 | grep -aq 'age-encryption.org'"
+  check "upgrade: ... which decrypts back to the note" bash -c "
+    git -C '$BASE/remotes/mem-infra-homelab.git' cat-file blob main:projects/$FOLD/memory/daemon.md >'$UPD/daemon.blob' &&
+    [ \"\$(cd '$SYNC' && '$UPD/realB/claude-memsync' age-textconv '$UPD/daemon.blob')\" = 'synced by the upgraded daemon' ]"
   unset HROOT REAL_RUN
 fi
 

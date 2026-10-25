@@ -180,11 +180,16 @@ func TestPQ_JoinRequestWithHybridKey(t *testing.T) {
 	if err != nil || got.Recipient != rcpt {
 		t.Fatalf("parse: %v", err)
 	}
-	// still strict
+	// still strict. The corrupted last character must differ from the real one
+	// (it was "q" in 1 run of 32, which left the key valid and failed the test).
+	swap := "q"
+	if strings.HasSuffix(rcpt, "q") {
+		swap = "p"
+	}
 	for name, c := range map[string]string{
 		"extra line":  text + "x: y\n",
 		"truncated":   strings.Replace(text, rcpt, rcpt[:len(rcpt)-4], 1),
-		"corrupt key": strings.Replace(text, rcpt, rcpt[:len(rcpt)-1]+"q", 1),
+		"corrupt key": strings.Replace(text, rcpt, rcpt[:len(rcpt)-1]+swap, 1),
 		"huge":        text + strings.Repeat("x", maxJoinBytes),
 		"two keys":    strings.Replace(text, rcpt, rcpt+" "+rcpt, 1),
 	} {
@@ -378,5 +383,64 @@ func TestPQ_IdentityNeverInRecipientsOrErrors(t *testing.T) {
 	buf.WriteString(err.Error())
 	if strings.Contains(buf.String(), secret) {
 		t.Error("error text must not carry the secret")
+	}
+}
+
+// forgeClassic commits a classic-ciphertext blob as legacy.md on h's branch.
+func forgeClassic(t *testing.T, h *host) {
+	t.Helper()
+	_, cl := newIdentity(t, "c")
+	ct, _ := Encrypt([]byte("legacy"), mustRecipients(t, cl))
+	oid, err := h.repo.RunStdin(ct, "hash-object", "-w", "--no-filters", "--stdin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.repo.Run("update-index", "--add", "--cacheinfo", "100644,"+strings.TrimSpace(oid)+",legacy.md"); err != nil {
+		t.Fatal(err)
+	}
+	h.repo.Commit("legacy")
+}
+
+// A clone whose memage.scheme went missing is still pq if its recipients are:
+// the guard must not fall back to accepting classic ciphertext.
+func TestPQ_SchemeOfFallsBackToTheRecipientsFile(t *testing.T) {
+	gitEnv(t)
+	a := newHostPQ(t, bareRemote(t), true)
+	a.write(t, "n.md", "ok\n")
+	a.commit(t, "memsync: 1 files")
+	if _, err := a.repo.Run("config", "--unset", SchemeConfigKey); err != nil {
+		t.Fatal(err)
+	}
+	if got := SchemeOf(a.repo); got != SchemePQ {
+		t.Fatalf("SchemeOf without memage.scheme but with a hybrid recipients file = %q, want pq", got)
+	}
+	forgeClassic(t, a)
+	if err := PushGuard(a.repo, "main"); err == nil {
+		t.Fatal("classic ciphertext must not be pushed from a repo with hybrid recipients")
+	}
+	// a classic repo stays classic
+	c := newHost(t, bareRemote(t), true)
+	if got := SchemeOf(c.repo); got != SchemeClassic {
+		t.Errorf("classic repo reads as %q", got)
+	}
+}
+
+// PushGuardCommit judges a commit that is not the branch tip yet.
+func TestPQ_PushGuardCommitJudgesAnUnmovedCommit(t *testing.T) {
+	gitEnv(t)
+	a := newHostPQ(t, bareRemote(t), true)
+	a.write(t, "n.md", "ok\n")
+	a.commit(t, "memsync: 1 files")
+	good := strings.TrimSpace(a.revHead(t))
+	if err := PushGuardCommit(a.repo, "main", good); err != nil {
+		t.Fatalf("hybrid commit refused: %v", err)
+	}
+	forgeClassic(t, a)
+	bad := strings.TrimSpace(a.revHead(t))
+	if _, err := a.repo.Run("reset", "-q", "--soft", good); err != nil {
+		t.Fatal(err)
+	}
+	if err := PushGuardCommit(a.repo, "main", bad); err == nil {
+		t.Fatal("a commit holding classic ciphertext must be refused before HEAD moves")
 	}
 }

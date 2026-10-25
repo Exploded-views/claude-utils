@@ -61,8 +61,8 @@ func runInit(args []string) int {
 	apiURL := flags.String("github-api-url", "", "GitHub API base URL (GitHub Enterprise); saved to config")
 	ghHost := flags.String("github-host", "", "git host remotes must use (default github.com); saved to config")
 	tokenFile := flags.String("token-file", "", "file holding a GitHub token for the private-only check (or set MEMSYNC_GITHUB_TOKEN)")
-	tokenCmd := flags.String("token-cmd", "", "command (shell-style quotes, no shell) printing a GitHub token, e.g. \"gh auth token\"; saved as githubTokenCmd (the command, never the token)")
-	ghApp := flags.String("github-app", "", "apps.json entry to mint the GitHub token from (see app-token); saved to config")
+	tokenCmd := flags.String("token-cmd", "", "command (shell-style quotes, no shell) printing a GitHub token, e.g. \"gh auth token\"; saved as githubTokenCmd (the command, never the token); not with --github-app")
+	ghApp := flags.String("github-app", "", "apps.json entry to mint the GitHub token from (see app-token); saved to config; not with --token-cmd")
 	hostLabel := flags.String("host-label", "", "a name you choose for this host (such as laptop-2): titles its deploy keys, labels its age recipient, names it in the registry; saved to config")
 	readOnly := flags.Bool("read-only", false, "read-only member: pull and apply notes into the Claude tree, never commit or push (the remote must already hold the repo); saved to config")
 	expires := flags.String("expires", "", "last day this host syncs (YYYY-MM-DD); the day after, the daemon holds and status says to retire it; saved to config and published to the registry")
@@ -86,6 +86,14 @@ func runInit(args []string) int {
 	if *remote == "" {
 		fmt.Fprintln(os.Stderr, "init: --remote is required")
 		flags.Usage()
+		return 2
+	}
+
+	if *ghApp != "" && *tokenCmd != "" {
+		// init saves the app to the config, and a token command would replace it
+		// (a typed token source beats the config's app): saving only one of the
+		// two without saying so is worse than asking which was meant.
+		fmt.Fprintln(os.Stderr, "init: --github-app and --token-cmd are two token sources; give one (the app is saved to the config, the command is the one-run token source)")
 		return 2
 	}
 
@@ -177,7 +185,7 @@ func runInit(args []string) int {
 		cfg.EncryptionScheme = *scheme
 		cfg.RecoveryRecipients = append([]string{}, recoveryRecipients...)
 		if enc.IdentityPath == "" {
-			enc.IdentityPath = defaultIdentityPath()
+			enc.IdentityPath = defaultIdentityFor(*scheme)
 		}
 		exe, err := executable()
 		if err != nil {
@@ -735,4 +743,19 @@ func printReport(r syncpkg.SyncReport) {
 	if len(r.BackedUp) > 0 {
 		fmt.Fprintf(os.Stderr, "%d collisions saved as .from-remote-* in the mirror\n", len(r.BackedUp))
 	}
+}
+
+// defaultIdentityFor is the identity file init uses when --identity is not given.
+//
+// Under the pq scheme an existing hybrid identity beside the default one
+// (identity-pq.txt, where `rekey-pq` puts it) is used instead of creating a
+// second identity for the host.
+func defaultIdentityFor(scheme string) string {
+	base := defaultIdentityPath()
+	if scheme == agecrypt.SchemePQ {
+		if p := newIdentityPath(base); fileExists(p) {
+			return p
+		}
+	}
+	return base
 }

@@ -8,6 +8,7 @@ fork are upstream's own releases.
 ## Unreleased
 
 - **Post-quantum encryption by default**: new repos use `encryptionScheme: pq` (hybrid ML-KEM-768 + X25519, `age1pq1…`); classic X25519 only on request; `recipients rekey-pq` converts a single-member classic repo, optionally onto one fresh root commit. *Upstream candidate.*
+- **rekey-pq hardening**: `--all` stops at the first failure and reports done/failed/not started; a rerun resumes, `--rollback` undoes an unpushed migration; checks run before any local change and `config.json` is saved only after the push; the classic identity is kept while any clone under the sync root uses it; synced-head follows the rekey; also `SchemeOf` falls back to the recipients file, `-h` never acts for `start`/`stop`/`status`/`uninstall`/`version`, `app add --verify` checks before writing, `init` refuses `--github-app` with `--token-cmd` and reuses `identity-pq.txt`. *Upstream candidate.*
 - **Explicit token flags win**: `--token-file`, `--token-cmd` and `--github-app` replace every configured token source for `doctor`, `host` and `repo create`. *Upstream candidate.*
 - **Safer app registration**: `app register` refuses unreplaced `<…>` placeholders, keeps the key in a `recovered.pem` if storing it fails, and `app add --replace --verify` repairs an entry. *Upstream candidate.*
 - **Filters follow the binary**: after an upgrade the daemon repoints each clone's age filter and merge drivers at the running binary. *Upstream candidate.*

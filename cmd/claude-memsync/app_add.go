@@ -81,20 +81,24 @@ func appAdd(stdout, stderr io.Writer, args []string) int {
 		fmt.Fprintln(stderr, "app add: the key file is not a usable private key")
 		return 1
 	}
-	if err := ghapp.SaveApp(path, entry); err != nil {
-		fmt.Fprintf(stderr, "app add: could not write %s: %v\n", path, err)
-		return 1
-	}
-	fmt.Fprintln(stdout, "Recorded in", path)
+	// Verify before writing: a failed verify leaves apps.json, and so the old
+	// entry of a --replace, exactly as it was.
 	if *verify {
 		m, err := entry.Minter()
 		if err == nil {
 			_, err = m.Token(context.Background())
 		}
 		if err != nil {
-			fmt.Fprintln(stderr, "app add: verify failed:", err)
+			fmt.Fprintln(stderr, "app add: verify failed (nothing written):", err)
 			return 1
 		}
+	}
+	if err := ghapp.SaveApp(path, entry); err != nil {
+		fmt.Fprintf(stderr, "app add: could not write %s: %v\n", path, err)
+		return 1
+	}
+	fmt.Fprintln(stdout, "Recorded in", path)
+	if *verify {
 		fmt.Fprintln(stdout, "MINT-OK")
 	}
 	return 0

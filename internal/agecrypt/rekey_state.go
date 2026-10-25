@@ -1,0 +1,272 @@
+package agecrypt
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/MarimerLLC/claude-utils/internal/gitwt"
+)
+
+// RekeyStateFile is, in the git dir, what `rekey-pq --apply` records before it
+// changes anything, so a rerun can finish an interrupted migration and
+// `rekey-pq --rollback` can put the classic values back. It holds public values
+// only (paths, public keys, labels, commit ids), mode 0600.
+const RekeyStateFile = "memsync-pre-pq.json"
+
+// PriorConfig is the part of config.json that a rekey changes.
+type PriorConfig struct {
+	EncryptionScheme   string   `json:"encryptionScheme"`
+	HostLabel          string   `json:"hostLabel"`
+	RecoveryRecipients []string `json:"recoveryRecipients"`
+}
+
+// PreRekeyState is the restore record.
+type PreRekeyState struct {
+	Tip             string      `json:"tip"`             // HEAD before the rekey (the backup ref's commit)
+	ClassicIdentity string      `json:"classicIdentity"` // memage.identity before
+	NewIdentity     string      `json:"newIdentity"`
+	NewRecipient    string      `json:"newRecipient"` // this host's hybrid public key
+	Label           string      `json:"label"`
+	Recovery        string      `json:"recovery"`
+	FreshRoot       bool        `json:"freshRoot"`
+	PriorScheme     string      `json:"priorScheme"`
+	PriorSchemeSet  bool        `json:"priorSchemeSet"`
+	Config          PriorConfig `json:"config"`
+}
+
+func rekeyStatePath(repo *gitwt.Repo) (string, error) {
+	d, err := gitCommonDir(repo)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, RekeyStateFile), nil
+}
+
+func writeRekeyState(repo *gitwt.Repo, st PreRekeyState) error {
+	p, err := rekeyStatePath(repo)
+	if err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
+}
+
+// ReadRekeyState reads the restore record; os.ErrNotExist when there is none.
+func ReadRekeyState(repo *gitwt.Repo) (PreRekeyState, error) {
+	var st PreRekeyState
+	p, err := rekeyStatePath(repo)
+	if err != nil {
+		return st, err
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return st, err
+	}
+	if err := json.Unmarshal(b, &st); err != nil {
+		return st, fmt.Errorf("%s: %w", RekeyStateFile, err)
+	}
+	return st, nil
+}
+
+func removeRekeyState(repo *gitwt.Repo) {
+	if p, err := rekeyStatePath(repo); err == nil {
+		_ = os.Remove(p)
+	}
+}
+
+// RekeyStage says how far an earlier rekey-pq --apply got.
+type RekeyStage int
+
+const (
+	// StageFresh: nothing done; run the whole migration.
+	StageFresh RekeyStage = iota
+	// StageFinishLocal: HEAD moved, but identity/scheme/pin were not repointed.
+	StageFinishLocal
+	// StageRetryPush: migrated locally; the remote is still at the backup tip.
+	StageRetryPush
+	// StagePublished: migrated and the remote holds the migrated tip.
+	StagePublished
+	// StageDone: already post-quantum and no backup: nothing to do.
+	StageDone
+)
+
+// rawScheme is memage.scheme as recorded, without SchemeOf's fallback.
+func rawScheme(repo *gitwt.Repo) (string, bool) {
+	out, err := repo.Run("config", "--get", SchemeConfigKey)
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(out), true
+}
+
+func revOf(repo *gitwt.Repo, rev string) (string, bool) {
+	out, err := repo.Run("rev-parse", "--verify", "--quiet", rev)
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(out), true
+}
+
+// DetectRekey classifies the repo for a rerun of rekey-pq --apply with opts o.
+// A leftover of an attempt that stopped before it committed anything is
+// cleaned up (StageFresh). It fetches origin/main when the stage depends on the
+// remote. Flags must match those of the interrupted run.
+func DetectRekey(repo *gitwt.Repo, o RekeyOpts) (RekeyStage, PreRekeyState, error) {
+	var st PreRekeyState
+	tip, hasBackup := revOf(repo, BackupRef)
+	scheme, _ := rawScheme(repo)
+	if !hasBackup {
+		if scheme == SchemePQ {
+			return StageDone, st, nil
+		}
+		return StageFresh, st, nil
+	}
+	st, err := ReadRekeyState(repo)
+	if err != nil {
+		return StageFresh, st, fmt.Errorf("a backup ref %s exists but its restore record %s does not (%v); inspect the repo, then drop the backup with `recipients rekey-pq --drop-backup` or delete the ref", BackupRef, RekeyStateFile, err)
+	}
+	if st.Tip != tip {
+		return StageFresh, st, fmt.Errorf("%s does not match the restore record; inspect the repo by hand", BackupRef)
+	}
+	head, _ := revOf(repo, "HEAD")
+	if scheme != SchemePQ && head == tip {
+		// An attempt that died before it committed: put the recipients file
+		// back and start over.
+		if _, err := repo.Run("checkout", "HEAD", "--", RecipientsFile); err != nil {
+			return StageFresh, st, err
+		}
+		_, _ = repo.Run("update-ref", "-d", BackupRef)
+		removeRekeyState(repo)
+		return StageFresh, PreRekeyState{}, nil
+	}
+	if o.FreshRoot != st.FreshRoot || strings.TrimSpace(o.Label) != st.Label || strings.TrimSpace(o.Recovery) != st.Recovery {
+		return StageFresh, st, errors.New("an earlier rekey-pq --apply was interrupted; rerun it with the same --host, --recovery-recipient and --fresh-root (or undo it with --rollback)")
+	}
+	if scheme != SchemePQ {
+		cur, err := ListRecipients(repo.Dir)
+		if err != nil {
+			return StageFresh, st, err
+		}
+		want := canonSet([]string{st.NewRecipient, st.Recovery})
+		have := canonSet(cur)
+		if len(have) != len(want) {
+			return StageFresh, st, errors.New("an earlier rekey-pq left the repo half-migrated and .age-recipients is not the migrated set; inspect it by hand")
+		}
+		for k := range want {
+			if !have[k] {
+				return StageFresh, st, errors.New("an earlier rekey-pq left the repo half-migrated and .age-recipients is not the migrated set; inspect it by hand")
+			}
+		}
+		return StageFinishLocal, st, nil
+	}
+	if _, err := repo.Run("fetch", "-q", "origin", "main"); err != nil {
+		return StageFresh, st, fmt.Errorf("cannot fetch origin: %w", err)
+	}
+	remote, _ := revOf(repo, "refs/remotes/origin/main")
+	switch remote {
+	case tip:
+		return StageRetryPush, st, nil
+	case head:
+		return StagePublished, st, nil
+	}
+	return StageFresh, st, errors.New("origin/main is neither the backup tip nor the migrated tip (someone pushed since?); not touching it. Inspect it, or drop the backup if the migration is complete")
+}
+
+// FinishRekeyLocal completes a migration whose HEAD moved but whose identity,
+// scheme and pin were not repointed (a crash in between).
+func FinishRekeyLocal(repo *gitwt.Repo, st PreRekeyState) (RekeyPlan, error) {
+	if err := repointLocal(repo, st.NewIdentity); err != nil {
+		return RekeyPlan{}, err
+	}
+	return PlanFromState(repo, st), nil
+}
+
+func repointLocal(repo *gitwt.Repo, newIdentity string) error {
+	if err := repo.ConfigSet(IdentityConfigKey, filepath.ToSlash(newIdentity)); err != nil {
+		return err
+	}
+	if err := SetScheme(repo, SchemePQ); err != nil {
+		return err
+	}
+	return PinCurrent(repo)
+}
+
+// PlanFromState describes a migration that is already done locally.
+func PlanFromState(repo *gitwt.Repo, st PreRekeyState) RekeyPlan {
+	head, _ := revOf(repo, "HEAD")
+	return RekeyPlan{Tip: st.Tip, NewCommit: head, NewRecipient: st.NewRecipient, IdentityPath: st.ClassicIdentity}
+}
+
+// RollbackRekey puts a repo back that rekey-pq migrated locally but never
+// published: the branch returns to the backup, and memage.identity,
+// memage.scheme and the pin to their classic values. restoreConfig puts
+// config.json back from the recorded values. It refuses when origin/main is no
+// longer the backup tip. It returns the restore record.
+func RollbackRekey(repo *gitwt.Repo, restoreConfig func(PriorConfig) error) (PreRekeyState, error) {
+	st, err := ReadRekeyState(repo)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return st, fmt.Errorf("nothing to roll back: no restore record (%s)", RekeyStateFile)
+		}
+		return st, err
+	}
+	tip, ok := revOf(repo, BackupRef)
+	if !ok || tip != st.Tip {
+		return st, fmt.Errorf("nothing to roll back: %s is missing or does not match the restore record", BackupRef)
+	}
+	if cur, err := repo.CurrentBranch(); err != nil || cur != "main" {
+		return st, errors.New("rollback works on the main branch")
+	}
+	if _, err := repo.Run("fetch", "-q", "origin", "main"); err != nil {
+		return st, fmt.Errorf("cannot fetch origin to confirm the remote is unchanged: %w", err)
+	}
+	if remote, _ := revOf(repo, "refs/remotes/origin/main"); remote != tip {
+		return st, errors.New("the remote has moved off the backup (the migrated history was pushed, or someone else pushed); a local rollback would diverge from it, so it is refused")
+	}
+	if repo.MergeInProgress() || repo.RebaseInProgress() || repo.HasUnmerged() {
+		return st, errors.New("a merge or rebase is in progress")
+	}
+	if out, err := repo.Run("status", "--porcelain"); err != nil {
+		return st, err
+	} else if strings.TrimSpace(out) != "" {
+		return st, errors.New("the work-tree has uncommitted changes; a rollback would discard them (refusing)")
+	}
+	// The classic identity first: the reset below checks files out through the filter.
+	if err := repo.ConfigSet(IdentityConfigKey, filepath.ToSlash(st.ClassicIdentity)); err != nil {
+		return st, err
+	}
+	if st.PriorSchemeSet {
+		if err := repo.ConfigSet(SchemeConfigKey, st.PriorScheme); err != nil {
+			return st, err
+		}
+	} else {
+		_, _ = repo.Run("config", "--unset", SchemeConfigKey)
+	}
+	if _, err := repo.Run("reset", "--hard", "-q", BackupRef); err != nil {
+		return st, err
+	}
+	if err := PinCurrent(repo); err != nil {
+		return st, err
+	}
+	if restoreConfig != nil {
+		if err := restoreConfig(st.Config); err != nil {
+			return st, err
+		}
+	}
+	if _, err := repo.Run("update-ref", "-d", BackupRef); err != nil {
+		return st, err
+	}
+	removeRekeyState(repo)
+	return st, nil
+}

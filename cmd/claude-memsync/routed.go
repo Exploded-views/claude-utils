@@ -581,7 +581,14 @@ var (
 func loopFailedPath(syncDir string) string { return filepath.Join(syncDir, ".state", "loop-failed") }
 
 func superviseLoop(ctx context.Context, loop *syncpkg.Loop, recheck func()) {
-	backoff := loopBackoffMin
+	superviseLoopWith(ctx, loop, recheck, runLoop, loopBackoffMin)
+}
+
+// superviseLoopWith is superviseLoop with the loop function and the first
+// backoff given, so a test can supervise a fake loop beside a running set
+// without assigning the package variables under a goroutine that reads them.
+func superviseLoopWith(ctx context.Context, loop *syncpkg.Loop, recheck func(), run func(context.Context, *syncpkg.Loop) error, backoffMin time.Duration) {
+	backoff := backoffMin
 	failed := loopFailedPath(loop.Cfg.SyncDir)
 	for {
 		if recheck != nil {
@@ -589,7 +596,7 @@ func superviseLoop(ctx context.Context, loop *syncpkg.Loop, recheck func()) {
 		}
 		healthy := time.AfterFunc(loopHealthy, func() { os.Remove(failed) })
 		started := time.Now()
-		err := runLoop(ctx, loop)
+		err := run(ctx, loop)
 		healthy.Stop()
 		if ctx.Err() != nil {
 			return
@@ -602,7 +609,7 @@ func superviseLoop(ctx context.Context, loop *syncpkg.Loop, recheck func()) {
 		_ = os.MkdirAll(filepath.Dir(failed), 0700)
 		_ = os.WriteFile(failed, []byte(time.Now().UTC().Format(time.RFC3339)+" "+msg+"\n"), 0600)
 		if time.Since(started) > loopHealthy {
-			backoff = loopBackoffMin
+			backoff = backoffMin
 		}
 		select {
 		case <-ctx.Done():

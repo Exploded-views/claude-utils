@@ -202,3 +202,22 @@ func TestRelatedOpener_TriesEachRoutedReposIdentity(t *testing.T) {
 		t.Error("a clone encrypted to a stranger must stay unreadable")
 	}
 }
+
+// A recipients line carries a "# host:<label>" or "# recovery" label; the key
+// comparison must look at the key only.
+func TestAgeOpener_ReadableWithLabelledRecipientLines(t *testing.T) {
+	hp, hr := newPQKey(t, "h")
+	other, _ := newPQKey(t, "o")
+	dir := ageClone(t, hr+" # host:vm-1", map[string]string{"n.md": "x"})
+	if !(ageOpener{IdentityPath: hp}).Readable(dir) {
+		t.Error("a labelled hybrid recipient line must match its own key")
+	}
+	if (ageOpener{IdentityPath: other}).Readable(dir) {
+		t.Error("another hybrid key must not read the clone")
+	}
+	ip, cr := newIdentity(t)
+	dir2 := ageClone(t, cr+" # recovery", map[string]string{"n.md": "x"})
+	if !(ageOpener{IdentityPath: ip}).Readable(dir2) {
+		t.Error("a labelled classic recipient line must match its own key")
+	}
+}
