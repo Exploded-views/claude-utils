@@ -27,6 +27,10 @@ type App struct {
 	// https://api.github.com; set it for GitHub Enterprise). It lives here,
 	// not in config.json, because a JWT proves control of the app.
 	APIBase string `json:"apiBase,omitempty"`
+
+	// KeyFingerprint is this host's key fingerprint as GitHub's settings page
+	// shows it (SHA256:...). When set, a key that does not match is refused.
+	KeyFingerprint string `json:"keyFingerprint,omitempty"`
 }
 
 // Argv is a command line as a JSON array (["secret-tool","read","vault://My Vault/x"]).
@@ -92,6 +96,8 @@ func (a App) Validate() error {
 		return errors.New("org is not a valid GitHub login")
 	case (a.KeyFile == "") == (len(a.KeyCmd) == 0):
 		return errors.New("set exactly one of keyFile and keyCmd")
+	case a.KeyFingerprint != "" && !fpRE.MatchString(a.KeyFingerprint):
+		return errors.New("keyFingerprint must look like SHA256:<base64>")
 	case a.APIBase != "" && !validAPIBase(a.APIBase):
 		return errors.New("apiBase must be an https URL")
 	}
@@ -202,5 +208,5 @@ func (a App) Minter() (*Minter, error) {
 	if len(a.KeyCmd) > 0 {
 		load = func(ctx context.Context) ([]byte, error) { return LoadKeyCmd(ctx, a.KeyCmd) }
 	}
-	return &Minter{AppID: a.AppID, Org: a.Org, APIBase: a.API(), LoadKey: load}, nil
+	return &Minter{AppID: a.AppID, Org: a.Org, APIBase: a.API(), LoadKey: load, Fingerprint: a.KeyFingerprint}, nil
 }

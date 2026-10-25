@@ -70,6 +70,7 @@ func TestAppRegisterKeyOut(t *testing.T) {
 		t.Fatalf("code %d: %s", code, errb.String())
 	}
 	b, err := os.ReadFile(keyOut)
+	wantFP, _ := ghapp.KeyFingerprint([]byte(cliPEM))
 	if err != nil || string(b) != cliPEM {
 		t.Fatalf("key file: %q %v", b, err)
 	}
@@ -88,7 +89,7 @@ func TestAppRegisterKeyOut(t *testing.T) {
 		}
 	}
 	a, err := ghapp.LookupApp(apps, "host-check")
-	if err != nil || a.AppID != "99" || a.Org != "orga" || a.KeyFile != keyOut {
+	if err != nil || a.KeyFingerprint != wantFP || a.AppID != "99" || a.Org != "orga" || a.KeyFile != keyOut {
 		t.Errorf("apps.json entry = %+v %v", a, err)
 	}
 	if st, _ := os.Stat(apps); runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 {
@@ -230,5 +231,31 @@ func TestAppRegisterKeyCmdsWithQuotedSpaces(t *testing.T) {
 	}
 	if a.APIBase != api.URL {
 		t.Errorf("apiBase = %q, want %q", a.APIBase, api.URL)
+	}
+}
+
+func TestAppKeyFingerprintCLI(t *testing.T) {
+	kp := appEnv(t, "") // a 0600 test key
+	os.Chmod(kp, 0o644)
+	b, _ := os.ReadFile(kp)
+	want, err := ghapp.KeyFingerprint(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	if code := appCmd(&out, &errb, []string{"key-fingerprint", "--key-file", kp}); code != 0 {
+		t.Fatalf("code %d: %s", code, errb.String())
+	}
+	if strings.TrimSpace(out.String()) != want || !strings.HasPrefix(want, "SHA256:") {
+		t.Errorf("out=%q want %q", out.String(), want)
+	}
+	if strings.Contains(out.String()+errb.String(), "BEGIN") {
+		t.Error("key printed")
+	}
+	if code := appCmd(&out, &errb, []string{"key-fingerprint"}); code != 2 {
+		t.Errorf("missing flag: %d", code)
+	}
+	if code := appCmd(&out, &errb, []string{"key-fingerprint", "--key-file", kp + ".none"}); code != 1 {
+		t.Errorf("missing file: %d", code)
 	}
 }

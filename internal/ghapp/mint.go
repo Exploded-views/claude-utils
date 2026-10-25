@@ -48,6 +48,10 @@ type Params struct {
 	Repositories []string
 	Permissions  map[string]string
 
+	// Fingerprint, when set, must equal the key's fingerprint or the key is
+	// refused before any request is made.
+	Fingerprint string
+
 	HTTP *http.Client
 	Now  func() time.Time
 }
@@ -89,6 +93,9 @@ func MintWith(ctx context.Context, p Params) (Token, error) {
 	key, err := ParseKey(p.Key)
 	if err != nil {
 		return Token{}, err
+	}
+	if p.Fingerprint != "" && Fingerprint(&key.PublicKey) != p.Fingerprint {
+		return Token{}, errFingerprint
 	}
 	jwt, err := signJWT(key, p.AppID, now())
 	if err != nil {
@@ -199,6 +206,7 @@ type Minter struct {
 	LoadKey      func(ctx context.Context) ([]byte, error)
 	HTTP         *http.Client
 	Now          func() time.Time
+	Fingerprint  string
 
 	mu  sync.Mutex
 	tok Token
@@ -225,7 +233,7 @@ func (m *Minter) get(ctx context.Context) (Token, error) {
 		return Token{}, err
 	}
 	t, err := MintWith(ctx, Params{AppID: m.AppID, Key: key, Org: m.Org, APIBase: m.APIBase,
-		Repositories: m.Repositories, Permissions: m.Permissions, HTTP: m.HTTP, Now: m.Now})
+		Repositories: m.Repositories, Permissions: m.Permissions, Fingerprint: m.Fingerprint, HTTP: m.HTTP, Now: m.Now})
 	if err != nil {
 		return Token{}, err
 	}

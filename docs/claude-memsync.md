@@ -997,7 +997,7 @@ one entry per app on this host:
 ```json
 [
   {"name": "<app-name>", "appId": "<numeric app id>", "org": "<org>",
-   "keyFile": "/path/to/<app-name>.pem"}
+   "keyFile": "/path/to/<app-name>.pem", "keyFingerprint": "SHA256:<base64>"}
 ]
 ```
 
@@ -1020,6 +1020,26 @@ The tool overwrites the key buffers it controls with zeros once the key is
 parsed, as a best effort. It cannot clear copies made by the Go runtime, the
 parsed key, swap or the secret manager, so treat the host, not the process
 memory, as the boundary.
+
+### One key per host
+
+Give each host its own private key for the app (generate it in the app's
+settings page; GitHub cannot create keys through the API) so a lost host can be
+cut off by deleting just its key. `keyFingerprint` is optional but recommended:
+when set, a key that does not match is refused before any request is made, which
+catches a wrong file or a rotated key. `app register` records it for you.
+
+```sh
+claude-memsync app key-fingerprint --key-file <pem>
+```
+
+prints `SHA256:<base64>`, the value GitHub shows next to the key in the app's
+settings (SHA-256 of the DER-encoded public key, standard base64; the same as
+GitHub's documented `openssl rsa -in <pem> -pubout -outform DER | openssl sha256
+-binary | openssl base64`). Use it to confirm a downloaded key is the one you
+meant, or to fill in `keyFingerprint` by hand. The command reads the key (it
+need not be mode 0600, since nothing is sent anywhere) but prints only the
+fingerprint.
 
 ### Using an app
 

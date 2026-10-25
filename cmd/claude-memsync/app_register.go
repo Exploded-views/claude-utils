@@ -22,6 +22,7 @@ var (
 )
 
 const appUsage = `usage:
+  claude-memsync app key-fingerprint --key-file <pem>
   claude-memsync app register --name <n> --org <org> --url <homepage> --perm <p:level>... (--key-out <path> | --key-cmd-store "<cmd>" --key-cmd "<cmd>")`
 
 func runApp(args []string) int { return appCmd(os.Stdout, os.Stderr, args) }
@@ -34,6 +35,8 @@ func appCmd(stdout, stderr io.Writer, args []string) int {
 	switch args[0] {
 	case "register":
 		return appRegister(stdout, stderr, args[1:])
+	case "key-fingerprint":
+		return appKeyFingerprint(stdout, stderr, args[1:])
 	}
 	fmt.Fprintln(stderr, appUsage)
 	return 2
@@ -118,6 +121,10 @@ func appRegister(stdout, stderr io.Writer, args []string) int {
 			conv.PEM[i] = 0
 		}
 	}()
+	fingerprint, ferr := ghapp.KeyFingerprint(append([]byte(nil), conv.PEM...))
+	if ferr != nil {
+		fingerprint = ""
+	}
 	web := strings.TrimRight(*webURL, "/")
 	if web == "" {
 		web = ghapp.DefaultWebBase
@@ -145,10 +152,36 @@ func appRegister(stdout, stderr io.Writer, args []string) int {
 		fmt.Fprintln(stdout, "Private key stored with the key store command")
 	}
 	entry.AppID = fmt.Sprint(conv.ID)
+	entry.KeyFingerprint = fingerprint
 	if err := ghapp.SaveApp(path, entry); err != nil {
 		fmt.Fprintf(stderr, "app register: could not write %s: %v\n", path, err)
 		return 1
 	}
 	fmt.Fprintln(stdout, "Recorded in", path)
+	return 0
+}
+
+func appKeyFingerprint(stdout, stderr io.Writer, args []string) int {
+	fs := flag.NewFlagSet("app key-fingerprint", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	keyFile := fs.String("key-file", "", "PEM private key file (required)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *keyFile == "" {
+		fmt.Fprintln(stderr, "app key-fingerprint: --key-file is required")
+		return 2
+	}
+	b, err := ghapp.ReadKeyFileAnyMode(*keyFile)
+	if err != nil {
+		fmt.Fprintln(stderr, "app key-fingerprint:", err)
+		return 1
+	}
+	fp, err := ghapp.KeyFingerprint(b)
+	if err != nil {
+		fmt.Fprintln(stderr, "app key-fingerprint:", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, fp)
 	return 0
 }

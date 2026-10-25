@@ -48,3 +48,19 @@ func LoadKeyCmd(ctx context.Context, argv []string) ([]byte, error) {
 	}
 	return b, nil
 }
+
+// ReadKeyFileAnyMode reads a PEM key without the mode check. It is for
+// fingerprinting a key GitHub just downloaded (often mode 0644), which sends
+// nothing anywhere; minting always goes through LoadKeyFile.
+func ReadKeyFileAnyMode(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, errors.New("cannot open the key file")
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxKeyFile))
+	if err != nil {
+		return nil, errors.New("cannot read the key file")
+	}
+	return b, nil
+}
