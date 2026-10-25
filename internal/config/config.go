@@ -33,6 +33,13 @@ type Config struct {
 	// Defaults to a sibling of the running daemon.
 	MergeDriverPath string `json:"mergeDriverPath"`
 
+	// BinDir is where the stable claude-memsync and claude-memmerge links live
+	// (default ~/.local/bin). When the link there resolves to the running
+	// build, git's filter config names the link, so relinking upgrades the
+	// filters. It can only choose a spelling of the running binary, never
+	// another program.
+	BinDir string `json:"binDir,omitempty"`
+
 	// DistilledDir holds the shared catalog of environment-level memories.
 	// Empty means <SyncDir>/distilled (see DistilledPath). It lives inside the
 	// work-tree so the daemon's git sync carries it across workstations.

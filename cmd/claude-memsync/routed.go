@@ -386,29 +386,46 @@ func warnRefreshOnce(dir, msg string) {
 	}
 }
 
-// refreshEncryption updates an encrypted clone's attributes and merge drivers
-// to this build's, at daemon start. Unencrypted repos are left alone. The
-// programs the clone already names are kept while they exist; a missing one is
-// replaced by this build's, unless that is a throwaway under a temp dir, in
-// which case nothing is rewritten.
+// refreshEncryption updates an encrypted clone's attributes, filters and merge
+// drivers to this build's, at daemon start. Unencrypted repos are left alone.
+// git runs whatever programs the clone's config names, so when they are not
+// this build (another version, or gone) all of memsync's entries are repointed
+// to the running build, by the stable link when there is one, and one line says
+// so. A same-version build at another path is kept. A running build under a
+// temp dir is a throwaway: the programs the clone names are kept while they
+// exist, a missing one is not replaced, and nothing is rewritten.
 func refreshEncryption(cfg config.Config) error {
 	repo := gitwt.New(cfg.SyncDir)
 	if !repo.IsRepo() || !agecrypt.Configured(repo) {
 		return nil
 	}
-	ms := configuredExe(repo, "filter."+agecrypt.FilterName+".process")
-	if ms == "" || !fileExists(ms) {
-		exe, err := executable()
-		if err != nil {
-			return err
+	curMS := configuredExe(repo, "filter."+agecrypt.FilterName+".process")
+	curMM := configuredExe(repo, "merge.claude-memory-index.driver")
+	ms, mm := curMS, curMM
+	if b, ok := runningBinaries(cfg); ok {
+		msStale := staleExe(curMS, b.ms, b.msRes, ownVersion(b.msRes))
+		mmStale := b.mm != "" && staleExe(curMM, b.mm, b.mmRes, ownVersion(b.mmRes))
+		if msStale || mmStale {
+			// Only a different or missing build is news; a move to the stable
+			// spelling of the same build is silent.
+			if !fileExists(curMS) || resolveReal(curMS) != b.msRes {
+				logRepoint(cfg.SyncDir, curMS, b)
+			}
+			ms = b.ms
+			if b.mm != "" {
+				mm = b.mm
+			}
 		}
-		if underTemp(exe) {
+	} else if ms == "" || !fileExists(ms) {
+		if exe, err := executable(); err == nil && underTemp(exe) {
 			warnRefreshOnce(cfg.SyncDir, "the configured claude-memsync is missing and this one runs from a temp dir; encryption settings left as they are")
 			return nil
+		} else if err != nil {
+			return err
+		} else {
+			ms = exe
 		}
-		ms = exe
 	}
-	mm := configuredExe(repo, "merge.claude-memory-index.driver")
 	if mm == "" || !fileExists(mm) {
 		mm = cfg.MergeDriverPath
 		var err error

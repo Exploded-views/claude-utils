@@ -30,6 +30,7 @@ type encryptSpec struct {
 	IdentityPath string   // this host's identity file (generated if missing)
 	Recipients   []string // extra public keys, e.g. an offline recovery key
 	MemsyncExe   string   // path of claude-memsync, which runs the filter
+	MemmergeExe  string   // path of claude-memmerge for the merge drivers; empty: cfg.MergeDriverPath
 }
 
 // stringList is a repeatable string flag.
@@ -163,12 +164,18 @@ func runInit(args []string) int {
 		if enc.IdentityPath == "" {
 			enc.IdentityPath = defaultIdentityPath()
 		}
-		exe, err := os.Executable()
+		exe, err := executable()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "init: cannot locate claude-memsync:", err)
 			return 1
 		}
 		enc.MemsyncExe = exe
+		if b, ok := runningBinaries(cfg); ok {
+			// The stable link if there is one, else the resolved build: never a
+			// path git would keep running after the next upgrade.
+			enc.MemsyncExe = b.ms
+			enc.MemmergeExe = b.mm
+		}
 	} else if *identity != "" || len(extraRecipients) > 0 || len(recoveryRecipients) > 0 {
 		fmt.Fprintln(os.Stderr, "init: --identity, --recipient and --recovery-recipient need --encrypt")
 		return 2
@@ -533,9 +540,13 @@ func prepareIdentity(enc *encryptSpec) (string, error) {
 // writes the recipients and attributes of a brand-new repo, and checks the
 // existing one out through the filter.
 func setupEncryption(repo *gitwt.Repo, cfg config.Config, enc *encryptSpec, ownRecipient string) error {
+	mm := cfg.MergeDriverPath
+	if enc.MemmergeExe != "" {
+		mm = enc.MemmergeExe
+	}
 	if err := agecrypt.Configure(repo, agecrypt.Opts{
 		MemsyncExe:   enc.MemsyncExe,
-		MemmergeExe:  cfg.MergeDriverPath,
+		MemmergeExe:  mm,
 		IdentityPath: enc.IdentityPath,
 	}); err != nil {
 		return fmt.Errorf("configure encryption: %w", err)

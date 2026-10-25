@@ -201,6 +201,9 @@ func encryptionLines(cfg config.Config) []string {
 	if l := joinStatusLine(cfg); l != "" {
 		out = append(out, l)
 	}
+	if l := filterVersionNote(cfg, repo); l != "" {
+		out = append(out, l)
+	}
 	return out
 }
 

@@ -225,8 +225,8 @@ mkbare() { # name [with-content]
 
 # newhome <name>: fresh fake HOME with insteadOf maps for every bare repo.
 newhome() {
-  H="$BASE/$1/home"; STUB_DIR="$BASE/$1/stub"
-  rm -rf "${BASE:?}/$1"; mkdir -p "$H" "$STUB_DIR"
+  H="${HROOT:-$BASE}/$1/home"; STUB_DIR="${HROOT:-$BASE}/$1/stub"
+  rm -rf "${HROOT:-${BASE:?}}/$1"; mkdir -p "$H" "$STUB_DIR"
   cp "$STUBS/memsync-wrap" "$STUB_DIR/"; cp "$BASE/otherkey" "$STUB_DIR/"
   : >"$STUB_DIR/gh.log"; : >"$STUB_DIR/memsync.log"
   rm -rf "$BASE/remotes"; mkdir -p "$BASE/remotes"
@@ -244,7 +244,7 @@ newhome() {
 # runboot <args...>: run the script in the fake HOME; sets RC and OUT.
 runboot() {
   set +e
-  OUT="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" GIT_CONFIG_NOSYSTEM=1 \
+  OUT="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="${REAL_RUN:-$REAL}" GIT_CONFIG_NOSYSTEM=1 \
     BOOTSTRAP_APP_API_BASE="http://127.0.0.1:$APIPORT" CLAUDE_UTILS_URL="https://example.invalid/claude-utils.git" \
     bash "$ROOT/scripts/bootstrap.sh" --sha "$SHA" --deny-owner Acme-Client --deny-term acmeclient ${ORGARGS[@]+"${ORGARGS[@]}"} "$@" </dev/null 2>&1)"
   RC=$?
@@ -699,6 +699,55 @@ rundoc 2
 check "registry configured: the run keeps it and exits 0" bash -c "[ $RC -eq 0 ] && grep -q '\"registry\"' '$H/.config/claude-memsync/routes.json'" _ "$OUT"
 check "registry configured: host check-key called with the fingerprint and the app slug" has "$STUB_DIR/memsync.log" 'host check-key --fingerprint SHA256:[^ ]+ --app memsync-check'
 check "registry configured: hosts/testhost/check-key committed with the fingerprint, no key" bash -c "git -C '$H/registry' show HEAD:hosts/testhost/check-key | grep -qE 'SHA256:[A-Za-z0-9+/]{43}=' && git -C '$H/registry' show HEAD:hosts/testhost/check-key | grep -q memsync-check && ! git -C '$H/registry' log -p | grep -qF -- '$(sed -n 2p "$BASE/check.pem")'"
+
+# An upgrade: a second build is bootstrapped over the first and the daemon
+# restarts. git runs whatever program the clone's config names, so the filters
+# must end up on the new build, or a newer on-disk format (host labels in
+# .age-recipients) makes every clean filter of the old build fail. Both builds
+# live outside the temp dirs, which the daemon never writes into git config.
+echo "--- upgrade: filters follow the new build"
+LDV="github.com/MarimerLLC/claude-utils/internal/version.Override"
+buildver() { # outdir version: claude-memsync and claude-memmerge reporting that version
+  mkdir -p "$1"
+  if command -v go >/dev/null; then
+    (cd "$ROOT" && go build -ldflags "-X $LDV=$2" -o "$1/claude-memsync" ./cmd/claude-memsync \
+      && go build -ldflags "-X $LDV=$2" -o "$1/claude-memmerge" ./cmd/claude-memmerge)
+  elif command -v docker >/dev/null; then
+    docker run --rm --user "$(id -u):$(id -g)" -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -e GOFLAGS=-buildvcs=false \
+      -v "$ROOT:/src:ro" -v "$1:/out" -w /src golang:1.25 \
+      sh -c "go build -ldflags '-X $LDV=$2' -o /out/claude-memsync ./cmd/claude-memsync && go build -ldflags '-X $LDV=$2' -o /out/claude-memmerge ./cmd/claude-memmerge"
+  else
+    return 1
+  fi
+}
+if ! command -v go >/dev/null && ! command -v docker >/dev/null; then
+  pending "upgrade check needs go or docker to build two versions of claude-memsync"
+else
+  UPD="$(mktemp -d "$HOME/.memsync-harness.XXXXXX")"
+  trap 'rm -rf "$UPD"' EXIT
+  for v in A B; do buildver "$UPD/real$v" "harness-$v"; done
+  git clone -q "$BASE/utils.git" "$UPD/second"
+  git -C "$UPD/second" -c user.name=tester -c user.email=tester@example.invalid commit -q --allow-empty -m "second build"
+  SHA2="$(git -C "$UPD/second" rev-parse HEAD)"
+  git -C "$UPD/second" push -q origin HEAD:refs/heads/second
+  HROOT="$UPD" REAL_RUN="$UPD/realA"
+  newhome up
+  runboot --host testhost --role homelab --yes
+  [ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+  check "upgrade: first bootstrap exits 0" [ "$RC" -eq 0 ]
+  SYNC="$H/.claudesync.d/infra-homelab"
+  check "upgrade: filters start on build A" bash -c "git -C '$SYNC' config --get filter.memage.process | grep -q '$UPD/realA/claude-memsync'"
+  REAL_RUN="$UPD/realB" SHA="$SHA2"
+  runboot --host testhost --role homelab --yes
+  [ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+  check "upgrade: second bootstrap exits 0" [ "$RC" -eq 0 ]
+  check "upgrade: status warns that the filters run the old build" bash -c "printf '%s' \"\$1\" | grep -q 'harness-A'" _ "$OUT"
+  # The daemon's start-up refresh (a foreground run, stopped once it is up).
+  HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" timeout 10 "$UPD/realB/claude-memsync" run --skip-quiet-window >"$UPD/run.log" 2>&1 || true
+  check "upgrade: the restarted daemon repoints the filter at build B" bash -c "git -C '$SYNC' config --get filter.memage.process | grep -q '$UPD/realB/claude-memsync'"
+  check "upgrade: the merge drivers follow" bash -c "git -C '$SYNC' config --get merge.memtext.driver | grep -q '$UPD/realB/claude-memmerge'"
+  unset HROOT REAL_RUN
+fi
 
 echo
 echo "passed=$PASS failed=$FAIL pending=$PENDING"
