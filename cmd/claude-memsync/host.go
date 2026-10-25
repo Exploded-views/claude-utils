@@ -194,6 +194,7 @@ func (hc *hostCtx) buildReport(c *ghguard.Client, org string, staleDays, warnAt 
 func runHost(args []string) int { return hostCmd(os.Stdout, os.Stderr, args) }
 
 const hostUsage = `usage: claude-memsync host list [--org ORG] [--stale-days N] [--json]
+       claude-memsync host retire <label> [--apply] [--org ORG]
        claude-memsync host check-key --fingerprint SHA256:... --app SLUG | --clear
   all take [--config PATH | --routes PATH] [--token-file FILE]`
 
@@ -251,6 +252,8 @@ func hostRun(hc *hostCtx, stdout, stderr io.Writer, args []string) int {
 		return hostList(hc, stdout, stderr, args[1:])
 	case "check-key":
 		return hostCheckKey(hc, stdout, stderr, args[1:])
+	case "retire":
+		return hostRetire(hc, stdout, stderr, args[1:])
 	}
 	fmt.Fprintf(stderr, "host: unknown action %q\n%s\n", args[0], hostUsage)
 	return 2

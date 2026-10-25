@@ -1349,6 +1349,39 @@ read** on the repos; the token is read from the usual places (`githubTokenFile`,
 `MEMSYNC_GITHUB_TOKEN`, `--token-file`). Output never contains key text.
 `doctor` prints a one-line summary of stale and expired hosts when there are any.
 
+### host retire
+
+    claude-memsync host retire <label> [--org <org>]            # plan only (dry run, the default)
+    claude-memsync host retire <label> [--org <org>] --apply    # act
+
+Retiring a host closes what it could still reach. The plan lists counts and names;
+no key material is ever printed. With `--apply`:
+
+1. **Deploy keys.** Every deploy key titled `<label>` is deleted on every `mem-*`
+   repo of the org (nothing else is touched). This needs a token with
+   **Administration: write**; without it the command stops at the first refusal with
+   a message naming the permission, before anything else is changed.
+2. **Recipients.** For each repo this host has, if a recipient labelled `<label>` is
+   present it is removed, HEAD is re-encrypted for the remaining recipients and the
+   commit is made (the daemon pushes it). This is `recipients remove` by label, so
+   it refuses to run while the daemon holds the sync dir; the command checks that
+   first, before deleting anything. **History stays readable to the retired key and
+   is not rewritten**: it keeps everything it already fetched; only new content is
+   closed to it.
+3. **Cannot re-encrypt here.** A repo the host had a key for but this host lacks,
+   a repo this host cannot decrypt, and a repo where the retired host was the only
+   recipient are listed as `cannot re-encrypt here: run retire on a member host, or
+   archive the repo`. Nothing is changed there.
+4. **Registry.** `hosts/<label>/` is removed from the registry work-tree and the
+   removal committed locally (the registry's own sync pushes it). If the host
+   recorded a check-App key, the plan and the result print the exact page to delete
+   it (`https://<git host>/organizations/<org>/settings/apps/<app-slug>`, from your
+   config and the registry) and its fingerprint, as a manual step: GitHub only lets
+   you delete App keys in the UI. With no check key recorded, nothing is printed.
+
+Retiring this host's own label is refused; run it from another host. A repeat run
+is safe: keys already gone are counted, and recipients already removed are skipped.
+
 ### Check-App keys
 
 A host may have its own private key for a GitHub App used for checks. Record its

@@ -141,3 +141,27 @@ func ClearCheckKey(dir, label string) error {
 	_, err = commitFile(dir, rel, "clear check key record for "+label)
 	return err
 }
+
+// RemoveHost removes hosts/<label>/ from the registry work-tree and commits
+// the removal locally. It reports whether the entry existed.
+func RemoveHost(dir, label string) (bool, error) {
+	rel, _, err := hostFile(dir, label, "x")
+	if err != nil {
+		return false, err
+	}
+	rel = filepath.ToSlash(filepath.Dir(rel))
+	full := filepath.Join(dir, filepath.FromSlash(rel))
+	if _, err := os.Stat(full); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if err := os.RemoveAll(full); err != nil {
+		return false, err
+	}
+	if _, err := commitFile(dir, rel, "retire host "+label); err != nil {
+		return true, err
+	}
+	return true, nil
+}
