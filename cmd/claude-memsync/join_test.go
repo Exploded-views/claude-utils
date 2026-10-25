@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -257,5 +258,110 @@ func TestJoinCLI_RoutedRepoFlag(t *testing.T) {
 	code, out, e = runJoinCmd("list")
 	if code != 0 || !strings.Contains(out, "repo shared:") || !strings.Contains(out, "new-host") {
 		t.Fatalf("routed list: %d %q %s", code, out, e)
+	}
+}
+
+var groupedFpRE = regexp.MustCompile(`(?m)^fingerprint: ([0-9a-f]{4} ){7}[0-9a-f]{4}$`)
+
+func TestJoinCLI_FingerprintLineFormat(t *testing.T) {
+	h := twoHosts(t)
+	code, out, e := runJoinCmd("request", "--config", h.b.Path(), "--label", "new-host")
+	if code != 0 || !groupedFpRE.MatchString(out) {
+		t.Fatalf("want one line `fingerprint: xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx`: %d %q %s", code, out, e)
+	}
+	// the same line on a repeat
+	_, out2, _ := runJoinCmd("request", "--config", h.b.Path(), "--label", "new-host")
+	if fpOf(out) != fpOf(out2) {
+		t.Errorf("repeat prints another fingerprint: %q %q", out, out2)
+	}
+	// the member accepts with it typed back ungrouped as well
+	runJoinCmd("list", "--config", h.a.Path())
+	plain := strings.ReplaceAll(fpOf(out), " ", "")
+	if code, _, e := runJoinCmd("accept", "new-host", "--config", h.a.Path(), "--fingerprint", plain); code != 0 {
+		t.Fatalf("ungrouped fingerprint: %d %s", code, e)
+	}
+}
+
+func TestJoinCLI_RequestRefusedWhenSyncFails(t *testing.T) {
+	h := twoHosts(t)
+	h.rb.Run("remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
+	head, _ := h.rb.Run("rev-parse", "HEAD")
+	code, _, e := runJoinCmd("request", "--config", h.b.Path(), "--label", "new-host")
+	if code == 0 || !strings.Contains(e, "up to date") {
+		t.Fatalf("a failed sync must refuse: %d %s", code, e)
+	}
+	if now, _ := h.rb.Run("rev-parse", "HEAD"); now != head {
+		t.Error("nothing may be committed")
+	}
+}
+
+func TestJoinCLI_RequestRefusedWhenLocalDiffersFromOrigin(t *testing.T) {
+	h := twoHosts(t)
+	// a local commit on top of origin's tip, as a stray earlier cycle might leave
+	oid, _ := h.rb.RunStdin([]byte("x\n"), "hash-object", "-w", "--no-filters", "--stdin")
+	h.rb.Run("update-index", "--add", "--cacheinfo", "100644,"+strings.TrimSpace(oid)+",stray/file.txt")
+	if _, err := h.rb.Run("commit", "-q", "-m", "local"); err != nil {
+		t.Fatal(err)
+	}
+	code, _, e := runJoinCmd("request", "--config", h.b.Path(), "--label", "new-host")
+	if code == 0 {
+		t.Fatalf("must refuse: %s", e)
+	}
+	if strings.Contains(originFiles(t, h.origin), "joins/") || strings.Contains(originFiles(t, h.origin), "stray") {
+		t.Error("nothing may be pushed")
+	}
+}
+
+func TestJoinCLI_StatusAfterAcceptShowsRecipientSetAndWarns(t *testing.T) {
+	h := twoHosts(t)
+	_, out, _ := runJoinCmd("request", "--config", h.b.Path(), "--label", "new-host")
+	fp := fpOf(out)
+	if code, _, e := runJoinCmd("accept", "new-host", "--config", h.a.Path(), "--fingerprint", fp); code != 0 {
+		t.Fatal(e)
+	}
+	if _, err := h.rb.Run("pull", "-q", "--rebase", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	code, st, _ := runJoinCmd("status", "--config", h.b.Path())
+	if code != 0 || !strings.Contains(st, "accepted") || !strings.Contains(st, "blindly") {
+		t.Fatalf("status: %d %q", code, st)
+	}
+	rcptB, _ := agecrypt.IdentityRecipient(h.idB)
+	if !strings.Contains(st, agecrypt.GroupFingerprint(agecrypt.JoinFingerprint(rcptB))) || !strings.Contains(st, rcptB) {
+		t.Errorf("must list this host's key with its fingerprint:\n%s", st)
+	}
+	if n := strings.Count(st, "recipient: "); n != 2 {
+		t.Errorf("want both keys of the pending set, got %d:\n%s", n, st)
+	}
+	if !strings.Contains(st, "this host") || !strings.Contains(st, "new") {
+		t.Errorf("tags missing:\n%s", st)
+	}
+}
+
+func TestJoinCLI_OnlyRequestUsesTheRequestGuard(t *testing.T) {
+	var kinds []string
+	joinGuardHook = func(k string) { kinds = append(kinds, k) }
+	t.Cleanup(func() { joinGuardHook = nil })
+	h := twoHosts(t)
+	_, out, _ := runJoinCmd("request", "--config", h.b.Path(), "--label", "new-host")
+	if strings.Join(kinds, ",") != "request" {
+		t.Fatalf("request: %v", kinds)
+	}
+	kinds = nil
+	if code, _, e := runJoinCmd("accept", "new-host", "--config", h.a.Path(), "--fingerprint", fpOf(out)); code != 0 {
+		t.Fatal(e)
+	}
+	if strings.Join(kinds, ",") != "normal" {
+		t.Fatalf("accept must use the full PushGuard: %v", kinds)
+	}
+	// and reject, on a fresh pair
+	h2 := twoHosts(t)
+	runJoinCmd("request", "--config", h2.b.Path(), "--label", "second")
+	kinds = nil
+	if code, _, e := runJoinCmd("reject", "second", "--config", h2.a.Path()); code != 0 {
+		t.Fatal(e)
+	}
+	if strings.Join(kinds, ",") != "normal" {
+		t.Fatalf("reject: %v", kinds)
 	}
 }

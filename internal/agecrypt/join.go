@@ -30,7 +30,7 @@ var (
 	joinPathRE  = regexp.MustCompile(`^joins/[a-z0-9-]+\.txt$`)
 	joinLabelRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 	joinAgeRE   = regexp.MustCompile(`^age1[a-z0-9]{58}$`)
-	joinFpRE    = regexp.MustCompile(`^[0-9a-f]{16}$`)
+	joinFpRE    = regexp.MustCompile(`^[0-9a-f]{32}$`)
 )
 
 const maxJoinBytes = 1024
@@ -52,12 +52,27 @@ type Join struct {
 	Requested   time.Time
 }
 
-// JoinFingerprint is the short fingerprint of a recipient: the first 8 bytes
-// of its SHA-256, in hex.
+// JoinFingerprint is the fingerprint of a recipient: the first 16 bytes (128
+// bits) of its SHA-256, as 32 lowercase hex characters.
 func JoinFingerprint(recipient string) string {
 	sum := sha256.Sum256([]byte(recipient))
-	return hex.EncodeToString(sum[:8])
+	return hex.EncodeToString(sum[:16])
 }
+
+// GroupFingerprint shows a fingerprint in groups of four ("a1b2 c3d4 ..."),
+// the form people read and type.
+func GroupFingerprint(fp string) string {
+	var parts []string
+	for len(fp) > 4 {
+		parts = append(parts, fp[:4])
+		fp = fp[4:]
+	}
+	return strings.Join(append(parts, fp), " ")
+}
+
+// NormalizeFingerprint drops the spaces of the grouped form. Nothing else is
+// forgiven: case and every character still have to match exactly.
+func NormalizeFingerprint(s string) string { return strings.ReplaceAll(s, " ", "") }
 
 // Format renders the request in the one accepted form.
 func (j Join) Format() string {
@@ -134,7 +149,12 @@ func joinRefs(repo *gitwt.Repo) []string {
 	refs := []string{"HEAD"}
 	r := "refs/remotes/origin/" + branchOf(repo)
 	if _, err := repo.Run("rev-parse", "--verify", "--quiet", r); err == nil {
-		refs = append(refs, r)
+		// The tip counts only while HEAD is behind it: a HEAD that is ahead of
+		// (or has moved past) the tip has the newer state, e.g. an accept that
+		// removed a request the stale tip still lists.
+		if behind, err := repo.IsAncestor("HEAD", r); err == nil && behind {
+			refs = append(refs, r)
+		}
 	}
 	return refs
 }
@@ -173,8 +193,10 @@ func hasRecipient(r *Recipients, key string) bool {
 
 // SyncFromOrigin fetches and, when the local branch is behind, fast-forwards
 // it, so a request or an accept sees the latest remote state. A keyless clone
-// can do this too: its ciphertext is checked out as it is. Failures are
-// returned for the caller to treat as "work from what is local".
+// can do this too: its ciphertext is checked out as it is. It refuses a remote
+// tree that tracks per-PC files (config.json and the rest), and a local branch
+// that has diverged from the remote. Any error means the clone was not brought
+// up to date.
 func SyncFromOrigin(repo *gitwt.Repo) error {
 	br := branchOf(repo)
 	if _, err := repo.Run("fetch", "-q", "origin", br); err != nil {
@@ -184,17 +206,113 @@ func SyncFromOrigin(repo *gitwt.Repo) error {
 	if _, err := repo.Run("rev-parse", "--verify", "--quiet", tip); err != nil {
 		return nil
 	}
-	if same, _ := repo.Run("rev-parse", "HEAD"); same != "" {
-		t, _ := repo.Run("rev-parse", tip)
-		if strings.TrimSpace(same) == strings.TrimSpace(t) {
-			return nil
-		}
+	if bad, err := repo.TrackedLocalOnly(tip); err != nil {
+		return err
+	} else if len(bad) > 0 {
+		return errors.New("pull refused: the remote tracks per-PC files (" + strings.Join(bad, ", ") + ")")
+	}
+	head, _ := repo.Run("rev-parse", "HEAD")
+	t, _ := repo.Run("rev-parse", tip)
+	if strings.TrimSpace(head) == strings.TrimSpace(t) {
+		return nil
+	}
+	if anc, err := repo.IsAncestor(tip, "HEAD"); err == nil && anc {
+		return nil // ahead of the remote
 	}
 	if anc, err := repo.IsAncestor("HEAD", tip); err != nil || !anc {
-		return errors.New("local branch is not behind the remote; sync first")
+		return errors.New("local branch has diverged from the remote; sync it first")
 	}
 	_, err := repo.Run("merge", "--ff-only", "-q", tip)
 	return err
+}
+
+// VerifyJoinPush says whether HEAD holds something to push for a join request
+// and checks that it is exactly the request and nothing else: one new commit
+// on top of origin's tip (its only parent), whose only change adds
+// joins/<label>.txt, a valid request. needPush is false when HEAD is origin's
+// tip. Anything else is an error, and nothing should be pushed.
+func VerifyJoinPush(repo *gitwt.Repo, label string) (needPush bool, err error) {
+	br := branchOf(repo)
+	tip, err := repo.Run("rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+br)
+	if err != nil {
+		return false, errors.New("origin has no such branch yet: nothing to join")
+	}
+	tip = strings.TrimSpace(tip)
+	head, err := repo.Run("rev-parse", "HEAD")
+	if err != nil {
+		return false, err
+	}
+	head = strings.TrimSpace(head)
+	path := JoinPath(label)
+	if head == tip {
+		if _, ok := blobAtRev(repo, "HEAD", path); !ok {
+			return false, errors.New("no join request for this label on origin")
+		}
+		return false, nil
+	}
+	refuse := errors.New("refusing to push: the local branch is not origin's tip plus exactly the join request commit")
+	line, err := repo.Run("rev-list", "--parents", "-n1", "HEAD")
+	if err != nil {
+		return false, err
+	}
+	if f := strings.Fields(line); len(f) != 2 || f[1] != tip {
+		return false, refuse
+	}
+	out, err := repo.Run("diff-tree", "-r", "--no-renames", "--raw", "--no-abbrev", "-z", tip, head)
+	if err != nil {
+		return false, err
+	}
+	f := strings.Split(strings.TrimSuffix(out, "\x00"), "\x00")
+	if len(f) != 2 || !strings.HasPrefix(f[0], ":000000 100644 ") || !strings.HasSuffix(f[0], " A") || f[1] != path {
+		return false, refuse
+	}
+	if b, ok := blobAtRev(repo, "HEAD", path); !ok || !ValidJoinBlob(path, b) {
+		return false, refuse
+	}
+	return true, nil
+}
+
+// PendingRecipient is one key of the work-tree's .age-recipients that this
+// host has not pinned yet.
+type PendingRecipient struct {
+	Key         string
+	Fingerprint string // JoinFingerprint of the key, as join list shows it
+	New         bool   // not in the pinned set
+	Own         bool   // this host's key
+}
+
+// PendingRecipients lists the work-tree's recipient set against the pin, so a
+// person can compare it with `join list` / `recipients list` on a member host
+// before accepting. removed counts pinned keys that are gone.
+func PendingRecipients(repo *gitwt.Repo) (list []PendingRecipient, removed int, err error) {
+	pin, err := readPin(repo)
+	if err != nil {
+		return nil, 0, err
+	}
+	data, err := os.ReadFile(filepath.Join(repo.Dir, RecipientsFile))
+	if err != nil {
+		return nil, 0, err
+	}
+	cur, err := ParseRecipients(data)
+	if err != nil {
+		return nil, 0, err
+	}
+	own, _ := IdentityRecipient(IdentityPath(repo))
+	pinned := map[string]bool{}
+	for _, c := range pin.canon {
+		pinned[c] = true
+	}
+	in := map[string]bool{}
+	for _, c := range cur.canon {
+		in[c] = true
+		list = append(list, PendingRecipient{Key: c, Fingerprint: JoinFingerprint(c), New: !pinned[c], Own: c == own})
+	}
+	for c := range pinned {
+		if !in[c] {
+			removed++
+		}
+	}
+	return list, removed, nil
 }
 
 // Join request outcomes.
@@ -351,7 +469,7 @@ func AcceptJoin(repo *gitwt.Repo, label, fingerprint string) error {
 	if !ValidJoinLabel(label) {
 		return fmt.Errorf("label must match %s", joinLabelRE)
 	}
-	if fingerprint == "" {
+	if NormalizeFingerprint(fingerprint) == "" {
 		return errors.New("refusing to accept without --fingerprint: compare it with the one the requesting host printed")
 	}
 	if err := CheckKeyed(repo); err != nil {
@@ -369,7 +487,7 @@ func AcceptJoin(repo *gitwt.Repo, label, fingerprint string) error {
 	if err != nil || JoinPath(j.Label) != path {
 		return fmt.Errorf("join request %q is malformed: refusing (reject it)", label)
 	}
-	if fingerprint != j.Fingerprint {
+	if NormalizeFingerprint(fingerprint) != j.Fingerprint {
 		return errors.New("fingerprint does not match the request: not accepted")
 	}
 	cur, err := ListRecipients(repo.Dir)

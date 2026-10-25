@@ -27,8 +27,8 @@ func TestJoinFormatParseRoundTrip(t *testing.T) {
 	if err != nil || got.Label != "host-1" || got.Recipient != j.Recipient || got.Fingerprint != j.Fingerprint || !got.Requested.Equal(joinNow) {
 		t.Fatalf("parse: %+v %v", got, err)
 	}
-	if len(j.Fingerprint) < 12 || len(j.Fingerprint) > 32 {
-		t.Errorf("fingerprint should be short: %q", j.Fingerprint)
+	if len(j.Fingerprint) != 32 {
+		t.Errorf("fingerprint: %q", j.Fingerprint)
 	}
 }
 
@@ -441,5 +441,249 @@ func TestNoDaemonPathAccepts(t *testing.T) {
 				t.Errorf("%s references AcceptJoin", f)
 			}
 		}
+	}
+}
+
+func TestFingerprintIs128BitsAndGroups(t *testing.T) {
+	j, _ := goodJoin(t, "host-1")
+	if len(j.Fingerprint) != 32 {
+		t.Fatalf("want 32 hex chars, got %q", j.Fingerprint)
+	}
+	g := GroupFingerprint(j.Fingerprint)
+	if len(strings.Fields(g)) != 8 || strings.ReplaceAll(g, " ", "") != j.Fingerprint || strings.Count(g, " ") != 7 {
+		t.Errorf("grouping: %q", g)
+	}
+	if NormalizeFingerprint(g) != j.Fingerprint {
+		t.Error("normalize must undo grouping")
+	}
+	if NormalizeFingerprint(strings.ToUpper(g)) == j.Fingerprint {
+		t.Error("case is not forgiven")
+	}
+	// a 64-bit fingerprint (the earlier form) is no longer valid in a file
+	short := strings.Replace(j.Format(), j.Fingerprint, j.Fingerprint[:16], 1)
+	if _, err := ParseJoin([]byte(short)); err == nil {
+		t.Error("64-bit fingerprint must be refused")
+	}
+}
+
+// A string that looks like an age key (right shape, consistent fingerprint)
+// but fails the bech32 checksum must be refused: only the real parser sees it.
+func TestParseJoinRefusesBadChecksumAgeKey(t *testing.T) {
+	j, _ := goodJoin(t, "host-1")
+	last := j.Recipient[len(j.Recipient)-1]
+	alt := byte('q')
+	if last == 'q' {
+		alt = 'p'
+	}
+	bad := j.Recipient[:len(j.Recipient)-1] + string(alt)
+	if !joinAgeRE.MatchString(bad) {
+		t.Fatal("test setup: the bad key must pass the shape check")
+	}
+	forged := Join{Label: "host-1", Recipient: bad, Fingerprint: JoinFingerprint(bad), Requested: joinNow}
+	if _, err := ParseJoin([]byte(forged.Format())); err == nil {
+		t.Fatal("bad-checksum age1 key must be refused")
+	}
+	if ValidJoinBlob("joins/host-1.txt", []byte(forged.Format())) {
+		t.Fatal("and the guard must refuse it")
+	}
+}
+
+func TestAcceptJoinRefusesWhileRecipientsUnreviewed(t *testing.T) {
+	a, b := pair(t)
+	RequestJoin(b.repo, "host-b", joinNow)
+	b.repo.Run("push", "origin", "main")
+	a.repo.Run("pull", "-q", "--rebase", "origin", "main")
+	list, _ := ListJoins(a.repo)
+	// someone changed .age-recipients upstream: the pin no longer matches
+	_, extra := newIdentity(t, "x")
+	keys, _ := ListRecipients(a.repo.Dir)
+	if err := WriteRecipients(a.repo.Dir, append(keys, extra)); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := Unreviewed(a.repo); !u {
+		t.Fatal("setup: must be unreviewed")
+	}
+	head := a.revHead(t)
+	err := AcceptJoin(a.repo, "host-b", list[0].Join.Fingerprint)
+	if err == nil || !strings.Contains(err.Error(), "not reviewed") {
+		t.Fatalf("accept must stop at the review gate, got %v", err)
+	}
+	if a.revHead(t) != head {
+		t.Error("nothing may be committed")
+	}
+}
+
+// Join requests still waiting are plaintext in HEAD after an accept: the
+// re-encryption must leave them alone.
+func TestAcceptLeavesOtherPendingRequestsPlaintext(t *testing.T) {
+	a, b := pair(t)
+	RequestJoin(b.repo, "host-b", joinNow)
+	cj, ctext := goodJoin(t, "host-c")
+	a.write(t, "joins/host-c.txt", ctext)
+	b.repo.Run("push", "origin", "main")
+	a.repo.Run("pull", "-q", "--rebase", "origin", "main")
+	a.commit(t, "c asks")
+	list, _ := ListJoins(a.repo)
+	var fp string
+	for _, e := range list {
+		if e.Join.Label == "host-b" {
+			fp = e.Join.Fingerprint
+		}
+	}
+	if err := AcceptJoin(a.repo, "host-b", fp); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.blob(t, "HEAD", "joins/host-c.txt"); got != ctext {
+		t.Fatalf("pending request was re-encrypted or changed: %.60q", got)
+	}
+	if err := PushGuard(a.repo, "main"); err != nil {
+		t.Fatal(err)
+	}
+	if es, _ := ListJoins(a.repo); len(es) != 1 || es[0].Join.Label != "host-c" || es[0].Join.Recipient != cj.Recipient || !es[0].Valid {
+		t.Errorf("host-c must remain a valid pending request: %+v", es)
+	}
+}
+
+func TestAcceptTakesGroupedFingerprint(t *testing.T) {
+	a, b := pair(t)
+	RequestJoin(b.repo, "host-b", joinNow)
+	b.repo.Run("push", "origin", "main")
+	a.repo.Run("pull", "-q", "--rebase", "origin", "main")
+	list, _ := ListJoins(a.repo)
+	if err := AcceptJoin(a.repo, "host-b", GroupFingerprint(list[0].Join.Fingerprint)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestVerifyJoinPush(t *testing.T) {
+	t.Run("exactly the request", func(t *testing.T) {
+		_, b := pair(t)
+		RequestJoin(b.repo, "host-b", joinNow)
+		need, err := VerifyJoinPush(b.repo, "host-b")
+		if err != nil || !need {
+			t.Fatalf("%v %v", need, err)
+		}
+	})
+	t.Run("nothing to push at origin's tip", func(t *testing.T) {
+		_, b := pair(t)
+		RequestJoin(b.repo, "host-b", joinNow)
+		b.repo.Run("push", "origin", "main")
+		b.repo.Run("fetch", "-q", "origin")
+		need, err := VerifyJoinPush(b.repo, "host-b")
+		if err != nil || need {
+			t.Fatalf("%v %v", need, err)
+		}
+		if _, err := VerifyJoinPush(b.repo, "other"); err == nil {
+			t.Error("a label with no request must not verify")
+		}
+	})
+	t.Run("an extra local commit", func(t *testing.T) {
+		_, b := pair(t)
+		plant(t, b, "projects/x.md", "local work\n")
+		RequestJoin(b.repo, "host-b", joinNow)
+		if _, err := VerifyJoinPush(b.repo, "host-b"); err == nil {
+			t.Fatal("two commits ahead must be refused")
+		}
+	})
+	t.Run("request commit that also touches another path", func(t *testing.T) {
+		_, b := pair(t)
+		_, text := goodJoin(t, "host-b")
+		b.write(t, "joins/host-b.txt", text)
+		b.write(t, "notes.txt", "x\n")
+		b.repo.Run("add", "-f", "joins/host-b.txt")
+		plantAdd(t, b, "other/y.md", "plain\n")
+		if _, err := VerifyJoinPush(b.repo, "host-b"); err == nil {
+			t.Fatal("a commit with a second path must be refused")
+		}
+	})
+	t.Run("parent is not origin's tip", func(t *testing.T) {
+		a, b := pair(t)
+		RequestJoin(b.repo, "host-b", joinNow)
+		a.write(t, "MEMORY.md", "- moved on\n")
+		a.commit(t, "memsync: more")
+		a.repo.Run("push", "origin", "main")
+		b.repo.Run("fetch", "-q", "origin")
+		if _, err := VerifyJoinPush(b.repo, "host-b"); err == nil {
+			t.Fatal("origin moved: the commit is not on its tip")
+		}
+	})
+	t.Run("modifies an existing file", func(t *testing.T) {
+		_, b := pair(t)
+		plantAdd(t, b, "joins/host-b.txt", "label: host-b\n")
+		if _, err := VerifyJoinPush(b.repo, "host-b"); err == nil {
+			t.Fatal("an invalid request file must be refused")
+		}
+	})
+}
+
+// plantAdd is plant without the commit message, same plumbing.
+func plantAdd(t *testing.T, h *host, path, content string) { plant(t, h, path, content) }
+
+func TestSyncFromOriginRefusals(t *testing.T) {
+	t.Run("remote tracks config.json", func(t *testing.T) {
+		a, b := pair(t)
+		a.write(t, "config.json", `{"githubTokenCmd":["/bin/evil"]}`)
+		a.repo.Run("add", "-f", "config.json")
+		plantAdd(t, a, "denylist.txt", "x\n")
+		a.repo.Run("push", "origin", "main")
+		before := b.revHead(t)
+		if err := SyncFromOrigin(b.repo); err == nil {
+			t.Fatal("must refuse a remote that tracks per-PC files")
+		}
+		if b.revHead(t) != before {
+			t.Error("must not merge")
+		}
+	})
+	t.Run("diverged", func(t *testing.T) {
+		a, b := pair(t)
+		plantAdd(t, b, "projects/local.md", "l\n")
+		a.write(t, "MEMORY.md", "- remote\n")
+		a.commit(t, "r")
+		a.repo.Run("push", "origin", "main")
+		if err := SyncFromOrigin(b.repo); err == nil {
+			t.Fatal("diverged branch must be an error")
+		}
+	})
+	t.Run("fetch failure", func(t *testing.T) {
+		_, b := pair(t)
+		b.repo.Run("remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
+		if err := SyncFromOrigin(b.repo); err == nil {
+			t.Fatal("a failed fetch is an error")
+		}
+	})
+}
+
+func TestPendingRecipients(t *testing.T) {
+	a, b := pair(t)
+	RequestJoin(b.repo, "host-b", joinNow)
+	b.repo.Run("push", "origin", "main")
+	a.repo.Run("pull", "-q", "--rebase", "origin", "main")
+	list, _ := ListJoins(a.repo)
+	AcceptJoin(a.repo, "host-b", list[0].Join.Fingerprint)
+	a.repo.Run("push", "origin", "main")
+	b.repo.Run("pull", "-q", "--rebase", "origin", "main")
+	got, removed, err := PendingRecipients(b.repo)
+	if err != nil || removed != 0 || len(got) != 2 {
+		t.Fatalf("%+v %d %v", got, removed, err)
+	}
+	var own, other int
+	for _, r := range got {
+		if r.Own {
+			own++
+			if !r.New || r.Key != b.rcpt {
+				t.Errorf("own entry: %+v", r)
+			}
+		} else {
+			other++
+			if r.New || r.Key != a.rcpt {
+				t.Errorf("other entry: %+v", r)
+			}
+		}
+		if r.Fingerprint != JoinFingerprint(r.Key) {
+			t.Error("fingerprint must be the join one")
+		}
+	}
+	if own != 1 || other != 1 {
+		t.Errorf("%+v", got)
 	}
 }

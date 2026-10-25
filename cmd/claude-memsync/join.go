@@ -120,6 +120,9 @@ func joinFetch(repo *gitwt.Repo) {
 	_, _ = repo.Run("fetch", "-q", "origin", br)
 }
 
+// joinGuardHook lets tests see which push guard a join command used.
+var joinGuardHook func(kind string)
+
 func joinPush(cfg config.Config, repo *gitwt.Repo, request bool) error {
 	if cfg.PrivateOnly {
 		if err := validateRemoteOffline(cfg); err != nil {
@@ -134,8 +137,13 @@ func joinPush(cfg config.Config, repo *gitwt.Repo, request bool) error {
 		br = defaultBranch
 	}
 	guard := agecrypt.PushGuard
+	kind := "normal"
 	if request {
 		guard = agecrypt.PushGuardJoinRequest
+		kind = "request"
+	}
+	if joinGuardHook != nil {
+		joinGuardHook(kind)
 	}
 	if err := guard(repo, br); err != nil {
 		return err
@@ -147,8 +155,11 @@ func joinRequest(stdout, stderr io.Writer, cfg config.Config, repo *gitwt.Repo, 
 	var j agecrypt.Join
 	var res agecrypt.JoinResult
 	err := withSyncLock(cfg.SyncDir, func() error {
+		// A request is built on origin's tip and nothing else: if the clone
+		// cannot be brought up to date, or differs from origin in any other
+		// way, nothing is committed or pushed.
 		if err := agecrypt.SyncFromOrigin(repo); err != nil {
-			fmt.Fprintln(stderr, "join: could not bring in the latest remote state; working from this clone:", err)
+			return fmt.Errorf("could not bring this clone up to date with origin: %w", err)
 		}
 		var err error
 		j, res, err = agecrypt.RequestJoin(repo, label, time.Now())
@@ -156,6 +167,13 @@ func joinRequest(stdout, stderr io.Writer, cfg config.Config, repo *gitwt.Repo, 
 			return err
 		}
 		if res == agecrypt.JoinAlreadyMember {
+			return nil
+		}
+		need, err := agecrypt.VerifyJoinPush(repo, j.Label)
+		if err != nil {
+			return err
+		}
+		if !need {
 			return nil
 		}
 		return joinPush(cfg, repo, true)
@@ -172,7 +190,7 @@ func joinRequest(stdout, stderr io.Writer, cfg config.Config, repo *gitwt.Repo, 
 	default:
 		fmt.Fprintf(stdout, "join request sent: %s\n", j.Label)
 	}
-	fmt.Fprintf(stdout, "fingerprint: %s\n", j.Fingerprint)
+	fmt.Fprintf(stdout, "fingerprint: %s\n", agecrypt.GroupFingerprint(j.Fingerprint))
 	fmt.Fprintln(stderr, "Give this fingerprint to the person who runs `claude-memsync join accept` on a member host; they must type it back.")
 	fmt.Fprintln(stderr, "After they accept, pull (the daemon does, or `git -C <sync dir> pull`), then run `claude-memsync recipients accept --yes` here: your key is a pinned-set change that a person must review.")
 	return 0
@@ -187,17 +205,18 @@ func joinStatus(stdout, stderr io.Writer, cfg config.Config, repo *gitwt.Repo) i
 	}
 	switch st.State {
 	case agecrypt.JoinStatePending:
-		fmt.Fprintf(stdout, "pending: label %s, fingerprint %s\n", st.Join.Label, st.Join.Fingerprint)
+		fmt.Fprintf(stdout, "pending: label %s, fingerprint %s\n", st.Join.Label, agecrypt.GroupFingerprint(st.Join.Fingerprint))
 	case agecrypt.JoinStateAccepted:
 		if u, _ := agecrypt.Unreviewed(repo); u {
-			fmt.Fprintln(stdout, "accepted: your key is in .age-recipients; run `claude-memsync recipients accept --yes` to pin it")
+			fmt.Fprintln(stdout, "accepted: your key is in .age-recipients. Do NOT run `recipients accept --yes` blindly: compare the set below with `claude-memsync join list` and `recipients list` on a member host first.")
+			printPendingRecipients(stdout, repo)
 		} else if agecrypt.CheckKeyed(repo) == nil {
 			fmt.Fprintln(stdout, "accepted: this host can decrypt the repo")
 		} else {
 			fmt.Fprintln(stdout, "accepted: your key is a recipient; pull to receive re-encrypted content")
 		}
 	default:
-		fmt.Fprintf(stdout, "none: no join request for this host's key (fingerprint %s)\n", st.Join.Fingerprint)
+		fmt.Fprintf(stdout, "none: no join request for this host's key (fingerprint %s)\n", agecrypt.GroupFingerprint(st.Join.Fingerprint))
 	}
 	return 0
 }
@@ -221,7 +240,7 @@ func joinList(stdout, stderr io.Writer, cfg config.Config) int {
 	}
 	for _, e := range es {
 		if e.Valid {
-			fmt.Fprintf(stdout, "%s\t%s\t%s\n", e.Join.Label, e.Join.Fingerprint, e.Join.Requested.Format(time.RFC3339))
+			fmt.Fprintf(stdout, "%s\t%s\t%s\n", e.Join.Label, agecrypt.GroupFingerprint(e.Join.Fingerprint), e.Join.Requested.Format(time.RFC3339))
 		} else {
 			fmt.Fprintf(stdout, "%s\tINVALID (will not be accepted; reject it)\t-\n", e.Join.Label)
 		}
@@ -269,4 +288,34 @@ func joinStatusLine(cfg config.Config) string {
 		return fmt.Sprintf("%d join request(s) pending (see `claude-memsync join list`)", n)
 	}
 	return ""
+}
+
+// printPendingRecipients shows the recipient set waiting for review: every key
+// with its fingerprint (the form `join list` uses), new ones and this host's
+// own marked.
+func printPendingRecipients(w io.Writer, repo *gitwt.Repo) {
+	list, removed, err := agecrypt.PendingRecipients(repo)
+	if err != nil {
+		fmt.Fprintln(w, "pending recipient set: unavailable:", err)
+		return
+	}
+	fmt.Fprintf(w, "pending recipient set (%d key(s)):\n", len(list))
+	for _, r := range list {
+		var tags []string
+		if r.New {
+			tags = append(tags, "new")
+		}
+		if r.Own {
+			tags = append(tags, "this host")
+		}
+		note := ""
+		if len(tags) > 0 {
+			note = "  (" + strings.Join(tags, ", ") + ")"
+		}
+		fmt.Fprintf(w, "recipient: %s  %s%s\n", agecrypt.GroupFingerprint(r.Fingerprint), r.Key, note)
+	}
+	if removed > 0 {
+		fmt.Fprintf(w, "%d pinned key(s) are gone from the new set\n", removed)
+	}
+	fmt.Fprintln(w, "then, if every key is expected: claude-memsync recipients accept --yes")
 }

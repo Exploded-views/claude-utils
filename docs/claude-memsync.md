@@ -937,6 +937,11 @@ spaces). `doctor` and `repo create` do not save it; `init` saves the command
   output is held in memory for that request only: never written to disk,
   `config.json`, logs or error text (the command's stdout and stderr are not
   put in errors either).
+- The command is honoured only from a trusted `config.json`: it must be owned
+  by the user, have no group or other permission bits (mode 0600), and, being in
+  the sync work-tree, not be tracked by git (at HEAD or in the index). Otherwise
+  it is ignored with a warning, since a remote could plant a `config.json` that
+  names a command. A command typed as `--token-cmd` is always honoured.
 - A command that fails, times out or prints nothing means *no token*: the
   existing no-token behaviour applies (init and doctor refuse; the daemon
   skips the API check).
@@ -977,6 +982,16 @@ refuses ssh remotes while `core.sshCommand`, `GIT_SSH_COMMAND` or `GIT_SSH` is
 set, and the daemon re-checks the push URL and these overrides before every push.
 
 Config keys: `githubHost`, `recheckMaxFailures`, `recheckMaxAgeHours`, `privateOnly`, `githubTokenEnv`, `githubTokenFile`, `githubTokenCmd`, `recheckTokenCmd`, `githubApiUrl`, `githubOrg`.
+
+### Per-PC files never arrive from the remote
+
+`config.json`, `denylist.txt`, `daemon.pid`, everything under `.state/`,
+`distilled/DISTILLED.md` and the temporary names `*.tmp`, `*.tmp.*` and
+`*.from-remote-*` are local to a PC (the generated `.gitignore` keeps them out).
+If a fetched tree tracks any of them, the pull is refused before anything is
+merged: the daemon logs it once, commits nothing from the remote, pushes
+nothing, and `claude-memsync status` says `syncing paused, pull refused`. It
+resumes by itself once the remote tree no longer tracks them.
 
 ## Several repos per host
 
@@ -1325,7 +1340,7 @@ exactly four lines, a public key and no secret:
 
     label: <host-label>
     recipient: <this host's age public key>
-    fingerprint: <short sha256 of the recipient>
+    fingerprint: <first 128 bits of the sha256 of the recipient, 32 hex characters>
     requested: <UTC RFC3339 time>
 
 It stays plaintext: `joins/*.txt` is exempt in `.gitattributes` and
@@ -1337,6 +1352,13 @@ is still refused. The command prints the fingerprint: give it to the person
 who will accept. Running it again is harmless (it reports the pending request);
 `join status` shows `pending` or `accepted`.
 
+The fingerprint is printed on one line as eight groups of four hex characters:
+`fingerprint: 0123 4567 89ab cdef 0123 4567 89ab cdef`. `request` first brings
+the clone up to date with origin and refuses (committing and pushing nothing) if
+that fails or if the local branch differs from origin in any way: what it
+pushes is exactly one new commit on origin's tip that adds
+`joins/<host-label>.txt`, and it checks that before the push.
+
 **On a member host** (one that can decrypt the repo):
 
     claude-memsync join list [--repo <name>]
@@ -1346,8 +1368,9 @@ who will accept. Running it again is harmless (it reports the pending request);
 `list` fetches and shows each pending request as label, fingerprint and time (a
 file that is not in the strict format is listed as INVALID and cannot be
 accepted). `status` also says `N join request(s) pending` per repo. `accept`
-requires `--fingerprint` to equal, exactly, the fingerprint in the file; without
-one, or with a different one, it refuses. Compare it with what the new host
+requires `--fingerprint` to equal, exactly, the fingerprint in the file (the
+grouped form or the same 32 characters without spaces; nothing else is
+forgiven); without one, or with a different one, it refuses. Compare it with what the new host
 printed, over a channel you trust. On success it adds the recipient (as
 `recipients add` does: re-encrypts HEAD to the new set), removes the request
 file in the same commit, and pushes. `reject` removes the file in its own commit
@@ -1355,9 +1378,14 @@ and pushes. Like `recipients`, these refuse while the daemon holds the sync dir.
 
 **Back on the new host:** its next pull brings the new `.age-recipients`. Its
 own key is then a change to the pinned set, so the existing gate applies: run
-`claude-memsync recipients accept --yes` (it shows the added key as a short
-fingerprint). Only then does the host start to commit and sync. `join status`
-says `accepted` and points at this step.
+`claude-memsync recipients accept --yes`, but **do not run it blindly**: anyone
+with write access to the remote could have added keys besides yours. `join
+status` on the new host lists the pending recipient set, one `recipient:` line
+per key with its fingerprint and the key itself, marking new keys and this
+host's own. Compare those lines with `claude-memsync join list` (fingerprints)
+and `claude-memsync recipients list` (keys) on a member host, and accept only
+if every key is one you expect. Only then does the host start to commit and
+sync.
 
 ### Reviewing recipient changes
 
