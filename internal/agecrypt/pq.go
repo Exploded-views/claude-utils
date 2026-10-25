@@ -39,11 +39,23 @@ func IsHybridRecipient(line string) bool {
 	return strings.HasPrefix(canonLine(line), hybridRecipientPrefix)
 }
 
-// SchemeOf is the repo's encryption scheme ("classic" when none is recorded).
+// SchemeOf is the repo's encryption scheme. memage.scheme decides; when it is
+// missing (a clone whose git config lost it) a recipients file that holds any
+// hybrid key makes the repo pq, so PushGuard cannot be talked into accepting
+// classic ciphertext. Otherwise it is "classic".
 func SchemeOf(repo *gitwt.Repo) string {
-	out, _ := repo.Run("config", "--get", SchemeConfigKey)
-	if strings.TrimSpace(out) == SchemePQ {
-		return SchemePQ
+	if s, ok := rawScheme(repo); ok {
+		if s == SchemePQ {
+			return SchemePQ
+		}
+		return SchemeClassic
+	}
+	if keys, err := ListRecipients(repo.Dir); err == nil {
+		for _, k := range keys {
+			if IsHybridRecipient(k) {
+				return SchemePQ
+			}
+		}
 	}
 	return SchemeClassic
 }
