@@ -1044,6 +1044,37 @@ doctor timer accepts `githubApp` as its token source. Like the other
 credential keys, `githubApp` is ignored when `config.json` is not trusted (see
 "Which config.json keys are trusted").
 
+### Registering an app
+
+```sh
+claude-memsync app register --name <app-name> --org <org> --url <homepage-url> \
+  --perm administration:write --perm metadata:read \
+  (--key-out <path> | --key-cmd-store "<store command>" --key-cmd "<read command>")
+```
+
+uses GitHub's manifest flow, so there is no form to fill in by hand. The command
+writes a local HTML file (mode 0600) and prints its path and `file://` URL; open
+it in a browser where you are signed in to GitHub as an owner of the org. The
+page posts a private app manifest (no webhook, no event subscriptions, only the
+`--perm` permissions) to GitHub, which asks you to confirm and then calls back
+on `127.0.0.1:<random port>`. A callback whose random `state` is wrong is
+refused and ignored (any local program can hit that port), and the command keeps
+waiting for the real one; it gives up after 30 minutes. The one-time code is
+exchanged unauthenticated, and the command prints the app id, slug and the
+install URL (`https://github.com/apps/<slug>/installations/new`). It never opens
+a browser and contacts GitHub only after a correct callback.
+
+The private key exists only in that one response. It is written to `--key-out`
+(mode 0600; an existing file is refused before anything is created) or piped to
+the stdin of `--key-cmd-store`, whose matching read command you give as
+`--key-cmd`. Both commands are run directly with no shell; shell-style quotes
+group words, e.g. `--key-cmd "<secret-manager-cli> read '<reference with
+spaces>'"`. The key is never printed. The apps.json entry (with `apiBase` set
+from `--api-url`, if you gave one) is written last, only after the key is safely
+stored. If storing fails, the app already exists on GitHub: delete it or add a
+key to it in the app's settings. `--github-url` and `--api-url` target GitHub
+Enterprise.
+
 ## Several repos per host
 
 By default one host has one sync repo (`~/.claudesync`) and every Claude project folder goes into it. A host that works for more than one party can instead keep several notes repos, for example your own projects, one per client, and a personal catalog, and route each Claude project folder to exactly one of them. One daemon runs one sync loop per repo. A folder that no rule routes anywhere is not synced at all.
