@@ -315,7 +315,8 @@ func VerifyHybridRemote(repo *gitwt.Repo, branch string, wantCommits int) (commi
 }
 
 // DropBackup removes the pre-migration backup ref and purges what only it kept
-// alive: the reflogs are expired and the object store pruned now.
+// alive: the reflogs of HEAD, main, origin/main and the backup are expired and
+// the object store pruned now. Other reflogs (the stash) are left alone.
 func DropBackup(repo *gitwt.Repo) error {
 	if SchemeOf(repo) != SchemePQ {
 		return errors.New("this repo is not post-quantum; there is no backup to drop")
@@ -323,10 +324,14 @@ func DropBackup(repo *gitwt.Repo) error {
 	if _, err := repo.Run("rev-parse", "--verify", "--quiet", BackupRef); err != nil {
 		return errors.New("no backup ref " + BackupRef)
 	}
-	if _, err := repo.Run("update-ref", "-d", BackupRef); err != nil {
-		return err
+	// Only the refs that held the old history: `--all` would also expire the
+	// stash reflog (the daemon's autostash) and lose its entries.
+	for _, ref := range []string{"HEAD", "refs/heads/main", "refs/remotes/origin/main"} {
+		if _, err := repo.Run("reflog", "expire", "--expire=now", "--expire-unreachable=now", ref); err != nil {
+			return err
+		}
 	}
-	if _, err := repo.Run("reflog", "expire", "--expire=now", "--all"); err != nil {
+	if _, err := repo.Run("update-ref", "-d", BackupRef); err != nil {
 		return err
 	}
 	_, err := repo.Run("gc", "-q", "--prune=now")
