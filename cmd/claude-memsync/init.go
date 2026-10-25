@@ -214,6 +214,7 @@ func bootstrapWith(cfg config.Config, force bool, denylist []byte, enc *encryptS
 func bootstrapFull(cfg config.Config, force bool, denylist []byte, enc *encryptSpec, owns func(string) bool) error {
 	// Step 1: ensure SyncDir exists / is empty.
 	info, err := os.Stat(cfg.SyncDir)
+	existed := err == nil
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		// fine, will be created by clone
@@ -247,12 +248,27 @@ func bootstrapFull(cfg config.Config, force bool, denylist []byte, enc *encryptS
 	}
 	var cloned bool
 	var cloneErr error
-	if enc != nil {
-		if cloneErr = repo.CloneNoCheckout(cfg.RemoteURL); cloneErr == nil {
-			cloned = true
+	// Always clone without a checkout: what the remote tree holds is looked at
+	// before any of it reaches the work-tree.
+	if cloneErr = repo.CloneNoCheckout(cfg.RemoteURL); cloneErr == nil {
+		cloned = true
+		if repo.HasHead() {
+			bad, err := repo.TrackedLocalOnly("HEAD")
+			if err == nil && len(bad) > 0 {
+				if !existed {
+					_ = os.RemoveAll(cfg.SyncDir)
+				}
+				return fmt.Errorf("the remote tracks per-PC files (%s) that must never be synced; nothing was checked out. Remove them from the remote first", strings.Join(bad, ", "))
+			}
+			if err != nil {
+				return err
+			}
+			if enc == nil {
+				if _, err := repo.Run("reset", "--hard", "-q", "HEAD"); err != nil {
+					return fmt.Errorf("check out: %w", err)
+				}
+			}
 		}
-	} else {
-		cloned, cloneErr = tryClone(repo, cfg.RemoteURL)
 	}
 	if !cloned {
 		// Clone failed (likely empty repo) — init local and add remote.
@@ -311,7 +327,9 @@ func bootstrapFull(cfg config.Config, force bool, denylist []byte, enc *encryptS
 	// Step 4: write config.json. A re-init keeps the guard settings of the
 	// config it replaces: the list is not an init flag, and dropping it would
 	// switch the foreign-writer guard off.
-	if old, err := config.Load(cfg.Path()); err == nil {
+	// Only a config this host already had: one that came with a clone is never
+	// read (the clone is refused above if the remote tracks one).
+	if old, err := config.Load(cfg.Path()); existed && err == nil {
 		if len(cfg.ForeignWriters) == 0 {
 			cfg.ForeignWriters = old.ForeignWriters
 		}
@@ -484,15 +502,6 @@ func printDistillPermissionHint(cfg config.Config) {
 	fmt.Fprintln(os.Stderr, "add this to ~/.claude/settings.json (permissions.allow):")
 	fmt.Fprintf(os.Stderr, "  \"Read(%s/**)\",\n", dir)
 	fmt.Fprintf(os.Stderr, "  \"Edit(%s/**)\"\n", dir)
-}
-
-// tryClone attempts `git clone <url> <dir>`. Returns (true, nil) on success,
-// (false, err) on failure. An empty-repo error is one common failure.
-func tryClone(repo *gitwt.Repo, url string) (bool, error) {
-	if err := repo.Clone(url); err != nil {
-		return false, err
-	}
-	return true, nil
 }
 
 // writeGitattributes makes sure .gitattributes has the lines the daemon needs,

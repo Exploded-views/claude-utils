@@ -619,6 +619,23 @@ func TestVerifyJoinPush(t *testing.T) {
 // plantAdd is plant without the commit message, same plumbing.
 func plantAdd(t *testing.T, h *host, path, content string) { plant(t, h, path, content) }
 
+func TestVerifyJoinPushNeedsHeadOnTheBranch(t *testing.T) {
+	_, b := pair(t)
+	RequestJoin(b.repo, "host-b", joinNow)
+	if need, err := VerifyJoinPush(b.repo, "host-b"); err != nil || !need {
+		t.Fatalf("setup: %v %v", need, err)
+	}
+	// detached HEAD at the same commit: the ref that would be pushed is older
+	b.repo.Run("checkout", "-q", "--detach")
+	if _, err := VerifyJoinPush(b.repo, "host-b"); err == nil {
+		t.Fatal("detached HEAD must be refused")
+	}
+	b.repo.Run("checkout", "-q", "main")
+	if _, err := VerifyJoinPush(b.repo, "host-b"); err != nil {
+		t.Fatalf("back on the branch: %v", err)
+	}
+}
+
 func TestSyncFromOriginRefusals(t *testing.T) {
 	t.Run("remote tracks config.json", func(t *testing.T) {
 		a, b := pair(t)

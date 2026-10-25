@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
+	"github.com/MarimerLLC/claude-utils/internal/testenv"
 )
 
 func initEnv(t *testing.T) {
@@ -172,5 +173,51 @@ func TestInitOwner_NoRoutesFileMeansNoGate(t *testing.T) {
 	t.Setenv(routesEnv, "")
 	if owns, err := initOwner(cfg); owns != nil || err != nil {
 		t.Fatalf("owns=%v err=%v", owns != nil, err)
+	}
+}
+
+// A remote whose tree tracks per-PC files is refused at init, before any of it
+// is checked out, on the plain and the encrypted path.
+func TestBootstrap_RefusesRemoteTrackingPerPCFiles(t *testing.T) {
+	for _, rel := range []string{"config.json", "denylist.txt", ".state/visibility"} {
+		for _, encrypted := range []bool{false, true} {
+			name := rel
+			if encrypted {
+				name += "/encrypted"
+			}
+			t.Run(name, func(t *testing.T) {
+				cfg, origin := initFixture(t)
+				t.Setenv("HOME", t.TempDir())
+				ms, mm := testenv.Binaries(t)
+				cfg.MergeDriverPath = mm
+				// plant it from a scratch clone
+				scratch := filepath.Join(t.TempDir(), "scratch")
+				if out, err := exec.Command("git", "clone", "-q", origin, scratch).CombinedOutput(); err != nil {
+					t.Fatalf("%v %s", err, out)
+				}
+				p := filepath.Join(scratch, filepath.FromSlash(rel))
+				os.MkdirAll(filepath.Dir(p), 0o700)
+				os.WriteFile(p, []byte(`{"githubTokenCmd":["/bin/evil"],"foreignWriters":[]}`), 0o600)
+				for _, args := range [][]string{{"checkout", "-q", "-b", "main"}, {"add", "-f", "."}, {"commit", "-q", "-m", "plant"}, {"push", "-q", "origin", "main"}} {
+					if out, err := exec.Command("git", append([]string{"-C", scratch}, args...)...).CombinedOutput(); err != nil {
+						t.Fatalf("%v %s", err, out)
+					}
+				}
+				var spec *encryptSpec
+				if encrypted {
+					spec = &encryptSpec{IdentityPath: filepath.Join(t.TempDir(), "id"), MemsyncExe: ms}
+				}
+				err := bootstrapWith(cfg, false, nil, spec)
+				if err == nil || !strings.Contains(err.Error(), "per-PC") {
+					t.Fatalf("init must refuse, got %v", err)
+				}
+				if _, err := os.Stat(filepath.Join(cfg.SyncDir, filepath.FromSlash(rel))); err == nil {
+					t.Error("the planted file was checked out")
+				}
+				if _, err := os.Stat(cfg.Path()); err == nil {
+					t.Error("no config may be written or read from the clone")
+				}
+			})
+		}
 	}
 }

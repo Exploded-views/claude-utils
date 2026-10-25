@@ -140,3 +140,49 @@ func TestStatusShowsRefusedPull(t *testing.T) {
 		t.Errorf("%q", l)
 	}
 }
+
+// However the config path is spelled (a symlinked sync dir, an aliased
+// --config), a config.json that git tracks is not trusted.
+func TestTokenCmdTrackedConfigIgnoredThroughSymlinks(t *testing.T) {
+	cfg, marker := trustFixture(t)
+	warnings(t)
+	repo := gitwt.New(cfg.SyncDir)
+	repo.Run("add", "-f", "config.json")
+	if _, err := repo.Run("commit", "-q", "-m", "hostile config"); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(cfg.SyncDir, link); err != nil {
+		t.Skip("no symlinks:", err)
+	}
+	// 1. the sync dir is the symlink, the config is spelled by its real path
+	c1 := cfg
+	c1.SyncDir = link
+	if c, _ := guardClient(c1); c != nil || ran(marker) {
+		t.Fatal("symlinked sync dir: tracked config must not be trusted")
+	}
+	// 2. the config is reached through the alias, the sync dir is the real one
+	c2 := cfg
+	c2.ConfigPath = filepath.Join(link, "config.json")
+	if c, _ := guardClient(c2); c != nil || ran(marker) {
+		t.Fatal("aliased --config: tracked config must not be trusted")
+	}
+	// 3. neither field names the work-tree at all
+	c3 := cfg
+	c3.SyncDir = t.TempDir()
+	c3.ConfigPath = filepath.Join(link, "config.json")
+	if c, _ := guardClient(c3); c != nil || ran(marker) {
+		t.Fatal("a tracked file is judged by the repo it is in, not by the sync dir field")
+	}
+}
+
+func TestTokenCmdHardLinkedConfigIgnored(t *testing.T) {
+	cfg, marker := trustFixture(t)
+	warnings(t)
+	if err := os.Link(cfg.ConfigPath, filepath.Join(t.TempDir(), "other")); err != nil {
+		t.Skip("no hard links:", err)
+	}
+	if c, _ := guardClient(cfg); c != nil || ran(marker) {
+		t.Fatal("a config with another hard link must not be trusted")
+	}
+}

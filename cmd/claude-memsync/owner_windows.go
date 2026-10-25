@@ -5,4 +5,4 @@ package main
 import "io/fs"
 
 // Windows has no uid/mode bits to check; the file's ACL is the user's.
-func ownedByCurrentUser(fs.FileInfo) bool { return true }
+func ownerAndLinksOK(fs.FileInfo) error { return nil }

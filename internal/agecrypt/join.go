@@ -243,6 +243,14 @@ func VerifyJoinPush(repo *gitwt.Repo, label string) (needPush bool, err error) {
 		return false, err
 	}
 	head = strings.TrimSpace(head)
+	// What gets pushed is the branch ref, so HEAD must be that ref: on the
+	// branch (not detached) and the branch at HEAD.
+	if sym, err := repo.Run("symbolic-ref", "-q", "HEAD"); err != nil || strings.TrimSpace(sym) != "refs/heads/"+br {
+		return false, errors.New("refusing to push: HEAD is not on branch " + br)
+	}
+	if ref, err := repo.Run("rev-parse", "--verify", "--quiet", "refs/heads/"+br); err != nil || strings.TrimSpace(ref) != head {
+		return false, errors.New("refusing to push: branch " + br + " is not at HEAD")
+	}
 	path := JoinPath(label)
 	if head == tip {
 		if _, ok := blobAtRev(repo, "HEAD", path); !ok {

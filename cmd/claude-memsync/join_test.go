@@ -365,3 +365,14 @@ func TestJoinCLI_OnlyRequestUsesTheRequestGuard(t *testing.T) {
 		t.Fatalf("reject: %v", kinds)
 	}
 }
+
+func TestJoinCLI_RequestGuidanceIsReviewFirst(t *testing.T) {
+	h := twoHosts(t)
+	_, _, e := runJoinCmd("request", "--config", h.b.Path(), "--label", "new-host")
+	if !strings.Contains(e, "join status") || !strings.Contains(e, "Only if every key is expected") {
+		t.Errorf("guidance must send the person to review first:\n%s", e)
+	}
+	if strings.Contains(e, "then run `claude-memsync recipients accept --yes` here") {
+		t.Errorf("old blind-accept wording:\n%s", e)
+	}
+}

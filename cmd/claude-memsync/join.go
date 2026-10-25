@@ -192,7 +192,7 @@ func joinRequest(stdout, stderr io.Writer, cfg config.Config, repo *gitwt.Repo, 
 	}
 	fmt.Fprintf(stdout, "fingerprint: %s\n", agecrypt.GroupFingerprint(j.Fingerprint))
 	fmt.Fprintln(stderr, "Give this fingerprint to the person who runs `claude-memsync join accept` on a member host; they must type it back.")
-	fmt.Fprintln(stderr, "After they accept, pull (the daemon does, or `git -C <sync dir> pull`), then run `claude-memsync recipients accept --yes` here: your key is a pinned-set change that a person must review.")
+	fmt.Fprintln(stderr, "After they accept, pull (the daemon does, or `git -C <sync dir> pull`), then run `claude-memsync join status` here to see the pending recipient set and compare it with `join list` and `recipients list` on a member host. Only if every key is expected, run `claude-memsync recipients accept --yes`.")
 	return 0
 }
 

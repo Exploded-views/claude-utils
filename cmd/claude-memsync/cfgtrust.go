@@ -48,7 +48,13 @@ func tokenCmdConfigTrusted(cfg config.Config) error {
 	if path == "" {
 		path = cfg.Path()
 	}
-	st, err := os.Lstat(path)
+	// Judge the real file: symlinks in the path (a symlinked sync dir, an
+	// aliased --config) must not hide which repo it lies in.
+	real, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return errors.New("config.json cannot be read")
+	}
+	st, err := os.Lstat(real)
 	if err != nil {
 		return errors.New("config.json cannot be read")
 	}
@@ -58,21 +64,21 @@ func tokenCmdConfigTrusted(cfg config.Config) error {
 	if st.Mode().Perm()&0o077 != 0 {
 		return fmt.Errorf("config.json mode %04o lets others read or write it; it must be 0600", st.Mode().Perm())
 	}
-	if !ownedByCurrentUser(st) {
-		return errors.New("config.json is not owned by the current user")
+	if err := ownerAndLinksOK(st); err != nil {
+		return err
 	}
-	// Inside the sync work-tree: the file must not be tracked.
-	if rel, err := filepath.Rel(cfg.SyncDir, path); err == nil && !strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel) {
-		repo := gitwt.New(cfg.SyncDir)
-		if repo.IsRepo() {
-			rel = filepath.ToSlash(rel)
-			if out, err := repo.Run("ls-files", "--error-unmatch", "--", rel); err == nil && strings.TrimSpace(out) != "" {
-				return errors.New("config.json is tracked in the sync repo")
-			}
-			if repo.HasHead() {
-				if _, err := repo.Run("cat-file", "-e", "HEAD:"+rel); err == nil {
-					return errors.New("config.json is tracked at HEAD in the sync repo")
-				}
+	// If the file's own directory is in a git work-tree (any, not only the
+	// configured sync dir), it must not be tracked there. git is asked from the
+	// file's directory, so it applies its own path and case rules.
+	dir, base := filepath.Split(real)
+	repo := gitwt.New(filepath.Clean(dir))
+	if _, err := repo.Run("rev-parse", "--is-inside-work-tree"); err == nil {
+		if out, err := repo.Run("ls-files", "--error-unmatch", "--", base); err == nil && strings.TrimSpace(out) != "" {
+			return errors.New("config.json is tracked in a git repo")
+		}
+		if repo.HasHead() {
+			if out, err := repo.Run("ls-tree", "--name-only", "HEAD", "--", base); err == nil && strings.TrimSpace(out) != "" {
+				return errors.New("config.json is tracked at HEAD in a git repo")
 			}
 		}
 	}

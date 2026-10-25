@@ -30,20 +30,26 @@ func headFiles(t *testing.T, r *gitwt.Repo) string {
 
 func TestLocalOnlyPath(t *testing.T) {
 	for p, want := range map[string]bool{
-		"config.json":                         true,
-		"daemon.pid":                          true,
-		"denylist.txt":                        true,
-		".state/visibility":                   true,
-		".state/a/b":                          true,
-		"x.tmp":                               true,
-		"projects/p/memory/a.tmp.1":           true,
-		"projects/p/memory/n.from-remote-abc": true,
-		"distilled/DISTILLED.md":              true,
-		"projects/p/memory/config.json":       false, // only the root one is the daemon's
-		"projects/p/memory/a.md":              false,
-		"notes/denylist.txt":                  false,
-		".gitignore":                          false,
-		".statex/a":                           false,
+		"config.json":                    true,
+		"daemon.pid":                     true,
+		"denylist.txt":                   true,
+		".state/visibility":              true,
+		".state/a/b":                     true,
+		"x.tmp":                          true,
+		"x.tmp.1":                        true,
+		"projects/p/memory/ideas.tmp.md": false,
+		"projects/p/memory/plan.tmp":     false,
+		"projects/p/memory/a.tmp.1":      false,
+		"projects/p/memory/.a.md.1f2e3d4c5b6a7988.tmp":     true,
+		"projects/p/memory/n.from-remote-0123456789abcdef": true,
+		"projects/p/memory/n.from-remote-abc":              false,
+		"projects/p/memory/n.from-remote-notes":            false,
+		"distilled/DISTILLED.md":                           true,
+		"projects/p/memory/config.json":                    false, // only the root one is the daemon's
+		"projects/p/memory/a.md":                           false,
+		"notes/denylist.txt":                               false,
+		".gitignore":                                       false,
+		".statex/a":                                        false,
 	} {
 		if gitwt.LocalOnlyPath(p) != want {
 			t.Errorf("LocalOnlyPath(%q) = %v, want %v", p, !want, want)
@@ -116,6 +122,21 @@ func TestPull_OrdinaryRemoteChangesStillPull(t *testing.T) {
 	f.peerPush("p1.md", "1\n")
 	if err := runPull(f.repo, "main"); err != nil {
 		t.Fatal(err)
+	}
+	if line := PullRefusedLine(f.repo.Dir); line != "" {
+		t.Error(line)
+	}
+}
+
+// A note named like a temp file is just a note: pulling it works.
+func TestPull_NoteNamedLikeATempFileIsNotRefused(t *testing.T) {
+	f := newPullFixture(t, map[string]string{"clean.md": "a\n"})
+	captureLog(t)
+	for _, name := range []string{"ideas.tmp.md", "plan.tmp", "x.tmp.1"} {
+		f.peerForce("projects/p1/memory/"+name, "idea\n")
+	}
+	if err := runPull(f.repo, "main"); err != nil {
+		t.Fatalf("a note called ideas.tmp.md must not refuse the pull: %v", err)
 	}
 	if line := PullRefusedLine(f.repo.Dir); line != "" {
 		t.Error(line)
