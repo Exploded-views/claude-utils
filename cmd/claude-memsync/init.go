@@ -177,7 +177,7 @@ func runInit(args []string) int {
 		cfg.EncryptionScheme = *scheme
 		cfg.RecoveryRecipients = append([]string{}, recoveryRecipients...)
 		if enc.IdentityPath == "" {
-			enc.IdentityPath = defaultIdentityPath()
+			enc.IdentityPath = defaultIdentityFor(*scheme)
 		}
 		exe, err := executable()
 		if err != nil {
@@ -738,4 +738,16 @@ func printReport(r syncpkg.SyncReport) {
 }
 
 // defaultIdentityFor is the identity file init uses when --identity is not given.
-func defaultIdentityFor(scheme string) string { return defaultIdentityPath() }
+//
+// Under the pq scheme an existing hybrid identity beside the default one
+// (identity-pq.txt, where `rekey-pq` puts it) is used instead of creating a
+// second identity for the host.
+func defaultIdentityFor(scheme string) string {
+	base := defaultIdentityPath()
+	if scheme == agecrypt.SchemePQ {
+		if p := newIdentityPath(base); fileExists(p) {
+			return p
+		}
+	}
+	return base
+}
