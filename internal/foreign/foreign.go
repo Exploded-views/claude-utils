@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -84,6 +85,8 @@ func Validate(ws []Writer) error {
 type Env struct {
 	GOOS string
 	Home string
+	// ClaudeDir is the Claude config dir (CLAUDE_CONFIG_DIR, else Home/.claude).
+	ClaudeDir string
 	// Systemctl runs `systemctl <args>` and returns its stdout. The exit status
 	// is not an answer (is-enabled exits non-zero for "disabled"): only an
 	// empty output with an error means systemctl could not be asked.
@@ -97,7 +100,11 @@ type Env struct {
 // DefaultEnv is the real host.
 func DefaultEnv(logf func(string, ...any)) Env {
 	home, _ := os.UserHomeDir()
-	return Env{GOOS: runtime.GOOS, Home: home, Systemctl: runSystemctl, Processes: procCmdlines, Logf: logf}
+	cdir := os.Getenv("CLAUDE_CONFIG_DIR")
+	if cdir == "" {
+		cdir = filepath.Join(home, ".claude")
+	}
+	return Env{GOOS: runtime.GOOS, Home: home, ClaudeDir: cdir, Systemctl: runSystemctl, Processes: procCmdlines, Logf: logf}
 }
 
 func runSystemctl(args ...string) (string, error) {
@@ -110,59 +117,96 @@ type Active struct{ Kind, Value string }
 
 func (a Active) String() string { return "foreign writer " + a.Kind + " " + a.Value }
 
+// Result is what a check found: entries that are active, and entries that
+// could not be checked on a host where they should have been.
+type Result struct{ Active, Unchecked []Active }
+
 // Refusal is the one-line error for a start that must not go ahead, or nil.
-func Refusal(act []Active) error {
-	if len(act) == 0 {
+// An entry that could not be checked refuses too: failing open is how a
+// predecessor slips through.
+func Refusal(r Result) error {
+	var parts []string
+	for _, a := range r.Active {
+		parts = append(parts, a.String()+" is active")
+	}
+	for _, a := range r.Unchecked {
+		parts = append(parts, a.String()+" could not be checked")
+	}
+	if len(parts) == 0 {
 		return nil
 	}
-	parts := make([]string, len(act))
-	for i, a := range act {
-		parts[i] = a.String()
-	}
-	return errors.New(strings.Join(parts, "; ") + " is active, refusing to start (--ignore-foreign-writers overrides)")
+	return errors.New(strings.Join(parts, "; ") + ", refusing to start (--ignore-foreign-writers overrides)")
 }
 
 // Check returns the entries that are active now.
-func Check(ws []Writer, env Env) []Active {
+func Check(ws []Writer, env Env) []Active { return Inspect(ws, env).Active }
+
+// Inspect checks every entry. Off Linux, systemdUnit and process entries are
+// skipped with a log line (only file and claudePlugin are checked there); on
+// Linux, one that cannot be asked is Unchecked.
+func Inspect(ws []Writer, env Env) Result {
 	if env.Logf == nil {
 		env.Logf = func(string, ...any) {}
 	}
-	var out []Active
+	var r Result
 	for _, w := range ws {
 		kind, val := w.Kind()
-		if active(w, env) {
-			out = append(out, Active{kind, val})
+		a := Active{kind, val}
+		switch state := probe(w, env); state {
+		case yes:
+			r.Active = append(r.Active, a)
+		case unknown:
+			r.Unchecked = append(r.Unchecked, a)
 		}
 	}
-	return out
+	return r
 }
 
-func active(w Writer, env Env) bool {
+type tri int
+
+const (
+	no tri = iota
+	yes
+	unknown
+)
+
+func b2t(b bool) tri {
+	if b {
+		return yes
+	}
+	return no
+}
+
+func probe(w Writer, env Env) tri {
 	switch {
 	case w.File != "":
-		return fileActive(expand(w.File, env.Home), w.JSONKeyNonEmpty)
+		return b2t(fileActive(expand(w.File, env.Home), w.JSONKeyNonEmpty))
 	case w.SystemdUnit != "":
 		if env.GOOS != "linux" {
 			env.Logf("foreign writers: skipping systemdUnit %s: not Linux", w.SystemdUnit)
-			return false
+			return no
 		}
 		return unitActive(w.SystemdUnit, env)
 	case w.Process != "":
+		if env.GOOS != "linux" {
+			env.Logf("foreign writers: skipping process %s: not Linux", w.Process)
+			return no
+		}
 		cmds, err := env.Processes()
 		if err != nil {
 			env.Logf("foreign writers: cannot list processes (%v); process %s not checked", err, w.Process)
-			return false
+			return unknown
 		}
 		for _, c := range cmds {
 			if strings.Contains(c, w.Process) {
-				return true
+				return yes
 			}
 		}
-		return false
+		return no
 	case w.ClaudePlugin != "":
-		return pluginActive(w, env)
+		return b2t(pluginActive(w, env))
 	}
-	return false
+	return no
 }
 
 func expand(p, home string) string {
@@ -217,7 +261,7 @@ func fileActive(path, key string) bool {
 	return true
 }
 
-func unitActive(unit string, env Env) bool {
+func unitActive(unit string, env Env) tri {
 	asked := false
 	for _, q := range []struct {
 		verb string
@@ -231,25 +275,44 @@ func unitActive(unit string, env Env) bool {
 		asked = true
 		for _, y := range q.yes {
 			if out == y {
-				return true
+				return yes
 			}
 		}
 	}
 	if !asked {
-		env.Logf("foreign writers: systemctl --user could not be asked about %s; not checked", unit)
+		env.Logf("foreign writers: systemctl --user could not be asked about %s", unit)
+		return unknown
 	}
-	return false
+	return no
 }
 
+// pluginActive reads the Claude settings files that can enable a plugin. A
+// file that exists but cannot be read or understood counts as the plugin being
+// enabled: the settings are how it would be switched off.
 func pluginActive(w Writer, env Env) bool {
-	b, err := os.ReadFile(filepath.Join(env.Home, ".claude", "settings.json"))
-	if err != nil {
-		return false
+	dir := env.ClaudeDir
+	if dir == "" {
+		dir = filepath.Join(env.Home, ".claude")
 	}
-	var s struct {
-		EnabledPlugins map[string]bool `json:"enabledPlugins"`
+	enabled := false
+	for _, name := range []string{"settings.json", "settings.local.json"} {
+		p := filepath.Join(dir, name)
+		b, err := os.ReadFile(p)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			enabled = true
+			continue
+		}
+		var s struct {
+			EnabledPlugins map[string]bool `json:"enabledPlugins"`
+		}
+		if json.Unmarshal(b, &s) != nil || s.EnabledPlugins[w.ClaudePlugin] {
+			enabled = true
+		}
 	}
-	if json.Unmarshal(b, &s) != nil || !s.EnabledPlugins[w.ClaudePlugin] {
+	if !enabled {
 		return false
 	}
 	if w.UnlessFile != "" && exists(expand(w.UnlessFile, env.Home)) {

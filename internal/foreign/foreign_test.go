@@ -208,11 +208,11 @@ func TestDescribe(t *testing.T) {
 	if a.String() != "foreign writer systemdUnit o.timer" {
 		t.Error(a.String())
 	}
-	err := Refusal([]Active{a})
+	err := Refusal(Result{Active: []Active{a}})
 	if err == nil || strings.Contains(err.Error(), "\n") || !strings.Contains(err.Error(), "systemdUnit o.timer") || !strings.Contains(err.Error(), "--ignore-foreign-writers") {
 		t.Errorf("%v", err)
 	}
-	if Refusal(nil) != nil {
+	if Refusal(Result{}) != nil {
 		t.Error("no active writer, no refusal")
 	}
 }
@@ -317,5 +317,81 @@ func TestQuietOnlyLooksAtOwnedFolders(t *testing.T) {
 func TestQuietMissingClaudeDirIsQuiet(t *testing.T) {
 	if err := QuietCheck([]Target{{Claude: filepath.Join(t.TempDir(), "none")}}, 1, func(time.Duration) {}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// ---- fail closed ----
+
+func TestPluginSettingsUnreadableOrMalformedIsActive(t *testing.T) {
+	e := env(t)
+	w := Writer{ClaudePlugin: "p@m"}
+	for _, name := range []string{"settings.json", "settings.local.json"} {
+		p := filepath.Join(e.Home, ".claude", name)
+		writeFile(t, p, `{not json`)
+		if got := Check([]Writer{w}, e); len(got) != 1 {
+			t.Errorf("malformed %s must count as active: %v", name, got)
+		}
+		writeFile(t, p, `{"enabledPlugins": "oops"}`)
+		if got := Check([]Writer{w}, e); len(got) != 1 {
+			t.Errorf("wrong-typed enabledPlugins in %s must count as active: %v", name, got)
+		}
+		os.Remove(p)
+		if got := Check([]Writer{w}, e); len(got) != 0 {
+			t.Errorf("a missing %s is just absent: %v", name, got)
+		}
+	}
+	// A settings path that exists but cannot be read (a directory).
+	if err := os.MkdirAll(filepath.Join(e.Home, ".claude", "settings.json"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := Check([]Writer{w}, e); len(got) != 1 {
+		t.Errorf("unreadable settings must count as active: %v", got)
+	}
+}
+
+func TestPluginReadsSettingsLocalAndConfigDir(t *testing.T) {
+	e := env(t)
+	w := Writer{ClaudePlugin: "p@m"}
+	writeFile(t, filepath.Join(e.Home, ".claude", "settings.local.json"), `{"enabledPlugins": {"p@m": true}}`)
+	if got := Check([]Writer{w}, e); len(got) != 1 {
+		t.Fatalf("settings.local.json counts: %v", got)
+	}
+	os.Remove(filepath.Join(e.Home, ".claude", "settings.local.json"))
+	e.ClaudeDir = filepath.Join(t.TempDir(), "cc")
+	writeFile(t, filepath.Join(e.ClaudeDir, "settings.json"), `{"enabledPlugins": {"p@m": true}}`)
+	if got := Check([]Writer{w}, e); len(got) != 1 {
+		t.Fatalf("CLAUDE_CONFIG_DIR counts: %v", got)
+	}
+}
+
+func TestDefaultEnvHonoursClaudeConfigDir(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "/somewhere/cc")
+	if got := DefaultEnv(nil).ClaudeDir; got != "/somewhere/cc" {
+		t.Errorf("%q", got)
+	}
+}
+
+func TestUncheckableOnLinuxIsReported(t *testing.T) {
+	e := env(t)
+	e.Systemctl = func(...string) (string, error) { return "", errors.New("exec: systemctl: not found") }
+	e.Processes = func() ([]string, error) { return nil, errors.New("no /proc") }
+	r := Inspect([]Writer{{SystemdUnit: "u.timer"}, {Process: "p"}, {File: filepath.Join(e.Home, "none")}}, e)
+	if len(r.Active) != 0 || len(r.Unchecked) != 2 {
+		t.Fatalf("%+v", r)
+	}
+	err := Refusal(r)
+	if err == nil || !strings.Contains(err.Error(), "could not be checked") || !strings.Contains(err.Error(), "systemdUnit u.timer") || strings.Contains(err.Error(), "\n") {
+		t.Errorf("%v", err)
+	}
+}
+
+func TestOffLinuxOnlyFileAndPluginAreChecked(t *testing.T) {
+	e := env(t)
+	e.GOOS = "darwin"
+	e.Systemctl = func(...string) (string, error) { t.Error("no systemctl"); return "", nil }
+	e.Processes = func() ([]string, error) { t.Error("no /proc"); return nil, errors.New("x") }
+	r := Inspect([]Writer{{SystemdUnit: "u"}, {Process: "p"}}, e)
+	if len(r.Active)+len(r.Unchecked) != 0 {
+		t.Errorf("skipped, not unchecked: %+v", r)
 	}
 }

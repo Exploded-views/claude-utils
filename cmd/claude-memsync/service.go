@@ -251,17 +251,17 @@ func runStatus(args []string) int {
 	default:
 		fmt.Println(st)
 	}
-	if lines := foreignStatusLines(); len(lines) > 0 {
-		for _, l := range lines {
-			fmt.Println(l)
-		}
-		code = 1
-	}
 	if handled, c := routedStatus(); handled {
 		if c > code {
 			code = c
 		}
 		return code
+	}
+	if lines := foreignStatusLines(); len(lines) > 0 {
+		for _, l := range lines {
+			fmt.Println(l)
+		}
+		code = 1
 	}
 	if cfg, err := loadDistillConfig(""); err == nil {
 		if b, err := os.ReadFile(loopFailedPath(cfg.SyncDir)); err == nil {
@@ -301,6 +301,10 @@ func routedStatus() (handled bool, code int) {
 		fmt.Println(l)
 	}
 	code = 0
+	for _, l := range set.foreignLines() {
+		fmt.Println(l)
+		code = 1
+	}
 	for _, name := range set.names() {
 		cfg := set.Cfgs[name]
 		var lines []string
@@ -337,7 +341,7 @@ func pausedLine(cfg config.Config) string {
 // in kardianos's service.Run() so the same code path serves both interactive
 // invocation (terminal, Windows scheduled task, systemd user unit) and any
 // future move to true SCM-managed mode.
-func runService(configPath, routesFlag string, ignoreForeign bool) int {
+func runService(configPath, routesFlag string, opts guardOpts) int {
 	if configPath == "" {
 		configPath = defaultConfigPath()
 	}
@@ -365,7 +369,7 @@ func runService(configPath, routesFlag string, ignoreForeign bool) int {
 	if pidDir == "" {
 		pidDir = defaultSyncDir()
 	}
-	if err := startGuard(configPath, routes, routed, ignoreForeign); err != nil {
+	if err := startGuard(configPath, routes, routed, opts); err != nil {
 		fmt.Fprintln(os.Stderr, "run:", err)
 		return 1
 	}

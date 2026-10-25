@@ -1100,13 +1100,14 @@ hook that still fires, or a daemon that was never stopped. claude-memsync would
 then mirror whatever it wrote, including copies filed in the wrong folder, into
 the repos the folders route to.
 
-Two guards run at `run` (service start) and at `init`, before anything is
-mirrored or pushed.
+The `foreignWriters` list is the primary guard. The quiet window below is a
+weak extra signal.
 
 ### foreignWriters
 
-List the predecessor under `foreignWriters` in `routes.json` (routed mode) or
-`config.json` (single repo). Each entry is exactly one of:
+List the predecessor under `foreignWriters` in `routes.json` (applies to every
+repo) and/or in a repo's `config.json` (applies to that repo; `init` keeps it
+when you re-init). Each entry is exactly one of:
 
 ```json
 "foreignWriters": [
@@ -1120,32 +1121,50 @@ List the predecessor under `foreignWriters` in `routes.json` (routed mode) or
 - `file`: active if the file exists and, when `jsonKeyNonEmpty` is set, that
   top-level key holds a non-empty value. A file that exists but cannot be parsed
   counts as active.
-- `systemdUnit`: active if `systemctl --user is-enabled` or `is-active` says
-  enabled or active. Skipped, with a log line, off Linux.
-- `process`: active if a running process's command line contains the text
-  (Linux, `/proc`). claude-memsync's own process is ignored, but choose text
-  that does not also match a claude-memsync command line.
-- `claudePlugin`: active if `name@marketplace` is enabled in
-  `~/.claude/settings.json` (`enabledPlugins`). `onlyIfFile` names the plugin's
-  own config: when it is set and missing, the plugin is inert. `unlessFile` is
-  the opposite: an enabled plugin is inert while that file exists.
+- `systemdUnit` (Linux only): active if `systemctl --user is-enabled` or
+  `is-active` says enabled or active.
+- `process` (Linux only): active if a running process's command line contains
+  the text. claude-memsync's own process is ignored, but choose text that does
+  not also match a claude-memsync command line.
+- `claudePlugin`: active if `name@marketplace` is enabled in `settings.json` or
+  `settings.local.json` of the Claude config dir (`CLAUDE_CONFIG_DIR`, else
+  `~/.claude`). A settings file that exists but cannot be read or parsed counts
+  as enabling it. `onlyIfFile` names the plugin's own config: when set and
+  missing, the plugin is inert. `unlessFile` is the opposite: an enabled plugin
+  is inert while that file exists.
+
+Off Linux only `file` and `claudePlugin` entries are checked; `systemdUnit` and
+`process` entries are skipped with a log line. On Linux, a `systemdUnit` or
+`process` entry that cannot be checked (no `systemctl`, no `/proc`) refuses the
+start like an active one does.
 
 If any entry is active, `run` and `init` exit non-zero with one line naming the
 kind and the configured value (never a note name), and `status` shows
-`blocked: foreign writer <kind> <value>`. `--ignore-foreign-writers` starts
-anyway and logs a warning per active entry.
+`blocked: foreign writer <kind> <value>` (per repo in routed mode).
+`--ignore-foreign-writers` starts anyway and logs a warning per entry.
+
+While a routed daemon runs, the list is checked again on every routes reload
+and every supervised loop restart. If an entry has become active, the repo it
+applies to stops mirroring, committing, pulling and pushing, logged once and
+shown in `status`; the daemon keeps running and the other repos carry on. The
+repo resumes when the writer is gone. Notes mirrored before the writer was seen
+are not undone.
 
 ### Quiet window
 
-Independent of the list, before the first sync of a run claude-memsync takes a
-snapshot (size, modification time, SHA-256) of the memory files of every folder
-it owns, waits `startQuietSec` seconds (default 15, in `config.json`; 0 turns it
-off), and takes another. If anything in an owned folder changed, it refuses
+A busy host writes memory all the time, so the window is limited to the
+migration moment: the first start after `init` for each repo (a marker in
+`.state/` records that it has been done). Before the first sync, claude-memsync
+snapshots (size, modification time, SHA-256) the memory files of every folder it
+owns, waits `startQuietSec` seconds (default 15, in `config.json`; 0 turns it
+off), and snapshots again. If anything in an owned folder changed, it refuses
 with `owned folder changed during start-up quiet window: something else writes
-there`, naming the folder by hash. `--ignore-foreign-writers` does not skip it.
-In routed mode the longest `startQuietSec` of the repos applies. Stop the other
-writer, or find it (the hash is the first 8 hex digits of the SHA-256 of the
-folder name), and start again.
+there`, naming the folder by hash (the first 8 hex digits of the SHA-256 of the
+folder name). Stop the other writer and start again.
+
+`init` always runs the window. Later starts skip it; `run --quiet-window`
+forces it, and `--skip-quiet-window` (on `run` or `init`) skips it for a
+deliberate first start. `--ignore-foreign-writers` does not skip it.
 
 ## Related projects
 

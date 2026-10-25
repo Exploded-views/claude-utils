@@ -328,6 +328,7 @@ func TestRunInitPrivateOnlyPublicPushesNothing(t *testing.T) {
 	claude := filepath.Join(root, "claude")
 	_ = os.MkdirAll(filepath.Join(claude, "p1", "memory"), 0700)
 	_ = os.WriteFile(filepath.Join(claude, "p1", "memory", "a.md"), []byte("x\n"), 0600)
+	fastQuietWindow(t)
 	// runInit needs a merge driver sibling; fake one next to the test binary.
 	exe, _ := os.Executable()
 	drv := filepath.Join(filepath.Dir(exe), "claude-memmerge")
@@ -521,6 +522,7 @@ func TestRunInitInsteadOfPushesNothing(t *testing.T) {
 	claude := filepath.Join(root, "claude")
 	_ = os.MkdirAll(filepath.Join(claude, "p1", "memory"), 0700)
 	_ = os.WriteFile(filepath.Join(claude, "p1", "memory", "a.md"), []byte("x\n"), 0600)
+	fastQuietWindow(t)
 	exe, _ := os.Executable()
 	drv := filepath.Join(filepath.Dir(exe), "claude-memmerge")
 	if _, err := os.Stat(drv); err != nil {
