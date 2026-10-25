@@ -435,15 +435,22 @@ func TestSuggest_ScopedToTheOwningRepo(t *testing.T) {
 	if code, _, _ := suggestRaw(); code != 2 {
 		t.Fatal("suggest without a project listed the host")
 	}
+	// host-wide shows every pair and counts the refused ones
+	_, all, _ := suggestRaw("--all")
+	if strings.Contains(all, "ycorp") || !strings.Contains(all, "2 withheld by policy") {
+		t.Fatalf("--all:\n%s", all)
+	}
 	// the environment variable stands in for --project
 	t.Setenv("CLAUDE_PROJECT_DIR", h.dir["a"])
 	if _, out, _ := suggestRaw(); !strings.Contains(out, "mem-project-a -> mem-project-c") {
 		t.Fatalf("env project:\n%s", out)
 	}
-	// host-wide shows every pair and counts the refused ones
-	_, all, _ := suggestRaw("--all")
-	if strings.Contains(all, "ycorp") || !strings.Contains(all, "2 withheld by policy") {
-		t.Fatalf("--all:\n%s", all)
+	// inside a Claude session --all is refused, with or without --project
+	for _, args := range [][]string{{"--all"}, {"--all", "--project", h.dir["a"]}} {
+		code, out, errs := suggestRaw(args...)
+		if code != 2 || strings.Contains(out, "mem-project") || !strings.Contains(errs, "--all") {
+			t.Fatalf("--all inside a session: code %d out %q err %q", code, out, errs)
+		}
 	}
 }
 

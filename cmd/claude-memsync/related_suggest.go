@@ -262,6 +262,10 @@ func relatedSuggestCmd(stdout, stderr io.Writer, args []string) int {
 		fmt.Fprintln(stderr, "usage: claude-memsync related suggest [--project DIR] [--json] [--min-score N] [--co-open-hours N] [--routes FILE]")
 		return 2
 	}
+	if *all && os.Getenv("CLAUDE_PROJECT_DIR") != "" {
+		fmt.Fprintln(stderr, "related suggest: --all is for the operator's own terminal, not inside a Claude session")
+		return 2
+	}
 	if *project == "" {
 		*project = os.Getenv("CLAUDE_PROJECT_DIR")
 	}

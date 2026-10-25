@@ -21,7 +21,7 @@ func writeFile(t *testing.T, dir, name, body string) {
 	}
 }
 
-func TestReadSessions_OnlyCwdAndTimestamps(t *testing.T) {
+func TestReadSessions_OnlyTimestamps(t *testing.T) {
 	dir := t.TempDir()
 	huge := `{"timestamp":"2030-01-01T00:00:00Z","cwd":"/x","message":"` + strings.Repeat("a", maxTranscriptLine+10) + `"}`
 	writeFile(t, dir, "s1.jsonl", strings.Join([]string{
@@ -37,7 +37,7 @@ func TestReadSessions_OnlyCwdAndTimestamps(t *testing.T) {
 		t.Fatalf("sessions %v err %v", got, err)
 	}
 	s := got[0]
-	if s.Cwd != "/work/a" || !s.Start.Equal(time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)) ||
+	if !s.Start.Equal(time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)) ||
 		!s.End.Equal(time.Date(2026, 10, 1, 11, 30, 0, 0, time.UTC)) {
 		t.Fatalf("session %+v (an oversize line must be skipped)", s)
 	}
@@ -422,7 +422,7 @@ func TestSessionIndex_IncrementalByMtimeAndOffset(t *testing.T) {
 	if opens != 2 || !ss[0].End.Equal(time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)) {
 		t.Fatalf("append: %+v opens %d", ss, opens)
 	}
-	st := ix.Files["f/s.jsonl"]
+	st := ix.Files[fileKey("f", "s.jsonl")]
 	if st.Offset != int64(len(line("2026-10-01T10:00:00Z")+line("2026-10-01T12:00:00Z"))) {
 		t.Fatalf("offset %d counts the partial line", st.Offset)
 	}
@@ -458,4 +458,80 @@ func evText(sg []Signal) string {
 		parts = append(parts, string(g.Kind)+": "+g.Detail)
 	}
 	return strings.Join(parts, "\n")
+}
+
+func TestSessionIndex_HoldsNoPathsOnDisk(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "abc-123.jsonl", `{"cwd":"/home/someone/checkout/secret-repo","timestamp":"2026-10-01T10:00:00Z"}`+"\n")
+	ix := &SessionIndex{}
+	ix.Update(dir, "-home-someone-checkout-secret-repo", time.Time{})
+	p := filepath.Join(t.TempDir(), "ix.json")
+	if err := ix.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(p)
+	for _, bad := range []string{"/home", "checkout", "secret-repo", "someone", "cwd", "Cwd"} {
+		if strings.Contains(string(b), bad) {
+			t.Fatalf("index holds %q: %s", bad, b)
+		}
+	}
+	// still incremental after a reload
+	opens := 0
+	orig := openTranscript
+	openTranscript = func(p string) (io.ReadSeekCloser, error) { opens++; return os.Open(p) }
+	defer func() { openTranscript = orig }()
+	if ss, ok := LoadSessionIndex(p).Update(dir, "-home-someone-checkout-secret-repo", time.Time{}); !ok || len(ss) != 1 || opens != 0 {
+		t.Fatalf("reloaded: %v %v opens %d", ss, ok, opens)
+	}
+}
+
+func TestSessionIndex_DeadlineStopsInsideAFileAndResumes(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	var sb strings.Builder
+	const n = 35000
+	for i := 0; i < n; i++ {
+		sb.WriteString(`{"timestamp":"` + base.Add(time.Duration(i)*time.Second).Format(time.RFC3339) + `"}` + "\n")
+	}
+	writeFile(t, dir, "big.jsonl", sb.String())
+	deadline := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	calls := 0
+	origNow := nowFn
+	nowFn = func() time.Time { // in time for the between-files check and the first scan check, then past it
+		calls++
+		if calls <= 2 {
+			return deadline.Add(-time.Second)
+		}
+		return deadline.Add(time.Second)
+	}
+	defer func() { nowFn = origNow }()
+	ix := &SessionIndex{}
+	ss, ok := ix.Update(dir, "f", deadline)
+	if ok {
+		t.Fatal("a file read past the deadline reported complete")
+	}
+	st := ix.Files[fileKey("f", "big.jsonl")]
+	if st.Offset <= 0 || st.Offset >= int64(sb.Len()) {
+		t.Fatalf("offset %d of %d: should be partway", st.Offset, sb.Len())
+	}
+	if len(ss) != 1 || !ss[0].End.Before(base.Add((n-1)*time.Second)) {
+		t.Fatalf("partial session %+v", ss)
+	}
+	// next tick, no deadline: continues from the offset to the end
+	nowFn = origNow
+	opened := int64(-1)
+	orig := openTranscript
+	openTranscript = func(p string) (io.ReadSeekCloser, error) {
+		f, err := os.Open(p)
+		opened = st.Offset
+		return f, err
+	}
+	defer func() { openTranscript = orig }()
+	ss, ok = ix.Update(dir, "f", time.Time{})
+	if !ok || opened != st.Offset || len(ss) != 1 || !ss[0].End.Equal(base.Add((n-1)*time.Second)) || !ss[0].Start.Equal(base) {
+		t.Fatalf("resume: ok=%v %+v", ok, ss)
+	}
+	if got := ix.Files[fileKey("f", "big.jsonl")].Offset; got != int64(sb.Len()) {
+		t.Fatalf("final offset %d, want %d", got, sb.Len())
+	}
 }
