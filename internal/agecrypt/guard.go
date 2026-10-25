@@ -148,6 +148,7 @@ func pushGuard(repo *gitwt.Repo, branch string, requireReviewed bool) error {
 		return err
 	}
 	var bad int
+	pq := SchemeOf(repo) == SchemePQ
 	jb, err := repo.BlobContents(joinOIDs)
 	if err != nil {
 		return err
@@ -158,13 +159,13 @@ func pushGuard(repo *gitwt.Repo, branch string, requireReviewed bool) error {
 		}
 	}
 	for i, b := range blobs {
-		if !IsCiphertext(b) {
+		if !IsCiphertext(b) || (pq && !IsHybridCiphertext(b)) {
 			bad++
 			_ = paths[i] // the name is not logged: it may be sensitive
 		}
 	}
 	if bad > 0 {
-		return fmt.Errorf("push refused: %d blob(s) to push are not age ciphertext (is the memage filter configured in this clone?)", bad)
+		return fmt.Errorf("push refused: %d blob(s) to push are not age ciphertext of the repo's scheme (is the memage filter configured in this clone?)", bad)
 	}
 	return nil
 }

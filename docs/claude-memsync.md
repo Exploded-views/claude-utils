@@ -979,7 +979,7 @@ Lists the org's repos and exits non-zero, naming each one, if any `mem-*` repo
 is public or internal, or if the repo this host joined is not private or lacks
 the `mem-` prefix. Public repos without the prefix are ignored. Output is repo
 names only. `--org` defaults to `githubOrg` in `config.json`, else the owner of
-the remote. `--token-file` names a file holding the GitHub token for this run, as `init --token-file` does (it is not written to `config.json`; `MEMSYNC_GITHUB_TOKEN` also works); with a routes file it applies to every repo. `--config` checks the one repo that config names. `repo create` resolves the org the same way and refuses if none is set.
+the remote. `--token-file` names a file holding the GitHub token for this run, as `init --token-file` does (it is not written to `config.json`; `MEMSYNC_GITHUB_TOKEN` also works); with a routes file it applies to every repo. `--config` checks the one repo that config names. `repo create` resolves the org the same way and refuses if none is set. For every command (`doctor`, `host list|retire|check-key`, `repo create`), a token flag typed on the command line (`--token-file`, `--token-cmd`, `--github-app`) wins over the token sources in `config.json`: a host whose config names the Metadata-only check app can still retire deploy keys with the admin token passed as a flag.
 
 `claude-memsync doctor --install-timer` writes a daily systemd user timer
 (Linux) or launchd agent (macOS) into `~/.config/systemd/user` or
@@ -1451,9 +1451,47 @@ How it works:
   otherwise.
 - The secret scrub reads the plaintext, not the ciphertext.
 
+### Encryption scheme: post-quantum by default
+
+`config.json` `encryptionScheme` is `pq` (the default for `init --encrypt`) or
+`classic` (upstream-compatible; also what a config without the field means).
+Under `pq` every recipient is a hybrid ML-KEM-768 + X25519 age key (`age1pq1...`,
+about 1,960 characters; identity `AGE-SECRET-KEY-PQ-1...`). `init --encrypt`
+generates a hybrid host identity (mode 0600, never printed) and prints only the
+public recipient. `--recipient`, `--recovery-recipient`, `recipients add`,
+`join accept` and `recipients label recovery` refuse classic X25519 and ssh keys
+under `pq` (age itself cannot mix the two), and a classic repo refuses hybrid
+keys. The pre-push guard also refuses classic ciphertext from a `pq` repo. A
+join request carries the long key, so its size cap is 4 KiB (the format is still
+exactly four lines). Choose the other scheme with `init --encryption-scheme`.
+
+Migrate an existing classic repo whose only member is this host:
+
+    claude-memsync recipients rekey-pq --repo <name> | --all \
+        --recovery-recipient <age1pq1...> --host <label> [--fresh-root] [--apply]
+
+It is a dry run unless `--apply` (daemon stopped): it prints the repos, the
+current recipient count and the file counts, and says when history will be
+replaced. `--apply` creates a new hybrid identity beside the old one
+(`identity-pq.txt`; the classic file is renamed `<name>.classic-retired` once no
+other repo on the host uses it), sets `.age-recipients` to exactly this host
+(`# host:<label>`) and the recovery key (`# recovery`), sets
+`encryptionScheme`, `hostLabel` and `recoveryRecipients`, re-pins, and
+re-encrypts every file at HEAD in one commit. With `--fresh-root` that commit is
+an orphan root, force-pushed with `--force-with-lease` on the old tip; the
+command then checks that origin/main has one commit and that every file is
+hybrid ciphertext (it prints counts only). It refuses when the recipients
+include any key other than this host's and the configured recovery keys, when
+the work-tree is dirty or the branch differs from origin/main, and for a
+read-only host. The pre-migration tip stays at `refs/memsync/pre-pq` for
+rollback; `rekey-pq --drop-backup` deletes it, expires the reflogs and runs
+`gc --prune=now` so the classic ciphertext leaves the local clone. Other hosts
+that were members of the old repo must re-clone.
+
 ### Keys
 
-`init --encrypt` generates a per-host X25519 identity (mode 0600; default
+`init --encrypt` generates a per-host identity (hybrid under `pq`, X25519 under
+`classic`) (mode 0600; default
 `<user config dir>/claude-memsync/identity.txt`, or `--identity <file>`) and
 prints only the **public** recipient. An existing age identity file, or an
 unencrypted SSH ed25519/RSA key (age cannot use ssh-agent, so a passphrase-protected

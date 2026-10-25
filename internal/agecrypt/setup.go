@@ -21,6 +21,7 @@ type Opts struct {
 	MemsyncExe   string // claude-memsync, runs the filter and textconv
 	MemmergeExe  string // claude-memmerge, runs the merge drivers
 	IdentityPath string // this host's age identity
+	Scheme       string // "pq" or "classic"; "" leaves the clone's recorded scheme alone
 }
 
 // ShellQuote quotes a path for the POSIX sh that git runs configured commands
@@ -60,6 +61,12 @@ func Configure(repo *gitwt.Repo, o Opts) error {
 		{"merge.memtext.driver", MergeCommand(o.MemmergeExe, "--text")},
 		{"merge.memunion.name", "decrypting union merge"},
 		{"merge.memunion.driver", MergeCommand(o.MemmergeExe, "--union")},
+	}
+	if o.Scheme != "" {
+		if !ValidScheme(o.Scheme) {
+			return fmt.Errorf("unknown encryption scheme %q (use pq or classic)", o.Scheme)
+		}
+		kv = append(kv, [2]string{SchemeConfigKey, o.Scheme})
 	}
 	for _, e := range kv {
 		if err := repo.ConfigSet(e[0], e[1]); err != nil {
@@ -176,13 +183,22 @@ func WriteAttributes(dir string) error {
 
 // WriteRecipients writes a new recipients file at dir.
 func WriteRecipients(dir string, keys []string) error {
+	data, err := recipientsBytes(keys)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, RecipientsFile), data, 0o600)
+}
+
+// recipientsBytes is the content of a recipients file holding keys.
+func recipientsBytes(keys []string) ([]byte, error) {
 	var b strings.Builder
 	b.WriteString("# Public age recipients of this memory repo. Public keys only.\n")
 	for _, k := range keys {
 		fmt.Fprintln(&b, strings.TrimSpace(k))
 	}
 	if _, err := ParseRecipients([]byte(b.String())); err != nil {
-		return err
+		return nil, err
 	}
-	return os.WriteFile(filepath.Join(dir, RecipientsFile), []byte(b.String()), 0o600)
+	return []byte(b.String()), nil
 }

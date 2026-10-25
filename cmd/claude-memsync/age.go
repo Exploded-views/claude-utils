@@ -57,7 +57,7 @@ func runAgeTextconv(args []string) int {
 // runRecipients handles `claude-memsync recipients add|remove|list|accept`.
 func runRecipients(args []string) int { return recipientsCmd(os.Stdout, os.Stderr, args) }
 
-const recipientsUsage = "usage: claude-memsync recipients add <public-key> [--host <label>] | remove <public-key> | list | accept --yes | label self --host <label> | label recovery <public-key> [--all]  [--repo <name> | --config <path>] [--routes <path>]"
+const recipientsUsage = "usage: claude-memsync recipients add <public-key> [--host <label>] | remove <public-key> | list | accept --yes | label self --host <label> | label recovery <public-key> [--all] | rekey-pq --recovery-recipient <age1pq1...> --host <label> [--all] [--fresh-root] [--apply] | rekey-pq --drop-backup  [--repo <name> | --config <path>] [--routes <path>]"
 
 // recipientsCmd acts on one repo. With a routes file the repo must be named
 // (--repo or --config): the personal repo is never assumed, since a key added
@@ -75,6 +75,9 @@ func recipientsCmd(stdout, stderr io.Writer, args []string) int {
 	args, hostLabel := extractFlag(args, "--host")
 	if len(args) > 0 && args[0] == "label" {
 		return labelCmd(stdout, stderr, sel, args[1:], hostLabel)
+	}
+	if len(args) > 0 && args[0] == "rekey-pq" {
+		return rekeyPQCmd(stdout, stderr, sel, args[1:], hostLabel)
 	}
 	cfg, _, err := resolveRepo(sel, true)
 	if err != nil {

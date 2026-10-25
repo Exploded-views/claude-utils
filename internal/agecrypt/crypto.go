@@ -169,16 +169,19 @@ func GenerateIdentity(path string) (string, error) {
 	return id.Recipient().String(), nil
 }
 
-// IdentityRecipient returns the public recipient of an X25519 identity file.
+// IdentityRecipient returns the public recipient of an X25519 or hybrid identity file.
 func IdentityRecipient(path string) (string, error) {
 	ids, err := LoadIdentities(path)
 	if err != nil {
 		return "", err
 	}
 	for _, id := range ids {
-		if x, ok := id.(*age.X25519Identity); ok {
+		switch x := id.(type) {
+		case *age.X25519Identity:
+			return x.Recipient().String(), nil
+		case *age.HybridIdentity:
 			return x.Recipient().String(), nil
 		}
 	}
-	return "", errors.New("identity is not an age X25519 key; pass its public key with --recipient")
+	return "", errors.New("identity is not an age X25519 or hybrid key; pass its public key with --recipient")
 }

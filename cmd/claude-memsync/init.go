@@ -30,6 +30,7 @@ type encryptSpec struct {
 	IdentityPath string   // this host's identity file (generated if missing)
 	Recipients   []string // extra public keys, e.g. an offline recovery key
 	MemsyncExe   string   // path of claude-memsync, which runs the filter
+	Scheme       string   // "pq" or "classic" ("" is classic: library callers predating the field)
 }
 
 // stringList is a repeatable string flag.
@@ -69,12 +70,13 @@ func runInit(args []string) int {
 	denylist := flags.String("denylist", "", "UTF-8 file of regexes (one per line) to install as the denylist before the first commit")
 	encrypt := flags.Bool("encrypt", false, "encrypt every file in the repo with age (new or already-encrypted remotes only)")
 	identity := flags.String("identity", "", "with --encrypt: age identity file (default: per-host key under the user config dir; generated if missing)")
+	scheme := flags.String("encryption-scheme", agecrypt.SchemePQ, "with --encrypt: pq (hybrid post-quantum age keys only, the default) or classic (upstream-compatible X25519/ssh keys); saved as encryptionScheme")
 	var extraRecipients stringList
 	var gopts guardOpts
 	flags.BoolVar(&gopts.IgnoreForeign, "ignore-foreign-writers", false, "go on although a foreignWriters entry is active or cannot be checked (logged)")
 	flags.BoolVar(&gopts.SkipQuiet, "skip-quiet-window", false, "skip the start-up quiet window")
 	var recoveryRecipients stringList
-	flags.Var(&recoveryRecipients, "recovery-recipient", "with --encrypt: the owner's offline recovery key (age/ssh public key, repeatable): a recipient like --recipient, marked \"# recovery\", saved as recoveryRecipients, and the only kind of recipient `join accept` lets go unlabelled")
+	flags.Var(&recoveryRecipients, "recovery-recipient", "with --encrypt: the owner's offline recovery key (an age1pq1... public key under the pq scheme, repeatable): a recipient like --recipient, marked \"# recovery\", saved as recoveryRecipients, and the only kind of recipient `join accept` lets go unlabelled")
 	flags.Var(&extraRecipients, "recipient", "with --encrypt: extra age/ssh public key, e.g. an offline recovery key (repeatable)")
 
 	if err := flags.Parse(args); err != nil {
@@ -84,6 +86,18 @@ func runInit(args []string) int {
 		fmt.Fprintln(os.Stderr, "init: --remote is required")
 		flags.Usage()
 		return 2
+	}
+
+	if *encrypt {
+		if !agecrypt.ValidScheme(*scheme) {
+			fmt.Fprintln(os.Stderr, "init: --encryption-scheme must be pq or classic")
+			return 2
+		}
+		keys := append(append([]string{}, extraRecipients...), recoveryRecipients...)
+		if err := agecrypt.CheckKeysForScheme(*scheme, keys); err != nil {
+			fmt.Fprintln(os.Stderr, "init: --recipient/--recovery-recipient:", err)
+			return 2
+		}
 	}
 
 	// Read and validate up front: a bad denylist must stop init before it
@@ -158,7 +172,8 @@ func runInit(args []string) int {
 		for _, r := range recoveryRecipients {
 			recs = append(recs, strings.TrimSpace(r)+" # recovery")
 		}
-		enc = &encryptSpec{IdentityPath: *identity, Recipients: recs}
+		enc = &encryptSpec{IdentityPath: *identity, Recipients: recs, Scheme: *scheme}
+		cfg.EncryptionScheme = *scheme
 		cfg.RecoveryRecipients = append([]string{}, recoveryRecipients...)
 		if enc.IdentityPath == "" {
 			enc.IdentityPath = defaultIdentityPath()
@@ -270,6 +285,9 @@ func bootstrapFull(cfg config.Config, force bool, denylist []byte, enc *encryptS
 
 	var ownRecipient string
 	if enc != nil {
+		if enc.Scheme != "" {
+			cfg.EncryptionScheme = enc.Scheme
+		}
 		var err error
 		if ownRecipient, err = prepareIdentity(enc); err != nil {
 			return err
@@ -498,6 +516,9 @@ func mergeReinit(cfg config.Config, oldPath string) config.Config {
 	if cfg.CheckKeyWarn == 0 {
 		cfg.CheckKeyWarn = old.CheckKeyWarn
 	}
+	if cfg.EncryptionScheme == "" {
+		cfg.EncryptionScheme = old.EncryptionScheme
+	}
 	return cfg
 }
 
@@ -507,6 +528,11 @@ func mergeReinit(cfg config.Config, oldPath string) config.Config {
 func prepareIdentity(enc *encryptSpec) (string, error) {
 	if _, err := os.Stat(enc.IdentityPath); err == nil {
 		rcpt, err := agecrypt.IdentityRecipient(enc.IdentityPath)
+		if err == nil && enc.Scheme != "" {
+			if kerr := agecrypt.CheckKeysForScheme(enc.Scheme, []string{rcpt}); kerr != nil {
+				return "", fmt.Errorf("identity %s does not fit encryption scheme %s: %w", enc.IdentityPath, enc.Scheme, kerr)
+			}
+		}
 		if err != nil {
 			if len(enc.Recipients) == 0 {
 				return "", fmt.Errorf("identity %s: %w", enc.IdentityPath, err)
@@ -518,11 +544,16 @@ func prepareIdentity(enc *encryptSpec) (string, error) {
 		}
 		return rcpt, nil
 	}
-	rcpt, err := agecrypt.GenerateIdentity(enc.IdentityPath)
+	gen := agecrypt.GenerateIdentity
+	kind := "age"
+	if enc.Scheme == agecrypt.SchemePQ {
+		gen, kind = agecrypt.GenerateHybridIdentity, "post-quantum hybrid age"
+	}
+	rcpt, err := gen(enc.IdentityPath)
 	if err != nil {
 		return "", err
 	}
-	fmt.Fprintln(os.Stderr, "generated a new age identity (mode 0600):", enc.IdentityPath)
+	fmt.Fprintf(os.Stderr, "generated a new %s identity (mode 0600): %s\n", kind, enc.IdentityPath)
 	fmt.Fprintln(os.Stderr, "back it up somewhere safe and offline; without it (or the recovery key) the data is unreadable")
 	fmt.Fprintln(os.Stderr, "public recipient:", rcpt)
 	return rcpt, nil
@@ -537,6 +568,7 @@ func setupEncryption(repo *gitwt.Repo, cfg config.Config, enc *encryptSpec, ownR
 		MemsyncExe:   enc.MemsyncExe,
 		MemmergeExe:  cfg.MergeDriverPath,
 		IdentityPath: enc.IdentityPath,
+		Scheme:       enc.Scheme,
 	}); err != nil {
 		return fmt.Errorf("configure encryption: %w", err)
 	}
@@ -550,6 +582,14 @@ func setupEncryption(repo *gitwt.Repo, cfg config.Config, enc *encryptSpec, ownR
 		}
 		if err := agecrypt.PinCurrent(repo); err != nil {
 			return err
+		}
+		if enc.Scheme != "" {
+			// An existing remote's scheme is whatever its recipients are.
+			if keys, lerr := agecrypt.ListRecipients(cfg.SyncDir); lerr == nil {
+				if serr := agecrypt.CheckKeysForScheme(enc.Scheme, keys); serr != nil {
+					return fmt.Errorf("the remote repo does not use the %s scheme this init asked for (pass --encryption-scheme %s to match it): %w", enc.Scheme, otherScheme(enc.Scheme), serr)
+				}
+			}
 		}
 		if _, err := repo.Run("reset", "--hard", "-q", "HEAD"); err != nil {
 			return fmt.Errorf("check out through the filter: %w", err)
@@ -575,6 +615,13 @@ func setupEncryption(repo *gitwt.Repo, cfg config.Config, enc *encryptSpec, ownR
 	}
 	fmt.Fprintln(os.Stderr, "encryption on: add an offline recovery recipient with `claude-memsync recipients add <public-key>` if you did not pass --recipient")
 	return nil
+}
+
+func otherScheme(s string) string {
+	if s == agecrypt.SchemePQ {
+		return agecrypt.SchemeClassic
+	}
+	return agecrypt.SchemePQ
 }
 
 // printDistillPermissionHint suggests the one-time Claude Code permission rule
