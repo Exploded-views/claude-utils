@@ -122,10 +122,6 @@ func (f *Filter) Clean(path string, in []byte) ([]byte, error) {
 	if rcpt.Len() == 0 {
 		return nil, errors.New("refusing to store plaintext: no recipients in " + RecipientsFile)
 	}
-	name := cacheName(in, rcpt.Fingerprint())
-	if ct, ok := f.cacheGet(name); ok {
-		return ct, nil
-	}
 	if os.Getenv(ReencryptEnv) != "1" {
 		// Cache lost: an unchanged file must still give the committed blob.
 		// Reusing the indexed blob keeps an unchanged file unmodified even
@@ -140,6 +136,10 @@ func (f *Filter) Clean(path string, in []byte) ([]byte, error) {
 				}
 			}
 		}
+	}
+	name := cacheName(in, rcpt.Fingerprint())
+	if ct, ok := f.cacheGet(name); ok {
+		return ct, nil
 	}
 	ct, err := Encrypt(in, rcpt)
 	if err != nil {

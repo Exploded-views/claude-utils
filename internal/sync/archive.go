@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/archive"
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
@@ -165,10 +166,16 @@ func finishArchive(repo *gitwt.Repo, cfg config.Config, units []archiveUnit) err
 			return err
 		}
 	}
-	if err := ensureUnionAttr(cfg.SyncDir); err != nil {
-		return err
+	kept = []string{gitwt.Literal(path.Join(archive.Dir, archive.IndexName))}
+	// An encrypted repo keeps its rules in $GIT_DIR/info/attributes (the union
+	// rule for the index included), and a changed .gitattributes there is a
+	// reviewed event: leave the file alone.
+	if !agecrypt.Enabled(repo) {
+		if err := ensureUnionAttr(cfg.SyncDir); err != nil {
+			return err
+		}
+		kept = append(kept, gitwt.Literal(".gitattributes"))
 	}
-	kept = []string{gitwt.Literal(path.Join(archive.Dir, archive.IndexName)), gitwt.Literal(".gitattributes")}
 	_, err = repo.Run(append([]string{"add", "-A", "--"}, kept...)...)
 	return err
 }

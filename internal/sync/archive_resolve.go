@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/archive"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
@@ -44,7 +45,7 @@ func resolveArchiveConflicts(repo *gitwt.Repo) (int, error) {
 		if err != nil {
 			return total, err
 		}
-		plan, ok := planArchiveResolution(entries)
+		plan, ok := planArchiveResolutionWith(entries, modifyDeleteResolver(repo))
 		if !ok {
 			return total, nil
 		}
@@ -88,6 +89,14 @@ func (r resolution) apply(repo *gitwt.Repo) error {
 	if err != nil {
 		return err
 	}
+	// An encrypted repo stores ciphertext: work on the plaintext, which the
+	// clean filter encrypts again on the add below. The name's hash is of the
+	// plaintext.
+	if plain, perr := agecrypt.PlainReader(repo)([]byte(content)); perr != nil {
+		return fmt.Errorf("cannot read a conflicted blob: %w", perr)
+	} else {
+		content = string(plain)
+	}
 	// A rename/rename merges one side's edit into the other side's copy. A copy
 	// must hold the bytes it is named for: put those back (they are in history).
 	if parts := strings.Split(r.path, "/"); len(parts) == 4 && parts[2] != archive.DistilledFolder {
@@ -113,6 +122,13 @@ func (r resolution) apply(repo *gitwt.Repo) error {
 // planArchiveResolution decides, from the conflicted index entries alone,
 // whether every path is of a safe shape, and what to do with each.
 func planArchiveResolution(entries []gitwt.UnmergedEntry) ([]resolution, bool) {
+	return planArchiveResolutionWith(entries, nil)
+}
+
+// planArchiveResolutionWith is planArchiveResolution plus a resolver for the one
+// shape that needs the file contents: a live note modified upstream and deleted
+// (archived) by the commit being replayed, stages {1,2}. nil leaves it unsafe.
+func planArchiveResolutionWith(entries []gitwt.UnmergedEntry, modDel func(p, base, upstream string) (resolution, bool)) ([]resolution, bool) {
 	if len(entries) == 0 {
 		return nil, false
 	}
@@ -150,6 +166,16 @@ func planArchiveResolution(entries []gitwt.UnmergedEntry) ([]resolution, bool) {
 					continue
 				}
 			}
+			if _, _, ok := splitMirrorPath(p); ok && modDel != nil && len(st) == 2 {
+				base, has1 := st[1]
+				up, has2 := st[2]
+				if has1 && has2 {
+					if r, ok := modDel(p, base, up); ok {
+						plan = append(plan, r)
+						continue
+					}
+				}
+			}
 			return nil, false
 		}
 	}
@@ -159,4 +185,71 @@ func planArchiveResolution(entries []gitwt.UnmergedEntry) ([]resolution, bool) {
 // resolvedLine is the cycle's one log line about it: a count, no paths.
 func resolvedLine(n int) string {
 	return fmt.Sprintf("pull: auto-resolved %d archive conflict(s) (both archive copies kept)", n)
+}
+
+// modifyDeleteResolver decides a live note that upstream changed while the
+// commit being replayed archived it. It applies only when the commit really
+// holds an archive copy of the base text, so a plain deletion is never taken
+// for an archive. If the upstream text is the base text (an encrypted repo
+// re-encrypts every file when a recipient joins, which looks like a change
+// of the ciphertext), the deletion stands. If the text was edited, the edit
+// stays at the note's live path and the archive copy keeps the original: both
+// versions survive, as in repairEditedArchives.
+func modifyDeleteResolver(repo *gitwt.Repo) func(p, base, upstream string) (resolution, bool) {
+	plainOf := agecrypt.PlainReader(repo)
+	read := func(oid string) ([]byte, bool) {
+		raw, err := repo.Run("cat-file", "blob", oid)
+		if err != nil {
+			return nil, false
+		}
+		b, err := plainOf([]byte(raw))
+		return b, err == nil
+	}
+	return func(p, baseOid, upOid string) (resolution, bool) {
+		folder, name, ok := splitMirrorPath(p)
+		if !ok {
+			return resolution{}, false
+		}
+		base, ok1 := read(baseOid)
+		up, ok2 := read(upOid)
+		if !ok1 || !ok2 {
+			return resolution{}, false
+		}
+		archived, ok := replayedArchiveCopy(repo, folder, name, fullHash(base))
+		if !ok {
+			return resolution{}, false
+		}
+		if string(base) == string(up) {
+			return resolution{path: p}, true
+		}
+		parts := strings.Split(archived, "/")
+		if err := archive.AppendIndex(repo.Dir, archive.Entry{
+			Date: parts[1], Folder: folder, File: name, Reason: reasonRestored, Path: archived,
+		}); err != nil {
+			return resolution{}, false
+		}
+		if _, err := repo.Run("add", "--", gitwt.Literal(path.Join(archive.Dir, archive.IndexName))); err != nil {
+			return resolution{}, false
+		}
+		return resolution{p, upOid}, true
+	}
+}
+
+// replayedArchiveCopy finds, in the commit the rebase is replaying, the archive
+// copy of folder/name whose name carries the hash prefix of the given text.
+func replayedArchiveCopy(repo *gitwt.Repo, folder, name, hash string) (string, bool) {
+	out, err := repo.Run("ls-tree", "-r", "--name-only", "-z", "REBASE_HEAD", "--", gitwt.Literal(archive.Dir))
+	if err != nil {
+		return "", false
+	}
+	for _, p := range strings.Split(out, "\x00") {
+		parts := strings.Split(p, "/")
+		if len(parts) != 4 || parts[2] != folder {
+			continue
+		}
+		if orig, prefix, ok := archiveNameHash(parts[3]); ok && orig == name && strings.HasPrefix(hash, prefix) {
+			return p, true
+		}
+	}
+	return "", false
 }

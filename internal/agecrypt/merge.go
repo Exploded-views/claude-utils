@@ -74,7 +74,14 @@ func (c *MergeContext) Merge(fn MergeFunc, base, ours, theirs []byte) ([]byte, b
 
 // TextMerge is a 3-way line merge through `git merge-file`, with conflict
 // markers of the given size (0 = git's default).
-func TextMerge(markerSize int) MergeFunc {
+func TextMerge(markerSize int) MergeFunc { return textMerge(markerSize, false) }
+
+// UnionMerge is the line merge that keeps both sides' lines and never
+// conflicts (`git merge-file --union`): for append-only files such as
+// archive/INDEX.md.
+func UnionMerge() MergeFunc { return textMerge(0, true) }
+
+func textMerge(markerSize int, union bool) MergeFunc {
 	return func(base, ours, theirs []byte) ([]byte, bool, error) {
 		dir, err := os.MkdirTemp("", "memtext-")
 		if err != nil {
@@ -88,6 +95,9 @@ func TextMerge(markerSize int) MergeFunc {
 			}
 		}
 		args := []string{"merge-file", "-p", "-L", "ours", "-L", "base", "-L", "theirs"}
+		if union {
+			args = append(args, "--union")
+		}
 		if markerSize > 0 {
 			args = append(args, "--marker-size", strconv.Itoa(markerSize))
 		}

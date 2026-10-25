@@ -209,3 +209,35 @@ func foreignCT(t *testing.T) []byte {
 	}
 	return ct
 }
+
+// A host's cache holds its own ciphertext for a text; the indexed blob is the
+// same text encrypted elsewhere (another host's commit, or a re-encryption). An
+// unchanged file must clean back to the indexed blob, or git calls it modified
+// and refuses to rebase over it.
+func TestFilterClean_IndexedBlobBeatsOwnCacheForUnchangedText(t *testing.T) {
+	fx := newFilterFixture(t)
+	own, err := fx.f.Clean("n.md", []byte("same\n")) // seeds the cache
+	if err != nil {
+		t.Fatal(err)
+	}
+	rcpts, err := ParseRecipients([]byte(fx.rcpt + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := Encrypt([]byte("same\n"), rcpts)
+	if err != nil || bytes.Equal(own, other) {
+		t.Fatalf("setup: need two different ciphertexts of one text (%v)", err)
+	}
+	fx.indexed["n.md"] = other
+	got, err := fx.f.Clean("n.md", []byte("same\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, other) {
+		t.Error("unchanged text must clean to the indexed blob, not this host's cached one")
+	}
+	edited, err := fx.f.Clean("n.md", []byte("edited\n"))
+	if err != nil || bytes.Equal(edited, other) {
+		t.Errorf("an edited text must be encrypted afresh (%v)", err)
+	}
+}

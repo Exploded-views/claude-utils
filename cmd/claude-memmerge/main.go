@@ -37,9 +37,12 @@ func main() {
 	}
 
 	args := os.Args[1:]
-	textMode := false
+	textMode, unionMode := false, false
 	if len(args) > 0 && args[0] == "--text" {
 		textMode = true
+		args = args[1:]
+	} else if len(args) > 0 && args[0] == "--union" {
+		unionMode = true
 		args = args[1:]
 	}
 	if len(args) < 3 {
@@ -88,6 +91,8 @@ func main() {
 	})
 	if textMode {
 		fn = agecrypt.TextMerge(markerSize)
+	} else if unionMode {
+		fn = agecrypt.UnionMerge()
 	}
 	merged, conflict, err := mctx.Merge(fn, base, ours, theirs)
 	if err != nil {
@@ -109,9 +114,10 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `claude-memmerge — git custom merge driver for MEMORY.md
 
 Usage:
-  claude-memmerge [--text] <base> <ours> <theirs> [marker-len] [pathname]
+  claude-memmerge [--text|--union] <base> <ours> <theirs> [marker-len] [pathname]
 
---text merges plain lines (git merge-file) instead of MEMORY.md sections.
+--text merges plain lines (git merge-file) instead of MEMORY.md sections;
+--union does the same but keeps both sides' lines and never conflicts.
 In an age-encrypted repo both modes decrypt the inputs and write ciphertext.
 
 This binary is invoked by git via merge.<name>.driver configuration; not

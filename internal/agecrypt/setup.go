@@ -57,6 +57,8 @@ func Configure(repo *gitwt.Repo, o Opts) error {
 		{"merge.claude-memory-index.driver", MergeCommand(o.MemmergeExe)},
 		{"merge.memtext.name", "decrypting text merge"},
 		{"merge.memtext.driver", MergeCommand(o.MemmergeExe, "--text")},
+		{"merge.memunion.name", "decrypting union merge"},
+		{"merge.memunion.driver", MergeCommand(o.MemmergeExe, "--union")},
 	}
 	for _, e := range kv {
 		if err := repo.ConfigSet(e[0], e[1]); err != nil {
@@ -121,6 +123,9 @@ func Attributes() string {
 # Exempt (stored in the clear): this file, .gitignore and the public recipients.
 * filter=memage diff=memage merge=memtext
 MEMORY.md filter=memage diff=memage merge=claude-memory-index
+# The archive index is append-only: decrypt, keep both sides' lines, encrypt.
+# This file outranks .gitattributes, so its union rule must be restated here.
+archive/INDEX.md filter=memage diff=memage merge=memunion
 /.gitattributes !filter !diff !merge
 /.gitignore !filter !diff !merge
 /.age-recipients !filter !diff merge=union
