@@ -221,3 +221,31 @@ func TestAgeOpener_ReadableWithLabelledRecipientLines(t *testing.T) {
 		t.Error("a labelled classic recipient line must match its own key")
 	}
 }
+
+func TestAgeOpener_DefaultFindsHybridIdentityAfterRekey(t *testing.T) {
+	cfgHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	dir := filepath.Join(cfgHome, "claude-memsync")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// After `recipients rekey-pq` the host key is identity-pq.txt and the
+	// classic one is retired: there is no identity.txt.
+	rcpt, err := agecrypt.GenerateHybridIdentity(filepath.Join(dir, "identity-pq.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "identity.txt.classic-retired"), []byte("retired"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clone := ageClone(t, rcpt, map[string]string{"MEMORY.md": "# HYBRID-HEADING\n", "n.md": "x"})
+
+	o := ageOpener{}
+	if !o.Readable(clone) {
+		t.Fatal("a related pq clone must be readable with only identity-pq.txt on the host")
+	}
+	ix, err := related.BuildIndex(clone, o)
+	if err != nil || len(ix.Headings) != 1 || !strings.Contains(ix.Headings[0], "HYBRID-HEADING") {
+		t.Fatalf("index of the pq clone: %+v %v", ix, err)
+	}
+}
