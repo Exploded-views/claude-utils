@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ var (
 
 const appUsage = `usage:
   claude-memsync app key-fingerprint --key-file <pem>
+  claude-memsync app add --name <n> --app-id <id> --org <org> (--key-cmd "<cmd>" | --key-file <path>) [--api-url <url>] [--replace] [--verify]
   claude-memsync app register --name <n> --org <org> --url <homepage> --perm <p:level>... (--key-out <path> | --key-cmd-store "<cmd>" --key-cmd "<cmd>")`
 
 func runApp(args []string) int { return appCmd(os.Stdout, os.Stderr, args) }
@@ -35,6 +37,8 @@ func appCmd(stdout, stderr io.Writer, args []string) int {
 	switch args[0] {
 	case "register":
 		return appRegister(stdout, stderr, args[1:])
+	case "add":
+		return appAdd(stdout, stderr, args[1:])
 	case "key-fingerprint":
 		return appKeyFingerprint(stdout, stderr, args[1:])
 	}
@@ -60,6 +64,9 @@ func appRegister(stdout, stderr io.Writer, args []string) int {
 		return 2
 	}
 	bad := func(msg string) int { fmt.Fprintln(stderr, "app register:", msg); return 2 }
+	if f := placeholderFlag(fs); f != "" {
+		return bad("--" + f + " still contains a <placeholder>; fill it in before registering (nothing was created)")
+	}
 	switch {
 	case *name == "" || *org == "" || *home == "":
 		return bad("--name, --org and --url are required")
@@ -131,6 +138,9 @@ func appRegister(stdout, stderr io.Writer, args []string) int {
 	}
 	fmt.Fprintf(stdout, "App created: id %d, slug %s\nInstall it on the org: %s/apps/%s/installations/new\n", conv.ID, conv.Slug, web, conv.Slug)
 
+	entry.AppID = fmt.Sprint(conv.ID)
+	entry.KeyFingerprint = fingerprint
+	failed := false
 	if *keyOut != "" {
 		f, err := os.OpenFile(*keyOut, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
@@ -140,19 +150,34 @@ func appRegister(stdout, stderr io.Writer, args []string) int {
 			}
 		}
 		if err != nil {
-			fmt.Fprintf(stderr, "app register: the app exists (id %d) but its key could not be written; generate a new key for it in the app settings\n", conv.ID)
-			return 1
+			fmt.Fprintf(stderr, "app register: the app exists (id %d) but --key-out could not be written (%v)\n", conv.ID, err)
+			failed = true
+		} else {
+			fmt.Fprintln(stdout, "Private key written to", *keyOut)
 		}
-		fmt.Fprintln(stdout, "Private key written to", *keyOut)
 	} else {
 		if err := secretcmd.Feed(context.Background(), storeArgv, conv.PEM, secretcmd.DefaultTimeout); err != nil {
-			fmt.Fprintf(stderr, "app register: the app exists (id %d) but the key store command failed (%v); generate a new key for it in the app settings\n", conv.ID, err)
+			fmt.Fprintf(stderr, "app register: the app exists (id %d) but the key store command failed (%v)\n", conv.ID, err)
+			failed = true
+		} else {
+			fmt.Fprintln(stdout, "Private key stored with the key store command")
+		}
+	}
+	if failed {
+		rec, rerr := writeRecoveredKey(filepath.Dir(path), *name, conv.PEM)
+		if rerr != nil {
+			fmt.Fprintf(stderr, "app register: could not save a recovery copy of the key (%v); generate a new key for app id %d in the app settings\n", rerr, conv.ID)
 			return 1
 		}
-		fmt.Fprintln(stdout, "Private key stored with the key store command")
+		fmt.Fprintf(stderr, "app register: the key was saved to %s (mode 0600). Store it where it belongs, then delete that file.\n", rec)
+		entry.KeyFile, entry.KeyCmd = rec, nil
+		if err := ghapp.SaveApp(path, entry); err != nil {
+			fmt.Fprintf(stderr, "app register: could not write %s: %v\n", path, err)
+		} else {
+			fmt.Fprintln(stdout, "Recorded in", path, "(keyFile points at the recovered key)")
+		}
+		return 1
 	}
-	entry.AppID = fmt.Sprint(conv.ID)
-	entry.KeyFingerprint = fingerprint
 	if err := ghapp.SaveApp(path, entry); err != nil {
 		fmt.Fprintf(stderr, "app register: could not write %s: %v\n", path, err)
 		return 1
@@ -184,4 +209,49 @@ func appKeyFingerprint(stdout, stderr io.Writer, args []string) int {
 	}
 	fmt.Fprintln(stdout, fp)
 	return 0
+}
+
+var placeholderRE = regexp.MustCompile(`<[A-Za-z0-9_ -]+>`)
+
+// placeholderFlag returns the name of the first set flag whose value still
+// holds a literal <placeholder> from the docs, or "".
+func placeholderFlag(fs *flag.FlagSet) string {
+	bad := ""
+	fs.Visit(func(f *flag.Flag) {
+		if bad == "" && placeholderRE.MatchString(f.Value.String()) {
+			bad = f.Name
+		}
+	})
+	return bad
+}
+
+// writeRecoveredKey saves pem to a new <dir>/<name>.recovered.pem (O_EXCL,
+// 0600), adding a numeric suffix when that name is taken.
+func writeRecoveredKey(dir, name string, pemBytes []byte) (string, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	for i := 0; i < 100; i++ {
+		p := filepath.Join(dir, name+".recovered.pem")
+		if i > 0 {
+			p = filepath.Join(dir, fmt.Sprintf("%s.recovered.%d.pem", name, i))
+		}
+		f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if os.IsExist(err) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		_, err = f.Write(pemBytes)
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			os.Remove(p)
+			return "", err
+		}
+		return p, nil
+	}
+	return "", fmt.Errorf("no free recovery file name")
 }
