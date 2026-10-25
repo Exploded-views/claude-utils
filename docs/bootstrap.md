@@ -98,11 +98,11 @@ cd ~/.local/src/claude-utils-<commit> && go build -o ~/.local/bin/claude-memsync
    For an app that already exists (created by hand, or recovered as above), record it without registering again:
 
    ```
-   claude-memsync app add --name memsync-admin --app-id <admin-app-id> --org Exploded-views \
+   claude-memsync app add --name memsync-admin --app-id <admin-app-id> --org <org> \
      (--key-cmd "<read cmd>" | --key-file <key-file>) [--api-url <api-url>] [--replace] [--verify]
    ```
 
-   The key file must be mode 0600, yours, with one hard link. The key fingerprint is recorded when the key is readable. An existing entry is refused unless `--replace`. `--verify` mints a token against the org and prints only `MINT-OK`.
+   The key file must be mode 0600, yours, with one hard link. The key fingerprint is recorded when the key is readable. An existing entry is refused unless `--replace`. `--verify` mints a token against the org and prints only `MINT-OK`; it runs before anything is written, so a failed verify (with `--replace` too) leaves `apps.json` and the old entry as they were.
 
 3. One private key per host for `memsync-check`: GitHub, Settings, Developer settings, GitHub Apps, `memsync-check`, Generate a private key. The browser downloads a `.pem`. Copy it to the host as `<check-key-file>` (for example `~/.config/claude-memsync/memsync-check.pem`), then on the host `chmod 600` it. It must be owned by you with one hard link, or the script refuses it. Delete the download. A lost or leaked key is revoked on that same page without touching the other hosts.
 

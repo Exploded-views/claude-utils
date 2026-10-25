@@ -379,16 +379,46 @@ claude-memsync recipients rekey-pq --repo <repo> --recovery-recipient <age1pq1..
 claude-memsync start
 ```
 
+Try one repo first with `--repo`, and only then use `--all`. Do not run
+`status` (or `git status` in a sync directory) with an old binary between the
+rekey and the restart: an old binary's filter cannot read the new hybrid
+ciphertext and would show every note as changed. Upgrade the binary, then
+`claude-memsync start`.
+
 `rekey-pq` refuses a repo with more than one member host: retire the others,
 convert, then let them join again with fresh hybrid keys. It also refuses a
-dirty work tree or unpushed commits, and drops pending join requests. It
-writes a new hybrid identity (`identity-pq.*`) beside the old one and points
-the repo at it (the old file is renamed `*.classic-retired` once no repo on
-the host uses it), swaps the whole recipient set (age cannot
-mix hybrid and classic recipients in one file), and re-encrypts the current
-tree. Optionally it replaces the history with one fresh root commit, so the
-remote no longer serves classically encrypted notes; see the caveats on
-force-pushes in [security.md](security.md#old-history).
+dirty work tree or unpushed commits, and drops pending join requests. It runs
+every check that could refuse the push before it changes anything, writes a
+new hybrid identity (`identity-pq.*`) beside the old one and points the repo at
+it, swaps the whole recipient set (age cannot mix hybrid and classic recipients
+in one file), and re-encrypts the current tree. Optionally it replaces the
+history with one fresh root commit, so the remote no longer serves classically
+encrypted notes; see the caveats on force-pushes in
+[security.md](security.md#old-history). `config.json` is saved only after the
+push succeeds.
+
+If something fails part way:
+
+- With `--all`, an `--apply` run **stops at the first repo that fails** and
+  lists which repos are done, which failed and which were not started.
+- **Rerun the same command** (same `--host`, `--recovery-recipient`,
+  `--fresh-root`). Finished repos are skipped; a repo that was migrated locally
+  but whose push failed gets its push retried; a run that crashed between
+  moving HEAD and repointing the identity, scheme and pin is finished.
+- To give up on a repo that was **not pushed**, run
+  `claude-memsync recipients rekey-pq --repo <repo> --rollback`: it resets the
+  branch to the pre-migration tip and restores the identity, scheme, pin and
+  `config.json`. Once the remote has moved off the backup, rollback is refused;
+  the restore record is `.git/memsync-pre-pq.json`.
+- If the push succeeded but the check afterwards failed, the output says
+  `pushed; verification failed`; look at origin/main before relying on it.
+
+The old classic identity file is renamed `*.classic-retired` only when no git
+clone beside the sync directories (routed or not, such as a `*.incident-*`
+copy) still points at it; otherwise it is kept, the clone is named, and a rerun
+retires it later. The pre-migration tip stays at `refs/memsync/pre-pq` until
+`rekey-pq --repo <repo> --drop-backup`; that removes the classic ciphertext from
+the local clone (after a `--fresh-root` run) without touching stash entries.
 
 Classic X25519 is chosen on purpose only, with
 `init --encrypt --encryption-scheme classic` (saved as

@@ -4,9 +4,9 @@
 # Builds cmd/claude-memsync (or uses $MEMSYNC_BIN), runs every subcommand's -h
 # (or its no-argument usage, for commands that dispatch to actions) in a
 # throwaway HOME, and writes the output under one heading per command, in a
-# fixed order. Commands that act without parsing flags (start, stop,
-# uninstall, status, version) are never run; they are listed from the
-# top-level help only.
+# fixed order. start, stop, uninstall, status and version take no flags; they
+# treat -h as "print usage, do nothing" (and refuse any other argument), so
+# their -h is safe to run here.
 #
 # CI runs this and fails when the committed file differs:
 #   sh scripts/gen-reference.sh && git diff --exit-code docs/reference.md
@@ -60,6 +60,7 @@ section() {
   section "init -h" init -h
   section "doctor -h" doctor -h
   section "app" app
+  section "app add -h" app add -h
   section "app register -h" app register -h
   section "app key-fingerprint -h" app key-fingerprint -h
   section "app-token -h" app-token -h
@@ -91,7 +92,10 @@ section() {
   section "host retire -h" host retire -h
   section "install -h" install -h
 
-  printf '\n## Commands without flags\n\n'
-  printf '`uninstall`, `start`, `stop`, `status` and `version` take no flags and act when run, so the generator does not run them; their one-line summaries are in the `--help` output above.\n'
+  section "start -h" start -h
+  section "stop -h" stop -h
+  section "uninstall -h" uninstall -h
+  section "status -h" status -h
+  section "version -h" version -h
 } > "$out.tmp"
 mv "$out.tmp" "$out"

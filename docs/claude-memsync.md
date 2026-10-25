@@ -1091,7 +1091,9 @@ overrides the path.
 
 To use an app for the private-only checks, set `"githubApp": "<app-name>"` in
 `config.json` (or `init --github-app <app-name>`, `doctor --github-app
-<app-name>`). Precedence among token sources is `githubApp`, then
+<app-name>`; `init` refuses `--github-app` together with `--token-cmd`, because the
+command would override the app it is about to save, so one of the two would be
+dropped silently). Precedence among token sources is `githubApp`, then
 `githubTokenFile`, then `githubTokenCmd`, then the env var; the first one
 configured is used, and if it fails the command fails rather than trying the
 next. The daemon keeps one token in memory, never longer than an hour whatever
@@ -1471,24 +1473,59 @@ Migrate an existing classic repo whose only member is this host:
 
     claude-memsync recipients rekey-pq --repo <name> | --all \
         --recovery-recipient <age1pq1...> --host <label> [--fresh-root] [--apply]
+    claude-memsync recipients rekey-pq --repo <name> | --all --rollback
+    claude-memsync recipients rekey-pq --repo <name> | --all --drop-backup
 
 It is a dry run unless `--apply` (daemon stopped): it prints the repos, the
 current recipient count and the file counts, and says when history will be
-replaced. `--apply` creates a new hybrid identity beside the old one
-(`identity-pq.txt`; the classic file is renamed `<name>.classic-retired` once no
-other repo on the host uses it), sets `.age-recipients` to exactly this host
-(`# host:<label>`) and the recovery key (`# recovery`), sets
-`encryptionScheme`, `hostLabel` and `recoveryRecipients`, re-pins, and
-re-encrypts every file at HEAD in one commit. With `--fresh-root` that commit is
-an orphan root, force-pushed with `--force-with-lease` on the old tip; the
-command then checks that origin/main has one commit and that every file is
-hybrid ciphertext (it prints counts only). It refuses when the recipients
+replaced. Before `--apply` changes anything locally it runs every check that can
+refuse the push (the private-only and push-URL checks, and the push guard on the
+built commit); then it records what a rollback needs in
+`.git/memsync-pre-pq.json` (mode 0600, public values only: paths, public keys,
+labels, commit ids). `--apply` creates a new hybrid identity beside the old one
+(`identity-pq.txt`), sets `.age-recipients` to exactly this host
+(`# host:<label>`) and the recovery key (`# recovery`), records the scheme and
+re-pins, re-encrypts every file at HEAD in one commit and moves
+`.state/synced-head` with it. With `--fresh-root` that commit is an orphan
+root, force-pushed with `--force-with-lease` on the old tip. Only after the push
+succeeds does it save `encryptionScheme`, `hostLabel` and `recoveryRecipients`
+in the config file it was given, check that origin/main holds the migrated tip
+(with `--fresh-root`: one commit; always: hybrid ciphertext only; it prints
+counts only) and retire the classic identity. A verification failure after the
+push is reported as `pushed; verification failed: ...` and is not a push
+failure; the classic identity is then kept. It refuses when the recipients
 include any key other than this host's and the configured recovery keys, when
 the work-tree is dirty or the branch differs from origin/main, and for a
-read-only host. The pre-migration tip stays at `refs/memsync/pre-pq` for
-rollback; `rekey-pq --drop-backup` deletes it, expires the reflogs and runs
-`gc --prune=now` so the classic ciphertext leaves the local clone. Other hosts
-that were members of the old repo must re-clone.
+read-only host.
+
+With `--all`, an `--apply` run stops at the first repo that fails and prints
+which repos are done, which failed and which were not started. Fix the cause
+and rerun the same command: finished repos are skipped, a repo that was
+migrated locally but whose push failed (the remote still at the backup tip) has
+its push retried, and a crash between moving HEAD and repointing
+`memage.identity`/`memage.scheme`/the pin is finished. A rerun must use the same
+`--host`, `--recovery-recipient` and `--fresh-root`. `--rollback` undoes a
+migration that was never published: for a repo whose remote still equals
+`refs/memsync/pre-pq` it resets the branch to it and restores
+`memage.identity`, `memage.scheme`, the pin, `config.json` and the synced-head
+record; it refuses when the remote has already moved off the backup (or the
+work-tree is dirty). The new hybrid identity file is left in place and reused by
+a later `rekey-pq`.
+
+The classic identity is renamed `<name>.classic-retired` only when no git clone
+beside the sync directories still names it in `memage.identity`: every
+`*/.git/config` under the parent directory of each sync dir is checked,
+including clones that are not routed (such as a `*.incident-*` copy). If one is
+found, the file stays, the clone is named in the output, and a rerun retires it
+once nothing uses it.
+
+The pre-migration tip stays at `refs/memsync/pre-pq`; `rekey-pq --drop-backup`
+deletes it and its record, expires the reflogs of HEAD, `main` and
+`origin/main` (not the stash) and runs `gc --prune=now`, so the classic
+ciphertext leaves the local clone. This removes classic ciphertext locally
+only after a `--fresh-root` run: without it the classic history is still the
+branch's own history and stays. Other hosts that were members of the old repo
+must re-clone.
 
 ### Keys
 
