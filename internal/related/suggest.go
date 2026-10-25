@@ -22,12 +22,17 @@ const (
 	SignalVocabulary SignalKind = "vocabulary"
 )
 
+func (s Signal) same() Signal { s.Safe = s.Detail; return s }
+
 var signalRank = map[SignalKind]int{SignalCoOpen: 0, SignalReference: 1, SignalVocabulary: 2}
 
 // Signal is one piece of evidence for a candidate edge.
 type Signal struct {
 	Kind   SignalKind
 	Detail string
+	// Safe is the same evidence without words or module paths, for a viewer
+	// who may not see those (a client context).
+	Safe string
 }
 
 // Candidate is a suggested edge. The mode is always read.
@@ -60,6 +65,10 @@ type SuggestOptions struct {
 	Accepted    []Edge
 	Declared    []Edge
 	Dismissed   [][2]string
+	// Scope, when set, is the viewing repo: only candidates with it as an end
+	// are considered, and a refusal is counted only when the other end may be
+	// known to the viewer (see MayCount).
+	Scope string
 }
 
 // Result is the outcome of Suggest. Withheld counts candidates the policy
@@ -108,7 +117,7 @@ func Raw(facts []RepoFacts, window time.Duration, minDays int) []Candidate {
 					dup = dup || s.Detail == d
 				}
 				if !dup {
-					c.Signals = append(c.Signals, Signal{SignalReference, d})
+					c.Signals = append(c.Signals, Signal{Kind: SignalReference, Detail: d, Safe: r.File + " names another routed repo"})
 				}
 			}
 		}
@@ -142,7 +151,7 @@ func Raw(facts []RepoFacts, window time.Duration, minDays int) []Candidate {
 		for j := i + 1; j < len(facts); j++ {
 			a, b := facts[i], facts[j]
 			if n := coOpenDays(a.Sessions, b.Sessions, window); n >= minDays {
-				attach(a.Name, b.Name, Signal{SignalCoOpen, fmt.Sprintf("co-opened on %d days (sessions within %dh of each other)", n, int(window/time.Hour))})
+				attach(a.Name, b.Name, Signal{Kind: SignalCoOpen, Detail: fmt.Sprintf("co-opened on %d days (sessions within %dh of each other)", n, int(window/time.Hour))}.same())
 			}
 			if owner := sharedOwner(a.Keys, b.Keys); owner != "" {
 				var shared []string
@@ -153,7 +162,7 @@ func Raw(facts []RepoFacts, window time.Duration, minDays int) []Candidate {
 				}
 				sort.Strings(shared)
 				if len(shared) >= 2 {
-					attach(a.Name, b.Name, Signal{SignalVocabulary, fmt.Sprintf("same owner %s, shared terms: %s", owner, strings.Join(firstN(shared, 5), ", "))})
+					attach(a.Name, b.Name, Signal{Kind: SignalVocabulary, Detail: fmt.Sprintf("same owner %s, shared terms: %s", owner, strings.Join(firstN(shared, 5), ", ")), Safe: fmt.Sprintf("same remote owner, %d shared terms", len(shared))})
 				}
 			}
 		}
@@ -269,6 +278,9 @@ func Filter(cands []Candidate, o SuggestOptions) Result {
 	}
 	var res Result
 	for _, c := range cands {
+		if o.Scope != "" && c.From != o.Scope && c.To != o.Scope {
+			continue
+		}
 		sym := !c.Directed
 		if have(c.From, c.To, sym) || dismissed(o.Dismissed, c.From, c.To) {
 			continue
@@ -279,12 +291,11 @@ func Filter(cands []Candidate, o SuggestOptions) Result {
 			// The pair has no natural direction: try the other way.
 			from, to = to, from
 			err = o.Checker.Check(from, to, ModeRead)
-			if err == nil && have(from, to, false) {
-				continue
-			}
 		}
 		if err != nil {
-			res.Withheld++
+			if o.Scope == "" || o.Checker.MayCount(o.Scope, otherEnd(c, o.Scope)) {
+				res.Withheld++
+			}
 			continue
 		}
 		c.From, c.To = from, to
@@ -304,6 +315,98 @@ func Filter(cands []Candidate, o SuggestOptions) Result {
 		return a.To < b.To
 	})
 	return res
+}
+
+func otherEnd(c Candidate, scope string) string {
+	if c.From == scope {
+		return c.To
+	}
+	return c.From
+}
+
+// Passing keeps the candidates the policy allows (in either direction for a
+// symmetric pair). The cache holds only these.
+func Passing(cands []Candidate, ck Checker) []Candidate {
+	var out []Candidate
+	for _, c := range cands {
+		ok := ck.Check(c.From, c.To, ModeRead) == nil
+		if !ok && !c.Directed {
+			ok = ck.Check(c.To, c.From, ModeRead) == nil
+		}
+		if ok {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// Strip drops the evidence, keeping only the signal kinds and the score, so a
+// stored candidate carries no word or module path.
+func Strip(cands []Candidate) []Candidate {
+	out := make([]Candidate, 0, len(cands))
+	for _, c := range cands {
+		s := Candidate{From: c.From, To: c.To, Mode: c.Mode, Score: c.Score, Directed: c.Directed}
+		for _, g := range c.Signals {
+			s.Signals = append(s.Signals, Signal{Kind: g.Kind})
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+func isClientKind(n Node) bool { return n.Kind == kindClient || n.Kind == kindOrch }
+
+// MayCount reports whether the viewer may be told that a refused candidate
+// with the other end exists: not when the other end is a client or orch repo
+// of another client (or when either end cannot be classified).
+func (c Checker) MayCount(viewer, other string) bool {
+	v, err := c.node(viewer)
+	if err != nil {
+		return false
+	}
+	o, err := c.node(other)
+	if err != nil {
+		return false
+	}
+	if !isClientKind(o) {
+		return true
+	}
+	return isClientKind(v) && v.Kind == o.Kind && sameClient(v, o)
+}
+
+// Evidence is the text of a candidate's signals for the viewer. With no viewer
+// (the host-wide listing) it is the full text. For a candidate with a client or
+// orch end the vocabulary is only counted, never listed, and module paths are
+// shown only when the viewer is of the same client.
+func Evidence(c Candidate, ck Checker, viewer string) []Signal {
+	redact, refs := false, true
+	if viewer != "" {
+		v, verr := ck.node(viewer)
+		for _, end := range []string{c.From, c.To} {
+			n, err := ck.node(end)
+			if err != nil || verr != nil || isClientKind(n) {
+				redact = true
+				if verr != nil || err != nil || !isClientKind(v) || v.Kind != n.Kind || !sameClient(v, n) {
+					refs = false
+				}
+			}
+		}
+	}
+	var out []Signal
+	for _, s := range c.Signals {
+		t := s.Detail
+		switch {
+		case redact && s.Kind == SignalVocabulary:
+			t = s.Safe
+		case redact && s.Kind == SignalReference && !refs:
+			t = s.Safe
+		}
+		if t == "" {
+			t = string(s.Kind)
+		}
+		out = append(out, Signal{Kind: s.Kind, Detail: t})
+	}
+	return out
 }
 
 func dismissed(d [][2]string, a, b string) bool {

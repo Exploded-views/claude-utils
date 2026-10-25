@@ -5,18 +5,23 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/related"
 )
 
-// suggestCacheTTL is how long the session-start count may reuse the signals of
-// an earlier run. Policy, acceptance and dismissal are applied afresh each time.
-const suggestCacheTTL = time.Hour
+// suggestCacheMaxAge is how old the cached signals may be and still give the
+// session-start count. The daemon's tick keeps them fresh.
+const suggestCacheMaxAge = 7 * 24 * time.Hour
+
+// defaultSuggestBudget bounds one refresh of the cache on the daemon's tick.
+const defaultSuggestBudget = 5 * time.Second
 
 func dismissedPath(routesPath string) string {
 	return filepath.Join(filepath.Dir(routesPath), "related-dismissed.json")
@@ -26,11 +31,21 @@ func suggestCachePath(routesPath string) string {
 	return filepath.Join(filepath.Dir(routesPath), "related-suggest-cache.json")
 }
 
+func suggestIndexPath(routesPath string) string {
+	return filepath.Join(filepath.Dir(routesPath), "related-suggest-index.json")
+}
+
+// updateSessions reads one folder's transcripts (a seam for tests).
+var updateSessions = func(ix *related.SessionIndex, dir, folder string, deadline time.Time) ([]related.Session, bool) {
+	return ix.Update(dir, folder, deadline)
+}
+
 // gatherFacts reads this host's own data for every routed repo: the sessions
 // and checkouts of the folders routed to it, and its notes headings. Nothing
 // leaves the host and nothing but times, remote keys, matched references and
-// headings is kept.
-func (rc *relCtx) gatherFacts() []related.RepoFacts {
+// headings is kept. complete is false when the deadline (zero: none) ended it.
+func (rc *relCtx) gatherFacts(ix *related.SessionIndex, deadline time.Time) (out []related.RepoFacts, complete bool) {
+	complete = true
 	byRepo := map[string]*related.RepoFacts{}
 	seen := map[string]bool{}
 	var dirs []string
@@ -41,6 +56,8 @@ func (rc *relCtx) gatherFacts() []related.RepoFacts {
 			dirs = append(dirs, d)
 		}
 	}
+	expired := func() bool { return !deadline.IsZero() && time.Now().After(deadline) }
+scan:
 	for _, pd := range dirs {
 		ents, err := os.ReadDir(pd)
 		if err != nil {
@@ -49,6 +66,10 @@ func (rc *relCtx) gatherFacts() []related.RepoFacts {
 		for _, e := range ents {
 			if !e.IsDir() {
 				continue
+			}
+			if expired() {
+				complete = false
+				break scan
 			}
 			folder := e.Name()
 			d := rc.set.Router.Decide(folder)
@@ -61,9 +82,9 @@ func (rc *relCtx) gatherFacts() []related.RepoFacts {
 				f = &related.RepoFacts{Name: name}
 				byRepo[name] = f
 			}
-			if ss, err := related.ReadSessions(filepath.Join(pd, folder)); err == nil {
-				f.Sessions = append(f.Sessions, ss...)
-			}
+			ss, ok := updateSessions(ix, filepath.Join(pd, folder), folder, deadline)
+			complete = complete && ok
+			f.Sessions = append(f.Sessions, ss...)
 			if c := rc.set.Router.Candidates(folder); len(c) == 1 {
 				if key, _ := rc.set.Router.Resolve(folder); key != "" {
 					f.Keys = append(f.Keys, key)
@@ -72,7 +93,6 @@ func (rc *relCtx) gatherFacts() []related.RepoFacts {
 			}
 		}
 	}
-	var out []related.RepoFacts
 	for name, f := range byRepo {
 		if k, ok := rc.set.localKey(name); ok {
 			if ix, err := related.BuildIndex(rc.set.Cfgs[k].SyncDir, rc.opener()); err == nil {
@@ -82,11 +102,28 @@ func (rc *relCtx) gatherFacts() []related.RepoFacts {
 		out = append(out, *f)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
+	return out, complete
+}
+
+// compute is a full run: transcripts are read incrementally, the signals are
+// computed. It refreshes the cache when the run used the default settings.
+func (rc *relCtx) compute(window time.Duration, minDays int, deadline time.Time) (cands []related.Candidate, complete bool) {
+	ixPath := suggestIndexPath(rc.set.Path)
+	ix := related.LoadSessionIndex(ixPath)
+	facts, complete := rc.gatherFacts(ix, deadline)
+	_ = ix.Save(ixPath)
+	if !complete {
+		return nil, false
+	}
+	cands = related.Raw(facts, window, minDays)
+	if window == 24*time.Hour && minDays == 2 {
+		rc.writeSuggestCache(cands)
+	}
+	return cands, true
 }
 
 // suggestFilter is the part of the options that comes from the host's state.
-func (rc *relCtx) suggestFilter(minScore int) (related.SuggestOptions, error) {
+func (rc *relCtx) suggestFilter(minScore int, scope string) (related.SuggestOptions, error) {
 	dis, err := related.LoadDismissed(dismissedPath(rc.set.Path))
 	if err != nil {
 		return related.SuggestOptions{}, fmt.Errorf("related-dismissed.json: %w", err)
@@ -97,6 +134,7 @@ func (rc *relCtx) suggestFilter(minScore int) (related.SuggestOptions, error) {
 		Accepted:  rc.acc.Edges,
 		Declared:  rc.reg.Edges(),
 		Dismissed: dis.Pairs,
+		Scope:     scope,
 	}, nil
 }
 
@@ -105,14 +143,20 @@ type suggestCache struct {
 	Cands []related.Candidate
 }
 
+// writeSuggestCache stores the candidates the policy allows, as signal kinds
+// and scores only: no word, module path or note text is kept.
 func (rc *relCtx) writeSuggestCache(c []related.Candidate) {
-	b, err := json.Marshal(suggestCache{At: time.Now(), Cands: c})
+	b, err := json.Marshal(suggestCache{At: time.Now(), Cands: related.Strip(related.Passing(c, rc.checker))})
 	if err != nil {
 		return
 	}
 	p := suggestCachePath(rc.set.Path)
-	if os.MkdirAll(filepath.Dir(p), 0o700) == nil {
-		_ = os.WriteFile(p, b, 0o600)
+	if os.MkdirAll(filepath.Dir(p), 0o700) != nil {
+		return
+	}
+	tmp := p + ".tmp"
+	if os.WriteFile(tmp, b, 0o600) == nil {
+		_ = os.Rename(tmp, p)
 	}
 }
 
@@ -122,16 +166,48 @@ func (rc *relCtx) readSuggestCache() ([]related.Candidate, bool) {
 		return nil, false
 	}
 	var c suggestCache
-	if json.Unmarshal(b, &c) != nil || time.Since(c.At) > suggestCacheTTL || time.Since(c.At) < -time.Minute {
+	if json.Unmarshal(b, &c) != nil || time.Since(c.At) > suggestCacheMaxAge || time.Since(c.At) < -time.Minute {
 		return nil, false
 	}
 	return c.Cands, true
 }
 
+// refreshSuggestCache is the daemon's tick work: bring the transcript index
+// and the cache up to date within budget. It reports whether it finished.
+func (rc *relCtx) refreshSuggestCache(budget time.Duration) bool {
+	if budget <= 0 {
+		budget = defaultSuggestBudget
+	}
+	_, ok := rc.compute(24*time.Hour, 2, time.Now().Add(budget))
+	return ok
+}
+
+var suggestRefreshing atomic.Bool
+
+// refreshSuggestionsInBackground runs refreshSuggestCache apart from the loops.
+func (s *routedSet) refreshSuggestionsInBackground() {
+	if s.File.Registry == "" || !suggestRefreshing.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer suggestRefreshing.Store(false)
+		rc, err := loadRelCtx(s.Path)
+		if err != nil {
+			return
+		}
+		rc.vis.quick = true
+		budget := time.Duration(s.File.RelatedSuggestBudgetSec) * time.Second
+		if !rc.refreshSuggestCache(budget) {
+			log.Printf("related: suggestion refresh stopped at its time budget; it continues next tick")
+		}
+	}()
+}
+
 // shown is the suggestions that may be printed, with the denylist applied: a
-// suggestion whose endpoints or evidence match the denylist of either end's
-// repo is counted and dropped.
-func (rc *relCtx) shown(res related.Result) (out []related.Candidate, hidden int) {
+// suggestion whose endpoints or printed evidence match the denylist of either
+// end's repo, or of the viewing repo, is counted and dropped. Each returned
+// candidate carries the evidence the viewer may see.
+func (rc *relCtx) shown(res related.Result, viewer string) (out []related.Candidate, hidden int) {
 	hiders := map[string]func(string) bool{}
 	hide := func(repo, text string) bool {
 		h, ok := hiders[repo]
@@ -142,41 +218,19 @@ func (rc *relCtx) shown(res related.Result) (out []related.Candidate, hidden int
 		return h(text)
 	}
 	for _, c := range res.Suggestions {
-		var parts []string
-		parts = append(parts, c.From, c.To)
+		c.Signals = related.Evidence(c, rc.checker, viewer)
+		parts := []string{c.From, c.To}
 		for _, s := range c.Signals {
 			parts = append(parts, s.Detail)
 		}
 		text := strings.Join(parts, "\n")
-		if hide(c.From, text) || hide(c.To, text) {
+		if hide(c.From, text) || hide(c.To, text) { // the viewer is one of the ends
 			hidden++
 			continue
 		}
 		out = append(out, c)
 	}
 	return out, hidden
-}
-
-// suggestions computes the visible suggestions. A cached run is used when
-// useCache is set and one is fresh.
-func (rc *relCtx) suggestions(window time.Duration, minDays, minScore int, useCache bool) (vis []related.Candidate, withheld, hidden int, err error) {
-	o, err := rc.suggestFilter(minScore)
-	if err != nil {
-		return nil, 0, 0, err
-	}
-	cands, ok := []related.Candidate(nil), false
-	if useCache {
-		cands, ok = rc.readSuggestCache()
-	}
-	if !ok {
-		cands = related.Raw(rc.gatherFacts(), window, minDays)
-		if window == 24*time.Hour && minDays == 2 {
-			rc.writeSuggestCache(cands)
-		}
-	}
-	res := related.Filter(cands, o)
-	vis, hidden = rc.shown(res)
-	return vis, res.Withheld, hidden, nil
 }
 
 type suggestJSON struct {
@@ -199,11 +253,20 @@ func relatedSuggestCmd(stdout, stderr io.Writer, args []string) int {
 	asJSON := fs.Bool("json", false, "print JSON")
 	minScore := fs.Int("min-score", 0, "only suggestions scoring at least this")
 	hours := fs.Int("co-open-hours", 24, "sessions of two projects opened within this many hours count as co-opened")
+	project := fs.String("project", "", "the project directory whose repo's suggestions are listed (default $CLAUDE_PROJECT_DIR)")
+	all := fs.Bool("all", false, "operator only: list every pair on this host, not one repo's")
 	if fs.Parse(args) != nil {
 		return 2
 	}
 	if *hours <= 0 || fs.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: claude-memsync related suggest [--json] [--min-score N] [--co-open-hours N] [--routes FILE]")
+		fmt.Fprintln(stderr, "usage: claude-memsync related suggest [--project DIR] [--json] [--min-score N] [--co-open-hours N] [--routes FILE]")
+		return 2
+	}
+	if *project == "" {
+		*project = os.Getenv("CLAUDE_PROJECT_DIR")
+	}
+	if *project == "" && !*all {
+		fmt.Fprintln(stderr, "related suggest: --project (or $CLAUDE_PROJECT_DIR) is required")
 		return 2
 	}
 	rc, err := loadRelCtx(*routesFlag)
@@ -213,11 +276,24 @@ func relatedSuggestCmd(stdout, stderr io.Writer, args []string) int {
 	}
 	rc.stderr = stderr
 	rc.vis.quick = true
-	vis, withheld, hidden, err := rc.suggestions(time.Duration(*hours)*time.Hour, 2, *minScore, false)
+	scope := ""
+	if !*all {
+		owner, ok := rc.owningRepoRemote(*project)
+		if !ok {
+			fmt.Fprintln(stdout, "no suggestions")
+			return 0
+		}
+		scope = owner
+	}
+	o, err := rc.suggestFilter(*minScore, scope)
 	if err != nil {
 		fmt.Fprintln(stderr, "related suggest:", err)
 		return 1
 	}
+	cands, _ := rc.compute(time.Duration(*hours)*time.Hour, 2, time.Time{})
+	res := related.Filter(cands, o)
+	vis, hidden := rc.shown(res, scope)
+	withheld := res.Withheld
 	if *asJSON {
 		out := struct {
 			Suggestions []suggestJSON `json:"suggestions"`
@@ -259,22 +335,21 @@ func relatedSuggestCmd(stdout, stderr io.Writer, args []string) int {
 }
 
 // suggestionLine is the SessionStart line for the owning repo: how many
-// suggestions involve it. Nothing when there are none.
+// cached suggestions involve it. It never computes anything: no cache, no line.
 func (rc *relCtx) suggestionLine(owner string) string {
-	vis, _, _, err := rc.suggestions(24*time.Hour, 2, 0, true)
+	cands, ok := rc.readSuggestCache()
+	if !ok {
+		return ""
+	}
+	o, err := rc.suggestFilter(0, owner)
 	if err != nil {
 		return ""
 	}
-	n := 0
-	for _, c := range vis {
-		if c.From == owner || c.To == owner {
-			n++
-		}
-	}
-	if n == 0 {
+	vis, _ := rc.shown(related.Filter(cands, o), owner)
+	if len(vis) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%d related-memory suggestions; run `claude-memsync related suggest`", n)
+	return fmt.Sprintf("%d related-memory suggestions; run `claude-memsync related suggest`", len(vis))
 }
 
 func relatedDismissCmd(stdout, stderr io.Writer, args []string) int {

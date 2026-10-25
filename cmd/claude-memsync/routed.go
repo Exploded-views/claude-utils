@@ -525,6 +525,7 @@ func (s *routedSet) Start(ctx context.Context) (*running, error) {
 				s.reload()
 				s.Router.Refresh()
 				s.syncRelatedInBackground()
+				s.refreshSuggestionsInBackground()
 			}
 		}
 	}()

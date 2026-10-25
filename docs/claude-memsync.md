@@ -1224,8 +1224,10 @@ If the copy is encrypted (`.age-recipients`) and this host cannot decrypt it, it
 
 `claude-memsync related suggest` offers candidate read relations computed from this host's own data. It never changes anything: an edge becomes a relation only when you accept it.
 
+It is scoped to the repo that owns `--project` (default `$CLAUDE_PROJECT_DIR`, resolved as `related context` does): only candidates with that repo at one end are listed or counted, and a refused candidate is counted only when its other end may be known to the viewer (never a client repo to a session outside that client). The viewing repo's denylist applies to everything printed, as well as each end's. For a candidate with a client or orch end the shared vocabulary is shown as a count only, and module paths only to a session of the same client.
+
 ```
-claude-memsync related suggest [--json] [--min-score N] [--co-open-hours N]
+claude-memsync related suggest [--project DIR] [--json] [--min-score N] [--co-open-hours N]
 claude-memsync related accept mem-project-<a> mem-project-<b> [--share]
 claude-memsync related dismiss mem-project-<a> mem-project-<b>
 ```
@@ -1240,7 +1242,7 @@ Every candidate must pass the related-project policy (the same check as `relate`
 
 `related accept <from> <to>` checks the policy again and pins the edge in this host's `related-accepted.json`; the registry is untouched. With `--share` it also writes the edge to `related.json` in the registry and commits it there (the registry's sync pushes it). `related dismiss` records the pair in `related-dismissed.json` beside `routes.json`; it applies to this host only. With no `<from> <to>`, `related accept` is the bulk review of registry edges described above.
 
-`related context` (the SessionStart line) adds `N related-memory suggestions; run `claude-memsync related suggest`` when N is above zero for the session's owning repo. It reuses the signals of a run up to an hour old (`related-suggest-cache.json` beside `routes.json`: repo names and matched modules only); the policy, acceptance and dismissals are applied afresh each time.
+`related context` (the SessionStart line) adds `N related-memory suggestions; run `claude-memsync related suggest`` when N is above zero for the session's owning repo. It never computes anything: it reads `related-suggest-cache.json` beside `routes.json` and shows nothing when there is none. The cache holds only candidates the policy allows, as repo names, signal kinds and scores (no word, module path or note text); the policy, acceptance, dismissals and denylist are applied afresh on every read. The daemon refreshes the cache on its tick within a time budget (`relatedSuggestBudgetSec`, default 5), reading transcripts incrementally (by mtime and offset, remembered in `related-suggest-index.json`: times only), and an unfinished refresh continues on the next tick.
 
 ## Encryption at rest
 
