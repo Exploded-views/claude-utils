@@ -73,6 +73,14 @@ func main() {
 }
 
 func runVersion(stdout, stderr io.Writer, args []string) int {
+	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help" || args[0] == "-help") {
+		fmt.Fprintln(stdout, "usage: claude-memsync version\n\nPrint the version; takes no flags")
+		return 0
+	}
+	if len(args) > 0 {
+		fmt.Fprintf(stderr, "version: unexpected argument %q (the command takes no flags; -h shows its usage)\n", args[0])
+		return 2
+	}
 	fmt.Fprintln(stdout, version.Strings("claude-memsync"))
 	return 0
 }

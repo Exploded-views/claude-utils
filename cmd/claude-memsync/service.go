@@ -239,6 +239,9 @@ var (
 )
 
 func runUninstall(args []string) int {
+	if done, code := noFlagArgs("uninstall", "remove the system service", args); done {
+		return code
+	}
 	if err := uninstallFn(); err != nil {
 		fmt.Fprintln(os.Stderr, "uninstall:", err)
 		return 1
@@ -248,6 +251,9 @@ func runUninstall(args []string) int {
 }
 
 func runStart(args []string) int {
+	if done, code := noFlagArgs("start", "start the system service", args); done {
+		return code
+	}
 	if err := startFn(); err != nil {
 		fmt.Fprintln(os.Stderr, "start:", err)
 		return 1
@@ -257,6 +263,9 @@ func runStart(args []string) int {
 }
 
 func runStop(args []string) int {
+	if done, code := noFlagArgs("stop", "stop the system service and clear a stale pull marker", args); done {
+		return code
+	}
 	if err := stopFn(); err != nil {
 		fmt.Fprintln(os.Stderr, "stop:", err)
 		return 1
@@ -285,6 +294,9 @@ var statusFn = statusTask
 // not a failure: the repos are still described. The exit code is non-zero only
 // when a repo is in an error state or the routing cannot be read.
 func runStatus(args []string) int {
+	if done, code := noFlagArgs("status", "report the service state, the routing and each repo's state", args); done {
+		return code
+	}
 	st, err := statusFn()
 	code := 0
 	switch {
@@ -491,4 +503,27 @@ func allConfigs() ([]config.Config, error) {
 		return nil, err
 	}
 	return []config.Config{cfg}, nil
+}
+
+// noFlagArgs is the argument handling of the commands that take no flags and
+// act when run. A lone -h/--help prints the usage and exits 0 without acting;
+// any other argument is refused with exit 2, also without acting. done reports
+// that the command must return code now.
+func noFlagArgs(name, summary string, args []string) (done bool, code int) {
+	if len(args) == 0 {
+		return false, 0
+	}
+	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help" || args[0] == "-help") {
+		fmt.Fprintf(os.Stdout, "usage: claude-memsync %s\n\n%s; takes no flags\n", name, capitalize(summary))
+		return true, 0
+	}
+	fmt.Fprintf(os.Stderr, "%s: unexpected argument %q (the command takes no flags; -h shows its usage)\n", name, args[0])
+	return true, 2
+}
+
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }

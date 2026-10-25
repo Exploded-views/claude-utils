@@ -16,6 +16,9 @@ import (
 // runAgeFilter is the git long-running filter process (`filter.memage.process`).
 // Git starts it in the work-tree root; stdout carries only the protocol.
 func runAgeFilter(args []string) int {
+	if done, code := noFlagArgs("age-filter", "git's long-running age filter process (started by git, not by hand)", args); done {
+		return code
+	}
 	wd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "age-filter:", err)
@@ -35,6 +38,10 @@ func runAgeFilter(args []string) int {
 
 // runAgeTextconv prints a file's plaintext for `git diff` and `git log -p`.
 func runAgeTextconv(args []string) int {
+	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help" || args[0] == "-help") {
+		fmt.Println("usage: claude-memsync age-textconv <file>\n\nPrint a file's plaintext for git diff and git log -p (started by git)")
+		return 0
+	}
 	if len(args) != 1 {
 		fmt.Fprintln(os.Stderr, "usage: claude-memsync age-textconv <file>")
 		return 2
