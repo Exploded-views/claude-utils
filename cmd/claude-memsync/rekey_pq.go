@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
@@ -233,21 +234,80 @@ func verifyTip(repo *gitwt.Repo) error {
 	return nil
 }
 
+// clonesUsingIdentity lists the git clones under the parent directory of each
+// sync dir (siblings such as ~/.claudesync.d/<name>.incident-1 included, routed
+// or not) whose repo-local memage.identity names the file old.
+func clonesUsingIdentity(old string, hostCfgs []config.Config) []string {
+	want := filepath.Clean(filepath.FromSlash(old))
+	parents := map[string]bool{}
+	for _, c := range hostCfgs {
+		parents[filepath.Dir(filepath.Clean(c.SyncDir))] = true
+	}
+	var out []string
+	seen := map[string]bool{}
+	check := func(gitCfg string) {
+		dir := filepath.Dir(filepath.Dir(gitCfg))
+		if seen[dir] {
+			return
+		}
+		seen[dir] = true
+		if id := identityInGitConfig(gitCfg); id != "" && filepath.Clean(filepath.FromSlash(id)) == want {
+			out = append(out, dir)
+		}
+	}
+	for _, c := range hostCfgs {
+		check(filepath.Join(c.SyncDir, ".git", "config"))
+	}
+	for p := range parents {
+		matches, _ := filepath.Glob(filepath.Join(p, "*", ".git", "config"))
+		for _, m := range matches {
+			check(m)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// identityInGitConfig reads memage.identity out of a git config file without
+// running git (the file may belong to any clone).
+func identityInGitConfig(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	in := false
+	for _, l := range strings.Split(string(b), "\n") {
+		l = strings.TrimSpace(l)
+		if strings.HasPrefix(l, "[") {
+			f := strings.Fields(strings.Trim(l, "[]"))
+			in = len(f) > 0 && strings.EqualFold(f[0], "memage")
+			continue
+		}
+		if !in {
+			continue
+		}
+		if k, v, ok := strings.Cut(l, "="); ok && strings.EqualFold(strings.TrimSpace(k), "identity") {
+			return strings.Trim(strings.TrimSpace(v), `"`)
+		}
+	}
+	return ""
+}
+
 // retireClassicIdentity renames the old classic identity to
-// <name>.classic-retired once no repo on this host still points at it.
+// <name>.classic-retired once no clone on this host still points at it: every
+// git clone beside the sync dirs counts, routed or not.
 func retireClassicIdentity(stdout io.Writer, old string, done config.Config, hostCfgs []config.Config) {
 	if old == "" {
 		return
 	}
-	for _, c := range hostCfgs {
-		if c.SyncDir == done.SyncDir {
-			continue
-		}
-		r := gitwt.New(c.SyncDir)
-		if r.IsRepo() && agecrypt.IdentityPath(r) == filepath.ToSlash(old) {
-			fmt.Fprintf(stdout, "  the classic identity %s is kept: another repo on this host still uses it\n", old)
-			return
-		}
+	if _, err := os.Stat(old); err != nil {
+		return // already retired (a rerun)
+	}
+	cfgs := append(append([]config.Config{}, hostCfgs...), done)
+	if users := clonesUsingIdentity(old, cfgs); len(users) > 0 {
+		fmt.Fprintf(stdout, "  the classic identity %s is kept: still used by %s\n", old, strings.Join(users, ", "))
+		fmt.Fprintln(stdout, "  rekey those clones (or remove them), then run this command again to retire it")
+		return
 	}
 	if err := os.Rename(old, old+".classic-retired"); err != nil {
 		fmt.Fprintln(stdout, "  could not retire the classic identity:", err)
