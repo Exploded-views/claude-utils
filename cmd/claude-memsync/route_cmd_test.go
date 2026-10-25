@@ -148,9 +148,12 @@ func TestRouteHome_ClientGuard(t *testing.T) {
 		t.Fatalf("move not logged by hash: %q", e)
 	}
 	// Client to client and client to deny need no consent.
-	runRouteCmd(t, "", false, "home", "client-a")
-	if code, _, _ := runRouteCmd(t, "", false, "home", "orch-a"); code != 0 {
-		t.Fatal("client to orch refused")
+	runRouteCmd(t, "", false, "home", "--confirm-move-out-of-client", "client-a")
+	if code, _, e := runRouteCmd(t, "", false, "home", "orch-a"); code == 0 || !strings.Contains(e, "--confirm-move-out-of-client") {
+		t.Fatalf("client to another client repo without consent: %d %s", code, e)
+	}
+	if code, _, _ := runRouteCmd(t, "", false, "home", "--confirm-move-out-of-client", "orch-a"); code != 0 {
+		t.Fatal("client to orch with consent refused")
 	}
 	if code, _, _ := runRouteCmd(t, "", false, "home", "deny"); code != 0 {
 		t.Fatal("client to deny refused")
@@ -418,5 +421,22 @@ func TestRouteHome_UnpinNeedsConsentOutOfClient(t *testing.T) {
 	}
 	if code, _, e := runRouteCmd(t, "", false, "home", "--unpin", "--confirm-move-out-of-client"); code != 0 {
 		t.Fatal(e)
+	}
+}
+
+func TestRouteHome_ClientAToClientBNeedsFlag(t *testing.T) {
+	p, _ := homeHost(t, map[string]string{"personal": "personal", "mem-client-a": "client", "mem-client-b": "client"}, nil)
+	if code, _, e := runRouteCmd(t, "", false, "home", "mem-client-a"); code != 0 {
+		t.Fatal(e)
+	}
+	code, _, e := runRouteCmd(t, "", false, "home", "mem-client-b")
+	if code == 0 || !strings.Contains(e, "--confirm-move-out-of-client") {
+		t.Fatalf("%d %s", code, e)
+	}
+	if routesOf(t, p).Routes[0].Repo != "mem-client-a" {
+		t.Fatal("changed without the flag")
+	}
+	if code, _, e := runRouteCmd(t, "", false, "home", "--confirm-move-out-of-client", "mem-client-b"); code != 0 || !strings.Contains(e, "another client repo") {
+		t.Fatalf("%d %s", code, e)
 	}
 }

@@ -156,3 +156,14 @@ func TestLeavingFlagsShadowingAcrossKinds(t *testing.T) {
 		t.Errorf("asked on a host without client rules: %v", rep.Leaving)
 	}
 }
+
+func TestLeavingFlagsClientToOtherClientRepo(t *testing.T) {
+	cur := clientHost()
+	cur.Repos["client-b"] = Repo{Config: "/x/b", Kind: KindClient}
+	cur.Routes = []Rule{{Folder: "-Users-zed-acme*", Repo: "client-a"}}
+	tpl := Template{Version: 1, Repos: map[string]string{"client-b": KindClient}, Routes: []TemplateRule{{Folder: "{home}-acme*", Repo: "client-b"}}}
+	_, rep, err := tpl.Inherit(cur, "-Users-zed", false, []string{"-Users-zed-acme-x"})
+	if err != nil || !strings.Contains(strings.Join(rep.Leaving, "\n"), "client-a -> client-b") {
+		t.Fatalf("%v %v", err, rep.Leaving)
+	}
+}

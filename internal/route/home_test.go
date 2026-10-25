@@ -304,3 +304,26 @@ func TestFolderCaseFoldOnlyWhereRoutingFolds(t *testing.T) {
 		t.Fatalf("pin lookup fold = %v, routing fold = %v", ok, foldCase)
 	}
 }
+
+func TestSetHomePinClientToOtherClientNeedsConsent(t *testing.T) {
+	f := fileOf(Rule{Folder: "-home-me", Repo: "client-a"})
+	f.Repos["client-b"] = Repo{Config: "/x/b", Kind: KindClient}
+	f.Repos["orch-b"] = Repo{Config: "/x/o", Kind: KindOrch}
+	p := writeRoutes(t, f)
+	for _, to := range []string{"client-b", "orch-b"} {
+		if _, err := SetHomePin(p, "-home-me", to, HomeOpts{}); !errors.Is(err, ErrNeedsConfirm) {
+			t.Fatalf("%s: %v", to, err)
+		}
+		if g, _ := Load(p); g.Routes[0].Repo != "client-a" {
+			t.Fatal("refused move changed the file")
+		}
+	}
+	var logs []string
+	o := HomeOpts{ConfirmMoveOutOfClient: true, Logf: func(format string, a ...any) { logs = append(logs, fmt.Sprintf(format, a...)) }}
+	if _, err := SetHomePin(p, "-home-me", "client-b", o); err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "another client repo") || strings.Contains(logs[0], "-home-me") {
+		t.Fatalf("log: %v", logs)
+	}
+}

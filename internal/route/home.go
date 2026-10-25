@@ -115,18 +115,26 @@ func (f File) WithHome(folder, repo string, o HomeOpts) (File, HomeChange, error
 	// one on a host that keeps client notes (a client's notes may sit in the
 	// home folder).
 	ch.To = g.Effective(folder)
-	if ch.To != "" && !g.Repos[ch.To].IsClient() && ch.To != ch.From {
+	if ch.To != "" && ch.To != ch.From {
+		// Repos carry no client name, so any move from a client or orch repo to
+		// another repo counts, whether the target is a plain repo or another
+		// client's.
 		fromClient := f.Repos[ch.From].IsClient()
+		toClient := g.Repos[ch.To].IsClient()
 		if !o.ConfirmMoveOutOfClient {
 			if fromClient {
-				return f, ch, fmt.Errorf("the home folder is routed to the client repo %q; this would route it to the non-client repo %q, where the catalog and other hosts can see its notes: %w if that is intended", ch.From, ch.To, ErrNeedsConfirm)
+				return f, ch, fmt.Errorf("the home folder is routed to the client repo %q; this would route it to the repo %q, which may belong to another party or be visible to the catalog and other hosts: %w if that is intended", ch.From, ch.To, ErrNeedsConfirm)
 			}
-			if ch.From == "" && f.HasClientRepo() {
+			if ch.From == "" && !toClient && f.HasClientRepo() {
 				return f, ch, fmt.Errorf("this host keeps client notes: routing the home folder to the non-client repo %q: %w", ch.To, ErrNeedsConfirm)
 			}
 		}
 		if fromClient && ch.Changed && o.Logf != nil {
-			o.Logf("route: folder %s moved from client repo %q to non-client repo %q; its notes will now sync there, and the old repo keeps a frozen copy", hash8(folder), ch.From, ch.To)
+			if toClient {
+				o.Logf("route: folder %s moved from client repo %q to another client repo %q; its notes will now sync there, and the old repo keeps a frozen copy", hash8(folder), ch.From, ch.To)
+			} else {
+				o.Logf("route: folder %s moved from client repo %q to non-client repo %q; its notes will now sync there, and the old repo keeps a frozen copy", hash8(folder), ch.From, ch.To)
+			}
 		}
 	}
 	return g, ch, nil
