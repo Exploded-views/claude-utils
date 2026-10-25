@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""SessionStart hook: inject the claude-memsync distilled catalog as "shared memory".
+
+Reads ~/.claudesync/distilled/*.md frontmatter (name, description) and prints a compact
+index as hookSpecificOutput.additionalContext, so every session in every project knows
+the shared notes exist and where they are. Never prints note bodies. Always exits 0.
+"""
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+BUDGET = 9000  # hook output past ~10k characters is cut to a preview
+
+
+
+def personal_sync_dir():
+    """The personal repo's sync dir from routes.json (multi-repo), else ~/.claudesync."""
+    import json
+    cfg = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "claude-memsync" / "routes.json"
+    try:
+        r = json.loads(cfg.read_text())
+        repo = r["repos"][r["personal"]]
+        c = json.loads(Path(os.path.expanduser(repo["config"])).read_text())
+        return Path(os.path.expanduser(c["syncDir"]))
+    except Exception:
+        return Path.home() / ".claudesync"
+
+def frontmatter(text):
+    m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+    meta = {}
+    if m:
+        for line in m.group(1).splitlines():
+            k, sep, v = line.partition(":")
+            if sep and not line.startswith((" ", "\t")):
+                meta[k.strip()] = v.strip().strip('"')
+    return meta
+
+
+def main():
+    try:
+        event = json.load(sys.stdin).get("hook_event_name") or "SessionStart"
+    except Exception:
+        event = "SessionStart"
+    sync = Path(os.environ.get("CLAUDE_MEMSYNC_DIR", "") or personal_sync_dir())
+    base = sync / "distilled"
+    if not base.is_dir():
+        return
+    lines = []
+    for p in sorted(base.glob("*.md")):
+        if p.name == "DISTILLED.md":
+            continue
+        try:
+            meta = frontmatter(p.read_text(errors="replace")[:4000])
+        except OSError:
+            continue
+        lines.append(f"- {meta.get('name') or p.stem} ({p.name})")
+    head = ("# Shared memory (claude-memsync distilled catalog: all projects and machines)\n\n"
+            f"Notes live in {base}/ (index with descriptions: {base / 'DISTILLED.md'}). Read a note "
+            "before relying on it. Rules about the user and how to work (memory types user and "
+            f"feedback) belong there: write them as {base}/<slug>.md with name and description "
+            "frontmatter, not to this project's memory.\n\n")
+    out, budget = [], BUDGET - len(head)
+    for i, l in enumerate(lines):
+        if budget - len(l) - 1 < 0:
+            out.append(f"- ... {len(lines) - i} more in {base / 'DISTILLED.md'}")
+            break
+        out.append(l)
+        budget -= len(l) + 1
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": event,
+                                             "additionalContext": head + "\n".join(out) + "\n"}}))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        pass
+    sys.exit(0)
