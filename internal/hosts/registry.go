@@ -165,3 +165,24 @@ func RemoveHost(dir, label string) (bool, error) {
 	}
 	return true, nil
 }
+
+// WriteExpiry publishes a host's expiry date as hosts/<label>/expiry
+// (YYYY-MM-DD) and commits that file locally; the registry's own sync pushes
+// it. It reports whether anything changed.
+func WriteExpiry(dir, label string, expiry time.Time) (bool, error) {
+	rel, path, err := hostFile(dir, label, "expiry")
+	if err != nil {
+		return false, err
+	}
+	want := expiry.UTC().Format("2006-01-02") + "\n"
+	if old, err := os.ReadFile(path); err == nil && string(old) == want {
+		return false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return false, err
+	}
+	if err := os.WriteFile(path, []byte(want), 0o600); err != nil {
+		return false, err
+	}
+	return commitFile(dir, rel, "expiry of "+label)
+}

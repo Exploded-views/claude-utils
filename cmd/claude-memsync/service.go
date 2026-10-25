@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kardianos/service"
 
@@ -271,6 +272,9 @@ func runStatus(args []string) int {
 		if line := readOnlyLine(cfg); line != "" {
 			fmt.Println(line)
 		}
+		if line := expiryLine(cfg, time.Now()); line != "" {
+			fmt.Println(line)
+		}
 		if line := pausedLine(cfg); line != "" {
 			fmt.Println(line)
 		}
@@ -312,6 +316,9 @@ func routedStatus() (handled bool, code int) {
 		cfg := set.Cfgs[name]
 		var lines []string
 		if l := readOnlyLine(cfg); l != "" {
+			lines = append(lines, l)
+		}
+		if l := expiryLine(cfg, time.Now()); l != "" {
 			lines = append(lines, l)
 		}
 		if l := visibilityLine(cfg); l != "" {

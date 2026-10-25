@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/foreign"
 )
@@ -89,6 +90,12 @@ type Config struct {
 	// that would commit refuses. Set by `init --read-only`.
 	ReadOnly bool `json:"readOnly,omitempty"`
 
+	// ExpiresAt (YYYY-MM-DD) is the last day this host syncs. The day after, the
+	// daemon holds like a foreign-writer hold (nothing mirrored, committed,
+	// pulled or pushed) and status says "expired: retire me". Set by
+	// `init --expires`; published to the registry as hosts/<label>/expiry.
+	ExpiresAt string `json:"expiresAt,omitempty"`
+
 	// HostLabel is the name this host goes by in deploy-key titles, recipient
 	// comments ("# host:<label>") and the registry (hosts/<label>/). A name
 	// you choose, never the machine's host name. Set by `init --host-label`.
@@ -112,6 +119,24 @@ type Config struct {
 	// StartQuietSec is the start-up quiet window in seconds (nil: 15, 0 turns
 	// it off): the owned folders must not change during it, or the run refuses.
 	StartQuietSec *int `json:"startQuietSec,omitempty"`
+}
+
+// ExpiryDate parses ExpiresAt; ok is false when none is set.
+func (c Config) ExpiryDate() (t time.Time, ok bool) {
+	if c.ExpiresAt == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse("2006-01-02", c.ExpiresAt)
+	return t, err == nil
+}
+
+// Expired reports whether now is past the last day of ExpiresAt (UTC dates).
+func (c Config) Expired(now time.Time) bool {
+	d, ok := c.ExpiryDate()
+	if !ok {
+		return false
+	}
+	return now.UTC().Truncate(24 * time.Hour).After(d)
 }
 
 // DefaultQuietSec is the start-up quiet window when config.json does not say.
@@ -190,6 +215,11 @@ func Load(path string) (Config, error) {
 	}
 	if err := foreign.Validate(c.ForeignWriters); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
+	}
+	if c.ExpiresAt != "" {
+		if _, err := time.Parse("2006-01-02", c.ExpiresAt); err != nil {
+			return Config{}, fmt.Errorf("%s: expiresAt must be a YYYY-MM-DD date", path)
+		}
 	}
 	if c.StartQuietSec != nil && *c.StartQuietSec < 0 {
 		return Config{}, fmt.Errorf("%s: startQuietSec must not be negative", path)

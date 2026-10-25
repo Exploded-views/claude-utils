@@ -1407,6 +1407,24 @@ member of are listed under "cannot re-encrypt here" (it never commits).
 --read-only` should mark the request so the accepting member's output reminds them
 to add the deploy key without `-w`.
 
+### Expiry
+
+    claude-memsync init --remote <url> --expires 2026-12-31
+
+For a host that is meant to be disposable, `--expires <YYYY-MM-DD>` (config
+`expiresAt`) sets the last day it syncs. The day after (UTC), the daemon holds
+exactly as it does for a foreign writer: nothing is mirrored, committed, pulled or
+pushed, and it logs why once. `status` says `expired: retire me`, and before the
+date it shows `expires on <date>`. A malformed `expiresAt` makes the config fail to
+load instead of silently never expiring. To extend a host, edit `expiresAt` and
+restart the daemon.
+
+When the host has a `hostLabel` and the routes file names a registry, the daemon
+publishes the date at start as `hosts/<label>/expiry` (committed locally; the
+registry's own sync pushes it; skipped on a read-only member of the registry), so
+`host list` on other hosts flags the host `expired` once the date has passed. The
+file is removed with the rest of `hosts/<label>/` by `host retire`.
+
 ### Check-App keys
 
 A host may have its own private key for a GitHub App used for checks. Record its

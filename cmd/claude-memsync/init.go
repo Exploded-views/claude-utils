@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/config"
@@ -60,6 +61,7 @@ func runInit(args []string) int {
 	tokenFile := flags.String("token-file", "", "file holding a GitHub token for the private-only check (or set MEMSYNC_GITHUB_TOKEN)")
 	hostLabel := flags.String("host-label", "", "a name you choose for this host (such as laptop-2): titles its deploy keys, labels its age recipient, names it in the registry; saved to config")
 	readOnly := flags.Bool("read-only", false, "read-only member: pull and apply notes into the Claude tree, never commit or push (the remote must already hold the repo); saved to config")
+	expires := flags.String("expires", "", "last day this host syncs (YYYY-MM-DD); the day after, the daemon holds and status says to retire it; saved to config and published to the registry")
 	force := flags.Bool("force", false, "re-init even if sync-dir already exists")
 	archiveDeletes := flags.Bool("archive-deletes", false, "archive instead of delete: a note removed from a Claude folder moves to archive/ in the repo (sets archiveDeletes in config.json)")
 	denylist := flags.String("denylist", "", "UTF-8 file of regexes (one per line) to install as the denylist before the first commit")
@@ -97,7 +99,19 @@ func runInit(args []string) int {
 			return 2
 		}
 	}
+	if *expires != "" {
+		d, err := time.Parse("2006-01-02", *expires)
+		switch {
+		case err != nil:
+			fmt.Fprintln(os.Stderr, "init: --expires must be a date like 2026-12-31")
+			return 2
+		case time.Now().UTC().Truncate(24 * time.Hour).After(d):
+			fmt.Fprintln(os.Stderr, "init: --expires is in the past")
+			return 2
+		}
+	}
 	cfg := config.Defaults()
+	cfg.ExpiresAt = *expires
 	cfg.HostLabel = *hostLabel
 	cfg.ReadOnly = *readOnly
 	if *syncDir != "" {

@@ -474,3 +474,40 @@ func hostCheckKey(hc *hostCtx, stdout, stderr io.Writer, args []string) int {
 	fmt.Fprintf(stdout, "recorded the check key of %s in the registry (committed locally; the registry's sync pushes it)\n", label)
 	return 0
 }
+
+// publishExpiry writes this host's expiresAt into the registry as
+// hosts/<label>/expiry (committed locally; the registry's own sync pushes it)
+// so `host list` on other hosts can flag it. It does nothing without an expiry,
+// and never commits into a registry this host is a read-only member of.
+func publishExpiry(cfg config.Config, registryDir string, registryReadOnly bool, logf func(string, ...any)) error {
+	d, ok := cfg.ExpiryDate()
+	if !ok || registryDir == "" {
+		return nil
+	}
+	if cfg.HostLabel == "" {
+		return errors.New("expiresAt is set but hostLabel is not: the expiry cannot be published under a name")
+	}
+	if registryReadOnly {
+		logf("expiry not published: this host is a read-only member of the registry")
+		return nil
+	}
+	changed, err := hosts.WriteExpiry(registryDir, cfg.HostLabel, d)
+	if err != nil {
+		return err
+	}
+	if changed {
+		logf("published the expiry %s as hosts/%s/expiry in the registry (committed locally)", cfg.ExpiresAt, cfg.HostLabel)
+	}
+	return nil
+}
+
+// expiryLine is the status line for a host with an expiry date.
+func expiryLine(cfg config.Config, now time.Time) string {
+	if cfg.ExpiresAt == "" {
+		return ""
+	}
+	if cfg.Expired(now) {
+		return "expired: retire me (expiresAt " + cfg.ExpiresAt + "): syncing is held"
+	}
+	return "expires on " + cfg.ExpiresAt
+}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -38,6 +39,9 @@ type Loop struct {
 	// active in the Claude folders.
 	Hold func() bool
 
+	// Now is the clock the expiry check reads (nil: time.Now); tests inject one.
+	Now func() time.Time
+
 	// Name labels this loop's log lines when several repos run in one process.
 	Name string
 	// Owns gates which Claude folders this loop may touch (see Roots.Owns).
@@ -47,7 +51,8 @@ type Loop struct {
 	// recovered is the outcome of a recoverLeftovers the cycle already ran
 	// before flush, so flush does not repeat it: a path whose restore keeps
 	// failing is counted once per cycle.
-	recovered *recovery
+	recovered  *recovery
+	expiryOnce sync.Once
 }
 
 type recovery struct{ err error }
@@ -183,7 +188,25 @@ func (l *Loop) reconcile(roots Roots, m *Manifest) error {
 	return err
 }
 
-func (l *Loop) held() bool { return l.Hold != nil && l.Hold() }
+// held is the pause: a foreign writer is active, or the host has expired.
+func (l *Loop) held() bool { return (l.Hold != nil && l.Hold()) || l.Expired() }
+
+// Expired reports whether this host's expiresAt date has passed. An expired
+// loop holds exactly like a foreign-writer hold: nothing is mirrored,
+// committed, pulled or pushed.
+func (l *Loop) Expired() bool {
+	now := time.Now
+	if l.Now != nil {
+		now = l.Now
+	}
+	if !l.Cfg.Expired(now()) {
+		return false
+	}
+	l.expiryOnce.Do(func() {
+		l.logln("this host expired on", l.Cfg.ExpiresAt+": syncing is held; run `claude-memsync host retire` for it from another host, or set a later expiresAt")
+	})
+	return true
+}
 
 // keyless reports (and logs) that encryption is on but this host's identity
 // cannot read the repo.
