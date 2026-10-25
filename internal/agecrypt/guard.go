@@ -106,6 +106,7 @@ func PushGuard(repo *gitwt.Repo, branch string) error {
 	}
 	seen := map[string]bool{}
 	var oids, paths []string
+	var joinOIDs, joinPaths []string
 	for _, line := range strings.Split(out, "\n") {
 		tab := strings.IndexByte(line, '\t')
 		if !strings.HasPrefix(line, ":") || tab < 0 {
@@ -117,6 +118,12 @@ func PushGuard(repo *gitwt.Repo, branch string) error {
 		}
 		seen[f[3]+line[tab:]] = true
 		path := line[tab+1:]
+		if IsJoinPath(path) {
+			// Plaintext is allowed here, but only a strictly valid request.
+			joinOIDs = append(joinOIDs, f[3])
+			joinPaths = append(joinPaths, path)
+			continue
+		}
 		if Exempt(path) {
 			continue
 		}
@@ -128,6 +135,15 @@ func PushGuard(repo *gitwt.Repo, branch string) error {
 		return err
 	}
 	var bad int
+	jb, err := repo.BlobContents(joinOIDs)
+	if err != nil {
+		return err
+	}
+	for i, b := range jb {
+		if !ValidJoinBlob(joinPaths[i], b) {
+			bad++
+		}
+	}
 	for i, b := range blobs {
 		if !IsCiphertext(b) {
 			bad++

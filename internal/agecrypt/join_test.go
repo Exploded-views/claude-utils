@@ -1,0 +1,445 @@
+package agecrypt
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+var joinNow = time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+
+func goodJoin(t *testing.T, label string) (Join, string) {
+	t.Helper()
+	_, rcpt := newIdentity(t, "j")
+	j := Join{Label: label, Recipient: rcpt, Requested: joinNow}
+	j.Fingerprint = JoinFingerprint(rcpt)
+	return j, j.Format()
+}
+
+func TestJoinFormatParseRoundTrip(t *testing.T) {
+	j, text := goodJoin(t, "host-1")
+	if !strings.HasPrefix(text, "label: host-1\nrecipient: age1") || !strings.Contains(text, "\nrequested: 2026-10-25T12:00:00Z\n") {
+		t.Fatalf("format: %q", text)
+	}
+	got, err := ParseJoin([]byte(text))
+	if err != nil || got.Label != "host-1" || got.Recipient != j.Recipient || got.Fingerprint != j.Fingerprint || !got.Requested.Equal(joinNow) {
+		t.Fatalf("parse: %+v %v", got, err)
+	}
+	if len(j.Fingerprint) < 12 || len(j.Fingerprint) > 32 {
+		t.Errorf("fingerprint should be short: %q", j.Fingerprint)
+	}
+}
+
+func TestParseJoinStrict(t *testing.T) {
+	j, good := goodJoin(t, "host-1")
+	lines := strings.Split(strings.TrimSuffix(good, "\n"), "\n")
+	_, sshKey := func() (string, string) {
+		return "", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHcbV3DnP0R7ZqzuZXlzJ4W0eKgQh8WZ1xX3nYF8mO6c"
+	}()
+	cases := map[string]string{
+		"extra line":      good + "extra: stuff\n",
+		"extra trailing":  good + "\n",
+		"no trailing nl":  strings.TrimSuffix(good, "\n"),
+		"crlf":            strings.ReplaceAll(good, "\n", "\r\n"),
+		"comment":         "# hi\n" + good,
+		"reordered":       strings.Join([]string{lines[1], lines[0], lines[2], lines[3]}, "\n") + "\n",
+		"upper label":     strings.Replace(good, "host-1", "Host-1", 1),
+		"long label":      strings.Replace(good, "host-1", strings.Repeat("a", 33), 1),
+		"leading dash":    strings.Replace(good, "host-1", "-host", 1),
+		"ssh recipient":   strings.Join([]string{lines[0], "recipient: " + sshKey, lines[2], lines[3]}, "\n") + "\n",
+		"bad fingerprint": strings.Replace(good, j.Fingerprint, strings.Repeat("0", len(j.Fingerprint)), 1),
+		"non-utc time":    strings.Replace(good, "12:00:00Z", "12:00:00+02:00", 1),
+		"garbage time":    strings.Replace(good, "2026-10-25T12:00:00Z", "yesterday", 1),
+		"two recipients":  strings.Replace(good, j.Recipient, j.Recipient+" "+j.Recipient, 1),
+		"trailing space":  strings.Replace(good, "host-1\n", "host-1 \n", 1),
+		"empty":           "",
+		"huge":            good + strings.Repeat("x", 5000),
+	}
+	for name, c := range cases {
+		if _, err := ParseJoin([]byte(c)); err == nil {
+			t.Errorf("%s: must be refused", name)
+		}
+	}
+}
+
+func TestIsJoinPathAndValidBlob(t *testing.T) {
+	_, good := goodJoin(t, "host-1")
+	for p, want := range map[string]bool{
+		"joins/host-1.txt":     true,
+		"joins/Host.txt":       false,
+		"joins/a/b.txt":        false,
+		"joins/host-1.md":      false,
+		"joins/.txt":           false,
+		"xjoins/host-1.txt":    false,
+		"projects/joins/a.txt": false,
+		"joins/host-1.txt/x":   false,
+	} {
+		if IsJoinPath(p) != want {
+			t.Errorf("IsJoinPath(%q) = %v", p, !want)
+		}
+	}
+	if !ValidJoinBlob("joins/host-1.txt", []byte(good)) {
+		t.Error("good blob refused")
+	}
+	if ValidJoinBlob("joins/other.txt", []byte(good)) {
+		t.Error("label must match the file name")
+	}
+	if ValidJoinBlob("notes/host-1.txt", []byte(good)) {
+		t.Error("path outside joins/")
+	}
+}
+
+// pair builds member a and keyless requester b over one remote.
+func pair(t *testing.T) (a, b *host) {
+	t.Helper()
+	gitEnv(t)
+	remote := bareRemote(t)
+	a = newHost(t, remote, true)
+	a.write(t, "MEMORY.md", "- first\n")
+	a.commit(t, "memsync: 1 files")
+	if _, err := a.repo.Run("push", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	b = newHost(t, remote, false)
+	if CheckKeyed(b.repo) == nil {
+		t.Fatal("b must be keyless")
+	}
+	return a, b
+}
+
+func headTreePaths(t *testing.T, h *host, rev string) string {
+	t.Helper()
+	out, err := h.repo.Run("diff", "--name-status", "--no-renames", rev+"~1", rev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(out)
+}
+
+func TestRequestJoinCommitsOnlyThePathAndPushes(t *testing.T) {
+	a, b := pair(t)
+	// A secret staged in the real index on the keyless host must stay staged.
+	b.write(t, "secret.txt", "TOPSECRET\n")
+	if _, err := b.repo.Run("add", "secret.txt"); err != nil {
+		t.Fatal(err)
+	}
+	j, st, err := RequestJoin(b.repo, "host-b", joinNow)
+	if err != nil || st != JoinRequested {
+		t.Fatalf("request: %v %v", st, err)
+	}
+	if j.Recipient != b.rcpt {
+		t.Error("recipient must be this host's public key")
+	}
+	if got := headTreePaths(t, b, "HEAD"); got != "A\tjoins/host-b.txt" {
+		t.Fatalf("commit must hold only the join file, got %q", got)
+	}
+	if staged, _ := b.repo.Run("diff", "--cached", "--name-only"); strings.TrimSpace(staged) != "secret.txt" {
+		t.Errorf("staged secret must stay staged and uncommitted, index diff: %q", staged)
+	}
+	if st := b.dirty(t); strings.Contains(st, "joins") {
+		t.Errorf("join file should be tracked and clean: %q", st)
+	}
+	if err := PushGuard(b.repo, "main"); err != nil {
+		t.Fatalf("guard must accept a valid join request: %v", err)
+	}
+	if _, err := b.repo.Run("push", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if !IsJoinPlaintextInRemote(t, a) {
+		t.Fatal("join file must be plaintext on the remote")
+	}
+}
+
+// IsJoinPlaintextInRemote fetches into a and reads the blob raw.
+func IsJoinPlaintextInRemote(t *testing.T, a *host) bool {
+	t.Helper()
+	if _, err := a.repo.Run("fetch", "-q", "origin"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := a.repo.Run("cat-file", "blob", "refs/remotes/origin/main:joins/host-b.txt")
+	return err == nil && strings.HasPrefix(out, "label: host-b\n")
+}
+
+func TestRequestJoinIdempotent(t *testing.T) {
+	_, b := pair(t)
+	if _, st, err := RequestJoin(b.repo, "host-b", joinNow); err != nil || st != JoinRequested {
+		t.Fatal(st, err)
+	}
+	before := b.revHead(t)
+	_, st, err := RequestJoin(b.repo, "host-b", joinNow.Add(time.Hour))
+	if err != nil || st != JoinExists {
+		t.Fatalf("second request: %v %v", st, err)
+	}
+	if b.revHead(t) != before {
+		t.Error("an idempotent request must not commit again")
+	}
+	// Same key under another label is the same request.
+	if _, st, _ := RequestJoin(b.repo, "other-name", joinNow); st != JoinExists {
+		t.Errorf("same key, other label: %v", st)
+	}
+}
+
+func TestRequestJoinLabelTakenByAnotherKey(t *testing.T) {
+	a, b := pair(t)
+	// a plants a request for the label under a different key
+	_, other := newIdentity(t, "o")
+	j := Join{Label: "host-b", Recipient: other, Requested: joinNow}
+	j.Fingerprint = JoinFingerprint(other)
+	a.write(t, "joins/host-b.txt", j.Format())
+	a.commit(t, "x")
+	a.repo.Run("push", "origin", "main")
+	if err := SyncFromOrigin(b.repo); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := RequestJoin(b.repo, "host-b", joinNow); err == nil {
+		t.Fatal("a label held by another key must be refused")
+	}
+}
+
+func TestRequestJoinRefusals(t *testing.T) {
+	a, b := pair(t)
+	if _, _, err := RequestJoin(b.repo, "Bad_Label", joinNow); err == nil {
+		t.Error("bad label")
+	}
+	if _, st, err := RequestJoin(a.repo, "host-a", joinNow); err != nil || st != JoinAlreadyMember {
+		t.Errorf("a member has nothing to request: %v %v", st, err)
+	}
+}
+
+func TestJoinAcceptEndToEnd(t *testing.T) {
+	a, b := pair(t)
+	if _, _, err := RequestJoin(b.repo, "host-b", joinNow); err != nil {
+		t.Fatal(err)
+	}
+	b.repo.Run("push", "origin", "main")
+	if _, err := a.repo.Run("pull", "-q", "--rebase", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	list, err := ListJoins(a.repo)
+	if err != nil || len(list) != 1 || !list[0].Valid || list[0].Join.Label != "host-b" {
+		t.Fatalf("list: %+v %v", list, err)
+	}
+	fp := list[0].Join.Fingerprint
+
+	// No fingerprint, wrong fingerprint: refused, nothing changes.
+	head := a.revHead(t)
+	for _, bad := range []string{"", "deadbeef", strings.ToUpper(fp), fp[:len(fp)-1], fp + "0"} {
+		if err := AcceptJoin(a.repo, "host-b", bad); err == nil {
+			t.Errorf("fingerprint %q must be refused", bad)
+		}
+	}
+	if a.revHead(t) != head {
+		t.Fatal("a refused accept must not commit")
+	}
+	if err := AcceptJoin(a.repo, "host-b", fp); err != nil {
+		t.Fatal(err)
+	}
+	if got := headTreePaths(t, a, "HEAD"); !strings.Contains(got, "D\tjoins/host-b.txt") || !strings.Contains(got, ".age-recipients") {
+		t.Fatalf("one commit must add the recipient and remove the join file: %q", got)
+	}
+	if n := strings.Count(headTreePaths(t, a, "HEAD"), "\n") + 1; n < 2 {
+		t.Fatalf("paths: %d", n)
+	}
+	if _, err := os.Stat(filepath.Join(a.repo.Dir, "joins", "host-b.txt")); err == nil {
+		t.Error("join file must be gone from the work-tree")
+	}
+	if strings.Contains(a.dirty(t), "joins") {
+		t.Errorf("dirty: %q", a.dirty(t))
+	}
+	keys, _ := ListRecipients(a.repo.Dir)
+	if !strings.Contains(strings.Join(keys, "\n"), b.rcpt) {
+		t.Error("recipient not added")
+	}
+	if err := PushGuard(a.repo, "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.repo.Run("push", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	// b: pull sees itself in the recipients; the pinned-set gate still applies.
+	if st, err := JoinStatus(b.repo); err != nil || st.State == "" {
+		t.Fatal(st, err)
+	}
+	if _, err := b.repo.Run("pull", "-q", "--rebase", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := Unreviewed(b.repo); !u {
+		t.Fatal("b must have to accept the recipients change")
+	}
+	if st, _ := JoinStatus(b.repo); st.State != JoinStateAccepted {
+		t.Errorf("status after accept: %+v", st)
+	}
+	if err := AcceptRecipients(b.repo); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckKeyed(b.repo); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestJoinStatusPendingThenNone(t *testing.T) {
+	_, b := pair(t)
+	if st, _ := JoinStatus(b.repo); st.State != JoinStateNone {
+		t.Errorf("before request: %+v", st)
+	}
+	RequestJoin(b.repo, "host-b", joinNow)
+	st, err := JoinStatus(b.repo)
+	if err != nil || st.State != JoinStatePending || st.Join.Label != "host-b" || st.Join.Fingerprint == "" {
+		t.Errorf("after request: %+v %v", st, err)
+	}
+}
+
+func TestJoinReject(t *testing.T) {
+	a, b := pair(t)
+	RequestJoin(b.repo, "host-b", joinNow)
+	b.repo.Run("push", "origin", "main")
+	a.repo.Run("pull", "-q", "--rebase", "origin", "main")
+	before, _ := ListRecipients(a.repo.Dir)
+	if err := RejectJoin(a.repo, "host-b"); err != nil {
+		t.Fatal(err)
+	}
+	if got := headTreePaths(t, a, "HEAD"); got != "D\tjoins/host-b.txt" {
+		t.Fatalf("reject commit: %q", got)
+	}
+	after, _ := ListRecipients(a.repo.Dir)
+	if strings.Join(before, ",") != strings.Join(after, ",") {
+		t.Error("reject must not touch recipients")
+	}
+	if err := RejectJoin(a.repo, "host-b"); err == nil {
+		t.Error("rejecting a missing request is an error")
+	}
+}
+
+// plant commits path=content on the remote from a, bypassing the filter, the
+// way a malicious writer with push access would.
+func plant(t *testing.T, a *host, path, content string) {
+	t.Helper()
+	oid, err := a.repo.RunStdin([]byte(content), "hash-object", "-w", "--no-filters", "--stdin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.repo.Run("update-index", "--add", "--cacheinfo", "100644,"+strings.TrimSpace(oid)+","+path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.repo.Run("commit", "-q", "-m", "plant"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPushGuardRefusesBadPlaintext(t *testing.T) {
+	_, good := goodJoin(t, "host-x")
+	j, _ := ParseJoin([]byte(good))
+	staleFP := strings.Replace(good, j.Fingerprint, "0123456789abcdef", 1)
+	cases := map[string]struct{ path, body string }{
+		"extra content":     {"joins/host-x.txt", good + "more\n"},
+		"stale fingerprint": {"joins/host-x.txt", staleFP},
+		"outside joins":     {"notes/host-x.txt", good},
+		"nested":            {"joins/sub/host-x.txt", good},
+		"wrong ext":         {"joins/host-x.md", good},
+		"label mismatch":    {"joins/other.txt", good},
+		"root":              {"host-x.txt", good},
+		"plain secret":      {"joins/host-x.txt", "api key is hunter2\n"},
+	}
+	for name, c := range cases {
+		c := c
+		t.Run(name, func(t *testing.T) {
+			a, _ := pair(t)
+			plant(t, a, c.path, c.body)
+			if err := PushGuard(a.repo, "main"); err == nil {
+				t.Fatalf("guard must refuse %s", name)
+			}
+		})
+	}
+	t.Run("valid passes", func(t *testing.T) {
+		a, _ := pair(t)
+		plant(t, a, "joins/host-x.txt", good)
+		if err := PushGuard(a.repo, "main"); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestAcceptRefusesTamperedAndInvalid(t *testing.T) {
+	a, _ := pair(t)
+	_, good := goodJoin(t, "host-x")
+	orig, _ := ParseJoin([]byte(good))
+
+	// Consistently modified after the request (new key, matching fingerprint):
+	// the fingerprint the human compared no longer matches.
+	_, other := newIdentity(t, "evil")
+	evil := Join{Label: "host-x", Recipient: other, Requested: joinNow}
+	evil.Fingerprint = JoinFingerprint(other)
+	plant(t, a, "joins/host-x.txt", evil.Format())
+	if err := AcceptJoin(a.repo, "host-x", orig.Fingerprint); err == nil {
+		t.Fatal("modified join file must be refused against the original fingerprint")
+	}
+	// Invalid file: refused even with whatever fingerprint it claims.
+	plant(t, a, "joins/host-y.txt", "label: host-y\nrecipient: ssh-ed25519 AAAA\nfingerprint: 00\nrequested: now\n")
+	if err := AcceptJoin(a.repo, "host-y", "00"); err == nil {
+		t.Fatal("invalid file must be refused")
+	}
+	list, err := ListJoins(a.repo)
+	if err != nil || len(list) != 2 {
+		t.Fatalf("%+v %v", list, err)
+	}
+	for _, e := range list {
+		if e.Join.Label == "host-y" && e.Valid {
+			t.Error("host-y must be listed as invalid")
+		}
+	}
+	keys, _ := ListRecipients(a.repo.Dir)
+	if strings.Contains(strings.Join(keys, "\n"), other) {
+		t.Error("recipient added despite refusal")
+	}
+}
+
+func TestAcceptNeedsAKeyedHost(t *testing.T) {
+	a, b := pair(t)
+	RequestJoin(b.repo, "host-b", joinNow)
+	b.repo.Run("push", "origin", "main")
+	a.repo.Run("pull", "-q", "--rebase", "origin", "main")
+	list, _ := ListJoins(a.repo)
+	// b is keyless: it cannot accept anything.
+	b.repo.Run("fetch", "-q", "origin")
+	if err := AcceptJoin(b.repo, "host-b", list[0].Join.Fingerprint); err == nil {
+		t.Error("keyless host must not accept")
+	}
+}
+
+func TestInfoAttributesExemptJoins(t *testing.T) {
+	_, b := pair(t)
+	if err := WriteInfoAttributes(b.repo); err != nil {
+		t.Fatal(err)
+	}
+	out, err := b.repo.Run("check-attr", "filter", "diff", "merge", "--", "joins/x.txt", "other/x.txt", "joins/a/b.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"joins/x.txt: filter: unspecified", "other/x.txt: filter: memage", "joins/a/b.txt: filter: memage"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("want %q in:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(Attributes(), "/joins/*.txt") {
+		t.Error(".gitattributes content must exempt joins/*.txt")
+	}
+}
+
+// Nothing in the sync loop may be able to accept a request.
+func TestNoDaemonPathAccepts(t *testing.T) {
+	dirs := []string{"../sync", "../../cmd/claude-memsync"}
+	for _, d := range dirs {
+		files, _ := filepath.Glob(filepath.Join(d, "*.go"))
+		for _, f := range files {
+			if strings.HasSuffix(f, "_test.go") || strings.HasSuffix(f, "join.go") {
+				continue
+			}
+			b, _ := os.ReadFile(f)
+			if strings.Contains(string(b), "AcceptJoin(") {
+				t.Errorf("%s references AcceptJoin", f)
+			}
+		}
+	}
+}
