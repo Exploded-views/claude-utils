@@ -85,6 +85,7 @@ func TestTokenCmdFailureIsNoToken(t *testing.T) {
 	var seen []string
 	cfg := guardCfg(t, okRepoHandler(&seen), false)
 	cfg.GitHubTokenCmd = []string{tokScript(t, "echo "+cmdTokSecret+"; echo "+cmdTokSecret+" >&2; exit 1")}
+	cfg = savedAndLoaded(t, cfg)
 	var out, errb bytes.Buffer
 	if code := repoCreateRun(cfg, "Org", "mem-personal", &out, &errb); code == 0 {
 		t.Fatal("want failure without a token")
@@ -104,6 +105,7 @@ func TestTokenFileWinsOverCmd(t *testing.T) {
 	var seen []string
 	cfg := guardCfg(t, okRepoHandler(&seen), true)
 	cfg.GitHubTokenCmd = []string{tokScript(t, "echo "+cmdTokSecret)}
+	cfg = savedAndLoaded(t, cfg)
 	c, err := guardClient(cfg)
 	if err != nil || c == nil {
 		t.Fatal(err)
@@ -120,6 +122,7 @@ func TestDaemonRecheckUsesTokenCmdAndNeverLogsIt(t *testing.T) {
 	var seen []string
 	cfg := guardCfg(t, okRepoHandler(&seen), false)
 	cfg.GitHubTokenCmd = []string{tokScript(t, "echo "+cmdTokSecret)}
+	cfg = savedAndLoaded(t, cfg)
 	var logs []string
 	logf := func(f string, a ...any) { logs = append(logs, f) }
 	allowed := pushWatch(cfg, logf)
@@ -141,6 +144,7 @@ func TestRecheckTokenCmdFalseSkipsCommand(t *testing.T) {
 	cfg.GitHubTokenCmd = []string{tokScript(t, "touch "+marker+"; echo "+cmdTokSecret)}
 	f := false
 	cfg.RecheckTokenCmd = &f
+	cfg = savedAndLoaded(t, cfg)
 	allowed := pushWatch(cfg, func(string, ...any) {})
 	if allowed == nil {
 		t.Fatal("local checks still apply")
@@ -172,4 +176,18 @@ func TestConfigRoundTripTokenCmd(t *testing.T) {
 	if err != nil || len(got.GitHubTokenCmd) != 3 || got.RecheckTokenCmd == nil || *got.RecheckTokenCmd {
 		t.Fatalf("round trip: %+v %v", got, err)
 	}
+}
+
+// savedAndLoaded writes cfg to its config.json (0600) and reads it back, the
+// way the daemon gets a config whose githubTokenCmd it may honour.
+func savedAndLoaded(t *testing.T, cfg config.Config) config.Config {
+	t.Helper()
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.Load(cfg.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }

@@ -271,6 +271,10 @@ func runStatus(args []string) int {
 		if line := pausedLine(cfg); line != "" {
 			fmt.Println(line)
 		}
+		if line := syncpkg.PullRefusedLine(cfg.SyncDir); line != "" {
+			fmt.Println(line)
+			code = 1
+		}
 		if line := visibilityLine(cfg); line != "" {
 			fmt.Println(line)
 		}
@@ -308,6 +312,10 @@ func routedStatus() (handled bool, code int) {
 	for _, name := range set.names() {
 		cfg := set.Cfgs[name]
 		var lines []string
+		if l := syncpkg.PullRefusedLine(cfg.SyncDir); l != "" {
+			lines = append(lines, l)
+			code = 1
+		}
 		if l := visibilityLine(cfg); l != "" {
 			lines = append(lines, l)
 		}
