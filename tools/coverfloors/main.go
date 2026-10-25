@@ -1,12 +1,14 @@
 // Command coverfloors enforces per-package Go statement-coverage floors.
 //
 //	coverfloors check   -profile cover.out -floors coverage-floors.json
-//	coverfloors ratchet -profile cover.out -floors coverage-floors.json [-out path]
+//	coverfloors ratchet -profile cover.out -floors coverage-floors.json [-out path] [-prune]
 //
 // The profile is `go test -coverprofile` output. Floors are a JSON object of
 // import path to percent (one decimal). check fails when a package is more than
-// 0.1 point below its floor, or has statements but no floor. ratchet raises each
-// floor to the current coverage rounded down to 0.1 and never lowers one.
+// 0.1 point below its floor, has statements but no floor, or has a floor for a
+// package absent from the profile. ratchet raises each floor to the current
+// coverage rounded down to 0.1 and never lowers one; with -prune it also drops
+// floors for packages absent from the profile. An empty profile is an error.
 // Exit codes: 0 ok, 1 check failed, 2 usage or input error.
 package main
 
@@ -102,6 +104,9 @@ func ParseProfile(r io.Reader) (map[string]Cov, error) {
 	if first {
 		return nil, errors.New("empty profile")
 	}
+	if len(blocks) == 0 {
+		return nil, errors.New("profile has a mode: line but no coverage blocks")
+	}
 	out := map[string]Cov{}
 	for key, b := range blocks {
 		file := key[:strings.LastIndex(key, ":")]
@@ -123,7 +128,16 @@ func ParseProfile(r io.Reader) (map[string]Cov, error) {
 
 // Prune drops floors for packages absent from cov and lists what it dropped.
 func Prune(floors map[string]float64, cov map[string]Cov) (map[string]float64, []string) {
-	return floors, nil
+	out := make(map[string]float64, len(floors))
+	var dropped []string
+	for _, pkg := range sortedKeys(floors) {
+		if _, seen := cov[pkg]; seen {
+			out[pkg] = floors[pkg]
+		} else {
+			dropped = append(dropped, pkg)
+		}
+	}
+	return out, dropped
 }
 
 func sortedKeys[V any](m map[string]V) []string {
@@ -136,7 +150,8 @@ func sortedKeys[V any](m map[string]V) []string {
 }
 
 // Check compares coverage with floors. It reports false when any package is
-// below its floor by more than the epsilon, or has statements and no floor.
+// below its floor by more than the epsilon, has statements and no floor, or has
+// a floor but no coverage in the profile ("not measured"; ratchet -prune drops it).
 func Check(floors map[string]float64, cov map[string]Cov) ([]Row, bool) {
 	ok := true
 	var rows []Row
@@ -159,6 +174,7 @@ func Check(floors map[string]float64, cov map[string]Cov) ([]Row, bool) {
 	for _, pkg := range sortedKeys(floors) {
 		if _, seen := cov[pkg]; !seen {
 			rows = append(rows, Row{Pkg: pkg, Floor: floors[pkg], HasFloor: true, Status: "not measured"})
+			ok = false
 		}
 	}
 	return rows, ok
@@ -212,6 +228,11 @@ func loadFloors(p string) (map[string]float64, error) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, fmt.Errorf("%s: %w", p, err)
 	}
+	for pkg, v := range m {
+		if v < 0 || v > 100 || math.Abs(v*10-math.Round(v*10)) > 1e-6 {
+			return nil, fmt.Errorf("%s: floor for %s is %v: want 0 to 100 with at most one decimal", p, pkg, v)
+		}
+	}
 	return m, nil
 }
 
@@ -240,7 +261,7 @@ func printTable(w io.Writer, rows []Row) {
 			floor = fmt.Sprintf("%.1f", r.Floor)
 		}
 		if r.Status != "not measured" {
-			cur = fmt.Sprintf("%.1f", r.Current)
+			cur = fmt.Sprintf("%.1f", math.Floor(r.Current*10+1e-9)/10) // truncate, as tenths() does
 		}
 		fmt.Fprintf(w, "%-*s  %8s  %8s  %s\n", width, r.Pkg, floor, cur, r.Status)
 	}
@@ -248,7 +269,7 @@ func printTable(w io.Writer, rows []Row) {
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || (args[0] != "check" && args[0] != "ratchet") {
-		fmt.Fprintln(stderr, "usage: coverfloors check|ratchet -profile cover.out -floors coverage-floors.json [-out path (ratchet)]")
+		fmt.Fprintln(stderr, "usage: coverfloors check|ratchet -profile cover.out -floors coverage-floors.json [-out path] [-prune] (-out and -prune: ratchet only)")
 		return 2
 	}
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
@@ -256,6 +277,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	profile := fs.String("profile", "cover.out", "go test -coverprofile output")
 	floorsPath := fs.String("floors", "coverage-floors.json", "floors JSON")
 	outPath := fs.String("out", "", "ratchet: write here instead of rewriting -floors")
+	prune := fs.Bool("prune", false, "ratchet: also drop floors for packages absent from the profile")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -290,6 +312,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	fmt.Fprintf(stdout, "%d floor(s) changed\n", len(changes))
+	if *prune {
+		var dropped []string
+		next, dropped = Prune(next, cov)
+		for _, pkg := range dropped {
+			fmt.Fprintf(stdout, "prune  %s\n", pkg)
+		}
+	}
 	dst := *floorsPath
 	if *outPath != "" {
 		dst = *outPath
