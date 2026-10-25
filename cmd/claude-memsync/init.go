@@ -89,6 +89,14 @@ func runInit(args []string) int {
 		return 2
 	}
 
+	if *ghApp != "" && *tokenCmd != "" {
+		// init saves the app to the config, and a token command would replace it
+		// (a typed token source beats the config's app): saving only one of the
+		// two without saying so is worse than asking which was meant.
+		fmt.Fprintln(os.Stderr, "init: --github-app and --token-cmd are two token sources; give one (the app is saved to the config, the command is the one-run token source)")
+		return 2
+	}
+
 	if *encrypt {
 		if !agecrypt.ValidScheme(*scheme) {
 			fmt.Fprintln(os.Stderr, "init: --encryption-scheme must be pq or classic")
