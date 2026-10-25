@@ -27,7 +27,7 @@ Contents:
 
 - git 2.26 or later, Go 1.25 or later (to build), `gh` logged in, `ssh-keygen`,
   `python3` (the bootstrap uses it), and `age-keygen` 1.3 or later (for
-  `-pq`).
+  `-pq`; `go install filippo.io/age/cmd/age-keygen@v1.3.2`).
 - A password manager with a CLI that can store a secret read from stdin and
   print it back. The recovery key and the admin App's key live there and
   nowhere else.
@@ -105,19 +105,36 @@ delete them in the UI; `host list` and `doctor` warn from 20.
 
 The recovery key is one more recipient of every repo. It is how you read your
 notes when every machine is gone, so its secret half must never sit on a
-synced machine. Generate a post-quantum hybrid key and pipe it straight into
-your password manager:
+synced machine. You need `age-keygen` 1.3 or later; older builds (for
+example a package-manager build before 1.3) have no `-pq`. Pin it:
 
 ```sh
-age-keygen -pq | <password-manager store command>
+go install filippo.io/age/cmd/age-keygen@v1.3.2
 ```
 
-`age-keygen` writes the secret identity (`AGE-SECRET-KEY-PQ-1…`) to stdout,
-which goes into the password manager, and, because stdout is not a terminal,
-prints `Public key: age1pq1…` on stderr. Copy that public key (about 2,000
-characters); it is the only part the tool needs. Do not redirect stdout to a
-file, and do not paste the secret anywhere. Optionally also keep an offline
-copy (paper or a hardware token).
+1. Generate a post-quantum hybrid key and pipe it straight into your password
+   manager, so the secret never touches disk:
+
+   ```sh
+   age-keygen -pq | <password-manager store command reading stdin>
+   ```
+
+2. Derive the public key from the stored copy (do not rely on capturing
+   `age-keygen`'s stderr; it can come out empty):
+
+   ```sh
+   <password-manager read command> | age-keygen -y > recovery-pq.pub
+   ```
+
+3. Check it: one line, starting with `age1pq1`, about 1,960 characters.
+
+   ```sh
+   wc -l recovery-pq.pub; wc -c recovery-pq.pub; head -c 7 recovery-pq.pub; echo
+   ```
+
+The public key is the only part the tool needs (pass it as
+`--recovery-recipient`). Never redirect the secret to a file or paste it
+anywhere. Optionally also keep an offline copy (paper or a hardware token).
 
 ### 5. Create the repos and the first host
 

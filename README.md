@@ -114,7 +114,7 @@ git clone <fork-url> claude-utils && cd claude-utils
 go build -o ~/.local/bin/ ./cmd/claude-memsync ./cmd/claude-memmerge
 # once per org: create the org, register the two GitHub Apps, make the recovery key
 #   -> docs/setup.md "First machine"
-age-keygen -pq | <password-manager store command>   # public key (age1pq1...) on stderr
+age-keygen -pq | <password-manager store command>   # then: <read command> | age-keygen -y
 bash scripts/bootstrap.sh --host <host-label> --role personal-dev --org <your-org> \
   --recovery-recipient <age1pq1...> --org-app memsync-admin --check-app memsync-check ... --dry-run
 # review the plan, run again with --yes, then on any later host: the paste prompt

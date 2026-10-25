@@ -141,7 +141,8 @@ and assume anything already fetched is kept.
 ## The recovery key
 
 - Generate it as a hybrid key and pipe it into your password manager
-  (`age-keygen -pq | <password-manager store command>`): the secret never
+  (`age-keygen -pq | <password-manager store command>`, then derive the public
+  key with `<password-manager read command> | age-keygen -y`): the secret never
   lands on disk, and only the public `age1pq1…` line is ever given to the tool.
 - It is a recipient of every repo, so it decrypts everything: never put the
   secret on a synced machine or an agent host.
