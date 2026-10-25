@@ -1,0 +1,218 @@
+# FORK-ONLY CI. This file is not part of upstream claude-utils and must never be
+# proposed there. Every job below is guarded by `github.repository_owner !=
+# 'MarimerLLC'`, so even if this file is merged upstream it never runs there.
+# Upstream's own ci.yml and release.yml are untouched. See docs/ci.md.
+#
+# Duplicate runs: push covers this repo's own branches, so a pull_request run is
+# skipped when the PR's head is in this same repo and only runs for forks of it.
+name: Fork CI (fork only)
+
+on:
+  push:
+    branches: [main, "integ/**", "feat/**"]
+  pull_request:
+    branches: [main, "integ/**", "feat/**"]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: fork-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vet:
+    name: go vet (${{ matrix.goos }})
+    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, windows]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # Same toolchain as the dev container, newer than go.mod's 1.25.0 floor,
+          # so CI sees what a local run sees. Bump both together.
+          go-version: '1.27.2'
+      - name: go vet
+        env:
+          GOOS: ${{ matrix.goos }}
+        run: go vet ./...
+
+  gofmt:
+    name: gofmt
+    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # Same toolchain as the dev container, newer than go.mod's 1.25.0 floor,
+          # so CI sees what a local run sees. Bump both together.
+          go-version: '1.27.2'
+      - name: gofmt -l is empty
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt found unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+  test:
+    name: go test -race, coverage floors
+    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # Same toolchain as the dev container, newer than go.mod's 1.25.0 floor,
+          # so CI sees what a local run sees. Bump both together.
+          go-version: '1.27.2'
+      # Floors in coverage-floors.json were measured this way (race on).
+      - name: go test -race with coverage profile
+        run: go test -race -coverprofile=cover.out ./...
+      # Runs even when a test failed, as long as a profile exists.
+      - name: coverage floors (check)
+        if: ${{ !cancelled() && hashFiles('cover.out') != '' }}
+        run: go run ./tools/coverfloors check -profile cover.out -floors coverage-floors.json
+      # Read-only: writes the raised floors to a file and offers it as an artifact.
+      # It opens no PR and needs no write permission (see docs/ci.md).
+      - name: coverage floors (ratchet suggestion)
+        if: ${{ github.event_name == 'push' && success() }}
+        run: |
+          go run ./tools/coverfloors ratchet -profile cover.out -floors coverage-floors.json -out ratchet/coverage-floors.json
+          if cmp -s coverage-floors.json ratchet/coverage-floors.json; then
+            rm -rf ratchet
+            echo "floors already at current coverage"
+          else
+            echo "::notice::floors can be raised: download the coverage-floors artifact, or run make ratchet"
+          fi
+      - name: upload suggested floors
+        if: ${{ hashFiles('ratchet/coverage-floors.json') != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-floors
+          path: ratchet/coverage-floors.json
+          retention-days: 14
+
+  shellcheck:
+    name: shellcheck (scripts/*.sh)
+    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # koalaman/shellcheck v0.10.0, pinned by digest. -S warning: info-level
+      # notes (SC2016 on literal backticks in printf) are intentional.
+      - name: shellcheck
+        run: |
+          docker run --rm -v "$PWD:/mnt:ro" -w /mnt \
+            koalaman/shellcheck@sha256:2097951f02e735b613f4a34de20c40f937a6c8f18ecb170612c88c34517221fb \
+            -S warning scripts/*.sh
+
+  bootstrap-harness:
+    name: scripts/bootstrap_test.sh
+    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # Same toolchain as the dev container, newer than go.mod's 1.25.0 floor,
+          # so CI sees what a local run sees. Bump both together.
+          go-version: '1.27.2'
+      # The harness stubs gh, systemctl, claude, go and ssh-keyscan itself and
+      # runs in a fake HOME. It needs git, python3 and ssh-keygen, all present
+      # on ubuntu-latest, plus the real binaries it is told to use.
+      - name: build the real binaries
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          go build -o "$RUNNER_TEMP/bin/claude-memsync" ./cmd/claude-memsync
+          go build -o "$RUNNER_TEMP/bin/claude-memmerge" ./cmd/claude-memmerge
+      - name: bootstrap harness
+        env:
+          MEMSYNC_BIN: ${{ runner.temp }}/bin/claude-memsync
+          MEMMERGE_BIN: ${{ runner.temp }}/bin/claude-memmerge
+          BOOTSTRAP_TEST_DIR: ${{ runner.temp }}/bootstrap-test
+        run: bash scripts/bootstrap_test.sh
+
+  gitleaks:
+    name: gitleaks
+    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # The binary, not gitleaks-action (which needs a license for organisations),
+      # pinned by version and sha256. Reviewed fixtures are in .gitleaksignore.
+      # Scans only the commits reachable from the checked-out HEAD, not every
+      # fetched ref.
+      - name: install gitleaks v8.30.1
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tgz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/gl"
+          tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP/gl" gitleaks
+      - name: gitleaks git
+        run: '"$RUNNER_TEMP/gl/gitleaks" git --no-banner --redact --log-opts=HEAD .'
+
+  reference-current:
+    name: docs/reference.md is current
+    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # Same toolchain as the dev container, newer than go.mod's 1.25.0 floor,
+          # so CI sees what a local run sees. Bump both together.
+          go-version: '1.27.2'
+      - name: regenerate and diff
+        run: |
+          sh scripts/gen-reference.sh
+          if ! git diff --exit-code docs/reference.md; then
+            echo "::error::docs/reference.md is stale: run sh scripts/gen-reference.sh and commit the result"
+            exit 1
+          fi

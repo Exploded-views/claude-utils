@@ -7,6 +7,7 @@ fork are upstream's own releases.
 
 ## Unreleased
 
+- **Fork CI and coverage ratchet**: a fork-only workflow (vet, gofmt, race tests, shellcheck, bootstrap harness, gitleaks, reference check) and per-package coverage floors that only rise (`make ratchet`); see `docs/ci.md`. *Fork-only.*
 - **Post-quantum encryption by default**: new repos use `encryptionScheme: pq` (hybrid ML-KEM-768 + X25519, `age1pq1…`); classic X25519 only on request; `recipients rekey-pq` converts a single-member classic repo, optionally onto one fresh root commit. *Upstream candidate.*
 - **rekey-pq hardening**: `--all` stops at the first failure and reports done/failed/not started; a rerun resumes, `--rollback` undoes an unpushed migration; checks run before any local change and `config.json` is saved only after the push; the classic identity is kept while any clone under the sync root uses it; synced-head follows the rekey; also `SchemeOf` falls back to the recipients file, `-h` never acts for `start`/`stop`/`status`/`uninstall`/`version`, `app add --verify` checks before writing, `init` refuses `--github-app` with `--token-cmd` and reuses `identity-pq.txt`. *Upstream candidate.*
 - **Explicit token flags win**: `--token-file`, `--token-cmd` and `--github-app` replace every configured token source for `doctor`, `host` and `repo create`. *Upstream candidate.*

@@ -1,0 +1,4 @@
+# Test fixtures that look like keys (reviewed). One fingerprint per line: commit:file:rule:line.
+aaae0b7fe188f9e6aa6ebb31ae562b039423ecc5:internal/hosts/hosts_test.go:private-key:191
+42f2212a173257bbd696542a52815f6de2ca31c8:internal/ghguard/ghguard_test.go:generic-api-key:14
+d4d0e9c99bdc9d5571aed376455bcd81c0c68398:internal/scrub/scrub_test.go:private-key:18
