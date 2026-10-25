@@ -180,11 +180,16 @@ func TestPQ_JoinRequestWithHybridKey(t *testing.T) {
 	if err != nil || got.Recipient != rcpt {
 		t.Fatalf("parse: %v", err)
 	}
-	// still strict
+	// still strict. The corrupted last character must differ from the real one
+	// (it was "q" in 1 run of 32, which left the key valid and failed the test).
+	swap := "q"
+	if strings.HasSuffix(rcpt, "q") {
+		swap = "p"
+	}
 	for name, c := range map[string]string{
 		"extra line":  text + "x: y\n",
 		"truncated":   strings.Replace(text, rcpt, rcpt[:len(rcpt)-4], 1),
-		"corrupt key": strings.Replace(text, rcpt, rcpt[:len(rcpt)-1]+"q", 1),
+		"corrupt key": strings.Replace(text, rcpt, rcpt[:len(rcpt)-1]+swap, 1),
 		"huge":        text + strings.Repeat("x", maxJoinBytes),
 		"two keys":    strings.Replace(text, rcpt, rcpt+" "+rcpt, 1),
 	} {
