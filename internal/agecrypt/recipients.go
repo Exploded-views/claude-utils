@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 
+	"filippo.io/age"
+
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
 
@@ -214,6 +216,9 @@ func AddRecipient(repo *gitwt.Repo, key string) error {
 	if _, err := ParseRecipients([]byte(key + "\n")); err != nil || !isKeyLine(key) {
 		return fmt.Errorf("not a valid age or ssh public key: %q", key)
 	}
+	if err := CheckKeysForScheme(SchemeOf(repo), []string{key}); err != nil {
+		return err
+	}
 	cur, err := ListRecipients(repo.Dir)
 	if err != nil {
 		return err
@@ -263,6 +268,9 @@ func rewriteRecipients(repo *gitwt.Repo, keys []string, msg string) error {
 	if u, _ := Unreviewed(repo); u {
 		return ErrRecipientsUnreviewed
 	}
+	if err := CheckKeysForScheme(SchemeOf(repo), keys); err != nil {
+		return err
+	}
 	if err := WriteRecipients(repo.Dir, keys); err != nil {
 		return err
 	}
@@ -302,9 +310,21 @@ func reencryptHeadDrop(repo *gitwt.Repo, msg string, drop []string) error {
 	if err != nil {
 		return err
 	}
-	out, err := repo.Run("ls-tree", "-r", "-z", "HEAD")
+	info, headOID, err := encryptHeadTree(repo, ids, pin, nil, drop)
 	if err != nil {
 		return err
+	}
+	return commitInfo(repo, oldRev, msg, info, headOID, drop)
+}
+
+// encryptHeadTree builds the index-info that rewrites every encrypted file of
+// HEAD to rcpts (decrypting with ids) and records the work-tree's
+// .age-recipients, or recipientsData when given, and deletes the drop paths.
+// It writes blobs only; no ref or index moves.
+func encryptHeadTree(repo *gitwt.Repo, ids []age.Identity, pin *Recipients, recipientsData []byte, drop []string) (string, map[string]string, error) {
+	out, err := repo.Run("ls-tree", "-r", "-z", "HEAD")
+	if err != nil {
+		return "", nil, err
 	}
 	type ent struct{ mode, oid, path string }
 	var ents []ent
@@ -324,7 +344,7 @@ func reencryptHeadDrop(repo *gitwt.Repo, msg string, drop []string) error {
 	}
 	blobs, err := repo.BlobContents(oids)
 	if err != nil {
-		return err
+		return "", nil, err
 	}
 	headOID := map[string]string{} // path -> HEAD's blob id, for the real-index update
 	var info strings.Builder
@@ -332,25 +352,29 @@ func reencryptHeadDrop(repo *gitwt.Repo, msg string, drop []string) error {
 		pt := b
 		if IsCiphertext(b) {
 			if pt, err = Decrypt(b, ids); err != nil {
-				return fmt.Errorf("re-encrypt: cannot read a file of this repo (%w)", err)
+				return "", nil, fmt.Errorf("re-encrypt: cannot read a file of this repo (%w)", err)
 			}
 		}
 		ct, err := Encrypt(pt, pin)
 		if err != nil {
-			return err
+			return "", nil, err
 		}
 		oid, err := repo.RunStdin(ct, "hash-object", "-w", "--no-filters", "--stdin")
 		if err != nil {
-			return err
+			return "", nil, err
 		}
 		e := ents[i]
 		headOID[e.path] = e.oid
 		fmt.Fprintf(&info, "%s %s\t%s\x00", e.mode, strings.TrimSpace(oid), e.path)
 	}
-	if data, err := os.ReadFile(filepath.Join(repo.Dir, RecipientsFile)); err == nil {
+	data := recipientsData
+	if data == nil {
+		data, _ = os.ReadFile(filepath.Join(repo.Dir, RecipientsFile))
+	}
+	if data != nil {
 		oid, err := repo.RunStdin(data, "hash-object", "-w", "--no-filters", "--stdin")
 		if err != nil {
-			return err
+			return "", nil, err
 		}
 		if prev, perr := repo.Run("rev-parse", "--verify", "--quiet", "HEAD:"+RecipientsFile); perr == nil {
 			headOID[RecipientsFile] = strings.TrimSpace(prev)
@@ -358,9 +382,9 @@ func reencryptHeadDrop(repo *gitwt.Repo, msg string, drop []string) error {
 		fmt.Fprintf(&info, "100644 %s\t%s\x00", strings.TrimSpace(oid), RecipientsFile)
 	}
 	if err := addDrops(repo, &info, headOID, drop); err != nil {
-		return err
+		return "", nil, err
 	}
-	return commitInfo(repo, oldRev, msg, info.String(), headOID, drop)
+	return info.String(), headOID, nil
 }
 
 // addDrops adds index-info lines that delete each path HEAD holds.
@@ -380,6 +404,12 @@ func addDrops(repo *gitwt.Repo, info *strings.Builder, headOID map[string]string
 // index-info applied, in a private index, with a compare-and-swap ref update;
 // then brings the real index (and dropped work-tree files) along.
 func commitInfo(repo *gitwt.Repo, oldRev, msg, infoText string, headOID map[string]string, drop []string) error {
+	return commitInfoMode(repo, oldRev, msg, infoText, headOID, drop, false)
+}
+
+// commitInfoMode is commitInfo; with orphan the commit has no parent (HEAD is
+// still moved from oldRev by compare-and-swap).
+func commitInfoMode(repo *gitwt.Repo, oldRev, msg, infoText string, headOID map[string]string, drop []string, orphan bool) error {
 	gitDir, err := gitCommonDir(repo)
 	if err != nil {
 		return err
@@ -397,7 +427,11 @@ func commitInfo(repo *gitwt.Repo, oldRev, msg, infoText string, headOID map[stri
 	if err != nil {
 		return err
 	}
-	commit, err := repo.Run("commit-tree", strings.TrimSpace(tree), "-p", oldRev, "-m", msg)
+	args := []string{"commit-tree", strings.TrimSpace(tree)}
+	if !orphan {
+		args = append(args, "-p", oldRev)
+	}
+	commit, err := repo.Run(append(args, "-m", msg)...)
 	if err != nil {
 		return err
 	}

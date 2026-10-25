@@ -128,6 +128,12 @@ type Config struct {
 	// `init --recovery-recipient` and `recipients label recovery`.
 	RecoveryRecipients []string `json:"recoveryRecipients,omitempty"`
 
+	// EncryptionScheme is "pq" (hybrid ML-KEM-768 + X25519 age recipients only;
+	// the default `init --encrypt` gives a new repo) or "classic" (upstream's
+	// X25519 and ssh recipients). Empty means classic: a config written before
+	// the field existed describes a classic repo.
+	EncryptionScheme string `json:"encryptionScheme,omitempty"`
+
 	// CheckKeyWarn is the count of live check-App keys at which `host list`
 	// and `doctor` warn (default 20; GitHub allows 25 per app).
 	CheckKeyWarn int `json:"checkKeyWarn,omitempty"`

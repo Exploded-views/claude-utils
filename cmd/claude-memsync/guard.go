@@ -150,6 +150,7 @@ func applyTokenCmdFlag(cfg *config.Config, flagVal string) {
 		cfg.GitHubTokenCmd = argv
 		cfg.TokenCmdFromFlag = true
 		cfg.GitHubTokenFile = ""
+		cfg.GitHubApp = "" // a typed token source beats the config's app
 	}
 }
 
@@ -288,14 +289,8 @@ func doctorCmd(stdout, stderr io.Writer, args []string) int {
 		if abs, err := filepath.Abs(*tokenFile); err == nil {
 			*tokenFile = abs // a timer unit must not depend on the working directory
 		}
-		cfg.GitHubTokenFile = *tokenFile
-		cfg.MarkFlag("githubTokenFile")
 	}
-	applyTokenCmdFlag(&cfg, *tokenCmd)
-	if *ghApp != "" {
-		cfg.GitHubApp = *ghApp
-		cfg.MarkFlag("githubApp")
-	}
+	tokenFlags{File: *tokenFile, Cmd: *tokenCmd, App: *ghApp}.apply(&cfg)
 	if *timer {
 		o, err := orgFor(cfg, *org)
 		if err != nil {
@@ -332,15 +327,7 @@ func doctorCmd(stdout, stderr io.Writer, args []string) int {
 			}
 			if *tokenFile != "" || *tokenCmd != "" || *ghApp != "" {
 				for n, c := range set.Cfgs {
-					if *tokenFile != "" {
-						c.GitHubTokenFile = *tokenFile
-						c.MarkFlag("githubTokenFile")
-					}
-					applyTokenCmdFlag(&c, *tokenCmd)
-					if *ghApp != "" {
-						c.GitHubApp = *ghApp
-						c.MarkFlag("githubApp")
-					}
+					tokenFlags{File: *tokenFile, Cmd: *tokenCmd, App: *ghApp}.apply(&c)
 					set.Cfgs[n] = c
 				}
 			}
@@ -355,7 +342,14 @@ func doctorCmd(stdout, stderr io.Writer, args []string) int {
 type tokenFlags struct{ File, Cmd, App string }
 
 // apply sets them on cfg, marked as flags so they are always honoured.
+//
+// An explicit flag wins over everything the config names: the config's other
+// token sources are cleared, so a host whose config.json names the
+// Metadata-only check app can still act with the token the operator passes.
 func (tf tokenFlags) apply(cfg *config.Config) {
+	if tf.File != "" || tf.Cmd != "" || tf.App != "" {
+		cfg.GitHubApp, cfg.GitHubTokenFile, cfg.GitHubTokenCmd = "", "", nil
+	}
 	if tf.File != "" {
 		cfg.GitHubTokenFile = tf.File
 		cfg.MarkFlag("githubTokenFile")

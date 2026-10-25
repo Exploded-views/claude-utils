@@ -29,11 +29,12 @@ const JoinsDir = "joins"
 var (
 	joinPathRE  = regexp.MustCompile(`^joins/[a-z0-9-]+\.txt$`)
 	joinLabelRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
-	joinAgeRE   = regexp.MustCompile(`^age1[a-z0-9]{58}$`)
+	joinAgeRE   = regexp.MustCompile(`^(age1[a-z0-9]{58}|age1pq1[a-z0-9]+)$`)
 	joinFpRE    = regexp.MustCompile(`^[0-9a-f]{32}$`)
 )
 
-const maxJoinBytes = 1024
+// maxJoinBytes bounds a request: a hybrid recipient alone is about 1.96 KiB.
+const maxJoinBytes = 4096
 
 // IsJoinPath reports whether a repo path may hold a plaintext join request.
 func IsJoinPath(p string) bool { return joinPathRE.MatchString(p) }
@@ -97,13 +98,19 @@ func ParseJoin(b []byte) (Join, error) {
 		return v, ok && v != "" && strings.TrimSpace(v) == v && !strings.ContainsAny(v, "\r\t ")
 	}
 	var ok bool
+	var err error
 	if j.Label, ok = val(0, "label"); !ok || !joinLabelRE.MatchString(j.Label) {
 		return j, bad
 	}
 	if j.Recipient, ok = val(1, "recipient"); !ok || !joinAgeRE.MatchString(j.Recipient) {
 		return j, bad
 	}
-	if _, err := age.ParseX25519Recipient(j.Recipient); err != nil {
+	if strings.HasPrefix(j.Recipient, hybridRecipientPrefix) {
+		_, err = age.ParseHybridRecipient(j.Recipient)
+	} else {
+		_, err = age.ParseX25519Recipient(j.Recipient)
+	}
+	if err != nil {
 		return j, bad
 	}
 	if j.Fingerprint, ok = val(2, "fingerprint"); !ok || !joinFpRE.MatchString(j.Fingerprint) || j.Fingerprint != JoinFingerprint(j.Recipient) {
@@ -540,6 +547,9 @@ func AcceptJoin(repo *gitwt.Repo, label, fingerprint string, opts AcceptOpts) er
 	}
 	if !have {
 		keys = append(keys, j.Recipient+hostComment+j.Label)
+	}
+	if err := CheckKeysForScheme(SchemeOf(repo), keys); err != nil {
+		return err
 	}
 	if err := WriteRecipients(repo.Dir, keys); err != nil {
 		return err

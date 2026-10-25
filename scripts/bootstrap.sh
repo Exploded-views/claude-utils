@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # claude-memsync host bootstrap.
 #
-#   bootstrap.sh --host <label> --role <role> [--sha <commit>] [--org Exploded-views]
+#   bootstrap.sh --host <label> --role <role> --org <org> --recovery-recipient <age1pq1...>
+#                [--sha <commit>]
 #                [--workspace <dir>]... [--own-owner <owner>]... [--deny-owner <owner>]...
 #                [--deny-term <term>]... [--repo-url <url>]
 #                --org-token-file <path> | --org-token-cmd "<argv>" | --org-app <name>
@@ -39,10 +40,9 @@ ROLE_personal_dev_HOME="personal"
 WORKSPACE_REPO="mem-project-code-workspace"
 
 GITHUB_FP="SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU"
-AGE_RECOVERY="age1d6jhrdfc0q3symtxzs6ay8efyvnx7g4mln9jvxckzstkaz4re9vqysptau"
 UTILS_URL="${CLAUDE_UTILS_URL:-https://github.com/Exploded-views/claude-utils}"
 
-HOST="" ROLE="" SHA="" ORG="Exploded-views" DRY_RUN=0 YES=0
+HOST="" ROLE="" SHA="" ORG="" AGE_RECOVERY="" DRY_RUN=0 YES=0
 WORKSPACES=() OWN_OWNERS=() DENY_OWNERS=() DENY_TERMS=() ALLOW_ORGS=() ORG_TOKEN_FILE="" ORG_TOKEN_CMD="" ORG_APP=""
 ORG_APP_ID="" ORG_APP_KEY_CMD="" CHECK_APP="" CHECK_APP_ID="" CHECK_KEY_FILE="" APP_API_BASE="${BOOTSTRAP_APP_API_BASE:-}" ADMIN_WRITTEN=0
 
@@ -69,7 +69,7 @@ run() {
   "$@"
 }
 
-usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 done_p() { [ -e "$STATE/$HOST.$1" ]; }
 mark()   { [ "$DRY_RUN" -eq 1 ] && return 0; mkdir -p "$STATE"; : >"$STATE/$HOST.$1"; }
@@ -154,6 +154,7 @@ while [ $# -gt 0 ]; do
     --role)       [ $# -ge 2 ] || usage; ROLE="$2"; shift 2 ;;
     --sha)        [ $# -ge 2 ] || usage; SHA="$2"; shift 2 ;;
     --org)        [ $# -ge 2 ] || usage; ORG="$2"; shift 2 ;;
+    --recovery-recipient) [ $# -ge 2 ] || usage; AGE_RECOVERY="$2"; shift 2 ;;
     --workspace)  [ $# -ge 2 ] || usage; WORKSPACES+=("$2"); shift 2 ;;
     --own-owner)  [ $# -ge 2 ] || usage; OWN_OWNERS+=("$(lower "$2")"); shift 2 ;;
     --deny-owner) [ $# -ge 2 ] || usage; DENY_OWNERS+=("$(lower "$2")"); shift 2 ;;
@@ -177,6 +178,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$HOST" ] || die "--host is required"
+[ -n "$ORG" ] || die "--org <org> is required: the GitHub organisation that holds the memory repos (there is no default)"
+[ -n "$AGE_RECOVERY" ] || die "--recovery-recipient <age1pq1...> is required: your own offline post-quantum recovery PUBLIC key (generate one as docs/bootstrap.md describes; there is no default)"
+printf '%s' "$AGE_RECOVERY" | grep -Eq '^age1pq1[023456789acdefghjklmnpqrstuvwxyz]{1000,}$' || die "--recovery-recipient must be a post-quantum age1pq1... public key (a classic age1... or ssh key is refused: repos are post-quantum by default)"
 n_tok=0
 for v in "$ORG_TOKEN_FILE" "$ORG_TOKEN_CMD" "$ORG_APP"; do [ -z "$v" ] || n_tok=$((n_tok + 1)); done
 [ "$n_tok" -le 1 ] || die "give only one of --org-token-file, --org-token-cmd or --org-app"
