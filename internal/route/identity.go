@@ -332,7 +332,7 @@ func (r *Router) identityLocked(folder string, d Decision, key string, keyOK boo
 		}
 		rec := *rp
 		target, listed := f.Repos[rec.Repo]
-		if !listed || rec.Repo == f.Personal || r.have == nil || !r.have(rec.Repo) ||
+		if !listed || f.isPersonal(rec.Repo) || r.have == nil || !r.have(rec.Repo) ||
 			target.IsClient() != rec.Client || len(rec.Roots) == 0 || !slices.Equal(roots, rec.Roots) {
 			return d
 		}

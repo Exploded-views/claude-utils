@@ -526,7 +526,7 @@ func (s *routedSet) statusLines() []string {
 		switch {
 		case !have:
 			lines = append(lines, fmt.Sprintf("  %s: not on this host (folders routed to it are denied)", name))
-		case name == s.Router.File().Personal:
+		case name == s.Router.File().Personal && sum.Owned[name] == 0:
 			lines = append(lines, fmt.Sprintf("  %s: personal, owns no folders; syncs %s", name, cfg.SyncDir))
 		default:
 			lines = append(lines, fmt.Sprintf("  %s: owns %d %s; syncs %s", name, sum.Owned[name], plural(sum.Owned[name], "folder", "folders"), cfg.SyncDir))

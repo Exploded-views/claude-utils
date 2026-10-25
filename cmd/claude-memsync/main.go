@@ -36,6 +36,8 @@ func main() {
 		os.Exit(runAgeTextconv(os.Args[2:]))
 	case "recipients":
 		os.Exit(runRecipients(os.Args[2:]))
+	case "route":
+		os.Exit(runRoute(os.Args[2:]))
 	case "changes":
 		os.Exit(runChanges(os.Args[2:]))
 	case "relate":
@@ -74,6 +76,7 @@ Subcommands:
   run         Run the sync daemon in the foreground
   distill     Rebuild the distilled-memory catalog index (see --prune, --dry-run)
   archive     List or search the archive of deleted notes (archive list, archive search <term>)
+  route       Edit routing: the home folder, publish or inherit a host template
   changes     List memory files changed in the sync repo since a commit (for hooks)
   relate      Declare a read or join relation between two memory repos (registry)
   unrelate    Remove a relation

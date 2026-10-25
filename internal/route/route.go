@@ -94,7 +94,10 @@ type Rule struct {
 	// rule too. They are only for remote rules: after a rename or transfer of
 	// the repo, list the old or the new name here.
 	Aliases []string `json:"aliases,omitempty"`
-	Repo    string   `json:"repo"`
+	// Deny makes the rule a denial: the folders it matches go to no repo, and
+	// no later rule is tried. It carries no Repo.
+	Deny bool   `json:"deny,omitempty"`
+	Repo string `json:"repo,omitempty"`
 }
 
 // matchesRemote reports whether the remote key matches the rule's pattern or
@@ -113,7 +116,11 @@ func (r Rule) matchesRemote(key string) bool {
 
 // sig identifies a rule's content, to tell an edited rule from an old one.
 func (r Rule) sig() string {
-	return r.kind() + "\x00" + r.pattern() + "\x00" + strings.Join(r.Aliases, "\x01") + "\x00" + r.Repo
+	d := ""
+	if r.Deny {
+		d = "\x00deny"
+	}
+	return r.kind() + "\x00" + r.pattern() + "\x00" + strings.Join(r.Aliases, "\x01") + "\x00" + r.Repo + d
 }
 
 func (r Rule) kind() string {
@@ -140,8 +147,8 @@ func (r Rule) pattern() string {
 type File struct {
 	// Repos names the repos this host may have, by their config.json.
 	Repos map[string]Repo `json:"repos"`
-	// Personal names the repo that owns no folders and only syncs its
-	// work-tree (the catalog). Optional.
+	// Personal names the repo that syncs its work-tree (the catalog) and owns
+	// no folders, except one reached through an exact folder pin. Optional.
 	Personal string `json:"personal,omitempty"`
 	Routes   []Rule `json:"routes"`
 	// Default must be "deny" (or empty): the only policy there is.
@@ -151,8 +158,9 @@ type File struct {
 	// matches the new name. nil means DefaultRenameGraceDays; 0 denies at once.
 	RenameGraceDays *int `json:"renameGraceDays,omitempty"`
 
-	// Registry is the directory of the registry repo (a normal sync dir)
-	// whose related.json declares the relations between repos. Optional.
+	// Registry is the directory of the registry repo (a normal sync dir):
+	// related.json declares the relations between repos, and hosts publish
+	// their routing templates under hosts/<label>/routes.json. Optional.
 	Registry string `json:"registry,omitempty"`
 	// RelatedRoot is where the fetch-only clones of related repos live
 	// (<RelatedRoot>/<repo>). Default: a "related" dir beside the registry.
@@ -202,6 +210,9 @@ func Load(path string) (File, error) {
 
 func (f File) validate() error {
 	for name, r := range f.Repos {
+		if strings.Contains(name, ":") || strings.HasPrefix(name, "deny") || strings.HasPrefix(name, "unavailable") {
+			return fmt.Errorf("repo name %q is reserved: no ':' and no name starting with deny or unavailable", name)
+		}
 		if !validKinds[r.Kind] {
 			return fmt.Errorf("repo %q: kind must be one of personal, project, infra, client, orch (got %q)", name, r.Kind)
 		}
@@ -239,18 +250,41 @@ func (f File) validate() error {
 		if n != 1 {
 			return fmt.Errorf("route %d: exactly one of folder, path and remote is required", i)
 		}
-		if r.Repo == "" {
+		if r.Deny && r.Repo != "" {
+			return fmt.Errorf("route %d: a deny rule carries no repo", i)
+		}
+		if !r.Deny && r.Repo == "" {
 			return fmt.Errorf("route %d: repo is required", i)
 		}
-		if f.Personal != "" && r.Repo == f.Personal {
-			return fmt.Errorf("route %d: the personal repo %q owns no folders and cannot be a route target", i, r.Repo)
+		if f.isPersonal(r.Repo) && !r.isPin() {
+			return fmt.Errorf("route %d: the personal repo %q can only be a target of a folder rule naming one exact folder (no glob characters), not of a path, remote or glob rule", i, r.Repo)
 		}
 	}
 	return nil
 }
 
+// hasGlob reports a glob character in a pattern.
+func hasGlob(s string) bool { return strings.ContainsAny(s, "*?[]") }
+
+// isPin reports a folder rule naming one exact folder.
+func (r Rule) isPin() bool {
+	return r.Folder != "" && r.Path == "" && r.Remote == "" && !hasGlob(r.Folder)
+}
+
+// isPersonal reports the personal repo: the one named in Personal, or any repo
+// of kind personal.
+func (f File) isPersonal(repo string) bool {
+	return (f.Personal != "" && repo == f.Personal) || f.Repos[repo].Kind == KindPersonal
+}
+
 // Denial reasons.
 const (
+	// ReasonPersonalNotPinned: the personal repo is only reachable through an
+	// exact folder pin.
+	ReasonDenied = "a deny rule matches"
+	// ReasonPersonalNotPinned: see isPersonal.
+	ReasonPersonalNotPinned = "the personal repo needs an exact folder pin"
+
 	ReasonNoRoute     = "no route matches"
 	ReasonUnresolved  = "remote or path could not be resolved"
 	ReasonRepoMissing = "route names a repo this host does not have"
@@ -487,6 +521,12 @@ func (r *Router) decide(folder string) (Decision, string, bool) {
 		if !match {
 			continue
 		}
+		if rule.Deny {
+			return Decision{Rule: i, Reason: ReasonDenied}, key, res == resolutionOK
+		}
+		if f.isPersonal(rule.Repo) && !rule.isPin() {
+			return Decision{Rule: i, Reason: ReasonPersonalNotPinned}, key, res == resolutionOK
+		}
 		if _, listed := f.Repos[rule.Repo]; !listed || r.have == nil || !r.have(rule.Repo) {
 			return Decision{Rule: i, Reason: ReasonRepoMissing}, key, res == resolutionOK
 		}
@@ -496,12 +536,9 @@ func (r *Router) decide(folder string) (Decision, string, bool) {
 }
 
 // Owns returns the gate for a repo's loop: true for the folders routed to it.
-// The personal repo owns nothing.
+// The personal repo owns only the folder an exact pin names.
 func (r *Router) Owns(repo string) func(folder string) bool {
 	return func(folder string) bool {
-		if repo == r.cur().Personal {
-			return false
-		}
 		return r.Decide(folder).Repo == repo
 	}
 }
@@ -647,7 +684,7 @@ func (r *Router) Summarize(folders []string) Summary {
 			}
 			s.Renamed = append(s.Renamed, RenamedFolder{Hash: hash8(f), DaysLeft: left})
 		}
-		if d.Repo == "" || d.Repo == r.cur().Personal {
+		if d.Repo == "" {
 			s.Denied++
 			continue
 		}
@@ -687,6 +724,15 @@ var globCache sync.Map
 // foldCase makes path and folder globs case-insensitive, as the file systems of
 // macOS and Windows are by default.
 var foldCase = runtime.GOOS == "darwin" || runtime.GOOS == "windows"
+
+// sameFolder compares folder names the way routing does: ignoring case only
+// where the file system does.
+func sameFolder(a, b string) bool {
+	if foldCase {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
 
 func globMatch(pat, name string) bool { return globFold(pat, name, false) }
 

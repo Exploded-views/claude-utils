@@ -994,12 +994,14 @@ Then write `~/.config/claude-memsync/routes.json` (or `$XDG_CONFIG_HOME/claude-m
 ```
 
 - `repos` names the repos this host may have, by their `config.json`, and each says what it is with `kind`: `personal`, `project`, `infra`, `client` or `orch`. A bare path string is refused, and so is a missing or unknown kind. The kind is checked against the repo's remote: a remote named `mem-client-*` must be kind `client`, and `mem-orch-*` must be `orch`, or the routes file does not load. The `personal` repo must have kind `personal`. Only folders routed to a `personal`, `project` or `infra` repo may feed the distilled catalog's worklist; `client` and `orch` never do.
-- `personal` names the repo that owns no folders. It syncs its work-tree and nothing from `~/.claude/projects`, so it is the home of the distilled catalog. No route may name it.
+- `personal` names the repo that owns no folders by default. It syncs its work-tree and nothing from `~/.claude/projects`, so it is the home of the distilled catalog. The one exception is an exact `folder` pin (no `*` or `?`): that is the only rule that may name it, and it gives the personal repo that one folder (see the home folder below). A path, remote or glob rule naming it is refused when the file loads.
 - `routes` is an ordered list, **first match wins**. Each rule has exactly one matcher:
   - `folder`: Claude's escaped folder name (every character that is not a letter or digit becomes `-`), or a glob over it.
   - `path`: a glob over the project directory. The escaped folder name is resolved to the one existing directory it names.
   - `remote`: a glob over the normalised git remote key of that directory's `origin`, `host/owner/repo` (ssh or https, any case, with or without `.git` or credentials, give the same key).
   - In a glob `*` matches within one segment (`github.com/<you>/*` matches `github.com/<you>/app` but not a nested group) and `**` matches across segments.
+- A rule may be `{ "folder"|"path"|"remote": "...", "deny": true }` with no `repo`: a match denies the folder and no later rule is tried.
+- Repo names may not contain `:` or start with `deny` or `unavailable`.
 - `default` can only be `deny`.
 
 ### What is denied
@@ -1056,6 +1058,37 @@ Install the unit as usual (`claude-memsync install --config ~/.claudesync.d/pers
 - `changes --hook` reports, for the project directory, the notes changed in each routed repo, each against its own per-session marker. A repo reports only the folders it owns.
 - `distill` and `changes` without `--config` use the personal repo's config (the primary one); an explicit `--config` always means that single repo.
 - `distill --prune` leaves an entry alone when the folder it came from is not in `~/.claude/projects` on this host: the entry was made on another host, and "file gone" is not the same as "folder never here".
+
+### Home folder and setting up a new host
+
+The home folder is the Claude folder of sessions started in your home directory (escaped like `-home-<user>` or `-Users-<user>`). Where it goes is a per-host choice: an orch repo on one host, an infra repo on a homelab, the personal repo on a Mac, or nowhere. It is always one exact `folder` rule, kept at the top of `routes.json`.
+
+```
+claude-memsync route home                  # show the pin and where the folder routes today
+claude-memsync route home <repo>           # set or replace the pin (the repo must be in "repos")
+claude-memsync route home deny             # write a deny pin: the folder is denied, whatever other rules say
+claude-memsync route home --unpin          # remove the pin; the folder then routes by the other rules
+claude-memsync route home --folder <name>  # use another folder name than the one computed from $HOME
+claude-memsync route home --suggest        # print one suggestion and why; changes nothing
+claude-memsync route home --ask            # list the repos by kind, read one choice (terminal only)
+```
+
+The suggestion comes from hints only: on macOS the personal repo (if configured); else an `orch` repo, then an `infra` repo, configured on this host; else `deny`. A home folder already pinned to the personal repo keeps that pin. `--ask` numbers the repos under personal / project / infra / orch / client / deny, marks the suggestion, and applies the choice you type (a number, a name, or Enter for the suggestion); without a terminal it refuses and tells you to pass the repo. `deny` never removes the pin, so a broader rule behind it cannot take the folder. Any change whose resulting route goes from a `client` or `orch` repo to any other repo (repos carry no client name, so another client's repo counts too), or from denied to a non-client repo on a host that keeps client or orch repos (including `--unpin`), needs `--confirm-move-out-of-client`; a move out of a client repo is logged like any other. The edit is atomic and happens under `routes.json.lock`; restart the daemon afterwards.
+
+To start a new host from another one, publish a template from a host that already works, then inherit it:
+
+```
+# on the host that works (the registry repo's work-tree is the "registry" field of routes.json, or --registry)
+claude-memsync route publish --as laptop-2
+
+# on the new host, after the registry has synced and its repos exist in routes.json
+claude-memsync route inherit laptop-2
+claude-memsync route inherit laptop-2 --home --yes
+```
+
+`publish` writes `hosts/<label>/routes.json` in the registry repo and commits that one file locally; the registry's own sync pushes it. It holds the rules and the names and kinds of the repos they name, and nothing else: no config paths, sync dirs, remote URLs, keys or tokens. `client` and `orch` repos are left out, and every rule naming one (or a repo this host lacks) is published as a deny: `{"folder": "{home}-<client>*", "deny": true}` keeps the pattern and names no repo, so a host that inherits it denies those folders instead of letting a broader rule catch them. The patterns are kept, so client names can appear in the registry; use a private registry. A client host's own client rules are written by hand on that host. The home pin is stored as "home", and a leading home in a folder or path pattern (`-home-<user>`, `/Users/<user>`) as `{home}`, which `inherit` expands for the local user. Other patterns (remote globs, folder names) are published as written, so do not put a name in them that you would not put in the registry. The label is a name you choose (`^[a-z0-9][a-z0-9-]{0,31}$`); the machine's host name is never used or recorded.
+
+`inherit` keeps the new host's `repos` and every setting of its own and replaces its rules with the template's, keeping only rules whose repo exists in this host's `repos` with the same kind. A rule it cannot take over (its repo is missing here, or has another kind) is printed with the reason and stays as a deny in its place, so a broader rule behind it never catches its folders. A client route is never added for a repo the host lacks. The template's home pin applies to this host's home folder only with `--home`; without it the host's own pin stays. It then shows the changes and asks before writing (`--yes` skips the question; without a terminal and without `--yes` nothing is written). It also routes every folder this host has, and one probe per client or orch rule, under the old and the new rules; if any folder would leave a client or orch repo (a dropped or shadowed client rule), or the home folder would newly go to a non-client repo on a host that keeps client notes, it lists them and refuses without `--confirm-move-out-of-client`. The check is repeated under the file lock before writing. Only the `routes` list is rewritten; every other field of `routes.json` is kept as it was. `route home` likewise needs `--confirm-move-out-of-client` for a non-client target on a host with any client or orch repo, and `--ask` then wants a typed `yes`.
 
 ## Related projects
 
