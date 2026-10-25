@@ -1,6 +1,14 @@
 package route
 
-import "testing"
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+)
 
 func TestPersonalPinAccepted(t *testing.T) {
 	f := fileOf(Rule{Folder: "-home-me", Repo: "personal"})
@@ -61,5 +69,124 @@ func TestRouterDeniesPersonalGlobEvenUnvalidated(t *testing.T) {
 	r := testRouter(t, f, []string{"personal"}, nil)
 	if r.Owns("personal")("-home-me") {
 		t.Fatal("glob rule gave the personal repo a folder")
+	}
+}
+
+func writeRoutes(t *testing.T, f File) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "routes.json")
+	b, _ := json.Marshal(f)
+	if err := os.WriteFile(p, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestSetHomePinPutsPinOnTopAndReplacesOld(t *testing.T) {
+	p := writeRoutes(t, fileOf(
+		Rule{Folder: "-home-me-app", Repo: "projects"},
+		Rule{Folder: "-home-me", Repo: "projects"},
+	))
+	ch, err := SetHomePin(p, "-home-me", "personal", HomeOpts{})
+	if err != nil || !ch.Changed {
+		t.Fatalf("%+v %v", ch, err)
+	}
+	f, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Routes) != 2 || f.Routes[0].Folder != "-home-me" || f.Routes[0].Repo != "personal" || f.Routes[1].Folder != "-home-me-app" {
+		t.Fatalf("%+v", f.Routes)
+	}
+	// Setting it again changes nothing.
+	if ch, err := SetHomePin(p, "-home-me", "personal", HomeOpts{}); err != nil || ch.Changed {
+		t.Fatalf("second set: %+v %v", ch, err)
+	}
+}
+
+func TestSetHomePinUnknownRepoRefused(t *testing.T) {
+	p := writeRoutes(t, fileOf())
+	if _, err := SetHomePin(p, "-home-me", "nope", HomeOpts{}); err == nil {
+		t.Fatal("repo not in repos accepted")
+	}
+	if _, err := SetHomePin(p, "-home-*", "projects", HomeOpts{}); err == nil {
+		t.Fatal("glob folder accepted")
+	}
+}
+
+func TestSetHomePinDenyRemovesPin(t *testing.T) {
+	p := writeRoutes(t, fileOf(
+		Rule{Folder: "-home-me", Repo: "projects"},
+		Rule{Folder: "-home-me-app", Repo: "projects"},
+	))
+	ch, err := SetHomePin(p, "-home-me", "", HomeOpts{})
+	if err != nil || !ch.Changed {
+		t.Fatal(ch, err)
+	}
+	f, _ := Load(p)
+	if len(f.Routes) != 1 || f.Routes[0].Folder != "-home-me-app" {
+		t.Fatalf("%+v", f.Routes)
+	}
+}
+
+func TestSetHomePinClientGuard(t *testing.T) {
+	for _, from := range []string{"client-a", "orch-a"} {
+		f := fileOf(Rule{Folder: "-home-me", Repo: from})
+		f.Repos["orch-a"] = Repo{Config: "/x/o/config.json", Kind: KindOrch}
+		p := writeRoutes(t, f)
+		var logs []string
+		o := HomeOpts{Logf: func(format string, a ...any) { logs = append(logs, fmt.Sprintf(format, a...)) }}
+		if _, err := SetHomePin(p, "-home-me", "personal", o); err == nil || !strings.Contains(err.Error(), "--confirm-move-out-of-client") {
+			t.Fatalf("%s: client move out allowed without confirmation: %v", from, err)
+		}
+		if g, _ := Load(p); g.Routes[0].Repo != from {
+			t.Fatal("refused move still wrote the file")
+		}
+		if len(logs) != 0 {
+			t.Fatalf("logged a refused move: %v", logs)
+		}
+		o.ConfirmMoveOutOfClient = true
+		if _, err := SetHomePin(p, "-home-me", "projects", o); err != nil {
+			t.Fatal(err)
+		}
+		if len(logs) != 1 || !strings.Contains(logs[0], "moved from client repo") || strings.Contains(logs[0], "-home-me") {
+			t.Fatalf("log: %v", logs)
+		}
+	}
+}
+
+func TestSetHomePinClientGuardCoversGlobRoutes(t *testing.T) {
+	// The home folder reaches the client repo through a glob; the new pin on
+	// top would take it out of there.
+	p := writeRoutes(t, fileOf(Rule{Folder: "-home-*", Repo: "client-a"}))
+	if _, err := SetHomePin(p, "-home-me", "projects", HomeOpts{}); err == nil {
+		t.Fatal("move out of client through a glob allowed")
+	}
+	// Into a client repo, or to deny, needs no confirmation.
+	if _, err := SetHomePin(p, "-home-me", "client-a", HomeOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetHomePin(p, "-home-me", "", HomeOpts{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSetHomePinLeavesBrokenFileAlone(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "routes.json")
+	os.WriteFile(p, []byte("{nope"), 0600)
+	if _, err := SetHomePin(p, "-h", "", HomeOpts{}); err == nil {
+		t.Fatal("broken file accepted")
+	}
+	if b, _ := os.ReadFile(p); string(b) != "{nope" {
+		t.Fatal("broken file overwritten")
+	}
+}
+
+func TestHomeFolderEscapesHome(t *testing.T) {
+	t.Setenv("HOME", "/home/a.b")
+	t.Setenv("USERPROFILE", "/home/a.b")
+	got, err := HomeFolder()
+	if runtime.GOOS != "windows" && (err != nil || got != "-home-a-b") {
+		t.Fatalf("%q %v", got, err)
 	}
 }

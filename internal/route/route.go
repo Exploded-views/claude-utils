@@ -137,6 +137,9 @@ type File struct {
 	// no folders, except one reached through an exact folder pin. Optional.
 	Personal string `json:"personal,omitempty"`
 	Routes   []Rule `json:"routes"`
+	// Registry is the work-tree of the registry repo, where hosts publish
+	// their routing templates (hosts/<label>/routes.json). Optional.
+	Registry string `json:"registry,omitempty"`
 	// Default must be "deny" (or empty): the only policy there is.
 	Default string `json:"default,omitempty"`
 	// RenameGraceDays is how long a folder whose remote was renamed keeps
