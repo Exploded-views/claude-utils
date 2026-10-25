@@ -1,6 +1,7 @@
 package agecrypt
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -81,6 +82,23 @@ func Configure(repo *gitwt.Repo, o Opts) error {
 		}
 	}
 	return nil
+}
+
+// Refresh brings an existing encrypted clone's local rules up to date: the
+// current Attributes() in $GIT_DIR/info/attributes and every filter and merge
+// driver setting (memtext, memunion, the index driver) with the given binaries,
+// keeping the clone's identity. It is idempotent and does nothing for a clone
+// that is not encrypted. A daemon calls it at start so a clone made by an older
+// build gains rules added later.
+func Refresh(repo *gitwt.Repo, memsyncExe, memmergeExe string) error {
+	if !Configured(repo) {
+		return nil
+	}
+	id := IdentityPath(repo)
+	if id == "" {
+		return errors.New("encrypted clone has no identity configured")
+	}
+	return Configure(repo, Opts{MemsyncExe: memsyncExe, MemmergeExe: memmergeExe, IdentityPath: id})
 }
 
 // Configured reports whether the clone has the age filter configured.

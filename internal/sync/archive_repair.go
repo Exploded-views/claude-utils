@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/archive"
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
@@ -158,7 +159,16 @@ func repairEditedArchives(repo *gitwt.Repo, cfg config.Config, pre, post string)
 			}
 		}
 	}
-	if _, err := repo.Commit("auto: restore edited notes @ " + time.Now().UTC().Format(time.RFC3339)); err != nil {
+	msg := "auto: restore edited notes @ " + time.Now().UTC().Format(time.RFC3339)
+	if agecrypt.Enabled(repo) {
+		// Names and time must not reach the remote in the clear.
+		changes, err := repo.StagedChanges()
+		if err != nil {
+			return 0, err
+		}
+		msg = fmt.Sprintf("memsync: %d files", len(changes))
+	}
+	if _, err := repo.Commit(msg); err != nil {
 		return 0, err
 	}
 	return len(bad), nil

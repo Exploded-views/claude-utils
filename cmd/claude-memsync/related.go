@@ -347,7 +347,7 @@ func (rc *relCtx) stateNote(e related.Edge) string {
 	switch {
 	case err != nil || !c.Exists():
 		return ": not fetched"
-	case !relatedOpener.Readable(c.Dir()):
+	case !rc.opener().Readable(c.Dir()):
 		return ": not readable on this host"
 	}
 	if since, stale := c.Stale(); stale {
@@ -426,7 +426,7 @@ func (rc *relCtx) syncRelated() []string {
 		case err != nil:
 			since, _ := c.Stale()
 			lines = append(lines, fmt.Sprintf("%s: fetch failed: %v; stale since %s", e.To, err, since))
-		case !relatedOpener.Readable(c.Dir()):
+		case !rc.opener().Readable(c.Dir()):
 			lines = append(lines, fmt.Sprintf("%s: not readable on this host (encrypted, this host cannot decrypt it)", e.To))
 		default:
 			lines = append(lines, fmt.Sprintf("%s: fetched, read-only at %s", e.To, c.Dir()))
@@ -531,11 +531,11 @@ func (rc *relCtx) readBlocks(owner string) []related.Block {
 		switch {
 		case err != nil || !c.Exists():
 			bl.Skipped = "not fetched on this host yet"
-		case !relatedOpener.Readable(c.Dir()):
+		case !rc.opener().Readable(c.Dir()):
 			bl.Skipped = "not readable on this host"
 		default:
 			bl.Path = c.Dir()
-			if ix, err := related.BuildIndex(c.Dir(), relatedOpener); err != nil {
+			if ix, err := related.BuildIndex(c.Dir(), rc.opener()); err != nil {
 				bl.Skipped = "not readable on this host"
 			} else {
 				kept := ix.Headings[:0:0]

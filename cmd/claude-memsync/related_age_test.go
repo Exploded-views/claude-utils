@@ -169,3 +169,36 @@ func TestRelate_VisibilityUsesGHGuardWhenATokenIsConfigured(t *testing.T) {
 		t.Error("the API was never asked")
 	}
 }
+
+// A related clone encrypted to the key of one of this host's own encrypted sync
+// repos is readable although that key is not the host's default identity.
+func TestRelatedOpener_TriesEachRoutedReposIdentity(t *testing.T) {
+	h := newRelHost(t, map[string][2]string{"a": {"mem-project-a", "project"}}, nil)
+	idPath, rcpt := newIdentity(t)
+	repo := gitwt.New(h.cfgs["a"].SyncDir)
+	if err := agecrypt.Configure(repo, agecrypt.Opts{MemsyncExe: "/x/ms", MemmergeExe: "/x/mm", IdentityPath: idPath}); err != nil {
+		t.Fatal(err)
+	}
+	dir := ageClone(t, rcpt, map[string]string{"MEMORY.md": "# ROUTED-KEY-HEADING\n"})
+
+	if (ageOpener{}).Readable(dir) {
+		t.Fatal("setup: the default identity must not read this clone")
+	}
+	rc, err := loadRelCtx("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := rc.opener()
+	if !o.Readable(dir) {
+		t.Fatal("the routed repo's identity should make the clone readable")
+	}
+	ix, err := related.BuildIndex(dir, o)
+	if err != nil || len(ix.Headings) != 1 || !strings.Contains(ix.Headings[0], "ROUTED-KEY-HEADING") {
+		t.Fatalf("index: %+v %v", ix, err)
+	}
+	// A clone for nobody on this host stays unreadable.
+	_, other := newIdentity(t)
+	if o.Readable(ageClone(t, other, map[string]string{"MEMORY.md": "# x\n"})) {
+		t.Error("a clone encrypted to a stranger must stay unreadable")
+	}
+}

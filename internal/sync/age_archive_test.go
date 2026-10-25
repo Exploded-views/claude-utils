@@ -208,3 +208,65 @@ func TestAgeArchive_RealRenameIsArchivePlusAdd(t *testing.T) {
 		}
 	}
 }
+
+// The archive resolver only settles a modify/delete when the deleting side
+// really holds an archive copy of the base text. A plain delete (archiving off
+// on that host) meeting an edit is a real conflict: the rebase aborts and
+// nothing is resolved by guesswork.
+func TestAgeArchive_PlainDeleteVsEditStillAborts(t *testing.T) {
+	a, b := ageArchiveHosts(t, map[string]string{"n.md": "original\n", "keep.md": "k\n"})
+	a.settle(b)                       // both hold the re-encrypted tree, so only the delete and the edit meet
+	a.loop.Cfg.ArchiveDeletes = false // a deletes without archiving
+	a.userDeletes("n.md")
+	b.edit("n.md", "edited on b\n")
+	if err := a.flushRetry(); err != nil {
+		t.Fatal(err)
+	}
+	err := b.flushRetry()
+	if err == nil || !strings.Contains(err.Error(), "rebase conflict") {
+		t.Fatalf("a delete without an archive copy against an edit must abort the rebase, got %v", err)
+	}
+	if b.repo.RebaseInProgress() {
+		t.Error("the aborted rebase was left in progress")
+	}
+	if got := b.claude("n.md"); got != "edited on b\n" {
+		t.Errorf("the edit must stay in the Claude tree, got %q", got)
+	}
+}
+
+// The archive restore commit of an encrypted repo says nothing about its
+// content or time, like every other commit there.
+func TestAgeArchive_RestoreCommitMessageIsNeutral(t *testing.T) {
+	archClock(t)
+	captureLog(t)
+	origin := ageEnv(t)
+	h := newAgeHost(t, origin, "aaa", true)
+	h.loop.Cfg.ArchiveDeletes = true
+	h.edit("n.md", "orig\n")
+	if _, err := CommitMirror(h.repo, h.loop.Cfg, "x"); err != nil {
+		t.Fatal(err)
+	}
+	pre := strings.TrimSpace(mustGit(t, h.repo, "rev-parse", "HEAD"))
+	// What a merge would leave: the note gone, its archive copy holding an edit.
+	mustGit(t, h.repo, "rm", "-q", "projects/p1/memory/n.md")
+	arch := archPath("p1", "n.md", "orig\n")
+	if err := os.MkdirAll(filepath.Join(h.repo.Dir, filepath.Dir(filepath.FromSlash(arch))), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h.repo.Dir, filepath.FromSlash(arch)), []byte("edited\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, h.repo, "add", "-A")
+	if _, err := h.repo.Commit("merge result"); err != nil {
+		t.Fatal(err)
+	}
+	post := strings.TrimSpace(mustGit(t, h.repo, "rev-parse", "HEAD"))
+	n, err := repairEditedArchives(h.repo, h.loop.Cfg, pre, post)
+	if err != nil || n != 1 {
+		t.Fatalf("repair: %d %v", n, err)
+	}
+	msg := strings.TrimSpace(mustGit(t, h.repo, "log", "-1", "--format=%s"))
+	if !strings.HasPrefix(msg, "memsync: ") || strings.Contains(msg, "restore") || strings.Contains(msg, "20") {
+		t.Errorf("restore commit message %q must be neutral", msg)
+	}
+}

@@ -13,7 +13,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/config"
+	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/lock"
 	"github.com/MarimerLLC/claude-utils/internal/route"
 	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
@@ -235,6 +237,26 @@ func (r *running) Stop() error {
 // Wait blocks until every loop has ended.
 func (r *running) Wait() { r.wg.Wait() }
 
+// refreshEncryption updates an encrypted clone's attributes and merge drivers
+// to this build's, at daemon start. Unencrypted repos are left alone.
+func refreshEncryption(cfg config.Config) error {
+	repo := gitwt.New(cfg.SyncDir)
+	if !repo.IsRepo() || !agecrypt.Configured(repo) {
+		return nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	mm := cfg.MergeDriverPath
+	if mm == "" {
+		if mm, err = config.DiscoverMergeDriver(); err != nil {
+			return err
+		}
+	}
+	return agecrypt.Refresh(repo, exe, mm)
+}
+
 // startSingle runs one Loop on cfg, as before routing existed, but refuses a
 // second daemon on the same sync dir.
 func startSingle(ctx context.Context, cfg config.Config) (*running, error) {
@@ -244,6 +266,10 @@ func startSingle(ctx context.Context, cfg config.Config) (*running, error) {
 	l, err := lock.Acquire(cfg.SyncDir)
 	if err != nil {
 		return nil, err
+	}
+	if err := refreshEncryption(cfg); err != nil {
+		l.Release()
+		return nil, fmt.Errorf("refresh encryption settings: %w", err)
 	}
 	if err := daemonGuard(cfg, log.Printf); err != nil {
 		l.Release()
@@ -289,6 +315,15 @@ func (s *routedSet) Start(ctx context.Context) (*running, error) {
 			return nil, fmt.Errorf("repo %q: %w", name, err)
 		}
 		r.locks = append(r.locks, l)
+	}
+	for _, name := range s.names() {
+		if err := refreshEncryption(s.Cfgs[name]); err != nil {
+			for _, h := range r.locks {
+				h.Release()
+			}
+			cancel()
+			return nil, fmt.Errorf("repo %q: refresh encryption settings: %w", name, err)
+		}
 	}
 	for _, m := range s.Missing {
 		log.Printf("routing: repo %q is not on this host; folders routed to it are denied", m)

@@ -123,3 +123,58 @@ func TestBootstrapEncrypt_SecondHostIsKeylessUntilAdded(t *testing.T) {
 	}
 	_ = origin
 }
+
+// A clone made by an older build lacks the later rules (the union driver, the
+// archive index line). The daemon refreshes them at start, and again is a no-op.
+func TestRefreshEncryption_OldStyleCloneGainsTheCurrentRules(t *testing.T) {
+	cfg, _ := initFixture(t)
+	t.Setenv("HOME", t.TempDir())
+	ms, mm := testenv.Binaries(t)
+	cfg.MergeDriverPath = mm
+	enc := &encryptSpec{IdentityPath: filepath.Join(t.TempDir(), "k", "identity.txt"), MemsyncExe: ms}
+	if err := bootstrapWith(cfg, false, nil, enc); err != nil {
+		t.Fatal(err)
+	}
+	repo := gitwt.New(cfg.SyncDir)
+	// Age the clone: no union driver, and attributes without the index rule.
+	repo.Run("config", "--unset", "merge.memunion.driver")
+	repo.Run("config", "--unset", "merge.memunion.name")
+	attrs, _ := repo.Run("rev-parse", "--git-path", "info/attributes")
+	ap := filepath.Join(cfg.SyncDir, strings.TrimSpace(attrs))
+	if filepath.IsAbs(strings.TrimSpace(attrs)) {
+		ap = strings.TrimSpace(attrs)
+	}
+	old := strings.ReplaceAll(agecrypt.Attributes(), "archive/INDEX.md filter=memage diff=memage merge=memunion\n", "")
+	if err := os.WriteFile(ap, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := refreshEncryption(cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(ap)
+	if string(got) != agecrypt.Attributes() {
+		t.Errorf("info/attributes not refreshed:\n%s", got)
+	}
+	drv, _ := repo.Run("config", "--get", "merge.memunion.driver")
+	if !strings.Contains(drv, "--union") || !strings.Contains(drv, filepath.Base(mm)) {
+		t.Errorf("union driver not configured: %q", drv)
+	}
+	if txt, _ := repo.Run("config", "--get", "merge.memtext.driver"); !strings.Contains(txt, "--text") {
+		t.Errorf("text driver lost: %q", txt)
+	}
+	before, _ := repo.Run("config", "--local", "--list")
+	if err := refreshEncryption(cfg); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := repo.Run("config", "--local", "--list")
+	again, _ := os.ReadFile(ap)
+	if before != after || string(again) != agecrypt.Attributes() {
+		t.Error("a second refresh must change nothing")
+	}
+	// An unencrypted repo is left alone.
+	plain, _ := initFixture(t)
+	if err := refreshEncryption(plain); err != nil {
+		t.Fatalf("plain repo: %v", err)
+	}
+}
