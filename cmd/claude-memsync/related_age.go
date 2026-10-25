@@ -23,11 +23,17 @@ type ageOpener struct {
 }
 
 func (o ageOpener) paths() []string {
-	first := o.IdentityPath
-	if first == "" {
-		first = defaultIdentityPath()
+	var out []string
+	if o.IdentityPath != "" {
+		out = []string{o.IdentityPath}
+	} else {
+		// The default identity, and the hybrid one `rekey-pq` leaves beside
+		// it (the classic file may be renamed *.classic-retired).
+		out = []string{defaultIdentityFor(agecrypt.SchemePQ)}
+		if base := defaultIdentityPath(); base != out[0] {
+			out = append(out, base)
+		}
 	}
-	out := []string{first}
 	for _, p := range o.Extra {
 		dup := false
 		for _, q := range out {
