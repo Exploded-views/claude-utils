@@ -2,6 +2,9 @@
 # proposed there. Every job below is guarded by `github.repository_owner !=
 # 'MarimerLLC'`, so even if this file is merged upstream it never runs there.
 # Upstream's own ci.yml and release.yml are untouched. See docs/ci.md.
+#
+# Duplicate runs: push covers this repo's own branches, so a pull_request run is
+# skipped when the PR's head is in this same repo and only runs for forks of it.
 name: Fork CI (fork only)
 
 on:
@@ -20,7 +23,7 @@ concurrency:
 jobs:
   vet:
     name: go vet (${{ matrix.goos }})
-    if: github.repository_owner != 'MarimerLLC'
+    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -35,7 +38,9 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          # Same toolchain as the dev container, newer than go.mod's 1.25.0 floor,
+          # so CI sees what a local run sees. Bump both together.
+          go-version: '1.27.2'
       - name: go vet
         env:
           GOOS: ${{ matrix.goos }}
@@ -43,7 +48,7 @@ jobs:
 
   gofmt:
     name: gofmt
-    if: github.repository_owner != 'MarimerLLC'
+    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -54,7 +59,9 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          # Same toolchain as the dev container, newer than go.mod's 1.25.0 floor,
+          # so CI sees what a local run sees. Bump both together.
+          go-version: '1.27.2'
       - name: gofmt -l is empty
         run: |
           unformatted=$(gofmt -l .)
@@ -66,7 +73,7 @@ jobs:
 
   test:
     name: go test -race, coverage floors
-    if: github.repository_owner != 'MarimerLLC'
+    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -77,7 +84,9 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          # Same toolchain as the dev container, newer than go.mod's 1.25.0 floor,
+          # so CI sees what a local run sees. Bump both together.
+          go-version: '1.27.2'
       # Floors in coverage-floors.json were measured this way (race on).
       - name: go test -race with coverage profile
         run: go test -race -coverprofile=cover.out ./...
@@ -107,7 +116,7 @@ jobs:
 
   shellcheck:
     name: shellcheck (scripts/*.sh)
-    if: github.repository_owner != 'MarimerLLC'
+    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -126,7 +135,7 @@ jobs:
 
   bootstrap-harness:
     name: scripts/bootstrap_test.sh
-    if: github.repository_owner != 'MarimerLLC'
+    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -137,7 +146,9 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          # Same toolchain as the dev container, newer than go.mod's 1.25.0 floor,
+          # so CI sees what a local run sees. Bump both together.
+          go-version: '1.27.2'
       # The harness stubs gh, systemctl, claude, go and ssh-keyscan itself and
       # runs in a fake HOME. It needs git, python3 and ssh-keygen, all present
       # on ubuntu-latest, plus the real binaries it is told to use.
@@ -155,7 +166,7 @@ jobs:
 
   gitleaks:
     name: gitleaks
-    if: github.repository_owner != 'MarimerLLC'
+    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -167,6 +178,8 @@ jobs:
           persist-credentials: false
       # The binary, not gitleaks-action (which needs a license for organisations),
       # pinned by version and sha256. Reviewed fixtures are in .gitleaksignore.
+      # Scans only the commits reachable from the checked-out HEAD, not every
+      # fetched ref.
       - name: install gitleaks v8.30.1
         env:
           GITLEAKS_VERSION: 8.30.1
@@ -178,11 +191,11 @@ jobs:
           mkdir -p "$RUNNER_TEMP/gl"
           tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP/gl" gitleaks
       - name: gitleaks git
-        run: '"$RUNNER_TEMP/gl/gitleaks" git --no-banner --redact .'
+        run: '"$RUNNER_TEMP/gl/gitleaks" git --no-banner --redact --log-opts=HEAD .'
 
   reference-current:
     name: docs/reference.md is current
-    if: github.repository_owner != 'MarimerLLC'
+    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -193,7 +206,9 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          # Same toolchain as the dev container, newer than go.mod's 1.25.0 floor,
+          # so CI sees what a local run sees. Bump both together.
+          go-version: '1.27.2'
       - name: regenerate and diff
         run: |
           sh scripts/gen-reference.sh

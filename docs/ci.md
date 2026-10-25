@@ -6,8 +6,17 @@
 upstream it would still not run there. Upstream's `ci.yml` and `release.yml` are
 untouched. Enable Actions on the fork for it to run.
 
-It runs on push and pull request for `main`, `integ/**` and `feat/**`, and on
-manual dispatch.
+It runs on push for `main`, `integ/**` and `feat/**`, and on manual dispatch. It
+also runs on pull requests into those branches, but only when the PR's head is a
+fork of this repository: a PR from a branch in this repo is already covered by the
+push run, so it is skipped to avoid running everything twice.
+
+Upstream's `ci.yml` is still in the tree and also runs on the fork for `main`
+(push and pull request), alongside this workflow.
+
+Go is pinned to `1.27.2` (the dev container's toolchain), newer than the 1.25.0
+floor in `go.mod`, so CI matches what a local run sees. Bump the workflow and the
+dev container together.
 
 ## What runs
 
@@ -18,7 +27,7 @@ manual dispatch.
 | `test` | `go test -race -coverprofile=cover.out ./...`, then the coverage floor check |
 | `shellcheck` | `scripts/*.sh` with ShellCheck v0.10.0 (pinned by image digest), warning level and up |
 | `bootstrap-harness` | `bash scripts/bootstrap_test.sh` against the real binaries (`MEMSYNC_BIN`, `MEMMERGE_BIN`) in a fake HOME with stubbed `gh`, `systemctl` and friends; needs only git, python3 and ssh-keygen, which `ubuntu-latest` has |
-| `gitleaks` | `gitleaks git` over full history; reviewed test fixtures are listed in `.gitleaksignore` |
+| `gitleaks` | `gitleaks git --log-opts=HEAD`: every commit reachable from the tested HEAD, not other fetched refs; reviewed test fixtures are listed in `.gitleaksignore` by fingerprint (commit, file, rule, line), so each entry names a commit that must be an ancestor of the tested HEAD |
 | `reference-current` | `sh scripts/gen-reference.sh` then `git diff --exit-code docs/reference.md` |
 
 Permissions are least privilege: the workflow sets `permissions: {}` and each job
@@ -37,10 +46,16 @@ gitleaks runs as a binary pinned by version and sha256 rather than through
 - `check` fails (exit 1) when a package is more than 0.1 point below its floor, or
   has statements but no floor ("new packages need a floor"). The 0.1 slack absorbs
   rounding and tiny run-to-run differences. Packages with no statements are
-  skipped. A floor for a package that no longer shows up is listed as
-  `not measured` and does not fail.
+  skipped.
+- A floor whose package is absent from the profile is reported `not measured` and
+  also fails `check`. An empty profile (no blocks) is an input error, exit 2, and
+  so is a floors file with a value below 0, above 100 or with more than one
+  decimal. The table shows current coverage truncated to tenths, as the ratchet
+  computes it.
 - `ratchet` raises each floor to the current coverage rounded **down** to 0.1. It
-  never lowers a floor and adds new packages.
+  never lowers a floor and adds new packages. `ratchet -prune` also drops floors for
+  packages that are not in the profile (a deleted or renamed package); without it
+  they are kept.
 
 Floors were measured with `go test -race`, the way CI runs. A plain run gave the
 same floors to 0.1 for every package, so the two agree today; if they ever drift,
