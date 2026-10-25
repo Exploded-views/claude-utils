@@ -188,12 +188,12 @@ if [ -n "$ORG_APP" ]; then
 fi
 if [ -n "$ORG_APP_ID" ] || [ -n "$ORG_APP_KEY_CMD" ]; then
   [ -n "$ORG_APP" ] || die "--org-app-id / --org-app-key-cmd go with --org-app <name>"
-  [ -n "$ORG_APP_ID" ] && [ -n "$ORG_APP_KEY_CMD" ] || die "give both --org-app-id and --org-app-key-cmd"
+  { [ -n "$ORG_APP_ID" ] && [ -n "$ORG_APP_KEY_CMD" ]; } || die "give both --org-app-id and --org-app-key-cmd"
   printf '%s' "$ORG_APP_ID" | grep -Eq '^[0-9]{1,20}$' || die "bad --org-app-id (numeric)"
   split_args json "$ORG_APP_KEY_CMD" >/dev/null || die "unbalanced quote in --org-app-key-cmd"
 fi
 if [ -n "$CHECK_APP$CHECK_APP_ID$CHECK_KEY_FILE" ]; then
-  [ -n "$CHECK_APP" ] && [ -n "$CHECK_APP_ID" ] && [ -n "$CHECK_KEY_FILE" ] || die "give --check-app, --check-app-id and --check-key-file together"
+  { [ -n "$CHECK_APP" ] && [ -n "$CHECK_APP_ID" ] && [ -n "$CHECK_KEY_FILE" ]; } || die "give --check-app, --check-app-id and --check-key-file together"
   printf '%s' "$CHECK_APP" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' || die "bad --check-app '$CHECK_APP'"
   printf '%s' "$CHECK_APP_ID" | grep -Eq '^[0-9]{1,20}$' || die "bad --check-app-id (numeric)"
   [ "$CHECK_APP" != "$ORG_APP" ] || die "--check-app must differ from --org-app: the admin app never serves the daemon"
@@ -415,7 +415,7 @@ admin_entry_remove() {
 check_key_file() {
   local f="$CHECK_KEY_FILE" m u n
   case "$f" in /*) ;; *) die "--check-key-file must be an absolute path" ;; esac
-  [ -f "$f" ] && [ ! -L "$f" ] || die "check key file $f is missing or not a plain file"
+  { [ -f "$f" ] && [ ! -L "$f" ]; } || die "check key file $f is missing or not a plain file"
   m="$(stat -c %a "$f" 2>/dev/null || stat -f %Lp "$f")"
   u="$(stat -c %u "$f" 2>/dev/null || stat -f %u "$f")"
   n="$(stat -c %h "$f" 2>/dev/null || stat -f %l "$f")"

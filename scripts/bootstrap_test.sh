@@ -676,10 +676,8 @@ runboot --host testhost --role homelab --yes --org-app memsync-admin --check-app
 check "--check-app without --check-app-id is refused" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'together'" _ "$OUT"
 ORGARGS=(--org-token-file "$BASE/orgtoken")
 newhome ck6
-ORGARGS=()
 runboot --host testhost --role homelab --yes --org-app-id 12345 --org-app-key-cmd "cat $BASE/app.pem"
 check "--org-app-id without --org-app is refused" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'go with --org-app'" _ "$OUT"
-ORGARGS=(--org-token-file "$BASE/orgtoken")
 
 echo "--- check key recorded in the registry"
 newhome reg
