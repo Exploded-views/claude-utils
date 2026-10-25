@@ -168,6 +168,16 @@ func orgFor(cfg config.Config, flagOrg string) (string, error) {
 // doctorRun lists the org's repos and the repos this host joined. It prints
 // repo names only and returns non-zero if any problem is found.
 func doctorRun(cfg config.Config, org string, out, errw io.Writer) int {
+	var joined []string
+	if cfg.RemoteURL != "" {
+		joined = append(joined, cfg.RemoteURL)
+	}
+	return doctorRunJoined(cfg, org, joined, out, errw)
+}
+
+// doctorRunJoined is doctorRun over an explicit list of joined remotes: with
+// several routed repos, every one of them is checked, not only cfg's.
+func doctorRunJoined(cfg config.Config, org string, joined []string, out, errw io.Writer) int {
 	c, err := guardClient(cfg)
 	if err != nil {
 		fmt.Fprintln(errw, "doctor:", err)
@@ -181,10 +191,6 @@ func doctorRun(cfg config.Config, org string, out, errw io.Writer) int {
 	if err != nil {
 		fmt.Fprintln(errw, "doctor:", err)
 		return 2
-	}
-	var joined []string
-	if cfg.RemoteURL != "" {
-		joined = append(joined, cfg.RemoteURL)
 	}
 	bad, err := c.Doctor(org, joined)
 	if err != nil {
@@ -217,6 +223,7 @@ func runDoctor(args []string) int {
 	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	org := flags.String("org", "", "GitHub org to check (default: config githubOrg, else owner of the remote)")
 	cfgPath := flags.String("config", "", "path to config.json")
+	routes := flags.String("routes", "", "path to routes.json: check every repo it routes (default: as for run, unless --config is given)")
 	timer := flags.Bool("install-timer", false, "write a daily user timer (systemd) or launchd agent for doctor; does not enable it")
 	unitDir := flags.String("unit-dir", "", "with --install-timer: directory to write units into")
 	if err := flags.Parse(args); err != nil {
@@ -242,6 +249,22 @@ func runDoctor(args []string) int {
 			cp = abs
 		}
 		return installTimerRun(runtime.GOOS, exe, o, cp, cfg.GitHubTokenFile, *unitDir, os.Stdout, os.Stderr)
+	}
+	if *cfgPath == "" {
+		if path, ok, err := resolveRoutesPath(*routes); err != nil {
+			fmt.Fprintln(os.Stderr, "doctor:", err)
+			return 1
+		} else if ok {
+			set, err := loadRouted(path)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "doctor:", err)
+				return 1
+			}
+			if primary, ok := set.Primary(); ok {
+				cfg = primary
+			}
+			return doctorRunJoined(cfg, *org, set.remotes(), os.Stdout, os.Stderr)
+		}
 	}
 	return doctorRun(cfg, *org, os.Stdout, os.Stderr)
 }

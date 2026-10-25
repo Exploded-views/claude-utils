@@ -191,12 +191,25 @@ func (s *routedSet) names() []string {
 	return out
 }
 
+// remotes lists the remote of every repo this host has, in name order: what
+// doctor must check as joined.
+func (s *routedSet) remotes() []string {
+	var out []string
+	for _, n := range s.names() {
+		if u := s.Cfgs[n].RemoteURL; u != "" {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
 // running is a started daemon body: Stop cancels it and waits.
 type running struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 	locks  []*lock.Lock
-	loop   *syncpkg.Loop // set for a single-repo run
+	loop   *syncpkg.Loop   // set for a single-repo run
+	loops  []*syncpkg.Loop // set for a routed run
 	mu     sync.Mutex
 	err    error
 }
@@ -257,6 +270,13 @@ func (s *routedSet) Start(ctx context.Context) (*running, error) {
 		return nil, fmt.Errorf("%s: this host has none of the repos", s.Path)
 	}
 	s.Router.Writable()
+	// The private-only guard runs for every repo before anything starts: one
+	// repo that fails it refuses the whole daemon, like a single-repo start.
+	for _, name := range s.names() {
+		if err := daemonGuard(s.Cfgs[name], log.Printf); err != nil {
+			return nil, fmt.Errorf("repo %q: private-only check failed, refusing to sync: %w", name, err)
+		}
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	r := &running{cancel: cancel}
 	for _, name := range s.names() {
@@ -279,7 +299,8 @@ func (s *routedSet) Start(ctx context.Context) (*running, error) {
 		if d := time.Duration(cfg.PullIntervalSec) * time.Second; d > 0 && d < interval {
 			interval = d
 		}
-		loop := &syncpkg.Loop{Cfg: cfg, Name: name, Owns: s.Router.Owns(name)}
+		loop := &syncpkg.Loop{Cfg: cfg, Name: name, Owns: s.Router.Owns(name), PushAllowed: pushWatch(cfg, log.Printf)}
+		r.loops = append(r.loops, loop)
 		r.wg.Add(1)
 		go func() {
 			defer r.wg.Done()
