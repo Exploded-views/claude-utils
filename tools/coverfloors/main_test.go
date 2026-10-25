@@ -113,9 +113,9 @@ func TestCheckFailsPackageWithoutFloor(t *testing.T) {
 	}
 }
 
-func TestCheckStaleFloorIsNotAFailure(t *testing.T) {
+func TestCheckNotMeasuredFloorFails(t *testing.T) {
 	rows, ok := Check(map[string]float64{pkgA: 50.0}, map[string]Cov{})
-	if !ok || status(rows, pkgA) != "not measured" {
+	if ok || status(rows, pkgA) != "not measured" {
 		t.Errorf("ok=%v rows=%+v", ok, rows)
 	}
 }
@@ -217,5 +217,108 @@ func TestRunRatchetWritesFloorsAndOut(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(dst); !strings.Contains(string(b), "50.0") {
 		t.Errorf("out not written: %s", b)
+	}
+}
+
+func TestParseProfileRejectsZeroBlocks(t *testing.T) {
+	for _, prof := range []string{"mode: set\n", "mode: atomic\n\n", ""} {
+		if _, err := ParseProfile(strings.NewReader(prof)); err == nil {
+			t.Errorf("expected an error for a profile with no blocks: %q", prof)
+		}
+	}
+}
+
+func TestPruneDropsOnlyUnmeasuredFloors(t *testing.T) {
+	got, dropped := Prune(map[string]float64{pkgA: 50.0, pkgB: 60.0}, map[string]Cov{pkgA: {Stmts: 10, Covered: 5}})
+	if _, has := got[pkgB]; has || got[pkgA] != 50.0 || len(got) != 1 {
+		t.Errorf("got %v", got)
+	}
+	if len(dropped) != 1 || dropped[0] != pkgB {
+		t.Errorf("dropped = %v", dropped)
+	}
+}
+
+func TestRunRejectsEmptyProfile(t *testing.T) {
+	dir := t.TempDir()
+	fl := writeFile(t, dir, "f.json", `{"`+pkgA+`": 10.0}`)
+	var out, errb bytes.Buffer
+	for _, body := range []string{"mode: set\n", ""} {
+		prof := writeFile(t, dir, "cover.out", body)
+		for _, cmd := range []string{"check", "ratchet"} {
+			if code := run([]string{cmd, "-profile", prof, "-floors", fl}, &out, &errb); code != 2 {
+				t.Errorf("%s with profile %q: code %d, want 2", cmd, body, code)
+			}
+		}
+	}
+}
+
+func TestRunCheckNotMeasuredFloorExitsOne(t *testing.T) {
+	dir := t.TempDir()
+	prof := writeFile(t, dir, "cover.out", "mode: set\nexample.test/m/a/x.go:1.1,2.2 5 1\n")
+	fl := writeFile(t, dir, "f.json", `{"`+pkgA+`": 10.0, "`+pkgB+`": 10.0}`)
+	var out, errb bytes.Buffer
+	if code := run([]string{"check", "-profile", prof, "-floors", fl}, &out, &errb); code != 1 {
+		t.Errorf("code %d, want 1; out %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "not measured") {
+		t.Errorf("table should say not measured: %s", out.String())
+	}
+}
+
+func TestRunRatchetPruneDropsAbsentFloors(t *testing.T) {
+	dir := t.TempDir()
+	prof := writeFile(t, dir, "cover.out", "mode: set\nexample.test/m/a/x.go:1.1,2.2 5 1\n")
+	fl := writeFile(t, dir, "f.json", `{"`+pkgA+`": 10.0, "`+pkgB+`": 10.0}`)
+	var out, errb bytes.Buffer
+	if code := run([]string{"ratchet", "-profile", prof, "-floors", fl}, &out, &errb); code != 0 {
+		t.Fatalf("code %d err %s", code, errb.String())
+	}
+	if b, _ := os.ReadFile(fl); !strings.Contains(string(b), pkgB) {
+		t.Errorf("without -prune the absent floor must stay: %s", b)
+	}
+	if code := run([]string{"ratchet", "-prune", "-profile", prof, "-floors", fl}, &out, &errb); code != 0 {
+		t.Fatalf("code %d err %s", code, errb.String())
+	}
+	if b, _ := os.ReadFile(fl); strings.Contains(string(b), pkgB) || !strings.Contains(string(b), pkgA) {
+		t.Errorf("-prune should drop only the absent floor: %s", b)
+	}
+}
+
+func TestRunRejectsBadFloorsFile(t *testing.T) {
+	dir := t.TempDir()
+	prof := writeFile(t, dir, "cover.out", "mode: set\nexample.test/m/a/x.go:1.1,2.2 5 1\n")
+	var out, errb bytes.Buffer
+	for name, body := range map[string]string{
+		"malformed json": `{"` + pkgA + `": `,
+		"wrong type":     `{"` + pkgA + `": "high"}`,
+		"negative":       `{"` + pkgA + `": -1.0}`,
+		"over 100":       `{"` + pkgA + `": 100.5}`,
+		"two decimals":   `{"` + pkgA + `": 50.25}`,
+	} {
+		fl := writeFile(t, dir, "f.json", body)
+		for _, cmd := range []string{"check", "ratchet"} {
+			if code := run([]string{cmd, "-profile", prof, "-floors", fl}, &out, &errb); code != 2 {
+				t.Errorf("%s / %s: code %d, want 2", name, cmd, code)
+			}
+		}
+	}
+	// the boundaries themselves are fine
+	fl := writeFile(t, dir, "f.json", `{"`+pkgA+`": 0.0, "`+pkgB+`": 100.0}`)
+	if code := run([]string{"check", "-profile", prof, "-floors", fl}, &out, &errb); code == 2 {
+		t.Errorf("0.0 and 100.0 are valid floors: %s", errb.String())
+	}
+}
+
+func TestRunTableTruncatesCurrentToTenths(t *testing.T) {
+	dir := t.TempDir()
+	// 1749 of 2500 statements is 69.96%: rounding would show 70.0
+	prof := writeFile(t, dir, "cover.out", "mode: set\nexample.test/m/a/x.go:1.1,2.2 1749 1\nexample.test/m/a/x.go:3.1,4.2 751 0\n")
+	fl := writeFile(t, dir, "f.json", `{"`+pkgA+`": 60.0}`)
+	var out, errb bytes.Buffer
+	if code := run([]string{"check", "-profile", prof, "-floors", fl}, &out, &errb); code != 0 {
+		t.Fatalf("code %d", code)
+	}
+	if !strings.Contains(out.String(), "69.9") || strings.Contains(out.String(), "70.0") {
+		t.Errorf("current should show 69.9, not 70.0: %s", out.String())
 	}
 }

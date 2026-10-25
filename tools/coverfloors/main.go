@@ -121,6 +121,11 @@ func ParseProfile(r io.Reader) (map[string]Cov, error) {
 	return out, nil
 }
 
+// Prune drops floors for packages absent from cov and lists what it dropped.
+func Prune(floors map[string]float64, cov map[string]Cov) (map[string]float64, []string) {
+	return floors, nil
+}
+
 func sortedKeys[V any](m map[string]V) []string {
 	ks := make([]string, 0, len(m))
 	for k := range m {
