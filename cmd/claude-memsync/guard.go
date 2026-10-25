@@ -25,6 +25,19 @@ func guardClient(cfg config.Config) (*ghguard.Client, error) {
 	if err := checkAPIHost(cfg); err != nil {
 		return nil, err
 	}
+	if cfg.GitHubTokenFile == "" && len(cfg.GitHubTokenCmd) > 0 {
+		// The token comes from a command, run now to see that it works and
+		// again for every request; it is never kept on the client.
+		argv := cfg.GitHubTokenCmd
+		if _, err := ghguard.RunTokenCmd(argv, ghguard.TokenCmdTimeout); err != nil {
+			return nil, nil // failure means no token
+		}
+		fn := func() string {
+			t, _ := ghguard.RunTokenCmd(argv, ghguard.TokenCmdTimeout)
+			return t
+		}
+		return &ghguard.Client{BaseURL: cfg.GitHubAPIURL, TokenFn: fn, Host: cfg.GitHubHost, Resolve: hostResolver}, nil
+	}
 	tok, err := ghguard.LoadToken(cfg.GitHubTokenEnv, cfg.GitHubTokenFile)
 	if err != nil {
 		return nil, err
@@ -106,7 +119,17 @@ func checkPushURL(cfg config.Config, repoDir string) error {
 	return nil
 }
 
-var errNoToken = errors.New("no GitHub token configured (set " + ghguard.DefaultTokenEnv + " or githubTokenFile); a deploy key cannot call the API, so the private-only check needs one")
+// applyTokenCmdFlag sets the one-run token command from --token-cmd (split on
+// spaces, no shell); it wins over a token file and is not saved by doctor or
+// repo create.
+func applyTokenCmdFlag(cfg *config.Config, flagVal string) {
+	if argv := strings.Fields(flagVal); len(argv) > 0 {
+		cfg.GitHubTokenCmd = argv
+		cfg.GitHubTokenFile = ""
+	}
+}
+
+var errNoToken = errors.New("no GitHub token configured (set " + ghguard.DefaultTokenEnv + ", githubTokenFile or githubTokenCmd); a deploy key cannot call the API, so the private-only check needs one")
 
 // guardRemote is the check run by init before anything is cloned or pushed.
 // It fails closed, including when no token is available.
@@ -130,6 +153,7 @@ func guardRemote(cfg config.Config) error {
 // daemonGuard runs at daemon start. With a token it must pass; without one it
 // logs once that the check only ran at init/doctor and lets the daemon start.
 func daemonGuard(cfg config.Config, logf func(format string, args ...any)) error {
+	cfg = cfg.ForDaemon()
 	if !cfg.PrivateOnly {
 		return nil
 	}
@@ -227,6 +251,7 @@ func doctorCmd(stdout, stderr io.Writer, args []string) int {
 	org := flags.String("org", "", "GitHub org to check (default: config githubOrg, else owner of the remote)")
 	cfgPath := flags.String("config", "", "path to config.json")
 	tokenFile := flags.String("token-file", "", "file holding a GitHub token for this run (as for init; or set MEMSYNC_GITHUB_TOKEN); not saved")
+	tokenCmd := flags.String("token-cmd", "", "command (argv split on spaces, no shell) printing a GitHub token, e.g. \"gh auth token\"; run at call time, never saved")
 	routes := flags.String("routes", "", "path to routes.json: check every repo it routes (default: as for run, unless --config is given)")
 	timer := flags.Bool("install-timer", false, "write a daily user timer (systemd) or launchd agent for doctor; does not enable it")
 	unitDir := flags.String("unit-dir", "", "with --install-timer: directory to write units into")
@@ -240,6 +265,7 @@ func doctorCmd(stdout, stderr io.Writer, args []string) int {
 		}
 		cfg.GitHubTokenFile = *tokenFile
 	}
+	applyTokenCmdFlag(&cfg, *tokenCmd)
 	if *timer {
 		o, err := orgFor(cfg, *org)
 		if err != nil {
@@ -270,9 +296,12 @@ func doctorCmd(stdout, stderr io.Writer, args []string) int {
 				fmt.Fprintln(stderr, "doctor:", err)
 				return 1
 			}
-			if *tokenFile != "" {
+			if *tokenFile != "" || *tokenCmd != "" {
 				for n, c := range set.Cfgs {
-					c.GitHubTokenFile = *tokenFile
+					if *tokenFile != "" {
+						c.GitHubTokenFile = *tokenFile
+					}
+					applyTokenCmdFlag(&c, *tokenCmd)
 					set.Cfgs[n] = c
 				}
 			}
@@ -356,25 +385,29 @@ func repoCreateRun(cfg config.Config, org, name string, out, errw io.Writer) int
 // runRepo handles `claude-memsync repo <create> ...`.
 func runRepo(args []string) int {
 	if len(args) < 1 || args[0] != "create" {
-		fmt.Fprintln(os.Stderr, "usage: claude-memsync repo create [--org <org>] [--config <path>] <name>")
+		fmt.Fprintln(os.Stderr, "usage: claude-memsync repo create [--org <org>] [--config <path>] [--token-cmd \"<cmd>\"] <name>")
 		return 2
 	}
 	flags := flag.NewFlagSet("repo create", flag.ContinueOnError)
 	org := flags.String("org", "", "GitHub org to create the repo in")
 	cfgPath := flags.String("config", "", "path to config.json")
+	tokenCmd := flags.String("token-cmd", "", "command (argv split on spaces, no shell) printing a GitHub token, e.g. \"gh auth token\"; never saved")
 	if err := flags.Parse(args[1:]); err != nil {
 		return 2
 	}
 	if flags.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: claude-memsync repo create [--org <org>] [--config <path>] <name>")
+		fmt.Fprintln(os.Stderr, "usage: claude-memsync repo create [--org <org>] [--config <path>] [--token-cmd \"<cmd>\"] <name>")
 		return 2
 	}
-	return repoCreateRun(loadCfgOptional(*cfgPath), *org, flags.Arg(0), os.Stdout, os.Stderr)
+	cfg := loadCfgOptional(*cfgPath)
+	applyTokenCmdFlag(&cfg, *tokenCmd)
+	return repoCreateRun(cfg, *org, flags.Arg(0), os.Stdout, os.Stderr)
 }
 
 // pushWatch returns the loop's PushAllowed hook, or nil when private-only is
 // off or no token is configured (nothing to re-check with).
 func pushWatch(cfg config.Config, logf func(string, ...any)) func() bool {
+	cfg = cfg.ForDaemon()
 	if !cfg.PrivateOnly {
 		return nil
 	}

@@ -57,6 +57,7 @@ func runInit(args []string) int {
 	apiURL := flags.String("github-api-url", "", "GitHub API base URL (GitHub Enterprise); saved to config")
 	ghHost := flags.String("github-host", "", "git host remotes must use (default github.com); saved to config")
 	tokenFile := flags.String("token-file", "", "file holding a GitHub token for the private-only check (or set MEMSYNC_GITHUB_TOKEN)")
+	tokenCmd := flags.String("token-cmd", "", "command (argv split on spaces, no shell) printing a GitHub token, e.g. \"gh auth token\"; saved as githubTokenCmd (the command, never the token)")
 	force := flags.Bool("force", false, "re-init even if sync-dir already exists")
 	archiveDeletes := flags.Bool("archive-deletes", false, "archive instead of delete: a note removed from a Claude folder moves to archive/ in the repo (sets archiveDeletes in config.json)")
 	denylist := flags.String("denylist", "", "UTF-8 file of regexes (one per line) to install as the denylist before the first commit")
@@ -97,6 +98,7 @@ func runInit(args []string) int {
 	}
 	cfg.RemoteURL = *remote
 	cfg.GitHubTokenFile = *tokenFile
+	applyTokenCmdFlag(&cfg, *tokenCmd)
 	cfg.PrivateOnly = *privateOnly
 	cfg.GitHubAPIURL = *apiURL
 	cfg.GitHubHost = *ghHost

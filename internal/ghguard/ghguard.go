@@ -108,6 +108,9 @@ func LoadToken(envName, path string) (string, error) {
 type Client struct {
 	BaseURL string // defaults to DefaultBaseURL; tests point it at httptest
 	Token   string
+	// TokenFn, when set, supplies the token per request (e.g. from a token
+	// command); the value is never stored on the client.
+	TokenFn func() string
 	HTTP    *http.Client
 
 	// Host is the git host remotes must use (default: derived from BaseURL,
@@ -145,13 +148,20 @@ func (c *Client) base() string {
 	return strings.TrimRight(c.BaseURL, "/")
 }
 
-func (c *Client) scrub(err error) error {
+func (c *Client) tok() string {
+	if c.TokenFn != nil {
+		return c.TokenFn()
+	}
+	return c.Token
+}
+
+func scrubTok(err error, tok string) error {
 	if err == nil {
 		return nil
 	}
 	msg := err.Error()
-	if c.Token != "" {
-		msg = strings.ReplaceAll(msg, c.Token, "[token]")
+	if tok != "" {
+		msg = strings.ReplaceAll(msg, tok, "[token]")
 	}
 	return errors.New(msg)
 }
@@ -163,6 +173,8 @@ func (c *Client) do(method, target string, body any) (int, []byte, http.Header, 
 }
 
 func (c *Client) doH(method, target string, body any, ifNoneMatch string) (int, []byte, http.Header, error) {
+	tok := c.tok()
+	scrub := func(e error) error { return scrubTok(e, tok) }
 	var rd io.Reader
 	if body != nil {
 		b, _ := json.Marshal(body)
@@ -170,7 +182,7 @@ func (c *Client) doH(method, target string, body any, ifNoneMatch string) (int, 
 	}
 	req, err := http.NewRequest(method, target, rd)
 	if err != nil {
-		return 0, nil, nil, c.scrub(err)
+		return 0, nil, nil, scrub(err)
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
@@ -180,8 +192,8 @@ func (c *Client) doH(method, target string, body any, ifNoneMatch string) (int, 
 	if ifNoneMatch != "" {
 		req.Header.Set("If-None-Match", ifNoneMatch)
 	}
-	if c.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.Token)
+	if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	h := c.HTTP
 	if h == nil {
@@ -189,12 +201,12 @@ func (c *Client) doH(method, target string, body any, ifNoneMatch string) (int, 
 	}
 	resp, err := h.Do(req)
 	if err != nil {
-		return 0, nil, nil, c.scrub(err)
+		return 0, nil, nil, scrub(err)
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
-		return 0, nil, nil, c.scrub(err)
+		return 0, nil, nil, scrub(err)
 	}
 	return resp.StatusCode, b, resp.Header, nil
 }
@@ -271,7 +283,7 @@ var nextRE = regexp.MustCompile(`<([^>]+)>\s*;\s*rel="next"`)
 func (c *Client) ListOrgRepos(org string) ([]Repo, error) {
 	baseU, err := url.Parse(c.base())
 	if err != nil {
-		return nil, c.scrub(err)
+		return nil, scrubTok(err, c.Token)
 	}
 	next := c.base() + "/orgs/" + url.PathEscape(org) + "/repos?type=all&per_page=100"
 	var all []Repo
