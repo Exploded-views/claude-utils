@@ -50,3 +50,14 @@ jobs:
 
       - name: go test
         run: go test ./...
+
+      - name: docs/reference.md is current
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          git ls-files --error-unmatch docs/reference.md >/dev/null
+          sh scripts/gen-reference.sh
+          if ! git diff --exit-code -- docs/reference.md; then
+            echo "::error::docs/reference.md is stale: run sh scripts/gen-reference.sh and commit the result"
+            exit 1
+          fi

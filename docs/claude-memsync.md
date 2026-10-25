@@ -1,5 +1,7 @@
 # claude-memsync — syncing Claude Code memories across workstations
 
+> See also: [setup guide](setup.md) · [security model](security.md) · [command reference](reference.md) · [changelog](../CHANGELOG.md)
+
 A guide to setting up and running the memory-sync daemon.
 
 ## What this is for
