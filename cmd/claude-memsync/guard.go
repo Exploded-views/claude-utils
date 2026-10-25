@@ -24,6 +24,7 @@ import (
 // guardClient builds an API client from config. A nil client with a nil error
 // means no token is configured.
 func guardClient(cfg config.Config) (*ghguard.Client, error) {
+	cfg = sanitizeCfg(cfg)
 	if err := checkAPIHost(cfg); err != nil {
 		return nil, err
 	}
@@ -31,12 +32,6 @@ func guardClient(cfg config.Config) (*ghguard.Client, error) {
 	if _, isCmd := src.(ghguard.CmdSource); isCmd {
 		// The token comes from a command, run now to see that it works and
 		// again for every request; it is never kept on the client.
-		if !cfg.TokenCmdFromFlag {
-			if err := tokenCmdConfigTrusted(cfg); err != nil {
-				warnTokenCmdIgnored(err)
-				return nil, nil // ignored: no token
-			}
-		}
 		if _, err := src.Token(context.Background()); err != nil {
 			return nil, nil // failure means no token
 		}
@@ -245,7 +240,7 @@ func loadCfgOptional(path string) config.Config {
 	if path == "" {
 		path = defaultConfigPath()
 	}
-	if c, err := config.Load(path); err == nil {
+	if c, err := loadConfig(path); err == nil {
 		return c
 	}
 	return config.Defaults()
@@ -273,6 +268,7 @@ func doctorCmd(stdout, stderr io.Writer, args []string) int {
 			*tokenFile = abs // a timer unit must not depend on the working directory
 		}
 		cfg.GitHubTokenFile = *tokenFile
+		cfg.MarkFlag("githubTokenFile")
 	}
 	applyTokenCmdFlag(&cfg, *tokenCmd)
 	if *timer {
@@ -309,6 +305,7 @@ func doctorCmd(stdout, stderr io.Writer, args []string) int {
 				for n, c := range set.Cfgs {
 					if *tokenFile != "" {
 						c.GitHubTokenFile = *tokenFile
+						c.MarkFlag("githubTokenFile")
 					}
 					applyTokenCmdFlag(&c, *tokenCmd)
 					set.Cfgs[n] = c

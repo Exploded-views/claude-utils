@@ -13,12 +13,17 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
 
-// githubTokenCmd in config.json is code that runs on every token use, and
-// config.json sits in the sync work-tree where a remote could try to plant one.
-// So it is honoured only when the file it came from is this user's own, mode
-// 0600-like (no group or other bits), and, if it lies in the work-tree, not
-// tracked by git (neither at HEAD nor in the index). A command typed as
-// --token-cmd is the user's own and needs none of this.
+// config.json sits in the sync work-tree, where a remote could try to plant
+// one, so some of its keys are code or credentials the user must really have
+// chosen: githubTokenCmd runs a command on every token use, githubTokenFile
+// names a file whose content is sent to the API, githubApp picks an app key
+// that signs for GitHub, githubApiUrl decides where tokens are sent, and
+// mergeDriverPath names a program git will run. They are honoured only when
+// the file they came from is this user's own, mode 0600-like (no group or
+// other bits), and, if it lies in the work-tree, not tracked by git (neither
+// at HEAD nor in the index). Otherwise they are ignored with one warning. A
+// value typed on the command line (--token-cmd, --token-file, --github-app) is
+// the user's own and needs none of this.
 
 var (
 	warnf = log.Printf
@@ -33,17 +38,78 @@ func resetTokenCmdWarned() {
 	warnedMu.Unlock()
 }
 
-func warnTokenCmdIgnored(err error) {
+func warnIgnored(keys []string, err error) {
+	msg := strings.Join(keys, ", ") + ": " + err.Error()
 	warnedMu.Lock()
 	defer warnedMu.Unlock()
-	if warned[err.Error()] {
+	if warned[msg] {
 		return
 	}
-	warned[err.Error()] = true
-	warnf("githubTokenCmd ignored (%v); no GitHub token is used from it. Fix with chmod 600 and make sure config.json is not tracked in the sync repo, or pass --token-cmd", err)
+	warned[msg] = true
+	warnf("%s", fmt.Sprintf("config.json is not trusted (%v); ignoring %s. Fix with chmod 600 and make sure config.json is not tracked in the sync repo, or pass the value as a flag", err, strings.Join(keys, ", ")))
 }
 
-func tokenCmdConfigTrusted(cfg config.Config) error {
+// configKeysFromFile lists the sensitive keys cfg holds that did not come from
+// a flag of this run.
+func configKeysFromFile(cfg config.Config) []string {
+	var keys []string
+	add := func(set bool, key string) {
+		if set && !cfg.FromFlag(key) {
+			keys = append(keys, key)
+		}
+	}
+	add(len(cfg.GitHubTokenCmd) > 0, "githubTokenCmd")
+	add(cfg.GitHubTokenFile != "", "githubTokenFile")
+	add(cfg.GitHubApp != "", "githubApp")
+	add(cfg.GitHubAPIURL != "", "githubApiUrl")
+	add(cfg.MergeDriverPath != "", "mergeDriverPath")
+	return keys
+}
+
+// sanitizeCfg drops the sensitive keys that came from an untrusted config.json
+// (warning once). It is idempotent and a no-op for a config that was not
+// loaded from a file or holds none of those keys.
+func sanitizeCfg(cfg config.Config) config.Config {
+	if cfg.ConfigPath == "" {
+		return cfg
+	}
+	keys := configKeysFromFile(cfg)
+	if len(keys) == 0 {
+		return cfg
+	}
+	err := configTrusted(cfg)
+	if err == nil {
+		return cfg
+	}
+	warnIgnored(keys, err)
+	for _, k := range keys {
+		switch k {
+		case "githubTokenCmd":
+			cfg.GitHubTokenCmd = nil
+		case "githubTokenFile":
+			cfg.GitHubTokenFile = ""
+		case "githubApp":
+			cfg.GitHubApp = ""
+		case "githubApiUrl":
+			cfg.GitHubAPIURL = ""
+		case "mergeDriverPath":
+			cfg.MergeDriverPath = ""
+		}
+	}
+	return cfg
+}
+
+// loadConfig is config.Load plus sanitizeCfg: every read of config.json in
+// this program goes through it.
+func loadConfig(path string) (config.Config, error) {
+	c, err := config.Load(path)
+	if err != nil {
+		return c, err
+	}
+	return sanitizeCfg(c), nil
+}
+
+func configTrusted(cfg config.Config) error {
 	path := cfg.ConfigPath
 	if path == "" {
 		path = cfg.Path()

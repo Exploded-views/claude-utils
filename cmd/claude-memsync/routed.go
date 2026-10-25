@@ -198,7 +198,7 @@ func loadRouted(path string) (*routedSet, error) {
 	s := &routedSet{Path: path, File: f, Cfgs: map[string]config.Config{}, fglobal: f.ForeignWriters}
 	for _, name := range f.RepoNames() {
 		cp := route.ExpandHome(f.Repos[name].Config)
-		cfg, err := config.Load(cp)
+		cfg, err := loadConfig(cp)
 		switch {
 		case err == nil:
 			if err := checkKindAgainstRemote(name, f.Repos[name].Kind, cfg.RemoteURL); err != nil {

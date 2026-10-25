@@ -111,7 +111,7 @@ func loadDistillConfig(cfgPath string) (config.Config, error) {
 		}
 		cfgPath = defaultConfigPath()
 	}
-	cfg, err := config.Load(cfgPath)
+	cfg, err := loadConfig(cfgPath)
 	if errors.Is(err, fs.ErrNotExist) {
 		return config.Defaults(), nil
 	}

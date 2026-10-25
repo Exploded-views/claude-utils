@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,7 +33,7 @@ func warnings(t *testing.T) *[]string {
 	t.Helper()
 	var w []string
 	old := warnf
-	warnf = func(f string, a ...any) { w = append(w, f) }
+	warnf = func(f string, a ...any) { w = append(w, fmt.Sprintf(f, a...)) }
 	t.Cleanup(func() { warnf = old })
 	resetTokenCmdWarned()
 	return &w

@@ -151,7 +151,7 @@ func archiveTargets(repoName, cfgPath, routesFlag string) ([]archiveTarget, erro
 			return nil, errors.New("--repo and --config both name a repo; give one")
 		}
 		if cfgPath != "" {
-			cfg, err := config.Load(cfgPath)
+			cfg, err := loadConfig(cfgPath)
 			if err != nil {
 				return nil, err
 			}
@@ -184,7 +184,7 @@ func archiveTargets(repoName, cfgPath, routesFlag string) ([]archiveTarget, erro
 		}
 		return out, nil
 	}
-	cfg, err := config.Load(defaultConfigPath())
+	cfg, err := loadConfig(defaultConfigPath())
 	if errors.Is(err, fs.ErrNotExist) {
 		cfg, err = config.Defaults(), nil
 	}

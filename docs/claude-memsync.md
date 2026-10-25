@@ -931,6 +931,19 @@ line per state change, and `claude-memsync status` says so. A failed API call
 keeps the last known state, is logged once, and does not block. Without a token
 there is no re-check; schedule `doctor`.
 
+### Which config.json keys are trusted
+
+`config.json` lives in the sync work-tree, so a remote could try to plant one.
+The keys that run a command, name a credential or pick an endpoint
+(`githubTokenCmd`, `githubTokenFile`, `githubApp`, `githubApiUrl`,
+`mergeDriverPath`) are therefore honoured only when `config.json` is owned by
+you, has no group or other permission bits (mode 0600) and is not tracked by git
+in the sync repo. Otherwise they are ignored, with one warning in the log that
+names the keys, and the tool behaves as if they were unset. Values you type on
+the command line (`--token-cmd`, `--token-file`, `--github-app`) are always
+honoured. The daemon also refuses to pull a remote tree that tracks per-host
+files such as `config.json`.
+
 ### doctor
 
 ```sh

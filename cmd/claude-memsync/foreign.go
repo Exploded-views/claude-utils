@@ -98,7 +98,7 @@ func startGuard(configPath, routes string, routed bool, opts guardOpts) error {
 			repos = append(repos, repo{cfg.SyncDir, foreign.Target{Claude: cfg.ClaudeProjectsDir, Owns: set.Router.Owns(name)}, cfg.QuietSec()})
 		}
 	} else {
-		cfg, err := config.Load(configPath)
+		cfg, err := loadConfig(configPath)
 		if err != nil {
 			return nil
 		}
@@ -172,7 +172,7 @@ func initGuard(cfg config.Config, owns func(string) bool, opts guardOpts) error 
 // foreignStatusLines reports an active foreign writer for `status` in
 // single-repo mode; the routed form is per repo (see routedSet.foreignLines).
 func foreignStatusLines() []string {
-	cfg, err := config.Load(defaultConfigPath())
+	cfg, err := loadConfig(defaultConfigPath())
 	if err != nil {
 		return nil
 	}
