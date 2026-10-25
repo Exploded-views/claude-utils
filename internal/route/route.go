@@ -228,7 +228,9 @@ func (f File) validate() error {
 func hasGlob(s string) bool { return strings.ContainsAny(s, "*?[]") }
 
 // isPin reports a folder rule naming one exact folder.
-func (r Rule) isPin() bool { return r.Folder != "" && r.Path == "" && r.Remote == "" && !hasGlob(r.Folder) }
+func (r Rule) isPin() bool {
+	return r.Folder != "" && r.Path == "" && r.Remote == "" && !hasGlob(r.Folder)
+}
 
 // isPersonal reports the personal repo: the one named in Personal, or any repo
 // of kind personal.

@@ -209,9 +209,6 @@ func registryDir(f File, override string) (string, error) {
 	if st, err := os.Stat(d); err != nil || !st.IsDir() {
 		return "", fmt.Errorf("registry %s is not a directory", d)
 	}
-	if !gitwt.New(d).IsRepo() {
-		return "", fmt.Errorf("registry %s is not a git work-tree", d)
-	}
 	return d, nil
 }
 
@@ -230,6 +227,9 @@ func PublishTemplate(routesPath, registryOverride, label, homeFolder string) (st
 	dir, err := registryDir(f, registryOverride)
 	if err != nil {
 		return "", err
+	}
+	if !gitwt.New(dir).IsRepo() {
+		return "", fmt.Errorf("registry %s is not a git work-tree", dir)
 	}
 	rel := filepath.ToSlash(filepath.Join("hosts", label, "routes.json"))
 	out := filepath.Join(dir, filepath.FromSlash(rel))
