@@ -736,3 +736,6 @@ func printReport(r syncpkg.SyncReport) {
 		fmt.Fprintf(os.Stderr, "%d collisions saved as .from-remote-* in the mirror\n", len(r.BackedUp))
 	}
 }
+
+// defaultIdentityFor is the identity file init uses when --identity is not given.
+func defaultIdentityFor(scheme string) string { return defaultIdentityPath() }
