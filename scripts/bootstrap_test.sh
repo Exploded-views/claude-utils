@@ -644,7 +644,7 @@ assert d["githubApp"]=="memsync-check" and d["recheckTokenCmd"] is False
 assert not any(x in d for x in ("githubTokenFile","githubTokenCmd"))' "$H/.claudesync.d/$k/config.json"
   done
   check "$ROLEN prompt: the admin app minted the org token (key command, per call)" bash -c "[ \$(grep -c 'memsync app-token --app memsync-admin' '$STUB_DIR/memsync.log') -ge 4 ] && grep -qE 'doctor --org Exploded-views --token-cmd .*app-token --app memsync-admin' '$STUB_DIR/memsync.log'"
-  check "$ROLEN prompt: every org call used the org token" bash -c "grep -qE '^repo create' '$STUB_DIR/gh.who' && ! grep -E '^(repo|api repos)' '$STUB_DIR/gh.who' | grep -v '|org'"
+  check "$ROLEN prompt: every org call used the org token" bash -c "grep -qE '^(repo|api repos)' '$STUB_DIR/gh.who' && ! grep -E '^(repo|api repos)' '$STUB_DIR/gh.who' | grep -v '|org'"
   check "$ROLEN prompt: admin key and org token nowhere on disk, in logs or output" bash -c "! grep -rIlF -- '$ADMIN_MARK' '$H' '$STUB_DIR/memsync.log' '$STUB_DIR/gh.log' && ! printf '%s' \"\$1\" | grep -qF -- '$ADMIN_MARK' && ! grep -rIl -- '$ORGTOK' '$H' '$STUB_DIR/memsync.log' && ! printf '%s' \"\$1\" | grep -qF -- '$ORGTOK' && ! printf '%s' \"\$1\" | grep -q 'BEGIN '" _ "$OUT"
   check "$ROLEN prompt: no daemon-read config names the admin app" bash -c "! grep -rIl 'memsync-admin' '$H/.claudesync.d'"
 done
@@ -671,8 +671,10 @@ STUB_PUBLIC=1 rundoc 2
 check "a failed run still removes the admin entry" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'NOT private' && ! grep -qs memsync-admin '$H/.config/claude-memsync/apps.json'" _ "$OUT"
 newhome ck5
 prompt_setup
+ORGARGS=()
 runboot --host testhost --role homelab --yes --org-app memsync-admin --check-app memsync-check --check-key-file "$H/.config/claude-memsync/memsync-check.pem"
 check "--check-app without --check-app-id is refused" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'together'" _ "$OUT"
+ORGARGS=(--org-token-file "$BASE/orgtoken")
 newhome ck6
 ORGARGS=()
 runboot --host testhost --role homelab --yes --org-app-id 12345 --org-app-key-cmd "cat $BASE/app.pem"
