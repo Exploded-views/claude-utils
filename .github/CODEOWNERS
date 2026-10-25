@@ -1,0 +1,23 @@
+# Fork-only and advisory: this file never goes upstream, and no branch rule
+# requires a code-owner review. It marks who looks at the sensitive paths.
+*                                   @gitgat
+# crypto and keys: age/PQ, recipients, rekey, join
+/internal/agecrypt/                 @gitgat
+/cmd/claude-memsync/age.go          @gitgat
+/cmd/claude-memsync/rekey_pq.go     @gitgat
+/cmd/claude-memsync/join.go         @gitgat
+/cmd/claude-memmerge/               @gitgat
+/internal/merge/                    @gitgat
+# app auth and tokens
+/internal/ghapp/                    @gitgat
+/internal/secretcmd/                @gitgat
+/internal/ghguard/                  @gitgat
+/cmd/claude-memsync/app*.go         @gitgat
+/cmd/claude-memsync/guard.go        @gitgat
+/cmd/claude-memsync/cfgtrust.go     @gitgat
+# bootstrap
+/scripts/bootstrap.sh               @gitgat
+# CI and security docs
+/.github/workflows/                 @gitgat
+/.github/CODEOWNERS                 @gitgat
+/docs/security.md                   @gitgat
