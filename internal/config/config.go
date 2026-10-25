@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/MarimerLLC/claude-utils/internal/foreign"
 )
 
 // Config controls the daemon's behavior. Defaults() returns a Config with
@@ -87,6 +89,26 @@ type Config struct {
 
 	// PullIntervalSec is how often to pull from the remote when idle.
 	PullIntervalSec int `json:"pullIntervalSec"`
+
+	// ForeignWriters lists other tools that write into Claude memory folders
+	// (a predecessor sync tool). While one is active, run and init refuse to
+	// start. With a routes file, its own foreignWriters list is used instead.
+	ForeignWriters []foreign.Writer `json:"foreignWriters,omitempty"`
+
+	// StartQuietSec is the start-up quiet window in seconds (nil: 15, 0 turns
+	// it off): the owned folders must not change during it, or the run refuses.
+	StartQuietSec *int `json:"startQuietSec,omitempty"`
+}
+
+// DefaultQuietSec is the start-up quiet window when config.json does not say.
+const DefaultQuietSec = 15
+
+// QuietSec is the start-up quiet window in seconds.
+func (c Config) QuietSec() int {
+	if c.StartQuietSec == nil {
+		return DefaultQuietSec
+	}
+	return *c.StartQuietSec
 }
 
 // Defaults returns a Config populated with platform-appropriate defaults.
@@ -151,6 +173,12 @@ func Load(path string) (Config, error) {
 	c := Defaults()
 	if err := json.Unmarshal(b, &c); err != nil {
 		return Config{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if err := foreign.Validate(c.ForeignWriters); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
+	}
+	if c.StartQuietSec != nil && *c.StartQuietSec < 0 {
+		return Config{}, fmt.Errorf("%s: startQuietSec must not be negative", path)
 	}
 	return c, nil
 }

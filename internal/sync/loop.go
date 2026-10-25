@@ -33,6 +33,11 @@ type Loop struct {
 	// no longer private).
 	PushAllowed func() bool
 
+	// Hold, when set and true, pauses the loop: nothing is mirrored, committed,
+	// pulled or pushed until it returns false. Used while a foreign writer is
+	// active in the Claude folders.
+	Hold func() bool
+
 	// Name labels this loop's log lines when several repos run in one process.
 	Name string
 	// Owns gates which Claude folders this loop may touch (see Roots.Owns).
@@ -102,7 +107,7 @@ func (l *Loop) Run(ctx context.Context) error {
 	// What a crash left behind is undone before Reconcile compares the trees: a
 	// stopped rebase or merge holds conflict markers, and the parked mirror
 	// copies of an unfinished park differ from the Claude ones.
-	if l.startCycle(repo, roots) {
+	if !l.held() && l.startCycle(repo, roots) {
 		if _, err := Reconcile(roots, manifest); err != nil {
 			l.logln("initial reconcile:", newPathGuard(l.Cfg).Err(err))
 		}
@@ -166,6 +171,8 @@ func (l *Loop) Run(ctx context.Context) error {
 		}
 	}
 }
+
+func (l *Loop) held() bool { return l.Hold != nil && l.Hold() }
 
 // keyless reports (and logs) that encryption is on but this host's identity
 // cannot read the repo.
@@ -273,7 +280,7 @@ func (l *Loop) pullTick(repo *gitwt.Repo, roots Roots) {
 		l.logln("load manifest:", newPathGuard(l.Cfg).Err(err))
 		m = NewManifest()
 	}
-	if l.startCycle(repo, roots) {
+	if !l.held() && l.startCycle(repo, roots) {
 		if _, err := Reconcile(roots, m); err != nil {
 			l.logln("reconcile:", newPathGuard(l.Cfg).Err(err))
 		}
@@ -293,6 +300,9 @@ func (l *Loop) pullTick(repo *gitwt.Repo, roots Roots) {
 // (handled, error). handled=true means the change was relevant and should
 // trigger a debounced flush.
 func (l *Loop) handleEvent(watcher *fsnotify.Watcher, roots Roots, ev fsnotify.Event) (bool, error) {
+	if l.held() {
+		return false, nil
+	}
 	rel, err := filepath.Rel(roots.Claude, ev.Name)
 	if err != nil {
 		return false, nil
@@ -349,6 +359,9 @@ func (l *Loop) handleEvent(watcher *fsnotify.Watcher, roots Roots, ev fsnotify.E
 // refs/remotes/origin/<branch> AND we have no unpushed commits, it returns
 // early — skipping the full pull/push churn that dominates idle ticks.
 func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err error) {
+	if l.held() {
+		return nil
+	}
 	// Registered first, so it runs last: whatever the cycle returns (including
 	// the restore error below) is stripped of denylisted names.
 	g := newPathGuard(l.Cfg)

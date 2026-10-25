@@ -15,6 +15,7 @@ import (
 
 	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/config"
+	"github.com/MarimerLLC/claude-utils/internal/foreign"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/lock"
 	"github.com/MarimerLLC/claude-utils/internal/route"
@@ -100,6 +101,93 @@ type routedSet struct {
 	Router    *route.Router
 	Cfgs      map[string]config.Config // repos this host has
 	Missing   []string                 // repos named in routes.json that this host lacks
+
+	fmu     sync.Mutex
+	fglobal []foreign.Writer // routes.json foreignWriters, replaced on reload
+	fheld   map[string]bool  // repos paused because a foreign writer was seen; sticky until restart
+	finit   bool             // the first recheck of this daemon has cleared old markers
+	logf    func(string, ...any)
+}
+
+// writersFor is the foreign writers that bear on a repo: the routes file's list
+// and the repo's own.
+func (s *routedSet) writersFor(name string) []foreign.Writer {
+	s.fmu.Lock()
+	defer s.fmu.Unlock()
+	out := append([]foreign.Writer{}, s.fglobal...)
+	return append(out, s.Cfgs[name].ForeignWriters...)
+}
+
+// held reports a repo paused because a foreign writer is active.
+func (s *routedSet) held(name string) bool {
+	s.fmu.Lock()
+	defer s.fmu.Unlock()
+	return s.fheld[name]
+}
+
+// foreignHeldPath is the marker a held repo leaves for `status`, which runs in
+// another process. A daemon restart removes it.
+func foreignHeldPath(syncDir string) string {
+	return filepath.Join(syncDir, ".state", "foreign-held")
+}
+
+// recheckForeign asks again, for every repo, whether a foreign writer is
+// active. The first sighting pauses the repo, logged once, and the pause is
+// sticky: it lasts until the daemon restarts, because the copies the writer
+// left behind would be mirrored the moment it stopped. A check that cannot be
+// answered changes nothing. The daemon does not exit: other repos keep running.
+func (s *routedSet) recheckForeign() {
+	s.fmu.Lock()
+	first := !s.finit
+	s.finit = true
+	s.fmu.Unlock()
+	for _, name := range s.names() {
+		if first { // a restart: whatever an earlier daemon held is over
+			_ = os.Remove(foreignHeldPath(s.Cfgs[name].SyncDir))
+		}
+		if s.held(name) {
+			continue
+		}
+		r := foreign.Inspect(s.writersFor(name), foreignEnv())
+		s.fmu.Lock()
+		if s.fheld == nil {
+			s.fheld = map[string]bool{}
+		}
+		logf := s.logf
+		if logf == nil {
+			logf = log.Printf
+		}
+		switch {
+		case len(r.Active) > 0:
+			s.fheld[name] = true
+			logf("[%s] foreign writer seen: restart after cleanup (%s); nothing is mirrored, committed or pushed for this repo until the daemon restarts", name, r.Active[0])
+			p := foreignHeldPath(s.Cfgs[name].SyncDir)
+			if err := os.MkdirAll(filepath.Dir(p), 0o700); err == nil {
+				_ = os.WriteFile(p, []byte(time.Now().UTC().Format(time.RFC3339)+" foreign writer seen: restart after cleanup ("+r.Active[0].String()+")\n"), 0o600)
+			}
+		case len(r.Unchecked) > 0:
+			logf("[%s] %s could not be checked; keeping the repo running", name, r.Unchecked[0])
+		}
+		s.fmu.Unlock()
+	}
+}
+
+// foreignLines is the per-repo part of status for repos a foreign writer holds.
+func (s *routedSet) foreignLines() []string {
+	var out []string
+	for _, name := range s.names() {
+		for _, a := range foreign.Check(s.writersFor(name), foreignEnv()) {
+			out = append(out, fmt.Sprintf("  [%s] blocked: %s", name, a))
+		}
+		if b, err := os.ReadFile(foreignHeldPath(s.Cfgs[name].SyncDir)); err == nil {
+			msg := strings.TrimSpace(string(b))
+			if _, rest, ok := strings.Cut(msg, " "); ok {
+				msg = rest // drop the timestamp
+			}
+			out = append(out, fmt.Sprintf("  [%s] held: %s", name, msg))
+		}
+	}
+	return out
 }
 
 func loadRouted(path string) (*routedSet, error) {
@@ -107,7 +195,7 @@ func loadRouted(path string) (*routedSet, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &routedSet{Path: path, File: f, Cfgs: map[string]config.Config{}}
+	s := &routedSet{Path: path, File: f, Cfgs: map[string]config.Config{}, fglobal: f.ForeignWriters}
 	for _, name := range f.RepoNames() {
 		cp := route.ExpandHome(f.Repos[name].Config)
 		cfg, err := config.Load(cp)
@@ -408,18 +496,19 @@ func (s *routedSet) Start(ctx context.Context) (*running, error) {
 	for _, m := range s.Missing {
 		log.Printf("routing: repo %q is not on this host; folders routed to it are denied", m)
 	}
+	s.recheckForeign()
 	interval := time.Hour
 	for _, name := range s.names() {
 		cfg := s.Cfgs[name]
 		if d := time.Duration(cfg.PullIntervalSec) * time.Second; d > 0 && d < interval {
 			interval = d
 		}
-		loop := &syncpkg.Loop{Cfg: cfg, Name: name, Owns: s.Router.Owns(name), PushAllowed: pushWatch(cfg, log.Printf)}
+		loop := &syncpkg.Loop{Cfg: cfg, Name: name, Owns: s.Router.Owns(name), PushAllowed: pushWatch(cfg, log.Printf), Hold: func() bool { return s.held(name) }}
 		r.loops = append(r.loops, loop)
 		r.wg.Add(1)
 		go func() {
 			defer r.wg.Done()
-			superviseLoop(ctx, loop)
+			superviseLoop(ctx, loop, s.recheckForeign)
 		}()
 	}
 	// Checkouts and remotes change; decisions are re-read on the pull tick.
@@ -445,6 +534,7 @@ func (s *routedSet) Start(ctx context.Context) (*running, error) {
 // reload re-reads routes.json and swaps the table in atomically. A file that no
 // longer parses leaves the old table in force and is logged once.
 func (s *routedSet) reload() {
+	defer s.recheckForeign()
 	f, err := route.Load(s.Path)
 	if err != nil {
 		if msg := err.Error(); msg != s.reloadErr {
@@ -454,6 +544,9 @@ func (s *routedSet) reload() {
 		return
 	}
 	s.reloadErr = ""
+	s.fmu.Lock()
+	s.fglobal = f.ForeignWriters
+	s.fmu.Unlock()
 	s.Router.Replace(f)
 }
 
@@ -468,10 +561,13 @@ var (
 
 func loopFailedPath(syncDir string) string { return filepath.Join(syncDir, ".state", "loop-failed") }
 
-func superviseLoop(ctx context.Context, loop *syncpkg.Loop) {
+func superviseLoop(ctx context.Context, loop *syncpkg.Loop, recheck func()) {
 	backoff := loopBackoffMin
 	failed := loopFailedPath(loop.Cfg.SyncDir)
 	for {
+		if recheck != nil {
+			recheck() // a restart is a moment to look again for a foreign writer
+		}
 		healthy := time.AfterFunc(loopHealthy, func() { os.Remove(failed) })
 		started := time.Now()
 		err := runLoop(ctx, loop)

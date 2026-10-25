@@ -63,6 +63,9 @@ func runInit(args []string) int {
 	encrypt := flags.Bool("encrypt", false, "encrypt every file in the repo with age (new or already-encrypted remotes only)")
 	identity := flags.String("identity", "", "with --encrypt: age identity file (default: per-host key under the user config dir; generated if missing)")
 	var extraRecipients stringList
+	var gopts guardOpts
+	flags.BoolVar(&gopts.IgnoreForeign, "ignore-foreign-writers", false, "go on although a foreignWriters entry is active or cannot be checked (logged)")
+	flags.BoolVar(&gopts.SkipQuiet, "skip-quiet-window", false, "skip the start-up quiet window")
 	flags.Var(&extraRecipients, "recipient", "with --encrypt: extra age/ssh public key, e.g. an offline recovery key (repeatable)")
 
 	if err := flags.Parse(args); err != nil {
@@ -135,6 +138,12 @@ func runInit(args []string) int {
 		return 2
 	}
 
+	// Before the clone, the reconcile and the push: nothing may be mirrored
+	// while another tool is still writing into the Claude folders.
+	if err := initGuard(cfg, owns, gopts); err != nil {
+		fmt.Fprintln(os.Stderr, "init refused:", err)
+		return 1
+	}
 	if err := bootstrapFull(cfg, *force, denylistData, enc, owns); err != nil {
 		fmt.Fprintln(os.Stderr, "init failed:", err)
 		return 1
@@ -297,7 +306,19 @@ func bootstrapFull(cfg config.Config, force bool, denylist []byte, enc *encryptS
 		return fmt.Errorf("write .gitignore: %w", err)
 	}
 
-	// Step 4: write config.json.
+	// Step 4: write config.json. A re-init keeps the guard settings of the
+	// config it replaces: the list is not an init flag, and dropping it would
+	// switch the foreign-writer guard off.
+	if old, err := config.Load(cfg.Path()); err == nil {
+		if len(cfg.ForeignWriters) == 0 {
+			cfg.ForeignWriters = old.ForeignWriters
+		}
+		if cfg.StartQuietSec == nil {
+			cfg.StartQuietSec = old.StartQuietSec
+		}
+	}
+	// init is the migration moment: the next start gets the quiet window again.
+	_ = os.Remove(quietMarker(cfg.SyncDir))
 	if err := config.Save(cfg); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}

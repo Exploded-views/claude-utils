@@ -1092,6 +1092,86 @@ claude-memsync route inherit laptop-2 --home --yes
 
 `inherit` keeps the new host's `repos` and every setting of its own and replaces its rules with the template's, keeping only rules whose repo exists in this host's `repos` with the same kind. A rule it cannot take over (its repo is missing here, or has another kind) is printed with the reason and stays as a deny in its place, so a broader rule behind it never catches its folders. A client route is never added for a repo the host lacks. The template's home pin applies to this host's home folder only with `--home`; without it the host's own pin stays. It then shows the changes and asks before writing (`--yes` skips the question; without a terminal and without `--yes` nothing is written). It also routes every folder this host has, and one probe per client or orch rule, under the old and the new rules; if any folder would leave a client or orch repo (a dropped or shadowed client rule), or the home folder would newly go to a non-client repo on a host that keeps client notes, it lists them and refuses without `--confirm-move-out-of-client`. The check is repeated under the file lock before writing. Only the `routes` list is rewritten; every other field of `routes.json` is kept as it was. `route home` likewise needs `--confirm-move-out-of-client` for a non-client target on a host with any client or orch repo, and `--ask` then wants a typed `yes`.
 
+## Migrating from another sync tool
+
+If another tool synced Claude memory folders before claude-memsync, it can keep
+writing into them after you think it is off: a timer you disabled but a plugin
+hook that still fires, or a daemon that was never stopped. claude-memsync would
+then mirror whatever it wrote, including copies filed in the wrong folder, into
+the repos the folders route to.
+
+The `foreignWriters` list is the primary guard. The quiet window below is a
+weak extra signal.
+
+### foreignWriters
+
+List the predecessor under `foreignWriters` in `routes.json` (applies to every
+repo) and/or in a repo's `config.json` (applies to that repo; `init` keeps it
+when you re-init). Each entry is exactly one of:
+
+```json
+"foreignWriters": [
+  {"file": "~/.old-sync/config.json", "jsonKeyNonEmpty": "repo"},
+  {"systemdUnit": "old-sync.timer"},
+  {"process": "old-sync"},
+  {"claudePlugin": "old-sync@marketplace", "onlyIfFile": "~/.old-sync/config.json"}
+]
+```
+
+- `file`: active if the file exists and, when `jsonKeyNonEmpty` is set, that
+  top-level key holds a non-empty value. A file that exists but cannot be parsed
+  counts as active.
+- `systemdUnit` (Linux only): active if `systemctl --user is-enabled` or
+  `is-active` says enabled or active.
+- `process` (Linux only): active if a running process's command line contains
+  the text. claude-memsync's own process is ignored, but choose text that does
+  not also match a claude-memsync command line.
+- `claudePlugin`: active if `name@marketplace` is enabled in `settings.json` or
+  `settings.local.json` of the Claude config dir (`CLAUDE_CONFIG_DIR`, else
+  `~/.claude`). A settings file that exists but cannot be read or parsed counts
+  as enabling it. `onlyIfFile` names the plugin's own config: when set and
+  missing, the plugin is inert. `unlessFile` is the opposite: an enabled plugin
+  is inert while that file exists.
+
+Off Linux only `file` and `claudePlugin` entries are checked; `systemdUnit` and
+`process` entries are skipped with a log line. On Linux, a `systemdUnit` or
+`process` entry that cannot be checked (no `systemctl`, no `/proc`) refuses the
+start like an active one does.
+
+If any entry is active, `run` and `init` exit non-zero with one line naming the
+kind and the configured value (never a note name), and `status` shows
+`blocked: foreign writer <kind> <value>` (per repo in routed mode).
+`--ignore-foreign-writers` starts anyway and logs a warning per entry.
+
+While a routed daemon runs, the list is checked again on every routes reload
+and every supervised loop restart. The first time an entry is seen active, the
+repo it applies to stops mirroring, committing, pulling and pushing. This is
+logged once (`foreign writer seen: restart after cleanup`) and shown in
+`status`. The hold is sticky: it does not lift when the writer stops, because
+the copies it left behind would then be mirrored. Clean up those copies, then
+restart the daemon; the start-up check runs again. The daemon itself keeps
+running and the other repos carry on. Notes mirrored before the writer was seen
+are not undone.
+
+Single-repo mode has no runtime recheck: the list is checked at `run` and
+`init` only.
+
+### Quiet window
+
+A busy host writes memory all the time, so the window is limited to the
+migration moment: the first start after `init` for each repo (a marker in
+`.state/` records that it has been done). Before the first sync, claude-memsync
+snapshots (size, modification time, SHA-256) the memory files of every folder it
+owns, waits `startQuietSec` seconds (default 15, in `config.json`; 0 turns it
+off), and snapshots again. If anything in an owned folder changed, it refuses
+with `owned folder changed during start-up quiet window: something else writes
+there`, naming the folder by hash (the first 8 hex digits of the SHA-256 of the
+folder name). Stop the other writer and start again.
+
+`init` always runs the window. Later starts skip it; `run --quiet-window`
+forces it, and `--skip-quiet-window` (on `run` or `init`) skips it for a
+deliberate first start. `--ignore-foreign-writers` does not skip it.
+
 ## Related projects
 
 A repo can name other repos whose notes are worth seeing while you work in it, without joining them. Relations are declared in the registry repo (a normal sync dir, for example `mem-registry`), never in the project repos, so a public project repo never names a memory repo.
