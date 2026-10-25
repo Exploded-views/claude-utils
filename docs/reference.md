@@ -50,6 +50,8 @@ Usage of init:
     	UTF-8 file of regexes (one per line) to install as the denylist before the first commit
   -encrypt
     	encrypt every file in the repo with age (new or already-encrypted remotes only)
+  -encryption-scheme string
+    	with --encrypt: pq (hybrid post-quantum age keys only, the default) or classic (upstream-compatible X25519/ssh keys); saved as encryptionScheme (default "pq")
   -expires string
     	last day this host syncs (YYYY-MM-DD); the day after, the daemon holds and status says to retire it; saved to config and published to the registry
   -force
@@ -73,7 +75,7 @@ Usage of init:
   -recipient value
     	with --encrypt: extra age/ssh public key, e.g. an offline recovery key (repeatable)
   -recovery-recipient join accept
-    	with --encrypt: the owner's offline recovery key (age/ssh public key, repeatable): a recipient like --recipient, marked "# recovery", saved as recoveryRecipients, and the only kind of recipient join accept lets go unlabelled
+    	with --encrypt: the owner's offline recovery key (an age1pq1... public key under the pq scheme, repeatable): a recipient like --recipient, marked "# recovery", saved as recoveryRecipients, and the only kind of recipient join accept lets go unlabelled
   -remote string
     	git remote URL to sync against (e.g. git@github.com:user/claude-memories.git)
   -skip-quiet-window
@@ -113,6 +115,7 @@ Usage of doctor:
 ```text
 usage:
   claude-memsync app key-fingerprint --key-file <pem>
+  claude-memsync app add --name <n> --app-id <id> --org <org> (--key-cmd "<cmd>" | --key-file <path>) [--api-url <url>] [--replace] [--verify]
   claude-memsync app register --name <n> --org <org> --url <homepage> --perm <p:level>... (--key-out <path> | --key-cmd-store "<cmd>" --key-cmd "<cmd>")
 ```
 
@@ -419,7 +422,7 @@ usage: claude-memsync related dismiss <from> <to> [--routes FILE]
 ## `claude-memsync recipients`
 
 ```text
-usage: claude-memsync recipients add <public-key> [--host <label>] | remove <public-key> | list | accept --yes | label self --host <label> | label recovery <public-key> [--all]  [--repo <name> | --config <path>] [--routes <path>]
+usage: claude-memsync recipients add <public-key> [--host <label>] | remove <public-key> | list | accept --yes | label self --host <label> | label recovery <public-key> [--all] | rekey-pq --recovery-recipient <age1pq1...> --host <label> [--all] [--fresh-root] [--apply] | rekey-pq --drop-backup  [--repo <name> | --config <path>] [--routes <path>]
 ```
 
 ## `claude-memsync join`
@@ -452,7 +455,8 @@ Usage of join request:
 usage: claude-memsync host list [--org ORG] [--stale-days N] [--json]
        claude-memsync host retire <label> [--apply] [--org ORG]
        claude-memsync host check-key --fingerprint SHA256:... --app SLUG | --clear
-  all take [--config PATH | --routes PATH] [--token-file FILE]
+  all take [--config PATH | --routes PATH] [--token-file FILE | --token-cmd CMD | --github-app NAME]
+  a token flag wins over the token sources in config.json
 ```
 
 ## `claude-memsync host list -h`

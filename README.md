@@ -108,7 +108,6 @@ The threat model is in [docs/security.md](docs/security.md).
 
 ### Quickstart
 
-<!-- verify-flags: bootstrap.sh --recovery-recipient -->
 ```sh
 git clone <fork-url> claude-utils && cd claude-utils
 go build -o ~/.local/bin/ ./cmd/claude-memsync ./cmd/claude-memmerge
