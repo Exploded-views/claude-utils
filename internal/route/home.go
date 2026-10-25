@@ -1,8 +1,11 @@
 package route
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 )
 
@@ -18,6 +21,19 @@ func HomeFolder() (string, error) {
 		return "", err
 	}
 	return escape(h), nil
+}
+
+// ErrNeedsConfirm marks a change that needs --confirm-move-out-of-client.
+var ErrNeedsConfirm = errors.New("pass --confirm-move-out-of-client")
+
+// HasClientRepo reports a client or orch repo among the repos.
+func (f File) HasClientRepo() bool {
+	for _, r := range f.Repos {
+		if r.IsClient() {
+			return true
+		}
+	}
+	return false
 }
 
 // HomeOpts tunes SetHomePin.
@@ -41,7 +57,7 @@ type HomeChange struct {
 // is one.
 func (f File) HomePin(folder string) (string, bool) {
 	for _, r := range f.Routes {
-		if r.isPin() && strings.EqualFold(r.Folder, folder) {
+		if r.isPin() && sameFolder(r.Folder, folder) {
 			return r.Repo, true
 		}
 	}
@@ -74,15 +90,23 @@ func (f File) WithHome(folder, repo string, o HomeOpts) (File, HomeChange, error
 	if ch.From == "" {
 		ch.From, _ = f.HomePin(folder)
 	}
-	if from, ok := f.Repos[ch.From]; ok && from.IsClient() && repo != "" && !f.Repos[repo].IsClient() && !o.ConfirmMoveOutOfClient {
-		return f, ch, fmt.Errorf("the home folder is routed to the client repo %q; moving it to the non-client repo %q puts its notes where the catalog and other hosts can see them: pass --confirm-move-out-of-client if that is intended", ch.From, repo)
+	// Pinning the home folder to a non-client repo needs consent when it is
+	// leaving a client repo, and on any host that keeps client notes at all
+	// (even from "denied": a client's notes may sit in the home folder).
+	if toPlain := repo != "" && !f.Repos[repo].IsClient(); toPlain && !o.ConfirmMoveOutOfClient {
+		if from, ok := f.Repos[ch.From]; ok && from.IsClient() {
+			return f, ch, fmt.Errorf("the home folder is routed to the client repo %q; moving it to the non-client repo %q puts its notes where the catalog and other hosts can see them: %w if that is intended", ch.From, repo, ErrNeedsConfirm)
+		}
+		if f.HasClientRepo() {
+			return f, ch, fmt.Errorf("this host keeps client notes: pinning the home folder to the non-client repo %q: %w", repo, ErrNeedsConfirm)
+		}
 	}
 	routes := make([]Rule, 0, len(f.Routes)+1)
 	if repo != "" {
 		routes = append(routes, Rule{Folder: folder, Repo: repo})
 	}
 	for _, r := range f.Routes {
-		if r.isPin() && strings.EqualFold(r.Folder, folder) {
+		if r.isPin() && sameFolder(r.Folder, folder) {
 			continue
 		}
 		routes = append(routes, r)
@@ -114,8 +138,14 @@ func SetHomePin(path, folder, repo string, o HomeOpts) (HomeChange, error) {
 	return ch, err
 }
 
+// ruleKeys are the fields of a rule this version knows.
+var ruleKeys = map[string]bool{"folder": true, "path": true, "remote": true, "aliases": true, "repo": true}
+
 // EditRoutes reads path under its lock, applies edit, and writes the result
-// atomically if it differs. An error from edit leaves the file untouched.
+// atomically if the routes differ. Only the "routes" list may change: every
+// other field of the file, known to this version or not, is written back as it
+// was read. A rule with a field this version does not know, or an edit that
+// changes anything but the routes, is refused rather than dropping data.
 func EditRoutes(path string, edit func(File) (File, error)) error {
 	unlock, err := lockFile(path + ".lock")
 	if err != nil {
@@ -126,6 +156,25 @@ func EditRoutes(path string, edit func(File) (File, error)) error {
 	if err != nil {
 		return err
 	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return err
+	}
+	var oldRules []map[string]json.RawMessage
+	if err := json.Unmarshal(top["routes"], &oldRules); err != nil && top["routes"] != nil {
+		return fmt.Errorf("routes: %w", err)
+	}
+	for i, r := range oldRules {
+		for k := range r {
+			if !ruleKeys[k] {
+				return fmt.Errorf("route %d has a field %q this version does not know; edit routes.json by hand", i, k)
+			}
+		}
+	}
 	g, err := edit(f)
 	if err != nil {
 		return err
@@ -133,7 +182,20 @@ func EditRoutes(path string, edit func(File) (File, error)) error {
 	if err := g.validate(); err != nil {
 		return err
 	}
-	return writeJSONAtomic(path, g, ".routes-*.tmp")
+	a, b := f, g
+	a.Routes, b.Routes = nil, nil
+	if !reflect.DeepEqual(a, b) {
+		return fmt.Errorf("internal error: the edit changed more than the routes; nothing written")
+	}
+	if sameRoutes(f.Routes, g.Routes) {
+		return nil
+	}
+	rb, err := json.Marshal(g.Routes)
+	if err != nil {
+		return err
+	}
+	top["routes"] = rb
+	return writeJSONAtomic(path, top, ".routes-*.tmp")
 }
 
 // sameRoutes reports equal rule lists.
@@ -148,3 +210,6 @@ func sameRoutes(a, b []Rule) bool {
 	}
 	return true
 }
+
+// SameRoutes reports equal rule lists.
+func SameRoutes(a, b []Rule) bool { return sameRoutes(a, b) }

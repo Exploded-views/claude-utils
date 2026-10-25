@@ -678,6 +678,15 @@ var globCache sync.Map
 // macOS and Windows are by default.
 var foldCase = runtime.GOOS == "darwin" || runtime.GOOS == "windows"
 
+// sameFolder compares folder names the way routing does: ignoring case only
+// where the file system does.
+func sameFolder(a, b string) bool {
+	if foldCase {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
 func globMatch(pat, name string) bool { return globFold(pat, name, false) }
 
 // globFold is globMatch, optionally ignoring case.

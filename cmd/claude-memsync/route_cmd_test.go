@@ -66,7 +66,7 @@ func routesOf(t *testing.T, p string) route.File {
 var stdKinds = map[string]string{"personal": "personal", "projects": "project", "lab": "infra", "orch-a": "orch", "client-a": "client"}
 
 func TestRouteHome_SetReplaceDenyAndShow(t *testing.T) {
-	p, hf := homeHost(t, stdKinds, []map[string]string{{"folder": "-x", "repo": "projects"}})
+	p, hf := homeHost(t, map[string]string{"personal": "personal", "projects": "project", "lab": "infra"}, []map[string]string{{"folder": "-x", "repo": "projects"}})
 	if code, _, e := runRouteCmd(t, "", false, "home", "lab"); code != 0 {
 		t.Fatalf("set: %d %s", code, e)
 	}
@@ -100,7 +100,7 @@ func TestRouteHome_SetReplaceDenyAndShow(t *testing.T) {
 
 func TestRouteHome_FolderOverrideAndUnknownRepo(t *testing.T) {
 	p, _ := homeHost(t, stdKinds, nil)
-	if code, _, e := runRouteCmd(t, "", false, "home", "--folder", "-other-home", "projects"); code != 0 {
+	if code, _, e := runRouteCmd(t, "", false, "home", "--folder", "-other-home", "--confirm-move-out-of-client", "projects"); code != 0 {
 		t.Fatalf("%s", e)
 	}
 	if f := routesOf(t, p); f.Routes[0].Folder != "-other-home" {
@@ -202,10 +202,17 @@ func TestRouteHome_AskChoices(t *testing.T) {
 	if f := routesOf(t, p); f.Routes[0].Folder != hf || f.Routes[0].Repo != "orch-a" {
 		t.Fatalf("%+v", f.Routes)
 	}
-	// By name, with consent needed to leave the orch repo.
-	if code, _, e := runRouteCmd(t, "personal\n", true, "home", "--ask"); code == 0 || !strings.Contains(e, "--confirm-move-out-of-client") {
-		t.Fatalf("%d %s", code, e)
+	// Leaving the orch repo needs a typed yes; a bare Enter refuses.
+	if code, out, _ := runRouteCmd(t, "personal\n\n", true, "home", "--ask"); code == 0 || !strings.Contains(out, "Type yes") {
+		t.Fatalf("bare Enter applied or no prompt: %d %s", code, out)
 	}
+	if routesOf(t, p).Routes[0].Repo != "orch-a" {
+		t.Fatal("applied without confirmation")
+	}
+	if code, _, e := runRouteCmd(t, "personal\nyes\n", true, "home", "--ask"); code != 0 {
+		t.Fatalf("typed yes refused: %s", e)
+	}
+	runRouteCmd(t, "orch-a\n", true, "home", "--ask")
 	if code, _, e := runRouteCmd(t, "personal\n", true, "home", "--ask", "--confirm-move-out-of-client"); code != 0 {
 		t.Fatalf("%s", e)
 	}
@@ -257,7 +264,7 @@ func TestRoutePublishInherit_EndToEnd(t *testing.T) {
 	fa.Registry = reg
 	b, _ := json.Marshal(fa)
 	os.WriteFile(pa, b, 0600)
-	runRouteCmd(t, "", false, "home", "orch-a")
+	runRouteCmd(t, "", false, "home", "--confirm-move-out-of-client", "lab")
 	if code, _, e := runRouteCmd(t, "", false, "publish", "--as", "Bad Label"); code == 0 {
 		t.Fatalf("bad label accepted: %s", e)
 	}
@@ -265,7 +272,7 @@ func TestRoutePublishInherit_EndToEnd(t *testing.T) {
 		t.Fatalf("publish: %d %s %s", code, out, e)
 	}
 	tb, _ := os.ReadFile(filepath.Join(reg, "hosts", "laptop-2", "routes.json"))
-	if strings.Contains(string(tb), hfA) || strings.Contains(string(tb), "config") {
+	if strings.Contains(string(tb), hfA) || strings.Contains(string(tb), "config") || strings.Contains(string(tb), "acme") || strings.Contains(string(tb), "client-a") {
 		t.Fatalf("template leaks: %s", tb)
 	}
 
@@ -281,7 +288,7 @@ func TestRoutePublishInherit_EndToEnd(t *testing.T) {
 	if code == 0 || !strings.Contains(e, "--yes") || !strings.Contains(out, "+ remote github.com/zed/* -> projects") {
 		t.Fatalf("%d out=%s err=%s", code, out, e)
 	}
-	if !strings.Contains(out, "dropped") || !strings.Contains(out, "client-a") {
+	if !strings.Contains(out, "dropped") || !strings.Contains(out, "lab") {
 		t.Fatalf("no drop report: %s", out)
 	}
 	if len(routesOf(t, pb).Routes) != 0 {
@@ -293,7 +300,7 @@ func TestRoutePublishInherit_EndToEnd(t *testing.T) {
 	}
 	g := routesOf(t, pb)
 	for _, r := range g.Routes {
-		if r.Repo == "client-a" || r.Repo == "orch-a" {
+		if r.Repo == "client-a" || r.Repo == "orch-a" || r.Repo == "lab" {
 			t.Fatalf("added a route to a repo this host lacks: %+v", r)
 		}
 	}
@@ -362,5 +369,28 @@ func TestRouteInherit_LosingClientRoutesNeedsConsent(t *testing.T) {
 	}
 	if len(routesOf(t, p).Routes) != 0 {
 		t.Fatal("not applied with consent")
+	}
+}
+
+func TestRouteInherit_RefusesWhenFileChangedAfterTheDiff(t *testing.T) {
+	p, _ := homeHost(t, map[string]string{"personal": "personal", "projects": "project", "client-a": "client"}, nil)
+	reg := t.TempDir()
+	os.MkdirAll(filepath.Join(reg, "hosts", "t"), 0700)
+	os.WriteFile(filepath.Join(reg, "hosts", "t", "routes.json"),
+		[]byte(`{"version":1,"repos":{"projects":"project"},"routes":[{"remote":"github.com/z/*","repo":"projects"}]}`), 0600)
+	// A client rule appears after the diff was shown and confirmed.
+	beforeInheritWrite = func() {
+		route.EditRoutes(p, func(f route.File) (route.File, error) {
+			f.Routes = append(f.Routes, route.Rule{Folder: "-late-client", Repo: "client-a"})
+			return f, nil
+		})
+	}
+	defer func() { beforeInheritWrite = func() {} }()
+	code, _, e := runRouteCmd(t, "", false, "inherit", "t", "--yes", "--registry", reg)
+	if code == 0 || !strings.Contains(e, "changed while") {
+		t.Fatalf("%d %s", code, e)
+	}
+	if f := routesOf(t, p); len(f.Routes) != 1 || f.Routes[0].Repo != "client-a" {
+		t.Fatalf("file overwritten: %+v", f.Routes)
 	}
 }

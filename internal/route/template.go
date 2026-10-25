@@ -49,17 +49,64 @@ func ValidLabel(s string) error {
 	return nil
 }
 
-// Template builds the template of this table; homeFolder is this host's home
-// folder, whose pin is published as a "home" rule.
-func (f File) Template(homeFolder string) Template {
-	t := Template{Version: templateVersion, Repos: map[string]string{}, Personal: f.Personal, Routes: []TemplateRule{}}
+// homePlaceholder stands for the publishing user's home in folder and path
+// patterns; inherit expands it for the local user.
+const homePlaceholder = "{home}"
+
+var (
+	homeFolderRe = regexp.MustCompile(`^-(?:home|Users)-[A-Za-z0-9]+`)
+	homePathRe   = regexp.MustCompile(`^(?:/(?:home|Users)/[^/]+|[A-Za-z]:/Users/[^/]+)`)
+)
+
+func portableFolder(p, homeFolder string) string {
+	if homeFolder != "" && len(p) >= len(homeFolder) && sameFolder(p[:len(homeFolder)], homeFolder) &&
+		(len(p) == len(homeFolder) || p[len(homeFolder)] == '-') {
+		return homePlaceholder + p[len(homeFolder):]
+	}
+	if m := homeFolderRe.FindString(p); m != "" {
+		return homePlaceholder + p[len(m):]
+	}
+	return p
+}
+
+func portablePath(p, homeDir string) string {
+	q := filepath.ToSlash(p)
+	if h := filepath.ToSlash(homeDir); h != "" && (q == h || strings.HasPrefix(q, h+"/")) {
+		return homePlaceholder + q[len(h):]
+	}
+	if m := homePathRe.FindString(q); m != "" {
+		return homePlaceholder + q[len(m):]
+	}
+	return p
+}
+
+// Template builds the template of this table. homeFolder and homeDir are this
+// host's home folder and directory: the home pin is published as a "home"
+// rule, and a leading home in a folder or path pattern as {home}. Client and
+// orch repos, and every rule naming one, are left out: a template is for
+// sharing between hosts, and a host's client rules are written by hand on it.
+func (f File) Template(homeFolder, homeDir string) Template {
+	t := Template{Version: templateVersion, Repos: map[string]string{}, Routes: []TemplateRule{}}
 	for n, r := range f.Repos {
-		t.Repos[n] = r.Kind
+		if !r.IsClient() {
+			t.Repos[n] = r.Kind
+		}
+	}
+	if _, ok := t.Repos[f.Personal]; ok {
+		t.Personal = f.Personal
 	}
 	for _, r := range f.Routes {
+		if _, ok := t.Repos[r.Repo]; !ok {
+			continue
+		}
 		tr := TemplateRule{Folder: r.Folder, Path: r.Path, Remote: r.Remote, Aliases: r.Aliases, Repo: r.Repo}
-		if r.isPin() && homeFolder != "" && strings.EqualFold(r.Folder, homeFolder) {
+		switch {
+		case r.isPin() && homeFolder != "" && sameFolder(r.Folder, homeFolder):
 			tr = TemplateRule{Home: true, Repo: r.Repo}
+		case r.Folder != "":
+			tr.Folder = portableFolder(r.Folder, homeFolder)
+		case r.Path != "":
+			tr.Path = portablePath(r.Path, homeDir)
 		}
 		t.Routes = append(t.Routes, tr)
 	}
@@ -68,62 +115,89 @@ func (f File) Template(homeFolder string) Template {
 
 // InheritReport says what Inherit did not take over.
 type InheritReport struct {
-	Dropped []string // template rules left out, with the reason
-	// LostClient lists this host's rules to client or orch repos that the new
-	// table does not have.
-	LostClient []string
-	// HomeOut is set when the home folder would leave a client or orch repo for
-	// a non-client one ("from -> to").
-	HomeOut string
+	Dropped []string // template rules not taken over, with the reason
+	// Leaving lists the folders (by hash) and rule patterns whose route would
+	// leave a client or orch repo, and a home folder newly pinned to a
+	// non-client repo on a host that keeps client notes. Applying needs
+	// --confirm-move-out-of-client.
+	Leaving []string
+}
+
+// unavailablePrefix names the repo of a deny placeholder: a rule that stands in
+// for one that could not be taken over. The router denies a rule naming a repo
+// the host does not have, so the folders it matched stay denied instead of
+// falling through to a broader rule behind it.
+const unavailablePrefix = "unavailable:"
+
+func (tr TemplateRule) expand(homeFolder string) (Rule, bool) {
+	r := Rule{Folder: tr.Folder, Path: tr.Path, Remote: tr.Remote, Aliases: tr.Aliases, Repo: tr.Repo}
+	if strings.HasPrefix(r.Folder, homePlaceholder) {
+		if homeFolder == "" {
+			return r, false
+		}
+		r.Folder = homeFolder + r.Folder[len(homePlaceholder):]
+	}
+	if strings.HasPrefix(r.Path, homePlaceholder) {
+		r.Path = "~" + r.Path[len(homePlaceholder):]
+	}
+	return r, true
 }
 
 // Inherit builds this host's table from a template. Repos and every host
-// setting stay the host's own; only rules whose repo exists here, with the kind
-// the template says, are kept, so a client route is never added for a repo
-// the host lacks. The template's home pin is applied to homeFolder only when
-// useHome is set; otherwise the host's own home pin stays on top. The host's
-// other existing rules are replaced.
-func (t Template) Inherit(cur File, homeFolder string, useHome bool) (File, InheritReport, error) {
+// setting stay the host's own; a rule is kept only when its repo exists here
+// with the kind the template says. A rule that cannot be kept stays as a deny
+// placeholder in its place, so a broader rule behind it never catches its
+// folders. The template's home pin applies to homeFolder only when useHome is
+// set; otherwise the host's own pin stays on top. The host's other rules are
+// replaced; folders is what the host knows (for the Leaving check).
+func (t Template) Inherit(cur File, homeFolder string, useHome bool, folders []string) (File, InheritReport, error) {
 	var rep InheritReport
 	var head []Rule
 	var rest []Rule
 	for _, tr := range t.Routes {
 		desc := tr.describe()
+		if tr.Home {
+			kind, inTpl := t.Repos[tr.Repo]
+			repo, here := cur.Repos[tr.Repo]
+			switch {
+			case !useHome:
+				rep.Dropped = append(rep.Dropped, desc+": home pin not applied (pass --home to apply it to this host's home folder)")
+			case homeFolder == "":
+				rep.Dropped = append(rep.Dropped, desc+": this host's home folder is unknown")
+			case !inTpl || !here || repo.Kind != kind:
+				rep.Dropped = append(rep.Dropped, desc+": this host has no repo "+tr.Repo+" of that kind")
+			default:
+				head = []Rule{{Folder: homeFolder, Repo: tr.Repo}}
+			}
+			continue
+		}
+		r, ok := tr.expand(homeFolder)
+		var why string
 		kind, inTpl := t.Repos[tr.Repo]
 		repo, here := cur.Repos[tr.Repo]
 		switch {
+		case !ok:
+			why = "this host's home folder is unknown"
 		case !inTpl:
-			rep.Dropped = append(rep.Dropped, desc+": the template does not say what "+tr.Repo+" is")
-			continue
+			why = "the template does not say what " + tr.Repo + " is"
 		case !here:
-			rep.Dropped = append(rep.Dropped, desc+": this host has no repo "+tr.Repo)
-			continue
+			why = "this host has no repo " + tr.Repo
 		case repo.Kind != kind:
-			rep.Dropped = append(rep.Dropped, fmt.Sprintf("%s: repo %s is kind %s here, %s in the template (kind differs)", desc, tr.Repo, repo.Kind, kind))
-			continue
-		}
-		if tr.Home {
-			if !useHome {
-				rep.Dropped = append(rep.Dropped, desc+": home pin not applied (pass --home to apply it to this host's home folder)")
-				continue
+			why = fmt.Sprintf("repo %s is kind %s here, %s in the template (kind differs)", tr.Repo, repo.Kind, kind)
+		default:
+			if err := (File{Repos: cur.Repos, Personal: cur.Personal, Routes: []Rule{r}}).validate(); err != nil {
+				why = strings.TrimPrefix(err.Error(), "route 0: ")
 			}
-			if homeFolder == "" {
-				rep.Dropped = append(rep.Dropped, desc+": this host's home folder is unknown")
-				continue
-			}
-			head = []Rule{{Folder: homeFolder, Repo: tr.Repo}}
-			continue
 		}
-		r := Rule{Folder: tr.Folder, Path: tr.Path, Remote: tr.Remote, Aliases: tr.Aliases, Repo: tr.Repo}
-		if err := (File{Repos: cur.Repos, Personal: cur.Personal, Routes: []Rule{r}}).validate(); err != nil {
-			rep.Dropped = append(rep.Dropped, desc+": "+strings.TrimPrefix(err.Error(), "route 0: "))
-			continue
+		if why != "" {
+			rep.Dropped = append(rep.Dropped, desc+": "+why+" (kept as a deny)")
+			r.Repo = unavailablePrefix + tr.Repo
 		}
 		rest = append(rest, r)
 	}
 	if head == nil && homeFolder != "" {
 		for _, r := range cur.Routes {
-			if r.isPin() && strings.EqualFold(r.Folder, homeFolder) {
+			if r.isPin() && sameFolder(r.Folder, homeFolder) {
 				head = []Rule{r}
 				break
 			}
@@ -134,22 +208,96 @@ func (t Template) Inherit(cur File, homeFolder string, useHome bool) (File, Inhe
 	if err := g.validate(); err != nil {
 		return cur, rep, err
 	}
-	have := map[string]bool{}
-	for _, r := range g.Routes {
-		have[r.sig()] = true
+	rep.Leaving = leaving(cur, g, homeFolder, folders)
+	return g, rep, nil
+}
+
+// probe is a folder to route under two tables. Synthetic probes stand for
+// "a folder this rule matches": no checkout is read; the remote or path the
+// probe carries (or one that matches no sane rule) is used instead.
+type probe struct {
+	label  string
+	folder string
+	synth  bool
+	remote string
+	path   string
+}
+
+func (f File) routeOf(p probe) string {
+	r := New(f, func(string) bool { return true })
+	r.Logf = func(string, ...any) {}
+	if p.synth {
+		r.Resolve = func(string) (string, resolution) {
+			if p.remote != "" {
+				return p.remote, resolutionOK
+			}
+			return "probe.invalid/x/y", resolutionOK
+		}
+		r.Candidates = func(string) []string {
+			if p.path != "" {
+				return []string{expandHome(p.path)}
+			}
+			return []string{"/nonexistent/probe-dir"}
+		}
+	}
+	return r.Decide(p.folder).Repo
+}
+
+// leaving compares the routes of every known folder, and of one probe per
+// client or orch rule pattern, under both tables.
+func leaving(cur, next File, home string, folders []string) []string {
+	var ps []probe
+	seen := map[string]bool{}
+	add := func(p probe) {
+		k := fmt.Sprintf("%v\x00%s\x00%s\x00%s\x00%v", p.synth, p.folder, p.remote, p.path, p.label)
+		if !seen[k] {
+			seen[k] = true
+			ps = append(ps, p)
+		}
+	}
+	for _, fo := range folders {
+		add(probe{label: "folder " + hash8(fo), folder: fo})
+	}
+	if home != "" {
+		add(probe{label: "home folder", folder: home})
 	}
 	for _, r := range cur.Routes {
-		if cur.Repos[r.Repo].IsClient() && !have[r.sig()] {
-			rep.LostClient = append(rep.LostClient, ruleLine(r))
+		if !cur.Repos[r.Repo].IsClient() {
+			continue
+		}
+		l := "rule " + ruleLine(r)
+		switch r.kind() {
+		case "folder":
+			add(probe{label: l, folder: r.Folder, synth: true})
+		case "path":
+			add(probe{label: l, folder: "probe", synth: true, path: r.Path})
+		default:
+			add(probe{label: l, folder: "probe", synth: true, remote: r.Remote})
+			for _, a := range r.Aliases {
+				add(probe{label: l, folder: "probe", synth: true, remote: a})
+			}
 		}
 	}
-	if homeFolder != "" {
-		from, to := cur.Effective(homeFolder), g.Effective(homeFolder)
-		if cur.Repos[from].IsClient() && to != "" && !g.Repos[to].IsClient() {
-			rep.HomeOut = from + " -> " + to
+	var out []string
+	for _, p := range ps {
+		o, n := cur.routeOf(p), next.routeOf(p)
+		if o == n {
+			continue
+		}
+		name := func(x string) string {
+			if x == "" {
+				return "denied"
+			}
+			return x
+		}
+		switch {
+		case cur.Repos[o].IsClient():
+			out = append(out, fmt.Sprintf("%s: %s -> %s", p.label, o, name(n)))
+		case p.label == "home folder" && o == "" && n != "" && !next.Repos[n].IsClient() && cur.HasClientRepo():
+			out = append(out, fmt.Sprintf("home folder: denied -> %s (this host keeps client notes)", n))
 		}
 	}
-	return g, rep, nil
+	return out
 }
 
 func (tr TemplateRule) describe() string {
@@ -216,7 +364,7 @@ func registryDir(f File, override string) (string, error) {
 // the routes file at routesPath and commits that one file locally (the
 // registry's own sync pushes it). It returns the file written. Nothing is
 // committed when the template did not change.
-func PublishTemplate(routesPath, registryOverride, label, homeFolder string) (string, error) {
+func PublishTemplate(routesPath, registryOverride, label, homeFolder, homeDir string) (string, error) {
 	if err := ValidLabel(label); err != nil {
 		return "", err
 	}
@@ -233,7 +381,7 @@ func PublishTemplate(routesPath, registryOverride, label, homeFolder string) (st
 	}
 	rel := filepath.ToSlash(filepath.Join("hosts", label, "routes.json"))
 	out := filepath.Join(dir, filepath.FromSlash(rel))
-	if err := writeJSONAtomic(out, f.Template(homeFolder), ".routes-*.tmp"); err != nil {
+	if err := writeJSONAtomic(out, f.Template(homeFolder, homeDir), ".routes-*.tmp"); err != nil {
 		return "", err
 	}
 	g := gitwt.New(dir)

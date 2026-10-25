@@ -2,21 +2,26 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/route"
 )
 
 // Test seams.
 var (
-	hostOS     = runtime.GOOS
-	stdinIsTTY = func() bool {
+	hostOS = runtime.GOOS
+	// beforeInheritWrite runs between the shown diff and the locked write.
+	beforeInheritWrite = func() {}
+	stdinIsTTY         = func() bool {
 		st, err := os.Stdin.Stat()
 		return err == nil && st.Mode()&os.ModeCharDevice != 0
 	}
@@ -156,9 +161,26 @@ func routeHome(args []string, in io.Reader, out, errw io.Writer) int {
 		if *suggest {
 			return 0
 		}
-		choice, err := askHome(f, s, in, out)
+		rd := bufio.NewReader(in)
+		choice, err := askHome(f, s, rd, out)
 		if err != nil {
 			return fail("%v", err)
+		}
+		// A bare Enter never applies a change that needs consent: it must be
+		// typed out.
+		if !*confirm {
+			repo := choice
+			if repo == "deny" {
+				repo = ""
+			}
+			if _, _, err := f.WithHome(hf, repo, route.HomeOpts{}); errors.Is(err, route.ErrNeedsConfirm) {
+				fmt.Fprintf(out, "\n%v\nType yes to confirm: ", err)
+				line, _ := rd.ReadString('\n')
+				if strings.TrimSpace(line) != "yes" {
+					return fail("not confirmed; nothing changed")
+				}
+				opts.ConfirmMoveOutOfClient = true
+			}
 		}
 		return apply(choice)
 	case len(pos) == 1:
@@ -188,7 +210,7 @@ func describeTarget(t string) string {
 
 // askHome lists the repos by kind and reads one choice: a number, a repo name,
 // "deny", or Enter for the suggestion.
-func askHome(f route.File, suggested string, in io.Reader, out io.Writer) (string, error) {
+func askHome(f route.File, suggested string, rd *bufio.Reader, out io.Writer) (string, error) {
 	fmt.Fprintln(out, "\nWhere should the home folder go?")
 	var names []string
 	n := 0
@@ -221,7 +243,7 @@ func askHome(f route.File, suggested string, in io.Reader, out io.Writer) (strin
 	}
 	fmt.Fprintf(out, " deny:\n  %d) deny%s\n", n, mark)
 	fmt.Fprint(out, "Choice (number or name, Enter for the suggestion): ")
-	line, err := bufio.NewReader(in).ReadString('\n')
+	line, err := rd.ReadString('\n')
 	if err != nil && line == "" {
 		return "", fmt.Errorf("no choice read")
 	}
@@ -261,7 +283,8 @@ func routePublish(args []string, out, errw io.Writer) int {
 		return fail(err)
 	}
 	hf, _ := route.HomeFolder()
-	p, err := route.PublishTemplate(path, *reg, *label, hf)
+	hd, _ := os.UserHomeDir()
+	p, err := route.PublishTemplate(path, *reg, *label, hf, hd)
 	if err != nil {
 		return fail(err)
 	}
@@ -309,7 +332,8 @@ func routeInherit(args []string, in io.Reader, out, errw io.Writer) int {
 		return fail("%v", err)
 	}
 	hf, _ := route.HomeFolder()
-	next, rep, err := tpl.Inherit(cur, hf, *home)
+	folders := knownFolders(cur)
+	next, rep, err := tpl.Inherit(cur, hf, *home, folders)
 	if err != nil {
 		return fail("%v", err)
 	}
@@ -325,12 +349,9 @@ func routeInherit(args []string, in io.Reader, out, errw io.Writer) int {
 	for _, l := range diff {
 		fmt.Fprintln(out, "  "+l)
 	}
-	if (len(rep.LostClient) > 0 || rep.HomeOut != "") && !*confirm {
-		for _, l := range rep.LostClient {
-			fmt.Fprintln(errw, "  would drop a client route:", l)
-		}
-		if rep.HomeOut != "" {
-			fmt.Fprintln(errw, "  the home folder would move out of a client repo:", rep.HomeOut)
+	if len(rep.Leaving) > 0 && !*confirm {
+		for _, l := range rep.Leaving {
+			fmt.Fprintln(errw, "  would leave a client repo:", l)
 		}
 		return fail("this takes folders out of client or orch repos: pass --confirm-move-out-of-client if that is intended")
 	}
@@ -345,16 +366,44 @@ func routeInherit(args []string, in io.Reader, out, errw io.Writer) int {
 			return 1
 		}
 	}
+	beforeInheritWrite()
 	err = route.EditRoutes(path, func(f route.File) (route.File, error) {
-		g, _, err := tpl.Inherit(f, hf, *home)
-		return g, err
+		// What was shown and confirmed must be what is written: recompute
+		// under the lock and refuse if the file moved meanwhile.
+		g, r2, err := tpl.Inherit(f, hf, *home, folders)
+		if err != nil {
+			return f, err
+		}
+		if !route.SameRoutes(g.Routes, next.Routes) || !slices.Equal(r2.Leaving, rep.Leaving) {
+			return f, fmt.Errorf("routes.json changed while this was decided; nothing written, run it again")
+		}
+		return g, nil
 	})
 	if err != nil {
 		return fail("%v", err)
 	}
-	if len(rep.LostClient) > 0 || rep.HomeOut != "" {
-		fmt.Fprintf(errw, "route: inherited %q: %d client route(s) dropped; folders they carried are no longer routed there\n", label, len(rep.LostClient))
+	if len(rep.Leaving) > 0 {
+		fmt.Fprintf(errw, "route: inherited %q: %d folder(s) or rule(s) left a client repo (confirmed)\n", label, len(rep.Leaving))
 	}
 	fmt.Fprintln(out, "applied; restart the daemon to use it")
 	return 0
+}
+
+// knownFolders lists the Claude project folders of every repo of this host.
+func knownFolders(f route.File) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, n := range f.RepoNames() {
+		cfg, err := config.Load(route.ExpandHome(f.Repos[n].Config))
+		if err != nil {
+			continue
+		}
+		for _, d := range claudeFolders(cfg.ClaudeProjectsDir) {
+			if !seen[d] {
+				seen[d] = true
+				out = append(out, d)
+			}
+		}
+	}
+	return out
 }

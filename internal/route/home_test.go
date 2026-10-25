@@ -2,6 +2,7 @@ package route
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -87,7 +88,7 @@ func TestSetHomePinPutsPinOnTopAndReplacesOld(t *testing.T) {
 		Rule{Folder: "-home-me-app", Repo: "projects"},
 		Rule{Folder: "-home-me", Repo: "projects"},
 	))
-	ch, err := SetHomePin(p, "-home-me", "personal", HomeOpts{})
+	ch, err := SetHomePin(p, "-home-me", "personal", HomeOpts{ConfirmMoveOutOfClient: true})
 	if err != nil || !ch.Changed {
 		t.Fatalf("%+v %v", ch, err)
 	}
@@ -99,7 +100,7 @@ func TestSetHomePinPutsPinOnTopAndReplacesOld(t *testing.T) {
 		t.Fatalf("%+v", f.Routes)
 	}
 	// Setting it again changes nothing.
-	if ch, err := SetHomePin(p, "-home-me", "personal", HomeOpts{}); err != nil || ch.Changed {
+	if ch, err := SetHomePin(p, "-home-me", "personal", HomeOpts{ConfirmMoveOutOfClient: true}); err != nil || ch.Changed {
 		t.Fatalf("second set: %+v %v", ch, err)
 	}
 }
@@ -109,7 +110,7 @@ func TestSetHomePinUnknownRepoRefused(t *testing.T) {
 	if _, err := SetHomePin(p, "-home-me", "nope", HomeOpts{}); err == nil {
 		t.Fatal("repo not in repos accepted")
 	}
-	if _, err := SetHomePin(p, "-home-*", "projects", HomeOpts{}); err == nil {
+	if _, err := SetHomePin(p, "-home-*", "projects", HomeOpts{ConfirmMoveOutOfClient: true}); err == nil {
 		t.Fatal("glob folder accepted")
 	}
 }
@@ -188,5 +189,66 @@ func TestHomeFolderEscapesHome(t *testing.T) {
 	got, err := HomeFolder()
 	if runtime.GOOS != "windows" && (err != nil || got != "-home-a-b") {
 		t.Fatalf("%q %v", got, err)
+	}
+}
+
+func TestSetHomePinNeedsConsentOnHostWithClientRepoEvenFromDenied(t *testing.T) {
+	p := writeRoutes(t, fileOf()) // has client-a; the home folder is denied
+	if _, err := SetHomePin(p, "-home-me", "projects", HomeOpts{}); !errors.Is(err, ErrNeedsConfirm) {
+		t.Fatalf("got %v", err)
+	}
+	if _, err := SetHomePin(p, "-home-me", "projects", HomeOpts{ConfirmMoveOutOfClient: true}); err != nil {
+		t.Fatal(err)
+	}
+	// A host without client repos needs none.
+	f := fileOf()
+	delete(f.Repos, "client-a")
+	p = writeRoutes(t, f)
+	if _, err := SetHomePin(p, "-home-me", "projects", HomeOpts{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEditKeepsUnknownKeys(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "routes.json")
+	in := `{"relatedRoot":"~/rel","relatedRemotes":["a/b"],"relatedOwners":["o"],"relatedFetchTimeoutSec":5,"relatedMaxMB":3,
+"repos":{"projects":{"config":"/x/c.json","kind":"project","remote":"git@h:o/r.git","client":"acme"},
+"client-a":{"config":"/x/d.json","kind":"client","extra":{"n":1}}},
+"routes":[{"folder":"-a","repo":"projects"}],"default":"deny"}`
+	os.WriteFile(p, []byte(in), 0600)
+	if _, err := SetHomePin(p, "-home-me", "client-a", HomeOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(p)
+	var got map[string]any
+	json.Unmarshal(b, &got)
+	for _, k := range []string{"relatedRoot", "relatedRemotes", "relatedOwners", "relatedFetchTimeoutSec", "relatedMaxMB"} {
+		if _, ok := got[k]; !ok {
+			t.Errorf("lost %s: %s", k, b)
+		}
+	}
+	repos := got["repos"].(map[string]any)
+	if repos["projects"].(map[string]any)["remote"] != "git@h:o/r.git" || repos["projects"].(map[string]any)["client"] != "acme" || repos["client-a"].(map[string]any)["extra"] == nil {
+		t.Fatalf("repo keys lost: %s", b)
+	}
+	if len(got["routes"].([]any)) != 2 {
+		t.Fatalf("%s", b)
+	}
+	// A rule with a field this version does not know is refused, untouched.
+	bad := strings.Replace(in, `{"folder":"-a","repo":"projects"}`, `{"folder":"-a","repo":"projects","note":"x"}`, 1)
+	os.WriteFile(p, []byte(bad), 0600)
+	if _, err := SetHomePin(p, "-home-me", "client-a", HomeOpts{}); err == nil {
+		t.Fatal("rule with unknown field rewritten")
+	}
+	if after, _ := os.ReadFile(p); string(after) != bad {
+		t.Fatal("file changed")
+	}
+}
+
+func TestFolderCaseFoldOnlyWhereRoutingFolds(t *testing.T) {
+	f := fileOf(Rule{Folder: "-Home-Me", Repo: "projects"})
+	_, ok := f.HomePin("-home-me")
+	if ok != foldCase {
+		t.Fatalf("pin lookup fold = %v, routing fold = %v", ok, foldCase)
 	}
 }
