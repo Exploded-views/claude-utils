@@ -15,7 +15,7 @@ import (
 
 // runAgeFilter is the git long-running filter process (`filter.memage.process`).
 // Git starts it in the work-tree root; stdout carries only the protocol.
-func runAgeFilter() int {
+func runAgeFilter(args []string) int {
 	wd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "age-filter:", err)

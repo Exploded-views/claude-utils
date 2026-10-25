@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/MarimerLLC/claude-utils/internal/version"
@@ -15,7 +16,7 @@ func main() {
 
 	switch os.Args[1] {
 	case "version", "--version", "-v":
-		fmt.Println(version.Strings("claude-memsync"))
+		os.Exit(runVersion(os.Stdout, os.Stderr, os.Args[2:]))
 	case "help", "--help", "-h":
 		usage()
 	case "init":
@@ -35,7 +36,7 @@ func main() {
 	case "archive":
 		os.Exit(runArchive(os.Args[2:]))
 	case "age-filter":
-		os.Exit(runAgeFilter())
+		os.Exit(runAgeFilter(os.Args[2:]))
 	case "age-textconv":
 		os.Exit(runAgeTextconv(os.Args[2:]))
 	case "recipients":
@@ -69,6 +70,11 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+}
+
+func runVersion(stdout, stderr io.Writer, args []string) int {
+	fmt.Fprintln(stdout, version.Strings("claude-memsync"))
+	return 0
 }
 
 func usage() {

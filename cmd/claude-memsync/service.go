@@ -230,8 +230,16 @@ func runInstall(args []string) int {
 	return 0
 }
 
+// The service actions are variables so tests can prove that -h and bad
+// arguments never reach them.
+var (
+	startFn     = startTask
+	stopFn      = stopTask
+	uninstallFn = uninstallTask
+)
+
 func runUninstall(args []string) int {
-	if err := uninstallTask(); err != nil {
+	if err := uninstallFn(); err != nil {
 		fmt.Fprintln(os.Stderr, "uninstall:", err)
 		return 1
 	}
@@ -240,7 +248,7 @@ func runUninstall(args []string) int {
 }
 
 func runStart(args []string) int {
-	if err := startTask(); err != nil {
+	if err := startFn(); err != nil {
 		fmt.Fprintln(os.Stderr, "start:", err)
 		return 1
 	}
@@ -249,7 +257,7 @@ func runStart(args []string) int {
 }
 
 func runStop(args []string) int {
-	if err := stopTask(); err != nil {
+	if err := stopFn(); err != nil {
 		fmt.Fprintln(os.Stderr, "stop:", err)
 		return 1
 	}
