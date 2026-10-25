@@ -1092,6 +1092,61 @@ claude-memsync route inherit laptop-2 --home --yes
 
 `inherit` keeps the new host's `repos` and every setting of its own and replaces its rules with the template's, keeping only rules whose repo exists in this host's `repos` with the same kind. A rule it cannot take over (its repo is missing here, or has another kind) is printed with the reason and stays as a deny in its place, so a broader rule behind it never catches its folders. A client route is never added for a repo the host lacks. The template's home pin applies to this host's home folder only with `--home`; without it the host's own pin stays. It then shows the changes and asks before writing (`--yes` skips the question; without a terminal and without `--yes` nothing is written). It also routes every folder this host has, and one probe per client or orch rule, under the old and the new rules; if any folder would leave a client or orch repo (a dropped or shadowed client rule), or the home folder would newly go to a non-client repo on a host that keeps client notes, it lists them and refuses without `--confirm-move-out-of-client`. The check is repeated under the file lock before writing. Only the `routes` list is rewritten; every other field of `routes.json` is kept as it was. `route home` likewise needs `--confirm-move-out-of-client` for a non-client target on a host with any client or orch repo, and `--ask` then wants a typed `yes`.
 
+## Migrating from another sync tool
+
+If another tool synced Claude memory folders before claude-memsync, it can keep
+writing into them after you think it is off: a timer you disabled but a plugin
+hook that still fires, or a daemon that was never stopped. claude-memsync would
+then mirror whatever it wrote, including copies filed in the wrong folder, into
+the repos the folders route to.
+
+Two guards run at `run` (service start) and at `init`, before anything is
+mirrored or pushed.
+
+### foreignWriters
+
+List the predecessor under `foreignWriters` in `routes.json` (routed mode) or
+`config.json` (single repo). Each entry is exactly one of:
+
+```json
+"foreignWriters": [
+  {"file": "~/.old-sync/config.json", "jsonKeyNonEmpty": "repo"},
+  {"systemdUnit": "old-sync.timer"},
+  {"process": "old-sync"},
+  {"claudePlugin": "old-sync@marketplace", "onlyIfFile": "~/.old-sync/config.json"}
+]
+```
+
+- `file`: active if the file exists and, when `jsonKeyNonEmpty` is set, that
+  top-level key holds a non-empty value. A file that exists but cannot be parsed
+  counts as active.
+- `systemdUnit`: active if `systemctl --user is-enabled` or `is-active` says
+  enabled or active. Skipped, with a log line, off Linux.
+- `process`: active if a running process's command line contains the text
+  (Linux, `/proc`). claude-memsync's own process is ignored, but choose text
+  that does not also match a claude-memsync command line.
+- `claudePlugin`: active if `name@marketplace` is enabled in
+  `~/.claude/settings.json` (`enabledPlugins`). `onlyIfFile` names the plugin's
+  own config: when it is set and missing, the plugin is inert. `unlessFile` is
+  the opposite: an enabled plugin is inert while that file exists.
+
+If any entry is active, `run` and `init` exit non-zero with one line naming the
+kind and the configured value (never a note name), and `status` shows
+`blocked: foreign writer <kind> <value>`. `--ignore-foreign-writers` starts
+anyway and logs a warning per active entry.
+
+### Quiet window
+
+Independent of the list, before the first sync of a run claude-memsync takes a
+snapshot (size, modification time, SHA-256) of the memory files of every folder
+it owns, waits `startQuietSec` seconds (default 15, in `config.json`; 0 turns it
+off), and takes another. If anything in an owned folder changed, it refuses
+with `owned folder changed during start-up quiet window: something else writes
+there`, naming the folder by hash. `--ignore-foreign-writers` does not skip it.
+In routed mode the longest `startQuietSec` of the repos applies. Stop the other
+writer, or find it (the hash is the first 8 hex digits of the SHA-256 of the
+folder name), and start again.
+
 ## Related projects
 
 A repo can name other repos whose notes are worth seeing while you work in it, without joining them. Relations are declared in the registry repo (a normal sync dir, for example `mem-registry`), never in the project repos, so a public project repo never names a memory repo.

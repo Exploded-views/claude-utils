@@ -24,6 +24,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/MarimerLLC/claude-utils/internal/foreign"
 )
 
 // Repo kinds. Every repo must say what it is: the client filter on the
@@ -158,6 +160,10 @@ type File struct {
 	// matches the new name. nil means DefaultRenameGraceDays; 0 denies at once.
 	RenameGraceDays *int `json:"renameGraceDays,omitempty"`
 
+	// ForeignWriters lists other tools that write into Claude memory folders;
+	// while one is active, run and init refuse to start (see package foreign).
+	ForeignWriters []foreign.Writer `json:"foreignWriters,omitempty"`
+
 	// Registry is the directory of the registry repo (a normal sync dir):
 	// related.json declares the relations between repos, and hosts publish
 	// their routing templates under hosts/<label>/routes.json. Optional.
@@ -209,6 +215,9 @@ func Load(path string) (File, error) {
 }
 
 func (f File) validate() error {
+	if err := foreign.Validate(f.ForeignWriters); err != nil {
+		return err
+	}
 	for name, r := range f.Repos {
 		if strings.Contains(name, ":") || strings.HasPrefix(name, "deny") || strings.HasPrefix(name, "unavailable") {
 			return fmt.Errorf("repo name %q is reserved: no ':' and no name starting with deny or unavailable", name)
