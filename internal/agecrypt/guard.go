@@ -111,6 +111,22 @@ func pushGuard(repo *gitwt.Repo, branch string, requireReviewed bool) error {
 	if _, err := repo.RunClean("rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+branch); err == nil {
 		rng = "refs/remotes/origin/" + branch + ".." + head
 	}
+	return guardRange(repo, rng, SchemeOf(repo) == SchemePQ)
+}
+
+// PushGuardCommit is the push guard for a commit that is built but not yet the
+// branch tip: every blob that origin/<branch>..commit adds or changes (all of
+// them, for a root commit) must be hybrid ciphertext. rekey-pq runs it before
+// it moves HEAD, so a refusal leaves the repo untouched.
+func PushGuardCommit(repo *gitwt.Repo, branch, commit string) error {
+	rng := commit
+	if _, err := repo.RunClean("rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+branch); err == nil {
+		rng = "refs/remotes/origin/" + branch + ".." + commit
+	}
+	return guardRange(repo, rng, true)
+}
+
+func guardRange(repo *gitwt.Repo, rng string, pq bool) error {
 	out, err := repo.RunClean("-c", "core.quotePath=true", "-c", "log.showRoot=true", "-c", "diff.renames=false",
 		"-c", "log.showSignature=false", "-c", "core.fsmonitor=false",
 		"log", "--root", "-m", "--raw", "--no-abbrev", "--no-renames", "--no-notes", "--no-ext-diff", "--no-textconv", "--format=", rng)
@@ -148,7 +164,6 @@ func pushGuard(repo *gitwt.Repo, branch string, requireReviewed bool) error {
 		return err
 	}
 	var bad int
-	pq := SchemeOf(repo) == SchemePQ
 	jb, err := repo.BlobContents(joinOIDs)
 	if err != nil {
 		return err

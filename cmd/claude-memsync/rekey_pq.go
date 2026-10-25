@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,14 +15,23 @@ import (
 	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
 
-const rekeyUsage = "usage: claude-memsync recipients rekey-pq (--repo <name> | --all | --config <path>) --recovery-recipient <age1pq1...> --host <label> [--fresh-root] [--apply]\n       claude-memsync recipients rekey-pq (--repo <name> | --all) --drop-backup"
+const rekeyUsage = "usage: claude-memsync recipients rekey-pq (--repo <name> | --all | --config <path>) --recovery-recipient <age1pq1...> --host <label> [--fresh-root] [--apply]\n       claude-memsync recipients rekey-pq (--repo <name> | --all) --rollback\n       claude-memsync recipients rekey-pq (--repo <name> | --all) --drop-backup"
+
+// rekeyTarget is one repo of a rekey-pq run and the name it is reported under.
+type rekeyTarget struct {
+	label string
+	cfg   config.Config
+}
 
 // rekeyPQCmd is `recipients rekey-pq`: it migrates an existing classic repo
 // whose only member is this host to the post-quantum scheme. It is a dry run
-// unless --apply is given.
+// unless --apply is given. With --all an --apply run stops at the first repo
+// that fails and says which repos are done, which failed and which were not
+// started; the same command, rerun, resumes. --rollback undoes a migration
+// that was not pushed.
 func rekeyPQCmd(stdout, stderr io.Writer, sel repoSel, args []string, hostLabel string) int {
 	args, recovery := extractFlag(args, "--recovery-recipient")
-	var all, fresh, apply, drop bool
+	var all, fresh, apply, drop, rollback bool
 	for _, a := range args {
 		switch a {
 		case "--all":
@@ -32,22 +42,28 @@ func rekeyPQCmd(stdout, stderr io.Writer, sel repoSel, args []string, hostLabel 
 			apply = true
 		case "--drop-backup":
 			drop = true
+		case "--rollback":
+			rollback = true
 		default:
 			fmt.Fprintf(stderr, "recipients rekey-pq: unexpected argument %q\n%s\n", a, rekeyUsage)
 			return 2
 		}
 	}
 	recovery = strings.TrimSpace(recovery)
-	if drop {
+	if drop || rollback {
+		if drop && rollback {
+			fmt.Fprintln(stderr, "recipients rekey-pq: --drop-backup and --rollback are separate runs")
+			return 2
+		}
 		if apply || fresh || recovery != "" || hostLabel != "" {
-			fmt.Fprintln(stderr, "recipients rekey-pq: --drop-backup goes alone (with --repo or --all)")
+			fmt.Fprintln(stderr, "recipients rekey-pq: --drop-backup and --rollback go alone (with --repo or --all)")
 			return 2
 		}
 	} else if recovery == "" || hostLabel == "" {
 		fmt.Fprintln(stderr, rekeyUsage)
 		return 2
 	}
-	var cfgs []config.Config
+	var targets []rekeyTarget
 	var all2 []config.Config // every repo of the host, for the identity-retirement check
 	if all {
 		if sel.Repo != "" || sel.Config != "" {
@@ -65,17 +81,20 @@ func rekeyPQCmd(stdout, stderr io.Writer, sel repoSel, args []string, hostLabel 
 			return 1
 		}
 		for _, n := range set.names() {
-			cfgs = append(cfgs, set.Cfgs[n])
+			targets = append(targets, rekeyTarget{n, set.Cfgs[n]})
+			all2 = append(all2, set.Cfgs[n])
 		}
-		all2 = cfgs
 	} else {
-		cfg, _, err := resolveRepo(sel, true)
+		cfg, name, err := resolveRepo(sel, true)
 		if err != nil {
 			fmt.Fprintln(stderr, "recipients:", err)
 			return 1
 		}
-		cfgs = append(cfgs, cfg)
-		all2 = cfgs
+		if name == "" {
+			name = cfg.SyncDir
+		}
+		targets = append(targets, rekeyTarget{name, cfg})
+		all2 = []config.Config{cfg}
 		if path, ok, rerr := resolveRoutesPath(sel.Routes); rerr == nil && ok {
 			if set, lerr := loadRouted(path); lerr == nil {
 				all2 = nil
@@ -86,20 +105,54 @@ func rekeyPQCmd(stdout, stderr io.Writer, sel repoSel, args []string, hostLabel 
 		}
 	}
 	code := 0
-	for _, cfg := range cfgs {
+	var done, failed, notStarted []string
+	for i, t := range targets {
 		var c int
-		if drop {
-			c = dropBackupOne(stdout, stderr, cfg)
-		} else {
-			c = rekeyOne(stdout, stderr, cfg, all2, agecrypt.RekeyOpts{
-				Label: hostLabel, Recovery: recovery, ConfiguredRecovery: cfg.RecoveryRecipients, FreshRoot: fresh,
+		switch {
+		case drop:
+			c = dropBackupOne(stdout, stderr, t.cfg)
+		case rollback:
+			c = rollbackOne(stdout, stderr, t.cfg, all)
+		default:
+			c = rekeyOne(stdout, stderr, t.cfg, all2, agecrypt.RekeyOpts{
+				Label: hostLabel, Recovery: recovery, ConfiguredRecovery: t.cfg.RecoveryRecipients, FreshRoot: fresh,
 			}, apply)
 		}
 		if c > code {
 			code = c
 		}
+		if c == 0 {
+			done = append(done, t.label)
+			continue
+		}
+		failed = append(failed, t.label)
+		// A failed apply stops the run: a later repo should not be migrated
+		// on top of a host in an unknown state. Dry runs and drops go on.
+		if apply && !rollback && !drop {
+			for _, r := range targets[i+1:] {
+				notStarted = append(notStarted, r.label)
+			}
+			break
+		}
+	}
+	if all && len(targets) > 1 && (len(failed) > 0 || len(notStarted) > 0) {
+		verb := "run"
+		if apply {
+			verb = "apply run stopped at the first failure"
+		}
+		fmt.Fprintf(stderr, "recipients rekey-pq --all: %s\n  done: %s\n  failed: %s\n  not started: %s\n", verb, joinOrNone(done), joinOrNone(failed), joinOrNone(notStarted))
+		if apply && len(failed) > 0 && !rollback && !drop {
+			fmt.Fprintln(stderr, "  fix the cause and rerun the same command to resume (finished repos are skipped), or undo an unpublished repo with `recipients rekey-pq --repo <name> --rollback`")
+		}
 	}
 	return code
+}
+
+func joinOrNone(l []string) string {
+	if len(l) == 0 {
+		return "(none)"
+	}
+	return strings.Join(l, ", ")
 }
 
 func dropBackupOne(stdout, stderr io.Writer, cfg config.Config) int {
@@ -118,6 +171,59 @@ func newIdentityPath(old string) string {
 	return strings.TrimSuffix(old, ext) + "-pq" + ext
 }
 
+// cfgFileOf is the config.json this repo's settings were loaded from.
+func cfgFileOf(cfg config.Config) string {
+	if cfg.ConfigPath != "" {
+		return cfg.ConfigPath
+	}
+	return cfg.Path()
+}
+
+// rollbackOne undoes an unpublished migration of one repo. With quietNone a
+// repo that has nothing to roll back is only mentioned (for --all).
+func rollbackOne(stdout, stderr io.Writer, cfg config.Config, quietNone bool) int {
+	repo := gitwt.New(cfg.SyncDir)
+	if !repo.IsRepo() {
+		fmt.Fprintf(stderr, "recipients: %s: not a git repo\n", cfg.SyncDir)
+		return 1
+	}
+	if _, err := agecrypt.ReadRekeyState(repo); errors.Is(err, os.ErrNotExist) && quietNone {
+		fmt.Fprintf(stdout, "%s: nothing to roll back\n", cfg.SyncDir)
+		return 0
+	}
+	cfgFile := cfgFileOf(cfg)
+	head, _ := repo.Run("rev-parse", "HEAD")
+	var st agecrypt.PreRekeyState
+	err := withSyncLock(cfg.SyncDir, func() error {
+		var rerr error
+		st, rerr = agecrypt.RollbackRekey(repo, func(pc agecrypt.PriorConfig) error {
+			raw, err := config.Load(cfgFile)
+			if err != nil {
+				return err
+			}
+			raw.EncryptionScheme, raw.HostLabel, raw.RecoveryRecipients = pc.EncryptionScheme, pc.HostLabel, pc.RecoveryRecipients
+			return config.SaveAt(cfgFile, raw)
+		})
+		if rerr != nil {
+			return rerr
+		}
+		return syncpkg.MoveSyncedHead(repo, strings.TrimSpace(head), st.Tip)
+	})
+	if err != nil {
+		return recipientsFail(stderr, fmt.Errorf("%s: %w", cfg.SyncDir, err))
+	}
+	fmt.Fprintf(stdout, "%s: rolled back to the classic repo at %s (identity, scheme, pin and config.json restored)\n", cfg.SyncDir, shortRev(st.Tip))
+	fmt.Fprintf(stdout, "  the hybrid identity %s is kept; a later rekey-pq reuses it\n", st.NewIdentity)
+	return 0
+}
+
+func shortRev(r string) string {
+	if len(r) > 10 {
+		return r[:10]
+	}
+	return r
+}
+
 func rekeyOne(stdout, stderr io.Writer, cfg config.Config, hostCfgs []config.Config, o agecrypt.RekeyOpts, apply bool) int {
 	repo := gitwt.New(cfg.SyncDir)
 	if cfg.ReadOnly {
@@ -132,110 +238,141 @@ func rekeyOne(stdout, stderr io.Writer, cfg config.Config, hostCfgs []config.Con
 		o.NewIdentityPath = newIdentityPath(agecrypt.IdentityPath(repo))
 	}
 	if !apply {
-		p, err := agecrypt.PlanRekeyPQ(repo, o, false)
-		if err != nil {
-			fmt.Fprintf(stderr, "recipients: %s: %v\n", cfg.SyncDir, err)
-			return 1
-		}
-		fmt.Fprintf(stdout, "%s: rekey-pq plan (dry run; nothing changed)\n", cfg.SyncDir)
-		fmt.Fprintf(stdout, "  recipients now: %d; after: 2 (this host as host:%s, and the recovery key)\n", p.Recipients, o.Label)
-		fmt.Fprintf(stdout, "  files to re-encrypt: %d; join requests dropped: %d\n", p.Blobs, p.JoinRequests)
-		if o.FreshRoot {
-			fmt.Fprintf(stdout, "  history (%d commits) will be REPLACED by one root commit and force-pushed (--force-with-lease on the current tip)\n", p.Commits)
-		} else {
-			fmt.Fprintf(stdout, "  one commit on top of the current history; classic ciphertext stays in history (use --fresh-root to replace it)\n")
-		}
-		fmt.Fprintf(stdout, "  a new hybrid identity is created at %s; the pre-migration tip is kept at %s\n", o.NewIdentityPath, agecrypt.BackupRef)
-		fmt.Fprintln(stdout, "  add --apply to do it (the daemon must be stopped)")
-		return 0
+		return rekeyPlanOne(stdout, stderr, cfg, repo, o)
 	}
-	var plan agecrypt.RekeyPlan
-	var pushed bool
-	err := withSyncLock(cfg.SyncDir, func() error {
-		p, err := agecrypt.ApplyRekeyPQ(repo, o)
-		if err != nil {
-			return err
+	// Everything that can refuse the push runs before the first local change.
+	if cfg.PrivateOnly {
+		if err := validateRemoteOffline(cfg); err != nil {
+			return recipientsFail(stderr, fmt.Errorf("%s: %w", cfg.SyncDir, err))
 		}
-		plan = p
-		if err := syncpkg.MoveSyncedHead(repo, p.Tip, p.NewCommit); err != nil {
-			return err
+		if err := checkPushURL(cfg, cfg.SyncDir); err != nil {
+			return recipientsFail(stderr, fmt.Errorf("%s: %w", cfg.SyncDir, err))
 		}
-		// The config follows the repo from here on.
-		cfgFile := cfg.ConfigPath
-		if cfgFile == "" {
-			cfgFile = cfg.Path()
+	}
+	if !repo.IsRepo() || !agecrypt.Enabled(repo) {
+		fmt.Fprintf(stderr, "recipients: %s: the sync repo is not encrypted\n", cfg.SyncDir)
+		return 1
+	}
+	cfgFile := cfgFileOf(cfg)
+	raw, err := config.Load(cfgFile)
+	if err != nil {
+		return recipientsFail(stderr, err)
+	}
+	o.Prior = agecrypt.PriorConfig{EncryptionScheme: raw.EncryptionScheme, HostLabel: raw.HostLabel, RecoveryRecipients: raw.RecoveryRecipients}
+
+	var (
+		plan   agecrypt.RekeyPlan
+		stage  agecrypt.RekeyStage
+		pushed bool
+		pushEr error
+		verr   error
+		vc, vb int
+	)
+	err = withSyncLock(cfg.SyncDir, func() error {
+		var st agecrypt.PreRekeyState
+		var derr error
+		if stage, st, derr = agecrypt.DetectRekey(repo, o); derr != nil {
+			return derr
 		}
-		raw, lerr := config.Load(cfgFile)
-		if lerr != nil {
-			return lerr
+		switch stage {
+		case agecrypt.StageDone:
+			return nil
+		case agecrypt.StageFresh:
+			p, aerr := agecrypt.ApplyRekeyPQ(repo, o)
+			if aerr != nil {
+				return aerr
+			}
+			plan = p
+		case agecrypt.StageFinishLocal:
+			p, ferr := agecrypt.FinishRekeyLocal(repo, st)
+			if ferr != nil {
+				return ferr
+			}
+			plan = p
+		default:
+			plan = agecrypt.PlanFromState(repo, st)
 		}
+		if stage != agecrypt.StagePublished {
+			if err := syncpkg.MoveSyncedHead(repo, plan.Tip, plan.NewCommit); err != nil {
+				return err
+			}
+			if pushEr = rekeyPush(repo, plan, o.FreshRoot); pushEr != nil {
+				return pushEr
+			}
+		}
+		pushed = true
+		// The remote now holds the migrated repo: the config follows it,
+		// whether or not the verification below passes.
 		raw.EncryptionScheme = agecrypt.SchemePQ
 		raw.HostLabel = o.Label
 		raw.RecoveryRecipients = []string{o.Recovery}
 		if err := config.SaveAt(cfgFile, raw); err != nil {
-			return err
+			return fmt.Errorf("pushed, but config.json could not be saved: %w (set encryptionScheme to pq, hostLabel and recoveryRecipients by hand)", err)
 		}
-		if err := rekeyPush(cfg, repo, p, o.FreshRoot); err != nil {
-			return err
+		want := 0
+		if o.FreshRoot {
+			want = 1
 		}
-		pushed = true
+		vc, vb, verr = agecrypt.VerifyHybridRemote(repo, defaultBranch, want)
 		return nil
 	})
 	if err != nil {
-		if plan.NewCommit != "" && !pushed {
-			fmt.Fprintf(stderr, "recipients: %s: migrated locally but the push failed (%v); the pre-migration tip is at %s\n", cfg.SyncDir, err, agecrypt.BackupRef)
+		if pushEr != nil && plan.NewCommit != "" {
+			fmt.Fprintf(stderr, "recipients: %s: migrated locally but the push failed (%v); nothing was published.\n  rerun the same command to retry, or undo with `recipients rekey-pq --repo <name> --rollback`; the pre-migration tip is at %s\n", cfg.SyncDir, pushEr, agecrypt.BackupRef)
 			return 1
 		}
-		return recipientsFail(stderr, err)
+		return recipientsFail(stderr, fmt.Errorf("%s: %w", cfg.SyncDir, err))
+	}
+	if stage == agecrypt.StageDone {
+		fmt.Fprintf(stdout, "%s: already post-quantum; nothing to do\n", cfg.SyncDir)
+		return 0
+	}
+	if pushed && verr != nil {
+		fmt.Fprintf(stderr, "recipients: %s: pushed; verification failed: %v\n  the classic identity is kept. Inspect origin/main before relying on it.\n", cfg.SyncDir, verr)
+		return 1
 	}
 	fmt.Fprintf(stdout, "%s: migrated to post-quantum; public recipient %s\n", cfg.SyncDir, plan.NewRecipient)
 	if o.FreshRoot {
-		c, b, _ := agecrypt.VerifyHybridRemote(repo, defaultBranch, 1)
-		fmt.Fprintf(stdout, "  verified origin/main: %d commit, %d files, all hybrid ciphertext\n", c, b)
+		fmt.Fprintf(stdout, "  verified origin/main: %d commit, %d files, all hybrid ciphertext\n", vc, vb)
 	} else {
-		fmt.Fprintf(stdout, "  re-encrypted %d files and pushed\n", plan.Blobs)
+		fmt.Fprintf(stdout, "  re-encrypted and pushed; origin/main verified: %d files, all hybrid ciphertext\n", vb)
 	}
 	fmt.Fprintf(stdout, "  rollback point kept at %s; delete it later with `recipients rekey-pq --drop-backup`\n", agecrypt.BackupRef)
 	retireClassicIdentity(stdout, plan.IdentityPath, cfg, hostCfgs)
 	return 0
 }
 
-// rekeyPush publishes the migrated repo: a plain push, or with a fresh root a
-// force-with-lease on the old tip, then a check of what the remote now holds.
-func rekeyPush(cfg config.Config, repo *gitwt.Repo, p agecrypt.RekeyPlan, fresh bool) error {
-	if cfg.PrivateOnly {
-		if err := validateRemoteOffline(cfg); err != nil {
-			return err
-		}
-		if err := checkPushURL(cfg, cfg.SyncDir); err != nil {
-			return err
-		}
+func rekeyPlanOne(stdout, stderr io.Writer, cfg config.Config, repo *gitwt.Repo, o agecrypt.RekeyOpts) int {
+	p, err := agecrypt.PlanRekeyPQ(repo, o, false)
+	if err != nil {
+		fmt.Fprintf(stderr, "recipients: %s: %v\n", cfg.SyncDir, err)
+		return 1
 	}
+	fmt.Fprintf(stdout, "%s: rekey-pq plan (dry run; nothing changed)\n", cfg.SyncDir)
+	fmt.Fprintf(stdout, "  recipients now: %d; after: 2 (this host as host:%s, and the recovery key)\n", p.Recipients, o.Label)
+	fmt.Fprintf(stdout, "  files to re-encrypt: %d; join requests dropped: %d\n", p.Blobs, p.JoinRequests)
+	if o.FreshRoot {
+		fmt.Fprintf(stdout, "  history (%d commits) will be REPLACED by one root commit and force-pushed (--force-with-lease on the current tip)\n", p.Commits)
+	} else {
+		fmt.Fprintf(stdout, "  one commit on top of the current history; classic ciphertext stays in history (use --fresh-root to replace it)\n")
+	}
+	fmt.Fprintf(stdout, "  a new hybrid identity is created at %s; the pre-migration tip is kept at %s\n", o.NewIdentityPath, agecrypt.BackupRef)
+	fmt.Fprintln(stdout, "  add --apply to do it (the daemon must be stopped)")
+	return 0
+}
+
+// rekeyPush publishes the migrated repo: a plain push, or with a fresh root a
+// force-with-lease on the old tip. The private-only and push-URL checks have
+// already run, before anything changed locally.
+func rekeyPush(repo *gitwt.Repo, p agecrypt.RekeyPlan, fresh bool) error {
 	if err := agecrypt.PushGuard(repo, defaultBranch); err != nil {
 		return err
 	}
 	if !fresh {
-		if err := repo.Push(defaultBranch); err != nil {
-			return err
-		}
-		// Classic history stays by design; the pushed tip must be hybrid only.
-		return verifyTip(repo)
+		return repo.Push(defaultBranch)
 	}
-	if _, err := repo.Run("push", "--force-with-lease=main:"+p.Tip, "origin", p.NewCommit+":refs/heads/main"); err != nil {
-		return err
-	}
-	if _, _, err := agecrypt.VerifyHybridRemote(repo, defaultBranch, 1); err != nil {
-		return fmt.Errorf("pushed, but the remote does not verify: %w", err)
-	}
-	return nil
-}
-
-// verifyTip checks the pushed tip holds hybrid ciphertext only.
-func verifyTip(repo *gitwt.Repo) error {
-	if _, _, err := agecrypt.VerifyHybridRemote(repo, defaultBranch, 0); err != nil {
-		return fmt.Errorf("pushed, but the remote does not verify: %w", err)
-	}
-	return nil
+	_, err := repo.Run("push", "--force-with-lease=main:"+p.Tip, "origin", p.NewCommit+":refs/heads/main")
+	return err
 }
 
 // clonesUsingIdentity lists the git clones under the parent directory of each

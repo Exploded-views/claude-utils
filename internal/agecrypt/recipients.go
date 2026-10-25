@@ -404,12 +404,13 @@ func addDrops(repo *gitwt.Repo, info *strings.Builder, headOID map[string]string
 // index-info applied, in a private index, with a compare-and-swap ref update;
 // then brings the real index (and dropped work-tree files) along.
 func commitInfo(repo *gitwt.Repo, oldRev, msg, infoText string, headOID map[string]string, drop []string) error {
-	return commitInfoMode(repo, oldRev, msg, infoText, headOID, drop, false)
+	return commitInfoMode(repo, oldRev, msg, infoText, headOID, drop, false, nil)
 }
 
 // commitInfoMode is commitInfo; with orphan the commit has no parent (HEAD is
-// still moved from oldRev by compare-and-swap).
-func commitInfoMode(repo *gitwt.Repo, oldRev, msg, infoText string, headOID map[string]string, drop []string, orphan bool) error {
+// still moved from oldRev by compare-and-swap). A non-nil check sees the built
+// commit before HEAD moves; its error stops the move.
+func commitInfoMode(repo *gitwt.Repo, oldRev, msg, infoText string, headOID map[string]string, drop []string, orphan bool, check func(commit string) error) error {
 	gitDir, err := gitCommonDir(repo)
 	if err != nil {
 		return err
@@ -436,6 +437,11 @@ func commitInfoMode(repo *gitwt.Repo, oldRev, msg, infoText string, headOID map[
 		return err
 	}
 	commit = strings.TrimSpace(commit)
+	if check != nil {
+		if err := check(commit); err != nil {
+			return err
+		}
+	}
 	if _, err := repo.Run("update-ref", "-m", msg, "HEAD", commit, oldRev); err != nil {
 		return fmt.Errorf("re-encrypt: HEAD moved underneath (is the daemon running?): %w", err)
 	}
