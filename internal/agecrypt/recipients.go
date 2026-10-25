@@ -24,6 +24,9 @@ func canonLine(line string) string {
 	return ""
 }
 
+// CanonLine is the key part of a recipients line, as the pin records it.
+func CanonLine(line string) string { return canonLine(line) }
+
 // stripTrailingComment drops a " # ..." comment from an age key line.
 func stripTrailingComment(line string) string {
 	if i := strings.Index(line, " #"); i >= 0 {
@@ -75,13 +78,76 @@ func AddRecipientLabelled(repo *gitwt.Repo, key, label string) error {
 	if !labelRE.MatchString("# host:" + label) {
 		return fmt.Errorf("invalid host label %q (use 1-32 characters of a-z, 0-9 and '-')", label)
 	}
+	if cur, err := ListRecipients(repo.Dir); err == nil {
+		for _, l := range cur {
+			if LabelOf(l) == label && canonLine(l) != canonLine(key) {
+				return fmt.Errorf("host label %q is already bound to another recipient", label)
+			}
+		}
+	}
 	return AddRecipient(repo, strings.TrimSpace(key)+" # host:"+label)
 }
 
-// RemoveRecipientLabel removes every recipient line labelled label,
-// re-encrypts HEAD to the rest and commits (as RemoveRecipient does). History
-// stays readable to the removed key.
+// ErrLabelAmbiguous means a host label is bound to more than one key.
+var ErrLabelAmbiguous = errors.New("that host label is bound to more than one key in the pinned recipients")
+
+const hostComment = " # host:"
+
+func labelSuffix(label string) string {
+	if label == "" {
+		return ""
+	}
+	return hostComment + label
+}
+
+// splitCanon splits a reviewed canonical entry into its key and its label.
+func splitCanon(c string) (key, label string) {
+	if i := strings.Index(c, hostComment); i >= 0 {
+		return c[:i], c[i+len(hostComment):]
+	}
+	return c, ""
+}
+
+// KeyPrint is the short fingerprint of a recipient key (a canonical key as
+// PinnedKeysForLabel returns it), safe to print.
+func KeyPrint(key string) string { return keyPrint(key) }
+
+// PinnedKeysForLabel resolves a host label through the pin, the set this host
+// has reviewed, and never through the work-tree's comments, which anyone with
+// write access to the remote can change. It returns the keys the pin binds to
+// the label (none if it binds none) and ErrLabelAmbiguous if more than one.
+func PinnedKeysForLabel(repo *gitwt.Repo, label string) ([]string, error) {
+	pin, err := readPin(repo)
+	if err != nil {
+		return nil, fmt.Errorf("no pinned recipients: %w", err)
+	}
+	var keys []string
+	for _, c := range pin.canon {
+		if k, l := splitCanon(c); l == label && label != "" {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) > 1 {
+		return keys, ErrLabelAmbiguous
+	}
+	return keys, nil
+}
+
+// RemoveRecipientLabel removes the recipient the pin binds to label,
+// re-encrypts HEAD to the rest and commits (as RemoveRecipient does). It
+// refuses while the work-tree's recipients are unreviewed, and when the label
+// is bound to more than one key. History stays readable to the removed key.
 func RemoveRecipientLabel(repo *gitwt.Repo, label string) error {
+	if u, _ := Unreviewed(repo); u {
+		return ErrRecipientsUnreviewed
+	}
+	keys, err := PinnedKeysForLabel(repo, label)
+	if err != nil {
+		return err
+	}
+	if len(keys) == 0 {
+		return errors.New("no recipient with that label")
+	}
 	cur, err := ListRecipients(repo.Dir)
 	if err != nil {
 		return err
@@ -89,7 +155,7 @@ func RemoveRecipientLabel(repo *gitwt.Repo, label string) error {
 	var keep []string
 	removed := 0
 	for _, l := range cur {
-		if LabelOf(l) == label && label != "" {
+		if canonLine(l) == keys[0] {
 			removed++
 			continue
 		}

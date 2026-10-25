@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -396,10 +397,11 @@ func TestHostRetire_RegistryEntryAndCheckKeyManualStep(t *testing.T) {
 	hc := retireCtx(t, f, cfg)
 	hc.registryDir = reg
 	wantURL := "https://git.example.test/organizations/Org/settings/apps/check-app"
+	const caveat = "as recorded in the registry (verify the fingerprint in GitHub's UI before deleting)"
 	// dry run: the manual step is announced, nothing removed
 	code, out, _ := hostDo(t, hc, "retire", "vm-b")
-	if code != 0 || !strings.Contains(out, wantURL) || !strings.Contains(out, fp) {
-		t.Errorf("plan should name the URL and fingerprint:\n%s", out)
+	if code != 0 || !strings.Contains(out, wantURL) || !strings.Contains(out, fp) || !strings.Contains(out, caveat) {
+		t.Errorf("plan should name the URL and fingerprint, with the caveat:\n%s", out)
 	}
 	if _, err := os.Stat(filepath.Join(reg, "hosts", "vm-b", "check-key")); err != nil {
 		t.Error("dry-run removed the record")
@@ -408,7 +410,7 @@ func TestHostRetire_RegistryEntryAndCheckKeyManualStep(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("%d %s%s", code, out, errb)
 	}
-	if !strings.Contains(out, wantURL) || !strings.Contains(out, fp) || !strings.Contains(out, "manual") {
+	if !strings.Contains(out, wantURL) || !strings.Contains(out, fp) || !strings.Contains(out, "manual") || !strings.Contains(out, caveat) {
 		t.Errorf("manual step missing:\n%s", out)
 	}
 	if _, err := os.Stat(filepath.Join(reg, "hosts", "vm-b")); err == nil {
@@ -435,34 +437,193 @@ func TestHostRetire_NoCheckKeyPrintsNoManualStep(t *testing.T) {
 	}
 }
 
-func TestHostRetire_UnknownLabel(t *testing.T) {
+func TestHostRetire_UnknownLabelIsANoOp(t *testing.T) {
 	f, cfg := hostFixture(t)
 	f.repos = []string{"mem-personal"}
 	f.keys["mem-personal"] = []fakeKey{{1, "vm-b", false, hdays(9), hdays(1)}}
 	hc := retireCtx(t, f, cfg)
-	code, _, errb := hostDo(t, hc, "retire", "vm-typo", "--apply")
-	if code != 1 || !strings.Contains(errb, "no host") || len(f.deletes()) != 0 {
-		t.Errorf("%d %s", code, errb)
+	code, out, errb := hostDo(t, hc, "retire", "vm-typo", "--apply")
+	if code != 0 || !strings.Contains(out, "nothing to retire") || len(f.deletes()) != 0 {
+		t.Errorf("%d %s%s", code, out, errb)
 	}
 }
 
-func TestHostRetire_NeverTouchesLocalReposOutsideMemNames(t *testing.T) {
+func recipientText(t *testing.T, e *encRepo) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(e.cfg.SyncDir, ".age-recipients"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func TestHostRetire_SwappedLabelsAreUnreviewedAndRemoveNothing(t *testing.T) {
 	f, cfg := hostFixture(t)
 	e := newEncRepo(t, "vm-b")
 	f.repos = []string{"mem-personal"}
 	f.keys["mem-personal"] = []fakeKey{{1, "vm-b", false, hdays(9), hdays(1)}}
+	// Upstream swaps the comments: vm-b now names this host's own key.
+	lines, _ := agecrypt.ListRecipients(e.cfg.SyncDir)
+	own := strings.Fields(lines[0])[0]
+	if err := agecrypt.WriteRecipients(e.cfg.SyncDir, []string{own + " # host:vm-b", e.otherRC + " # host:vm-own"}); err != nil {
+		t.Fatal(err)
+	}
+	hc := retireCtx(t, f, cfg, localRepo{Name: "mem-personal", Dir: e.cfg.SyncDir, Cfg: e.cfg})
 	headBefore := e.head(t)
-	// this host's repo is named like something else entirely
-	hc := retireCtx(t, f, cfg, localRepo{Name: "claude-memories", Dir: e.cfg.SyncDir, Cfg: e.cfg})
 	code, out, errb := hostDo(t, hc, "retire", "vm-b", "--apply")
 	if code != 0 {
 		t.Fatalf("%d %s%s", code, out, errb)
 	}
-	if e.head(t) != headBefore {
-		t.Error("a local repo whose name is not an allowed mem-* name must not be changed")
+	if e.head(t) != headBefore || !strings.Contains(recipientText(t, e), e.otherRC) || !strings.Contains(recipientText(t, e), own) {
+		t.Error("with unreviewed recipients nothing may be removed from them")
+	}
+	i := strings.Index(out, "cannot re-encrypt here")
+	if i < 0 || !strings.Contains(out[i:], "mem-personal") || !strings.Contains(out, "not reviewed") {
+		t.Errorf("the unreviewed repo belongs in the can't-re-encrypt list:\n%s", out)
+	}
+}
+
+func TestHostRetire_RefusesALabelOnTwoKeys(t *testing.T) {
+	f, cfg := hostFixture(t)
+	e := newEncRepo(t, "vm-b")
+	f.repos = []string{"mem-personal"}
+	f.keys["mem-personal"] = []fakeKey{{1, "vm-b", false, hdays(9), hdays(1)}}
+	_, rcX := newTestIdentity(t, "x")
+	lines, _ := agecrypt.ListRecipients(e.cfg.SyncDir)
+	if err := agecrypt.WriteRecipients(e.cfg.SyncDir, append(lines, rcX+" # host:vm-b")); err != nil {
+		t.Fatal(err)
+	}
+	if err := agecrypt.AcceptRecipients(e.repo); err != nil { // a person accepted the duplicate
+		t.Fatal(err)
+	}
+	hc := retireCtx(t, f, cfg, localRepo{Name: "mem-personal", Dir: e.cfg.SyncDir, Cfg: e.cfg})
+	for _, args := range [][]string{{"retire", "vm-b"}, {"retire", "vm-b", "--apply"}} {
+		code, _, errb := hostDo(t, hc, args...)
+		if code != 1 || !strings.Contains(errb, "more than one key") {
+			t.Errorf("%v: want a refusal: %d %s", args, code, errb)
+		}
+	}
+	if len(f.deletes()) != 0 {
+		t.Errorf("a refused retire deletes nothing: %v", f.deletes())
+	}
+}
+
+func TestHostRetire_RefusesALabelOnDifferentKeysAcrossRepos(t *testing.T) {
+	f, cfg := hostFixture(t)
+	e1 := newEncRepo(t, "vm-b")
+	e2 := newEncRepo(t, "vm-b") // a different identity behind the same label
+	f.repos = []string{"mem-personal", "mem-project-x"}
+	f.keys["mem-personal"] = []fakeKey{{1, "vm-b", false, hdays(9), hdays(1)}}
+	hc := retireCtx(t, f, cfg,
+		localRepo{Name: "mem-personal", Dir: e1.cfg.SyncDir, Cfg: e1.cfg},
+		localRepo{Name: "mem-project-x", Dir: e2.cfg.SyncDir, Cfg: e2.cfg})
+	h1, h2 := e1.head(t), e2.head(t)
+	code, _, errb := hostDo(t, hc, "retire", "vm-b", "--apply")
+	if code != 1 || !strings.Contains(errb, "different keys") {
+		t.Fatalf("want a refusal: %d %s", code, errb)
+	}
+	if len(f.deletes()) != 0 || e1.head(t) != h1 || e2.head(t) != h2 {
+		t.Error("a refused retire changes nothing")
+	}
+}
+
+func TestHostRetire_PlanShowsTheKeyFingerprintPerRepo(t *testing.T) {
+	f, cfg := hostFixture(t)
+	e := newEncRepo(t, "vm-b")
+	f.repos = []string{"mem-personal"}
+	f.keys["mem-personal"] = []fakeKey{{1, "vm-b", false, hdays(9), hdays(1)}}
+	hc := retireCtx(t, f, cfg, localRepo{Name: "mem-personal", Dir: e.cfg.SyncDir, Cfg: e.cfg})
+	_, out, _ := hostDo(t, hc, "retire", "vm-b")
+	keys, _ := agecrypt.PinnedKeysForLabel(e.repo, "vm-b")
+	if !strings.Contains(out, agecrypt.KeyPrint(keys[0])) {
+		t.Errorf("the plan should show the short fingerprint of the key it would remove:\n%s", out)
+	}
+	if strings.Contains(out, e.otherRC) {
+		t.Error("never the key itself")
+	}
+}
+
+func TestHostRetire_HoldsEveryInvolvedLockForTheWholeApply(t *testing.T) {
+	f, cfg := hostFixture(t)
+	e := newEncRepo(t, "vm-b")
+	f.repos = []string{"mem-personal"}
+	f.keys["mem-personal"] = []fakeKey{{1, "vm-b", false, hdays(9), hdays(1)}}
+	var heldDuringDelete bool
+	f.onDelete = func(string) {
+		l, err := lock.Acquire(e.cfg.SyncDir)
+		if err == nil {
+			l.Release()
+			return
+		}
+		heldDuringDelete = errors.Is(err, lock.ErrHeld)
+	}
+	hc := retireCtx(t, f, cfg, localRepo{Name: "mem-personal", Dir: e.cfg.SyncDir, Cfg: e.cfg})
+	// ... and also while the recipients are being rewritten
+	var heldDuringRewrite bool
+	old := removeLabelRecipient
+	removeLabelRecipient = func(r *gitwt.Repo, label string) error {
+		if l, err := lock.Acquire(r.Dir); err == nil {
+			l.Release()
+		} else {
+			heldDuringRewrite = errors.Is(err, lock.ErrHeld)
+		}
+		return old(r, label)
+	}
+	t.Cleanup(func() { removeLabelRecipient = old })
+	if code, out, errb := hostDo(t, hc, "retire", "vm-b", "--apply"); code != 0 {
+		t.Fatalf("%d %s%s", code, out, errb)
+	}
+	if !heldDuringDelete || !heldDuringRewrite {
+		t.Errorf("the daemon lock must be held across the whole apply: delete=%v rewrite=%v", heldDuringDelete, heldDuringRewrite)
+	}
+	l, err := lock.Acquire(e.cfg.SyncDir)
+	if err != nil {
+		t.Fatalf("the lock must be released afterwards: %v", err)
+	}
+	l.Release()
+}
+
+func TestHostRetire_PartialFailureIsSummarisedAndARerunFinishesIt(t *testing.T) {
+	f, cfg := hostFixture(t)
+	e := newEncRepo(t, "vm-b")
+	f.repos = []string{"mem-personal"}
+	f.keys["mem-personal"] = []fakeKey{{1, "vm-b", false, hdays(9), hdays(1)}}
+	reg := newRegistryWithHost(t, "vm-b")
+	hc := retireCtx(t, f, cfg, localRepo{Name: "mem-personal", Dir: e.cfg.SyncDir, Cfg: e.cfg})
+	hc.registryDir = reg
+	old := removeLabelRecipient
+	removeLabelRecipient = func(*gitwt.Repo, string) error { return errors.New("simulated failure") }
+	t.Cleanup(func() { removeLabelRecipient = old })
+	code, out, errb := hostDo(t, hc, "retire", "vm-b", "--apply")
+	if code != 1 || !strings.Contains(out, "STILL A RECIPIENT in mem-personal: re-run") {
+		t.Fatalf("the summary must list what is pending: %d\n%s%s", code, out, errb)
+	}
+	if len(f.keys["mem-personal"]) != 0 {
+		t.Error("the key deletion step had already happened")
+	}
+	removeLabelRecipient = old
+	code, out, errb = hostDo(t, hc, "retire", "vm-b", "--apply")
+	if code != 0 || strings.Contains(out, "STILL") || !strings.Contains(out, "retire complete") {
+		t.Fatalf("the re-run should finish the job: %d\n%s%s", code, out, errb)
 	}
 	labels, _ := agecrypt.ListLabels(e.cfg.SyncDir)
-	if strings.Join(labels, ",") != "vm-b,vm-own" {
-		t.Errorf("recipients changed: %v", labels)
+	if strings.Join(labels, ",") != "vm-own" {
+		t.Errorf("labels: %v", labels)
+	}
+	if _, err := os.Stat(filepath.Join(reg, "hosts", "vm-b")); err == nil {
+		t.Error("the registry entry should be gone")
+	}
+	// and a third run changes nothing at all
+	headAfter, deletesAfter := e.head(t), len(f.deletes())
+	regHead, _ := execGit(reg, "rev-parse", "HEAD")
+	code, out, _ = hostDo(t, hc, "retire", "vm-b", "--apply")
+	if code != 0 || !strings.Contains(out, "nothing to retire") {
+		t.Errorf("a repeat is a no-op: %d %s", code, out)
+	}
+	if e.head(t) != headAfter || len(f.deletes()) != deletesAfter {
+		t.Error("a repeat must change nothing")
+	}
+	if h, _ := execGit(reg, "rev-parse", "HEAD"); h != regHead {
+		t.Error("a repeat must not commit to the registry")
 	}
 }

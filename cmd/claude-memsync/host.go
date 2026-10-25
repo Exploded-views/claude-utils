@@ -401,7 +401,7 @@ func hostList(hc *hostCtx, stdout, stderr io.Writer, args []string) int {
 		fmt.Fprintln(stdout, "no hosts found: no deploy keys on the mem-* repos")
 	}
 	for _, a := range rep.CheckKeys {
-		fmt.Fprintf(stdout, "check keys: %s %d live\n", a.App, a.Live)
+		fmt.Fprintf(stdout, "check keys: %s %d live (as recorded in the registry; not verified with GitHub)\n", a.App, a.Live)
 	}
 	for _, w := range rep.Warnings() {
 		fmt.Fprintln(stderr, "warning:", w)

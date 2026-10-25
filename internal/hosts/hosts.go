@@ -175,7 +175,7 @@ func (r Report) Warnings() []string {
 	var out []string
 	for _, a := range r.CheckKeys {
 		if a.Warn {
-			out = append(out, fmt.Sprintf("check app %q: %d live keys (warning from %d); GitHub allows at most %d keys per app and they can only be deleted in the GitHub UI: retire hosts you no longer use",
+			out = append(out, fmt.Sprintf("check app %q: %d live keys as recorded in the registry (warning from %d); GitHub allows at most %d keys per app and they can only be deleted in the GitHub UI: retire hosts you no longer use",
 				a.App, a.Live, r.checkWarn, MaxAppKeys))
 		}
 	}

@@ -1330,8 +1330,12 @@ config.json). The label ties together what a host leaves behind:
 - its **deploy keys** are titled with the label (`gh repo deploy-key add <key-file> -t <label>`);
 - its **age recipient** in each repo's `.age-recipients` carries a trailing comment
   `# host:<label>`. `init --encrypt --host-label` writes it for the first host of a repo,
-  and `recipients add <public-key> --host <label>` for the next ones. Lines without the
-  comment stay valid and are treated as unlabelled;
+  and `recipients add <public-key> --host <label>` for the next ones (a label already
+  bound to another key is refused). Lines without the comment stay valid and are treated
+  as unlabelled. **The label is part of what the pin reviews**: it is recorded with the
+  key in the set this host pinned, so a label changed or swapped upstream shows up as an
+  unreviewed recipients change (`recipients list`, `recipients accept`), and `host retire`
+  resolves a label through the pin, never through the comment text;
 - the **registry** may hold `hosts/<label>/` (routing template, expiry, check-key record).
 
 ### host list
@@ -1361,15 +1365,19 @@ no key material is ever printed. With `--apply`:
    repo of the org (nothing else is touched). This needs a token with
    **Administration: write**; without it the command stops at the first refusal with
    a message naming the permission, before anything else is changed.
-2. **Recipients.** For each repo this host has, if a recipient labelled `<label>` is
-   present it is removed, HEAD is re-encrypted for the remaining recipients and the
-   commit is made (the daemon pushes it). This is `recipients remove` by label, so
-   it refuses to run while the daemon holds the sync dir; the command checks that
-   first, before deleting anything. **History stays readable to the retired key and
-   is not rewritten**: it keeps everything it already fetched; only new content is
-   closed to it.
+2. **Recipients.** For each repo this host has, the label is resolved through the
+   pin to one key; that recipient is removed, HEAD is re-encrypted for the remaining
+   recipients and the commit is made (the daemon pushes it). The plan prints the short
+   fingerprint of the key per repo. The command **refuses**, before changing anything,
+   when the label is bound to more than one key in a repo or to different keys in
+   different repos. It needs the daemon off: the sync-dir locks of every repo it
+   writes to are taken first and **held until the command ends**, and if one is held
+   the command stops with nothing changed. **History stays readable to the retired
+   key and is not rewritten**: it keeps everything it already fetched; only new
+   content is closed to it.
 3. **Cannot re-encrypt here.** A repo the host had a key for but this host lacks,
-   a repo this host cannot decrypt, and a repo where the retired host was the only
+   a repo this host cannot decrypt, a repo whose recipients changed upstream and are
+   not reviewed here, and a repo where the retired host was the only
    recipient are listed as `cannot re-encrypt here: run retire on a member host, or
    archive the repo`. Nothing is changed there.
 4. **Registry.** `hosts/<label>/` is removed from the registry work-tree and the
@@ -1377,10 +1385,16 @@ no key material is ever printed. With `--apply`:
    recorded a check-App key, the plan and the result print the exact page to delete
    it (`https://<git host>/organizations/<org>/settings/apps/<app-slug>`, from your
    config and the registry) and its fingerprint, as a manual step: GitHub only lets
-   you delete App keys in the UI. With no check key recorded, nothing is printed.
+   you delete App keys in the UI. The fingerprint is printed *as recorded in the
+   registry*; verify it in GitHub's UI before deleting, since anyone who can write to
+   the registry can change it (the live-key count in `host list` has the same caveat).
+   With no check key recorded, nothing is printed.
 
-Retiring this host's own label is refused; run it from another host. A repeat run
-is safe: keys already gone are counted, and recipients already removed are skipped.
+Retiring this host's own label is refused; run it from another host. The command ends
+with a summary: `retire complete`, or a `still pending` list (for example `STILL A
+RECIPIENT in mem-x: re-run`). A re-run is idempotent: keys already gone are counted,
+recipients already removed are skipped, and once nothing is left it reports `nothing
+to retire` and changes nothing.
 
 ### Read-only membership
 

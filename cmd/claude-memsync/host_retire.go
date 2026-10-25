@@ -29,11 +29,17 @@ type retirePlan struct {
 	Label, Org string
 	Keys       []planKey
 	Reencrypt  []localRepo
+	Prints     map[string]string // repo -> short fingerprint of the key to remove
 	Cannot     []cannotItem
 	Notes      []string
 	InRegistry bool
 	CheckKey   *hosts.CheckKey
+	// Refuse is set when the label cannot be resolved to one key; nothing is done.
+	Refuse error
 }
+
+// removeLabelRecipient is the recipients step; a variable so a test can make it fail.
+var removeLabelRecipient = agecrypt.RemoveRecipientLabel
 
 func (p retirePlan) empty() bool {
 	return len(p.Keys) == 0 && len(p.Reencrypt) == 0 && len(p.Cannot) == 0 && !p.InRegistry
@@ -42,7 +48,8 @@ func (p retirePlan) empty() bool {
 // planRetire reads the org and this host's repos and decides, without changing
 // anything, what retiring label involves. Only mem-* repos are ever considered.
 func (hc *hostCtx) planRetire(c *ghguard.Client, org, label string) (retirePlan, error) {
-	plan := retirePlan{Label: label, Org: org}
+	plan := retirePlan{Label: label, Org: org, Prints: map[string]string{}}
+	boundTo := map[string][]string{} // pinned key -> repos
 	repos, err := c.ListMemRepos(org)
 	if err != nil {
 		return plan, err
@@ -94,19 +101,40 @@ func (hc *hostCtx) planRetire(c *ghguard.Client, org, label string) (retirePlan,
 			plan.Cannot = append(plan.Cannot, cannotItem{n, "its recipients cannot be read here"})
 			continue
 		}
-		has, others := false, 0
+		// The label is resolved through the pin (what a person here reviewed),
+		// never through the comments in the work-tree, which upstream can change.
+		keys, kerr := agecrypt.PinnedKeysForLabel(repo, label)
+		inTree := false
 		for _, ln := range lines {
 			if agecrypt.LabelOf(ln) == label {
-				has = true
-			} else {
-				others++
+				inTree = true
 			}
 		}
-		switch {
-		case !has:
+		if u, _ := agecrypt.Unreviewed(repo); u {
+			if inTree || len(keys) > 0 {
+				plan.Cannot = append(plan.Cannot, cannotItem{n, "its recipients changed upstream and are not reviewed here (`recipients list`, then `recipients accept`)"})
+			}
+			continue
+		}
+		if errors.Is(kerr, agecrypt.ErrLabelAmbiguous) {
+			plan.Refuse = fmt.Errorf("%s: label %q is bound to more than one key in the pinned recipients; fix it with `recipients remove <public-key>` on a writable host", n, label)
+			return plan, nil
+		}
+		if len(keys) == 0 {
 			if len(keysOn[n]) > 0 {
 				plan.Notes = append(plan.Notes, fmt.Sprintf("%s: no recipient is labelled %s; if its line has no label, remove it with `recipients remove <public-key>`", n, label))
 			}
+			continue
+		}
+		key := keys[0]
+		others := 0
+		for _, ln := range lines {
+			if agecrypt.CanonLine(ln) != key {
+				others++
+			}
+		}
+		boundTo[key] = append(boundTo[key], n)
+		switch {
 		case others == 0:
 			plan.Cannot = append(plan.Cannot, cannotItem{n, "the retired host is the only recipient there, so no one could read it afterwards"})
 		case l.Cfg.ReadOnly:
@@ -115,7 +143,17 @@ func (hc *hostCtx) planRetire(c *ghguard.Client, org, label string) (retirePlan,
 			plan.Cannot = append(plan.Cannot, cannotItem{n, "this host cannot read the repo, so it cannot re-encrypt it"})
 		default:
 			plan.Reencrypt = append(plan.Reencrypt, l)
+			plan.Prints[n] = agecrypt.KeyPrint(key)
 		}
+	}
+	if len(boundTo) > 1 {
+		var parts []string
+		for k, repos := range boundTo {
+			parts = append(parts, fmt.Sprintf("%s -> key %s", strings.Join(repos, ", "), agecrypt.KeyPrint(k)))
+		}
+		sort.Strings(parts)
+		plan.Refuse = fmt.Errorf("label %q is bound to different keys in different repos (%s); that is not one host, so nothing is retired", label, strings.Join(parts, "; "))
+		return plan, nil
 	}
 	if hc.registryDir != "" {
 		reg, err := hosts.ReadRegistry(hc.registryDir)
@@ -163,7 +201,7 @@ func (hc *hostCtx) printPlan(w io.Writer, plan retirePlan, apply bool) {
 	fmt.Fprintln(w)
 	var rn []string
 	for _, l := range plan.Reencrypt {
-		rn = append(rn, l.Name)
+		rn = append(rn, l.Name+" key "+plan.Prints[l.Name])
 	}
 	fmt.Fprintf(w, "recipients to remove and re-encrypt here: %d", len(rn))
 	if len(rn) > 0 {
@@ -183,7 +221,7 @@ func (hc *hostCtx) printPlan(w io.Writer, plan retirePlan, apply bool) {
 		fmt.Fprintf(w, "registry: hosts/%s/ will be removed (committed locally)\n", plan.Label)
 	}
 	if plan.CheckKey != nil {
-		fmt.Fprintf(w, "manual step: delete this host's check App key %s in the GitHub UI: %s (keys can only be deleted there)\n", plan.CheckKey.Fingerprint, hc.appURL(plan))
+		fmt.Fprintf(w, "manual step: delete this host's check App key in the GitHub UI: %s\n  fingerprint %s, as recorded in the registry (verify the fingerprint in GitHub's UI before deleting); App keys can only be deleted there\n", hc.appURL(plan), plan.CheckKey.Fingerprint)
 	}
 	fmt.Fprintln(w, "history stays readable to the retired key: nothing already pushed is rewritten, only new content is closed to it")
 }
@@ -232,9 +270,13 @@ func hostRetire(hc *hostCtx, stdout, stderr io.Writer, args []string) int {
 		fmt.Fprintln(stderr, "host retire:", err)
 		return 1
 	}
-	if plan.empty() {
-		fmt.Fprintf(stderr, "host retire: no host labelled %q found (no deploy key, labelled recipient or registry entry)\n", label)
+	if plan.Refuse != nil {
+		fmt.Fprintln(stderr, "host retire: refused:", plan.Refuse)
 		return 1
+	}
+	if plan.empty() {
+		fmt.Fprintf(stdout, "nothing to retire for %q: no deploy key, labelled recipient or registry entry found (already retired, or check the spelling)\n", label)
+		return 0
 	}
 	if !*apply {
 		hc.printPlan(stdout, plan, false)
@@ -243,32 +285,90 @@ func hostRetire(hc *hostCtx, stdout, stderr io.Writer, args []string) int {
 	return hc.applyRetire(c, plan, stdout, stderr)
 }
 
-// applyRetire acts on the plan in an order that fails early: the daemon locks
-// are checked first, the deploy keys go next (the step that needs the most
-// permission), then the recipients, then the registry.
+// applyRetire acts on the plan. The daemon locks of every sync dir it will
+// write to are taken first and held until it returns, so the daemon cannot
+// start a cycle between the steps; if one is held, nothing has changed. The
+// deploy keys go next (the step that needs the most permission), then the
+// recipients, then the registry. What could not be done is summarised at the
+// end, and a re-run picks up exactly that.
 func (hc *hostCtx) applyRetire(c *ghguard.Client, plan retirePlan, stdout, stderr io.Writer) int {
-	// Recipients changes refuse to run while the daemon holds the sync dir;
-	// find that out before anything is deleted.
+	dirs := map[string]string{}
 	for _, l := range plan.Reencrypt {
-		lk, err := lock.Acquire(l.Dir)
+		dirs[l.Dir] = l.Name
+	}
+	if plan.InRegistry {
+		for _, l := range hc.local {
+			if sameDir(l.Dir, hc.registryDir) {
+				dirs[l.Dir] = "registry"
+			}
+		}
+	}
+	var held []*lock.Lock
+	defer func() {
+		for _, lk := range held {
+			lk.Release()
+		}
+	}()
+	for dir, name := range dirs {
+		lk, err := lock.Acquire(dir)
 		if err != nil {
-			fmt.Fprintf(stderr, "host retire: %s: %v\n", l.Name, err)
+			fmt.Fprintf(stderr, "host retire: %s: %v\n", name, err)
 			if errors.Is(err, lock.ErrHeld) {
 				fmt.Fprintln(stderr, "the daemon is running on this sync dir; run `claude-memsync stop`, then this command, then `claude-memsync start`. Nothing was changed.")
 			}
 			return 1
 		}
-		lk.Release()
+		held = append(held, lk)
 	}
 	hc.printPlan(stdout, plan, true)
+
+	remainingKeys := len(plan.Keys)
+	pendingRepos := map[string]bool{}
+	for _, l := range plan.Reencrypt {
+		pendingRepos[l.Name] = true
+	}
+	registryPending := plan.InRegistry
+	failed := false
+	summary := func() int {
+		var pend []string
+		if remainingKeys > 0 {
+			pend = append(pend, fmt.Sprintf("%d deploy key(s) not deleted: re-run", remainingKeys))
+		}
+		for _, l := range plan.Reencrypt {
+			if pendingRepos[l.Name] {
+				pend = append(pend, fmt.Sprintf("STILL A RECIPIENT in %s: re-run", l.Name))
+			}
+		}
+		if registryPending {
+			pend = append(pend, fmt.Sprintf("registry entry hosts/%s/ not removed: re-run", plan.Label))
+		}
+		for _, cn := range plan.Cannot {
+			pend = append(pend, fmt.Sprintf("NOT re-encrypted in %s: %s", cn.Repo, cn.Reason))
+		}
+		if len(pend) == 0 {
+			fmt.Fprintf(stdout, "retire complete for %s\n", plan.Label)
+		} else {
+			fmt.Fprintln(stdout, "still pending:")
+			for _, p := range pend {
+				fmt.Fprintln(stdout, "  "+p)
+			}
+		}
+		if failed {
+			return 1
+		}
+		return 0
+	}
+
 	deleted, gone := 0, 0
 	for _, k := range plan.Keys {
 		err := c.DeleteDeployKey(plan.Org, k.Repo, k.ID)
 		switch {
 		case err == nil:
 			deleted++
+			remainingKeys--
 		case errors.Is(err, ghguard.ErrNotFound):
 			gone++
+			remainingKeys--
 		case errors.Is(err, ghguard.ErrForbidden):
 			fmt.Fprintf(stderr, "host retire: GitHub refused to delete a deploy key of %s: the token needs Administration: write on the mem-* repos.\n", k.Repo)
 			if deleted == 0 {
@@ -276,10 +376,12 @@ func (hc *hostCtx) applyRetire(c *ghguard.Client, plan retirePlan, stdout, stder
 			} else {
 				fmt.Fprintf(stderr, "%d key(s) were deleted before this; fix the token and run the command again (it is safe to repeat).\n", deleted)
 			}
-			return 1
+			failed = true
+			return summaryOnAbort(deleted, summary)
 		default:
 			fmt.Fprintf(stderr, "host retire: deleting a deploy key of %s: %v\n", k.Repo, err)
-			return 1
+			failed = true
+			return summaryOnAbort(deleted, summary)
 		}
 	}
 	fmt.Fprintf(stdout, "deleted %d deploy key(s)", deleted)
@@ -287,24 +389,27 @@ func (hc *hostCtx) applyRetire(c *ghguard.Client, plan retirePlan, stdout, stder
 		fmt.Fprintf(stdout, " (%d already gone)", gone)
 	}
 	fmt.Fprintln(stdout)
-	code := 0
 	for _, l := range plan.Reencrypt {
 		repo := gitwt.New(l.Dir)
-		err := withSyncLock(l.Dir, func() error { return agecrypt.RemoveRecipientLabel(repo, plan.Label) })
-		if err != nil {
+		if err := removeLabelRecipient(repo, plan.Label); err != nil {
 			fmt.Fprintf(stderr, "host retire: %s: %v\n", l.Name, err)
-			code = 1
+			failed = true
 			continue
 		}
+		pendingRepos[l.Name] = false
 		fmt.Fprintf(stdout, "%s: recipient removed and HEAD re-encrypted (committed; the daemon pushes it)\n", l.Name)
 	}
 	if plan.InRegistry {
 		if _, err := hosts.RemoveHost(hc.registryDir, plan.Label); err != nil {
 			fmt.Fprintf(stderr, "host retire: registry: %v\n", err)
-			code = 1
+			failed = true
 		} else {
+			registryPending = false
 			fmt.Fprintf(stdout, "registry: hosts/%s/ removed (committed locally; the registry's sync pushes it)\n", plan.Label)
 		}
 	}
-	return code
+	return summary()
 }
+
+// summaryOnAbort prints the summary when the key step stopped early.
+func summaryOnAbort(_ int, summary func() int) int { summary(); return 1 }

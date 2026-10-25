@@ -39,6 +39,7 @@ type fakeGH struct {
 	repos        []string
 	keys         map[string][]fakeKey
 	forbidDelete bool
+	onDelete     func(repo string) // called while a DELETE is being served
 	calls        []string
 	srv          *httptest.Server
 }
@@ -96,6 +97,9 @@ func (f *fakeGH) serve(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(403)
 			_, _ = w.Write([]byte(`{"message":"Resource not accessible by personal access token"}`))
 			return
+		}
+		if f.onDelete != nil {
+			f.onDelete(p[2])
 		}
 		var id int64
 		fmt.Sscan(p[4], &id)
@@ -315,8 +319,8 @@ func TestHostList_RegistryExpiryAndCheckKeys(t *testing.T) {
 	if !strings.Contains(line, "expired") || !strings.Contains(line, fp) {
 		t.Errorf("vm-a line should show expired and the check-key fingerprint: %q", line)
 	}
-	if !strings.Contains(out, "check keys: chk 1 live") {
-		t.Errorf("live check key count missing:\n%s", out)
+	if !strings.Contains(out, "check keys: chk 1 live") || !strings.Contains(out, "as recorded in the registry") {
+		t.Errorf("live check key count (with its caveat) missing:\n%s", out)
 	}
 	// warn threshold
 	code, out, errb = hostDo(t, hc, "list", "--check-key-warn", "1")
