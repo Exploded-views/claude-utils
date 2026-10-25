@@ -107,6 +107,14 @@ type Config struct {
 	// StartQuietSec is the start-up quiet window in seconds (nil: 15, 0 turns
 	// it off): the owned folders must not change during it, or the run refuses.
 	StartQuietSec *int `json:"startQuietSec,omitempty"`
+
+	// ConfigPath is the file Load read this config from ("" for a config that
+	// was not loaded). Not part of config.json.
+	ConfigPath string `json:"-"`
+
+	// TokenCmdFromFlag marks GitHubTokenCmd as typed on this command line
+	// (--token-cmd) rather than read from config.json. Not saved.
+	TokenCmdFromFlag bool `json:"-"`
 }
 
 // ForDaemon returns c with the token command dropped when recheckTokenCmd is
@@ -198,6 +206,7 @@ func Load(path string) (Config, error) {
 	if c.StartQuietSec != nil && *c.StartQuietSec < 0 {
 		return Config{}, fmt.Errorf("%s: startQuietSec must not be negative", path)
 	}
+	c.ConfigPath = path
 	return c, nil
 }
 

@@ -29,6 +29,12 @@ func guardClient(cfg config.Config) (*ghguard.Client, error) {
 		// The token comes from a command, run now to see that it works and
 		// again for every request; it is never kept on the client.
 		argv := cfg.GitHubTokenCmd
+		if !cfg.TokenCmdFromFlag {
+			if err := tokenCmdConfigTrusted(cfg); err != nil {
+				warnTokenCmdIgnored(err)
+				return nil, nil // ignored: no token
+			}
+		}
 		if _, err := ghguard.RunTokenCmd(argv, ghguard.TokenCmdTimeout); err != nil {
 			return nil, nil // failure means no token
 		}
@@ -125,6 +131,7 @@ func checkPushURL(cfg config.Config, repoDir string) error {
 func applyTokenCmdFlag(cfg *config.Config, flagVal string) {
 	if argv := strings.Fields(flagVal); len(argv) > 0 {
 		cfg.GitHubTokenCmd = argv
+		cfg.TokenCmdFromFlag = true
 		cfg.GitHubTokenFile = ""
 	}
 }
