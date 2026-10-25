@@ -28,7 +28,22 @@ func guardClient(cfg config.Config) (*ghguard.Client, error) {
 	if err := checkAPIHost(cfg); err != nil {
 		return nil, err
 	}
-	src := ghguard.SelectSource(nil, cfg.GitHubTokenFile, cfg.GitHubTokenCmd, cfg.GitHubTokenEnv)
+	var app ghguard.TokenSource
+	baseURL := cfg.GitHubAPIURL
+	if cfg.GitHubApp != "" {
+		m, a, err := appMinter(cfg.GitHubApp, "")
+		if err != nil {
+			return nil, err
+		}
+		// The app's JWT and tokens go only where apps.json says. A different
+		// githubApiUrl (config.json is not the place to decide that) is refused
+		// rather than followed.
+		if cfg.GitHubAPIURL != "" && strings.TrimRight(cfg.GitHubAPIURL, "/") != a.API() {
+			return nil, errors.New("githubApiUrl differs from the app's apiBase in apps.json; refusing to send the app's token there")
+		}
+		app, baseURL = m, a.API()
+	}
+	src := ghguard.SelectSource(app, cfg.GitHubTokenFile, cfg.GitHubTokenCmd, cfg.GitHubTokenEnv)
 	if _, isCmd := src.(ghguard.CmdSource); isCmd {
 		// The token comes from a command, run now to see that it works and
 		// again for every request; it is never kept on the client.
@@ -43,6 +58,10 @@ func guardClient(cfg config.Config) (*ghguard.Client, error) {
 	}
 	if tok == "" {
 		return nil, nil
+	}
+	if app != nil {
+		// refreshed per request; the first token above proved the app works
+		return &ghguard.Client{BaseURL: baseURL, Source: src, Host: cfg.GitHubHost, Resolve: hostResolver}, nil
 	}
 	return &ghguard.Client{BaseURL: cfg.GitHubAPIURL, Token: tok, Host: cfg.GitHubHost, Resolve: hostResolver}, nil
 }
@@ -133,7 +152,7 @@ func applyTokenCmdFlag(cfg *config.Config, flagVal string) {
 	}
 }
 
-var errNoToken = errors.New("no GitHub token configured (set " + ghguard.DefaultTokenEnv + ", githubTokenFile or githubTokenCmd); a deploy key cannot call the API, so the private-only check needs one")
+var errNoToken = errors.New("no GitHub token configured (set " + ghguard.DefaultTokenEnv + ", githubTokenFile, githubTokenCmd or githubApp); a deploy key cannot call the API, so the private-only check needs one")
 
 // guardRemote is the check run by init before anything is cloned or pushed.
 // It fails closed, including when no token is available.
@@ -255,6 +274,7 @@ func doctorCmd(stdout, stderr io.Writer, args []string) int {
 	org := flags.String("org", "", "GitHub org to check (default: config githubOrg, else owner of the remote)")
 	cfgPath := flags.String("config", "", "path to config.json")
 	tokenFile := flags.String("token-file", "", "file holding a GitHub token for this run (as for init; or set MEMSYNC_GITHUB_TOKEN); not saved")
+	ghApp := flags.String("github-app", "", "apps.json entry to mint the GitHub token from, for this run; not saved")
 	tokenCmd := flags.String("token-cmd", "", "command (shell-style quotes, no shell) printing a GitHub token, e.g. \"gh auth token\"; run at call time, never saved")
 	routes := flags.String("routes", "", "path to routes.json: check every repo it routes (default: as for run, unless --config is given)")
 	timer := flags.Bool("install-timer", false, "write a daily user timer (systemd) or launchd agent for doctor; does not enable it")
@@ -271,6 +291,10 @@ func doctorCmd(stdout, stderr io.Writer, args []string) int {
 		cfg.MarkFlag("githubTokenFile")
 	}
 	applyTokenCmdFlag(&cfg, *tokenCmd)
+	if *ghApp != "" {
+		cfg.GitHubApp = *ghApp
+		cfg.MarkFlag("githubApp")
+	}
 	if *timer {
 		o, err := orgFor(cfg, *org)
 		if err != nil {
@@ -289,7 +313,11 @@ func doctorCmd(stdout, stderr io.Writer, args []string) int {
 		if abs, err := filepath.Abs(cp); err == nil {
 			cp = abs
 		}
-		return installTimerRun(runtime.GOOS, exe, o, cp, cfg.GitHubTokenFile, *unitDir, stdout, stderr)
+		tf := cfg.GitHubTokenFile
+		if tf == "" && (cfg.GitHubApp != "" || len(cfg.GitHubTokenCmd) > 0) {
+			tf = "(configured)" // presence check only; a timer has no environment but can run a command
+		}
+		return installTimerRun(runtime.GOOS, exe, o, cp, tf, *unitDir, stdout, stderr)
 	}
 	if *cfgPath == "" {
 		if path, ok, err := resolveRoutesPath(*routes); err != nil {
@@ -301,13 +329,17 @@ func doctorCmd(stdout, stderr io.Writer, args []string) int {
 				fmt.Fprintln(stderr, "doctor:", err)
 				return 1
 			}
-			if *tokenFile != "" || *tokenCmd != "" {
+			if *tokenFile != "" || *tokenCmd != "" || *ghApp != "" {
 				for n, c := range set.Cfgs {
 					if *tokenFile != "" {
 						c.GitHubTokenFile = *tokenFile
 						c.MarkFlag("githubTokenFile")
 					}
 					applyTokenCmdFlag(&c, *tokenCmd)
+					if *ghApp != "" {
+						c.GitHubApp = *ghApp
+						c.MarkFlag("githubApp")
+					}
 					set.Cfgs[n] = c
 				}
 			}
@@ -321,7 +353,7 @@ func doctorCmd(stdout, stderr io.Writer, args []string) int {
 // anything; it prints the command for the user to run.
 func installTimerRun(goos, exe, org, cfgPath, tokenFile, dir string, out, errw io.Writer) int {
 	if tokenFile == "" {
-		fmt.Fprintln(errw, "doctor: the timer runs without your environment, so it needs githubTokenFile set in config.json (a file holding the token); refusing to install")
+		fmt.Fprintln(errw, "doctor: the timer runs without your environment, so it needs githubTokenFile, githubTokenCmd or githubApp set in config.json; refusing to install")
 		return 1
 	}
 	home, _ := os.UserHomeDir()

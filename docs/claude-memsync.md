@@ -976,7 +976,73 @@ must pair with the API: github.com with api.github.com, or another host with
 refuses ssh remotes while `core.sshCommand`, `GIT_SSH_COMMAND` or `GIT_SSH` is
 set, and the daemon re-checks the push URL and these overrides before every push.
 
-Config keys: `githubHost`, `recheckMaxFailures`, `recheckMaxAgeHours`, `privateOnly`, `githubTokenEnv`, `githubTokenFile`, `githubApiUrl`, `githubOrg`.
+Config keys: `githubApp`, `githubHost`, `recheckMaxFailures`, `recheckMaxAgeHours`, `privateOnly`, `githubTokenEnv`, `githubTokenFile`, `githubApiUrl`, `githubOrg`.
+
+## GitHub App authentication
+
+Instead of a long-lived personal access token, the checks (`init`, `doctor`,
+`repo create`, the daemon's re-check) can use a GitHub App. The tool signs a
+short-lived JWT with the app's private key and exchanges it for an installation
+token that expires in an hour. Nothing else changes: the token is only used for
+the same API calls as before, and App auth is optional. Without it, the
+`MEMSYNC_GITHUB_TOKEN`, `githubTokenFile` and `githubTokenCmd` sources behave
+exactly as described under "Where the check runs".
+
+### apps.json
+
+`~/.config/claude-memsync/apps.json` (or `$XDG_CONFIG_HOME/claude-memsync/`) must
+be mode 0600 because it can name a command that gets run. It is a JSON array,
+one entry per app on this host:
+
+```json
+[
+  {"name": "<app-name>", "appId": "<numeric app id>", "org": "<org>",
+   "keyFile": "/path/to/<app-name>.pem"}
+]
+```
+
+Give each entry exactly one of `keyFile` (a PEM file that must be mode 0600:
+a looser file is refused unread) or `keyCmd` (a command that prints the PEM on
+stdout). `keyCmd` is a JSON array, `["<secret-manager-cli>", "read", "<reference
+with spaces>"]`, so spaces survive; a plain string is also accepted and split
+with shell-style quotes. Either way it is run directly with no shell, a 10
+second timeout and its stderr discarded. PKCS#1 and PKCS#8 RSA keys both work.
+The key is never stored in `apps.json`.
+
+`apiBase` (default `https://api.github.com`; an `https` URL, set it for GitHub
+Enterprise) is the only place the app's JWT is ever sent. It lives here, not in
+`config.json`, on purpose: a JWT proves control of the app, and `config.json`
+sits in a synced work-tree. The `githubApiUrl` in `config.json` is never used
+for minting, and if it names a different API than the app's `apiBase` the tool
+refuses to use the app at all.
+
+The tool overwrites the key buffers it controls with zeros once the key is
+parsed, as a best effort. It cannot clear copies made by the Go runtime, the
+parsed key, swap or the secret manager, so treat the host, not the process
+memory, as the boundary.
+
+### Using an app
+
+```sh
+claude-memsync app-token --app <app-name> [--org <org>] [--repo <name>]... [--perm metadata:read]...
+```
+
+prints one installation token on stdout, so another tool can use the command as
+its own token command. `--org` overrides the entry's org, and `--repo` and
+`--perm` narrow the token below what the installation grants. `--apps-file`
+overrides the path.
+
+To use an app for the private-only checks, set `"githubApp": "<app-name>"` in
+`config.json` (or `init --github-app <app-name>`, `doctor --github-app
+<app-name>`). Precedence among token sources is `githubApp`, then
+`githubTokenFile`, then `githubTokenCmd`, then the env var; the first one
+configured is used, and if it fails the command fails rather than trying the
+next. The daemon keeps one token in memory, never longer than an hour whatever
+expiry the server reports, and mints a new one when fewer than five minutes
+remain. Tokens, JWTs and keys never appear in logs or errors, and the daily
+doctor timer accepts `githubApp` as its token source. Like the other
+credential keys, `githubApp` is ignored when `config.json` is not trusted (see
+"Which config.json keys are trusted").
 
 ## Several repos per host
 

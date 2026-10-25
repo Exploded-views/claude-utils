@@ -24,6 +24,8 @@ func main() {
 		os.Exit(runDoctor(os.Args[2:]))
 	case "repo":
 		os.Exit(runRepo(os.Args[2:]))
+	case "app-token":
+		os.Exit(runAppToken(os.Args[2:]))
 	case "run":
 		os.Exit(runRun(os.Args[2:]))
 	case "distill":
@@ -72,6 +74,7 @@ Usage:
 Subcommands:
   init        Bootstrap the local sync repo against a remote
   doctor      Check every mem-* repo in the org is private (--org, --install-timer)
+  app-token   Print a GitHub App installation token (--app <name>) for use as another tool's token command
   repo        repo create <name>: create a private mem-* repo and verify it
   run         Run the sync daemon in the foreground
   distill     Rebuild the distilled-memory catalog index (see --prune, --dry-run)
