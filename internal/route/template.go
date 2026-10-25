@@ -36,7 +36,8 @@ type TemplateRule struct {
 	Path    string   `json:"path,omitempty"`
 	Remote  string   `json:"remote,omitempty"`
 	Aliases []string `json:"aliases,omitempty"`
-	Repo    string   `json:"repo"`
+	Deny    bool     `json:"deny,omitempty"`
+	Repo    string   `json:"repo,omitempty"`
 }
 
 var labelRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
@@ -84,7 +85,7 @@ func portablePath(p, homeDir string) string {
 // host's home folder and directory: the home pin is published as a "home"
 // rule, and a leading home in a folder or path pattern as {home}. Client and
 // orch repos, and every rule naming one, are left out: a template is for
-// sharing between hosts, and a host's client rules are written by hand on it.
+// sharing between hosts. Their rules are published as denies (pattern, no repo name).
 func (f File) Template(homeFolder, homeDir string) Template {
 	t := Template{Version: templateVersion, Repos: map[string]string{}, Routes: []TemplateRule{}}
 	for n, r := range f.Repos {
@@ -96,12 +97,17 @@ func (f File) Template(homeFolder, homeDir string) Template {
 		t.Personal = f.Personal
 	}
 	for _, r := range f.Routes {
-		if _, ok := t.Repos[r.Repo]; !ok {
-			continue
-		}
+		// A client or orch rule, a deny, and a rule whose repo this host lacks
+		// are published as a deny that keeps the pattern and names no repo, so
+		// a host that inherits them denies those folders instead of letting a
+		// broader rule catch them.
+		_, shared := t.Repos[r.Repo]
 		tr := TemplateRule{Folder: r.Folder, Path: r.Path, Remote: r.Remote, Aliases: r.Aliases, Repo: r.Repo}
+		if r.Deny || !shared {
+			tr.Deny, tr.Repo = true, ""
+		}
 		switch {
-		case r.isPin() && homeFolder != "" && sameFolder(r.Folder, homeFolder):
+		case !tr.Deny && r.isPin() && homeFolder != "" && sameFolder(r.Folder, homeFolder):
 			tr = TemplateRule{Home: true, Repo: r.Repo}
 		case r.Folder != "":
 			tr.Folder = portableFolder(r.Folder, homeFolder)
@@ -123,14 +129,8 @@ type InheritReport struct {
 	Leaving []string
 }
 
-// unavailablePrefix names the repo of a deny placeholder: a rule that stands in
-// for one that could not be taken over. The router denies a rule naming a repo
-// the host does not have, so the folders it matched stay denied instead of
-// falling through to a broader rule behind it.
-const unavailablePrefix = "unavailable:"
-
 func (tr TemplateRule) expand(homeFolder string) (Rule, bool) {
-	r := Rule{Folder: tr.Folder, Path: tr.Path, Remote: tr.Remote, Aliases: tr.Aliases, Repo: tr.Repo}
+	r := Rule{Folder: tr.Folder, Path: tr.Path, Remote: tr.Remote, Aliases: tr.Aliases, Repo: tr.Repo, Deny: tr.Deny}
 	if strings.HasPrefix(r.Folder, homePlaceholder) {
 		if homeFolder == "" {
 			return r, false
@@ -178,6 +178,10 @@ func (t Template) Inherit(cur File, homeFolder string, useHome bool, folders []s
 		switch {
 		case !ok:
 			why = "this host's home folder is unknown"
+		case tr.Deny:
+			if err := (File{Repos: cur.Repos, Personal: cur.Personal, Routes: []Rule{r}}).validate(); err != nil {
+				why = strings.TrimPrefix(err.Error(), "route 0: ")
+			}
 		case !inTpl:
 			why = "the template does not say what " + tr.Repo + " is"
 		case !here:
@@ -191,7 +195,7 @@ func (t Template) Inherit(cur File, homeFolder string, useHome bool, folders []s
 		}
 		if why != "" {
 			rep.Dropped = append(rep.Dropped, desc+": "+why+" (kept as a deny)")
-			r.Repo = unavailablePrefix + tr.Repo
+			r.Repo, r.Deny = "", true
 		}
 		rest = append(rest, r)
 	}
@@ -223,7 +227,7 @@ type probe struct {
 	path   string
 }
 
-func (f File) routeOf(p probe) string {
+func (f File) routeOf(p probe) (string, string) {
 	r := New(f, func(string) bool { return true })
 	r.Logf = func(string, ...any) {}
 	if p.synth {
@@ -240,7 +244,8 @@ func (f File) routeOf(p probe) string {
 			return []string{"/nonexistent/probe-dir"}
 		}
 	}
-	return r.Decide(p.folder).Repo
+	d := r.Decide(p.folder)
+	return d.Repo, d.Reason
 }
 
 // leaving compares the routes of every known folder, and of one probe per
@@ -262,7 +267,7 @@ func leaving(cur, next File, home string, folders []string) []string {
 		add(probe{label: "home folder", folder: home})
 	}
 	for _, r := range cur.Routes {
-		if !cur.Repos[r.Repo].IsClient() {
+		if !protectedRule(cur, r) {
 			continue
 		}
 		l := "rule " + ruleLine(r)
@@ -280,7 +285,8 @@ func leaving(cur, next File, home string, folders []string) []string {
 	}
 	var out []string
 	for _, p := range ps {
-		o, n := cur.routeOf(p), next.routeOf(p)
+		o, oWhy := cur.routeOf(p)
+		n, _ := next.routeOf(p)
 		if o == n {
 			continue
 		}
@@ -293,8 +299,50 @@ func leaving(cur, next File, home string, folders []string) []string {
 		switch {
 		case cur.Repos[o].IsClient():
 			out = append(out, fmt.Sprintf("%s: %s -> %s", p.label, o, name(n)))
+		case oWhy == ReasonDenied && n != "":
+			out = append(out, fmt.Sprintf("%s: denied by a deny rule -> %s", p.label, n))
 		case p.label == "home folder" && o == "" && n != "" && !next.Repos[n].IsClient() && cur.HasClientRepo():
 			out = append(out, fmt.Sprintf("home folder: denied -> %s (this host keeps client notes)", n))
+		}
+	}
+	return append(out, shadowing(cur, next)...)
+}
+
+// protectedRule is a client or orch rule, or a deny.
+func protectedRule(f File, r Rule) bool { return r.Deny || f.Repos[r.Repo].IsClient() }
+
+// shadowing is the conservative structural check, for rule kinds the folder
+// probes cannot tell apart: when the current table has any protected rule, it
+// lists every protected rule that is gone or changed, and every unprotected rule
+// that now sits ahead of a protected one it was not ahead of before.
+func shadowing(cur, next File) []string {
+	idx := func(rs []Rule, sig string) int {
+		for i, r := range rs {
+			if r.sig() == sig {
+				return i
+			}
+		}
+		return -1
+	}
+	var out []string
+	for _, p := range cur.Routes {
+		if !protectedRule(cur, p) {
+			continue
+		}
+		ni := idx(next.Routes, p.sig())
+		if ni < 0 {
+			out = append(out, "rule removed or changed: "+ruleLine(p))
+			continue
+		}
+		ci := idx(cur.Routes, p.sig())
+		for j := 0; j < ni; j++ {
+			q := next.Routes[j]
+			if protectedRule(next, q) {
+				continue
+			}
+			if cj := idx(cur.Routes, q.sig()); cj < 0 || cj > ci {
+				out = append(out, fmt.Sprintf("rule %s is now ahead of %s", ruleLine(q), ruleLine(p)))
+			}
 		}
 	}
 	return out
@@ -304,10 +352,15 @@ func (tr TemplateRule) describe() string {
 	if tr.Home {
 		return "home folder -> " + tr.Repo
 	}
-	return ruleLine(Rule{Folder: tr.Folder, Path: tr.Path, Remote: tr.Remote, Repo: tr.Repo})
+	return ruleLine(Rule{Folder: tr.Folder, Path: tr.Path, Remote: tr.Remote, Repo: tr.Repo, Deny: tr.Deny})
 }
 
-func ruleLine(r Rule) string { return r.kind() + " " + r.pattern() + " -> " + r.Repo }
+func ruleLine(r Rule) string {
+	if r.Deny {
+		return r.kind() + " " + r.pattern() + " -> deny"
+	}
+	return r.kind() + " " + r.pattern() + " -> " + r.Repo
+}
 
 // DiffRoutes lists the rules removed ("- ") and added ("+ ") going from a to b,
 // and a note when only the order changed. It is empty when they are equal.

@@ -561,6 +561,22 @@ func TestFallbackNotForPersonalOrMissingRepo(t *testing.T) {
 	}
 }
 
+// A repo of kind personal that the "personal" field does not name never gets
+// the rename fallback either.
+func TestFallbackNotForKindPersonalRepoNotNamedInPersonal(t *testing.T) {
+	f := idFile(Rule{Remote: "github.com/old/x", Repo: "projects"})
+	e := newIDEnv(t, f)
+	e.remotes["-f"], e.roots["-f"] = "github.com/old/x", []string{"aaa"}
+	e.r.Decide("-f")
+	e.remotes["-f"] = "github.com/new/x"
+	g := idFile(Rule{Remote: "github.com/old/x", Repo: "projects"})
+	g.Personal = ""
+	g.Repos["projects"] = Repo{Config: "/x", Kind: KindPersonal}
+	if d := e.router(g).Decide("-f"); d.Repo != "" {
+		t.Fatalf("renamed folder routed to a kind-personal repo: %+v", d)
+	}
+}
+
 func TestNewListedFolderSharingRootsGetsNoFallback(t *testing.T) {
 	f := idFile(Rule{Remote: "github.com/old/x", Repo: "projects"})
 	e := newIDEnv(t, f)

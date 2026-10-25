@@ -87,7 +87,10 @@ type Rule struct {
 	// rule too. They are only for remote rules: after a rename or transfer of
 	// the repo, list the old or the new name here.
 	Aliases []string `json:"aliases,omitempty"`
-	Repo    string   `json:"repo"`
+	// Deny makes the rule a denial: the folders it matches go to no repo, and
+	// no later rule is tried. It carries no Repo.
+	Deny bool   `json:"deny,omitempty"`
+	Repo string `json:"repo,omitempty"`
 }
 
 // matchesRemote reports whether the remote key matches the rule's pattern or
@@ -106,7 +109,11 @@ func (r Rule) matchesRemote(key string) bool {
 
 // sig identifies a rule's content, to tell an edited rule from an old one.
 func (r Rule) sig() string {
-	return r.kind() + "\x00" + r.pattern() + "\x00" + strings.Join(r.Aliases, "\x01") + "\x00" + r.Repo
+	d := ""
+	if r.Deny {
+		d = "\x00deny"
+	}
+	return r.kind() + "\x00" + r.pattern() + "\x00" + strings.Join(r.Aliases, "\x01") + "\x00" + r.Repo + d
 }
 
 func (r Rule) kind() string {
@@ -177,6 +184,9 @@ func Load(path string) (File, error) {
 
 func (f File) validate() error {
 	for name, r := range f.Repos {
+		if strings.Contains(name, ":") || strings.HasPrefix(name, "deny") || strings.HasPrefix(name, "unavailable") {
+			return fmt.Errorf("repo name %q is reserved: no ':' and no name starting with deny or unavailable", name)
+		}
 		if !validKinds[r.Kind] {
 			return fmt.Errorf("repo %q: kind must be one of personal, project, infra, client, orch (got %q)", name, r.Kind)
 		}
@@ -214,7 +224,10 @@ func (f File) validate() error {
 		if n != 1 {
 			return fmt.Errorf("route %d: exactly one of folder, path and remote is required", i)
 		}
-		if r.Repo == "" {
+		if r.Deny && r.Repo != "" {
+			return fmt.Errorf("route %d: a deny rule carries no repo", i)
+		}
+		if !r.Deny && r.Repo == "" {
 			return fmt.Errorf("route %d: repo is required", i)
 		}
 		if f.isPersonal(r.Repo) && !r.isPin() {
@@ -242,6 +255,8 @@ func (f File) isPersonal(repo string) bool {
 const (
 	// ReasonPersonalNotPinned: the personal repo is only reachable through an
 	// exact folder pin.
+	ReasonDenied = "a deny rule matches"
+	// ReasonPersonalNotPinned: see isPersonal.
 	ReasonPersonalNotPinned = "the personal repo needs an exact folder pin"
 
 	ReasonNoRoute     = "no route matches"
@@ -479,6 +494,9 @@ func (r *Router) decide(folder string) (Decision, string, bool) {
 		}
 		if !match {
 			continue
+		}
+		if rule.Deny {
+			return Decision{Rule: i, Reason: ReasonDenied}, key, res == resolutionOK
 		}
 		if f.isPersonal(rule.Repo) && !rule.isPin() {
 			return Decision{Rule: i, Reason: ReasonPersonalNotPinned}, key, res == resolutionOK

@@ -272,7 +272,7 @@ func TestRoutePublishInherit_EndToEnd(t *testing.T) {
 		t.Fatalf("publish: %d %s %s", code, out, e)
 	}
 	tb, _ := os.ReadFile(filepath.Join(reg, "hosts", "laptop-2", "routes.json"))
-	if strings.Contains(string(tb), hfA) || strings.Contains(string(tb), "config") || strings.Contains(string(tb), "acme") || strings.Contains(string(tb), "client-a") {
+	if strings.Contains(string(tb), hfA) || strings.Contains(string(tb), "config") || strings.Contains(string(tb), "client-a") {
 		t.Fatalf("template leaks: %s", tb)
 	}
 

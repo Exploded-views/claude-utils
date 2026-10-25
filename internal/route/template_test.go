@@ -47,7 +47,7 @@ func TestTemplateStripsPathsKeysHomeAndClients(t *testing.T) {
 	tpl := hostFile().Template("-home-zed", "/home/zed")
 	b, _ := json.Marshal(tpl)
 	s := string(b)
-	for _, leak := range []string{"/home/zed", "-home-zed", "config", ".claudesync", "registry", "://", "@", "orch-a", "acme"} {
+	for _, leak := range []string{"/home/zed", "-home-zed", "config", ".claudesync", "registry", "://", "@", "orch-a"} {
 		if strings.Contains(s, leak) {
 			t.Errorf("template contains %q: %s", leak, s)
 		}
@@ -55,12 +55,11 @@ func TestTemplateStripsPathsKeysHomeAndClients(t *testing.T) {
 	if len(tpl.Repos) != 3 || tpl.Repos["lab"] != KindInfra {
 		t.Fatalf("repos: %v", tpl.Repos)
 	}
-	// Dropped: the orch path rule and the orch remote rule. Left: home, lab
-	// path, scratch pin, projects remote.
-	if len(tpl.Routes) != 4 || !tpl.Routes[0].Home || tpl.Routes[0].Repo != "lab" || tpl.Routes[0].Folder != "" {
+	// The orch path and remote rules are published as denies.
+	if len(tpl.Routes) != 6 || !tpl.Routes[1].Deny || !tpl.Routes[4].Deny || !tpl.Routes[0].Home || tpl.Routes[0].Repo != "lab" || tpl.Routes[0].Folder != "" {
 		t.Fatalf("routes: %+v", tpl.Routes)
 	}
-	if tpl.Routes[1].Path != "{home}/lab/**" || tpl.Routes[2].Folder != "{home}-scratch" {
+	if tpl.Routes[2].Path != "{home}/lab/**" || tpl.Routes[3].Folder != "{home}-scratch" {
 		t.Fatalf("home not replaced: %+v", tpl.Routes)
 	}
 }
@@ -306,7 +305,7 @@ func TestPublishWritesTemplateAndCommitsOnlyIt(t *testing.T) {
 	}
 	// And read back.
 	tpl, err := ReadTemplate(reg, "laptop-2")
-	if err != nil || len(tpl.Routes) != 4 {
+	if err != nil || len(tpl.Routes) != 6 {
 		t.Fatalf("%v %+v", err, tpl)
 	}
 }
