@@ -92,6 +92,10 @@ func appTokenCmd(stdout, stderr io.Writer, args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	if f := placeholderFlag(fs); f != "" {
+		fmt.Fprintln(stderr, "app-token: --"+f+" still contains a <placeholder>")
+		return 2
+	}
 	if *app == "" {
 		fmt.Fprintln(stderr, "app-token: --app is required")
 		return 2

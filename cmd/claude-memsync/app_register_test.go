@@ -163,28 +163,6 @@ func TestAppRegisterKeyCmdStore(t *testing.T) {
 	}
 }
 
-func TestAppRegisterStoreFailureWritesNoEntry(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("needs false")
-	}
-	apps := filepath.Join(t.TempDir(), "apps.json")
-	old := appsFileOverride
-	appsFileOverride = apps
-	t.Cleanup(func() { appsFileOverride = old })
-	api := convServer(t)
-	withCallback(t, "c0de")
-	var out, errb bytes.Buffer
-	if code := appCmd(&out, &errb, regArgs(api.URL, "--key-cmd-store", "false", "--key-cmd", "cat x")); code == 0 {
-		t.Fatal("failed store reported success")
-	}
-	if _, err := os.Stat(apps); err == nil {
-		t.Error("apps.json written although the key was not stored")
-	}
-	if strings.Contains(out.String()+errb.String(), keyBody) {
-		t.Error("pem printed")
-	}
-}
-
 func TestAppRegisterForgedStateIsIgnoredNotObeyed(t *testing.T) {
 	api := convServer(t)
 	oldR, oldW := registerOnReady, registerWait
@@ -257,5 +235,187 @@ func TestAppKeyFingerprintCLI(t *testing.T) {
 	}
 	if code := appCmd(&out, &errb, []string{"key-fingerprint", "--key-file", kp + ".none"}); code != 1 {
 		t.Errorf("missing file: %d", code)
+	}
+}
+
+func useApps(t *testing.T) string {
+	t.Helper()
+	apps := filepath.Join(t.TempDir(), "cfg", "apps.json")
+	old := appsFileOverride
+	appsFileOverride = apps
+	t.Cleanup(func() { appsFileOverride = old })
+	return apps
+}
+
+func TestAppPlaceholderFlagsRefused(t *testing.T) {
+	useApps(t)
+	cases := [][]string{
+		{"register", "--name", "x", "--org", "o", "--url", "https://e.test", "--perm", "metadata:read", "--key-cmd-store", "tee <vault>", "--key-cmd", "cat k"},
+		{"register", "--name", "x", "--org", "o", "--url", "https://e.test", "--perm", "metadata:read", "--key-out", "/tmp/<some key>.pem"},
+		{"add", "--name", "x", "--app-id", "<check-app-id>", "--org", "o", "--key-cmd", "cat k"},
+		{"add", "--name", "x", "--app-id", "1", "--org", "o", "--key-file", "<check-key-file>"},
+	}
+	want := []string{"--key-cmd-store", "--key-out", "--app-id", "--key-file"}
+	for i, c := range cases {
+		var out, errb bytes.Buffer
+		if code := appCmd(&out, &errb, c); code != 2 {
+			t.Errorf("case %d: code %d", i, code)
+		}
+		if !strings.Contains(errb.String(), want[i]) {
+			t.Errorf("case %d: flag not named: %q", i, errb.String())
+		}
+	}
+}
+
+func TestAppRegisterPlaceholderCreatesNothing(t *testing.T) {
+	apps := useApps(t)
+	hit := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hit = true }))
+	defer srv.Close()
+	var out, errb bytes.Buffer
+	code := appCmd(&out, &errb, regArgs(srv.URL, "--key-cmd-store", "tee <vault>/x", "--key-cmd", "cat x"))
+	if code != 2 || hit {
+		t.Errorf("code %d hit %v", code, hit)
+	}
+	if _, err := os.Stat(apps); err == nil {
+		t.Error("apps.json written")
+	}
+}
+
+func TestAppRegisterStoreFailureRecoversKey(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs false")
+	}
+	apps := useApps(t)
+	api := convServer(t)
+	withCallback(t, "c0de")
+	var out, errb bytes.Buffer
+	if code := appCmd(&out, &errb, regArgs(api.URL, "--key-cmd-store", "false", "--key-cmd", "cat x")); code != 1 {
+		t.Fatalf("code %d", code)
+	}
+	rec := filepath.Join(filepath.Dir(apps), "host-check.recovered.pem")
+	if b, err := os.ReadFile(rec); err != nil || string(b) != cliPEM {
+		t.Fatalf("recovered file: %v", err)
+	}
+	if st, _ := os.Stat(rec); runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 {
+		t.Errorf("mode %v", st.Mode())
+	}
+	if !strings.Contains(errb.String(), rec) || !strings.Contains(errb.String(), "delete") {
+		t.Errorf("path/instruction not printed: %q", errb.String())
+	}
+	if strings.Contains(out.String()+errb.String(), keyBody) {
+		t.Error("pem printed")
+	}
+	a, err := ghapp.LookupApp(apps, "host-check")
+	if err != nil || a.AppID != "99" || a.Org != "orga" || a.KeyFile != rec || len(a.KeyCmd) != 0 || a.KeyFingerprint == "" {
+		t.Errorf("entry = %+v %v", a, err)
+	}
+}
+
+func TestAppRegisterKeyOutFailureRecoversWithSuffix(t *testing.T) {
+	apps := useApps(t)
+	os.MkdirAll(filepath.Dir(apps), 0o700)
+	os.WriteFile(filepath.Join(filepath.Dir(apps), "host-check.recovered.pem"), []byte("old"), 0o600)
+	api := convServer(t)
+	withCallback(t, "c0de")
+	bad := filepath.Join(t.TempDir(), "no-such-dir", "k.pem")
+	var out, errb bytes.Buffer
+	if code := appCmd(&out, &errb, regArgs(api.URL, "--key-out", bad)); code != 1 {
+		t.Fatalf("code %d", code)
+	}
+	a, err := ghapp.LookupApp(apps, "host-check")
+	if err != nil || !strings.HasPrefix(filepath.Base(a.KeyFile), "host-check.recovered.") || filepath.Base(a.KeyFile) == "host-check.recovered.pem" {
+		t.Fatalf("entry = %+v %v", a, err)
+	}
+	if b, _ := os.ReadFile(a.KeyFile); string(b) != cliPEM {
+		t.Error("recovered content")
+	}
+	if b, _ := os.ReadFile(filepath.Join(filepath.Dir(apps), "host-check.recovered.pem")); string(b) != "old" {
+		t.Error("existing recovered file clobbered")
+	}
+}
+
+func writeKey(t *testing.T, mode os.FileMode) string {
+	p := filepath.Join(t.TempDir(), "k.pem")
+	if err := os.WriteFile(p, []byte(cliPEM), mode); err != nil {
+		t.Fatal(err)
+	}
+	os.Chmod(p, mode)
+	return p
+}
+
+func TestAppAddKeyFile(t *testing.T) {
+	apps := useApps(t)
+	kp := writeKey(t, 0o600)
+	var out, errb bytes.Buffer
+	args := []string{"add", "--name", "chk", "--app-id", "42", "--org", "orga", "--key-file", kp}
+	if code := appCmd(&out, &errb, args); code != 0 {
+		t.Fatalf("code %d: %s", code, errb.String())
+	}
+	a, err := ghapp.LookupApp(apps, "chk")
+	if err != nil || a.AppID != "42" || a.KeyFile != kp || !strings.HasPrefix(a.KeyFingerprint, "SHA256:") {
+		t.Fatalf("entry %+v %v", a, err)
+	}
+	if st, _ := os.Stat(apps); runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 {
+		t.Errorf("apps.json mode %v", st.Mode())
+	}
+	// existing entry: refused without --replace, allowed with it
+	errb.Reset()
+	if code := appCmd(&out, &errb, args); code != 2 || !strings.Contains(errb.String(), "--replace") {
+		t.Errorf("overwrite: %d %q", code, errb.String())
+	}
+	if code := appCmd(&out, &errb, append(args, "--replace")); code != 0 {
+		t.Errorf("replace: %d", code)
+	}
+}
+
+func TestAppAddRefusesLooseKeyFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no mode bits")
+	}
+	apps := useApps(t)
+	kp := writeKey(t, 0o644)
+	var out, errb bytes.Buffer
+	if code := appCmd(&out, &errb, []string{"add", "--name", "chk", "--app-id", "42", "--org", "orga", "--key-file", kp}); code != 1 {
+		t.Errorf("code %d", code)
+	}
+	if _, err := os.Stat(apps); err == nil {
+		t.Error("entry written for a loose key file")
+	}
+}
+
+func TestAppAddKeyCmdAndExclusive(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs cat")
+	}
+	apps := useApps(t)
+	kp := writeKey(t, 0o600)
+	var out, errb bytes.Buffer
+	if code := appCmd(&out, &errb, []string{"add", "--name", "chk", "--app-id", "42", "--org", "orga", "--key-cmd", "cat '" + kp + "'"}); code != 0 {
+		t.Fatalf("code %d: %s", code, errb.String())
+	}
+	a, err := ghapp.LookupApp(apps, "chk")
+	if err != nil || len(a.KeyCmd) != 2 || a.KeyCmd[1] != kp || a.KeyFingerprint == "" {
+		t.Errorf("entry %+v %v", a, err)
+	}
+	if code := appCmd(&out, &errb, []string{"add", "--name", "z", "--app-id", "1", "--org", "o", "--key-cmd", "cat x", "--key-file", kp}); code != 2 {
+		t.Errorf("both: %d", code)
+	}
+}
+
+func TestAppAddVerify(t *testing.T) {
+	gh := newAppFake(t)
+	useApps(t)
+	kp := writeKey(t, 0o600)
+	var out, errb bytes.Buffer
+	code := appCmd(&out, &errb, []string{"add", "--name", "chk", "--app-id", "42", "--org", "orga", "--key-file", kp, "--api-url", gh.URL, "--verify"})
+	if code != 0 {
+		t.Fatalf("code %d: %s", code, errb.String())
+	}
+	if !strings.HasSuffix(out.String(), "MINT-OK\n") || strings.Contains(out.String()+errb.String(), appTestToken) {
+		t.Errorf("out %q err %q", out.String(), errb.String())
+	}
+	if gh.mints != 1 {
+		t.Errorf("mints %d", gh.mints)
 	}
 }
