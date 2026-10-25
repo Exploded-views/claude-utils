@@ -340,6 +340,7 @@ check "zero gh calls against any other org" bash -c "! grep -v 'user/orgs' '$STU
 newhome orgs2
 STUB_ORGS="$(printf 'example-org\nSomeOther')" runboot --host testhost --role homelab --yes --allow-org someother
 check "--allow-org accepts an extra org" [ "$RC" -eq 0 ]
+check "the script holds no built-in allowed org or own owner: only --org (and flags) feed the lists" bash -c "! grep -nE '(ALLOW_ORGS|OWN_OWNERS)\\+?=\\([a-z-]' '$ROOT/scripts/bootstrap.sh'"
 
 echo "--- token split"
 newhome tok1
@@ -554,7 +555,7 @@ mkgit "$H/code/ownproj" "git@github.com:gitgat/ownproj.git"
 mkgit "$H/code/thirdlib" "https://github.com/someoneelse/thirdlib.git"
 mkgit "$H/code/clientapp" "https://github.com/Acme-Client/clientapp.git"
 export H
-runboot --host testmac --role personal-dev --workspace "$H/code" --yes
+runboot --host testmac --role personal-dev --workspace "$H/code" --own-owner gitgat --yes
 [ "$RC" -eq 0 ] || echo "$OUT" | tail -20
 check "personal-dev run exits 0" [ "$RC" -eq 0 ]
 check "only the own repo gets a mem-project repo" bash -c "grep 'repo create' '$STUB_DIR/gh.log' | grep -c 'mem-project-' | grep -qx 2 && grep -q 'create example-org/mem-project-ownproj --private' '$STUB_DIR/gh.log' && grep -q 'create example-org/mem-project-code-workspace --private' '$STUB_DIR/gh.log' && ! grep -qE 'thirdlib|clientapp' '$STUB_DIR/gh.log'"
@@ -585,7 +586,7 @@ mkgit "$H/code/extra" "git@github.com:gitgat/extra.git"
 git init -q --bare -b main "$BASE/remotes/mem-project-extra.git"
 git config --file "$H/.gitconfig" "url.$BASE/remotes/mem-project-extra.git.insteadOf" "git@gh-mem-project-extra:$ORG/mem-project-extra.git"
 CREATES2="$(grep -c 'repo create' "$STUB_DIR/gh.log")"
-runboot --host testmac --role personal-dev --workspace "$H/code" --yes
+runboot --host testmac --role personal-dev --workspace "$H/code" --own-owner gitgat --yes
 [ "$RC" -eq 0 ] || echo "$OUT" | tail -20
 check "re-run with a new project exits 0" [ "$RC" -eq 0 ]
 check "routes.json regenerated from the plan: new repo and remote route, old ones kept, backup kept" jsonok '
@@ -601,6 +602,25 @@ d=json.load(open(sys.argv[1]))
 pins={r["folder"]:r["repo"] for r in d["routes"] if "folder" in r}
 assert pins[re.sub(r"[^A-Za-z0-9]","-",os.environ["H"])]=="personal", pins' "$H/.config/claude-memsync/routes.json"
 check "only the new project repo was created, private, and inited" bash -c "[ \$(grep -c 'repo create' '$STUB_DIR/gh.log') -eq $((CREATES2 + 1)) ] && grep -q 'create example-org/mem-project-extra --private' '$STUB_DIR/gh.log' && grep -q 'init --remote git@gh-mem-project-extra' '$STUB_DIR/memsync.log' && [ -d '$H/.claudesync.d/project-extra' ]"
+echo "--- personal-dev with no --own-owner: only --org is own"
+newhome pdevdef
+mkdir -p "$H/code"
+mkgit "$H/code/ownproj" "git@github.com:example-org/ownproj.git"
+mkgit "$H/code/gitproj" "git@github.com:gitgat/gitproj.git"
+mkgit "$H/code/otherproj" "git@github.com:some-other-owner/otherproj.git"
+export H
+runboot --host testmac --role personal-dev --workspace "$H/code" --yes
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+check "no-own-owner run exits 0" [ "$RC" -eq 0 ]
+check "no built-in own owner in routes: only the --org remote is routed" jsonok '
+import json,sys
+d=json.load(open(sys.argv[1]))
+rem={r["remote"]:r["repo"] for r in d["routes"] if "remote" in r}
+assert rem=={"github.com/example-org/ownproj":"project-ownproj"}, rem
+assert set(d["repos"])=={"personal","project-code-workspace","project-ownproj"}, set(d["repos"])' "$H/.config/claude-memsync/routes.json"
+check "other owners are listed third-party and get no repo" bash -c "printf '%s' \"\$1\" | grep -q 'gitproj.*not synced (third-party)' && printf '%s' \"\$1\" | grep -q 'otherproj.*not synced (third-party)' && ! grep -qE 'gitproj|otherproj' '$STUB_DIR/gh.log'" _ "$OUT"
+check "no built-in owner name in the generated config" bash -c "! grep -rIiE 'gitgat' '$H/.config/claude-memsync'"
+
 newhome rtdiff
 mkdir -p "$H/.config/claude-memsync"; echo '{"repos":{},"routes":[],"default":"deny"}' >"$H/.config/claude-memsync/routes.json"
 set +e
