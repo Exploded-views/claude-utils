@@ -562,3 +562,46 @@ func TestRouted_ReadOnlyUntilStarted(t *testing.T) {
 		t.Fatal("the daemon's router must be able to write")
 	}
 }
+
+// Routed install must not need the legacy ~/.claudesync/config.json: it uses
+// the personal (primary) repo's config.
+func TestRouted_InstallUsesPrimaryRepoConfigWithoutLegacy(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "projects"}, "personal", nil)
+	home, _ := os.UserHomeDir()
+	if _, err := os.Stat(filepath.Join(home, ".claudesync", "config.json")); err == nil {
+		t.Fatal("test setup: legacy config must not exist")
+	}
+	var got string
+	old, oldRoutes := installTaskFn, unitRoutes
+	defer func() { installTaskFn, unitRoutes = old, oldRoutes }()
+	installTaskFn = func(p string) error { got = p; return nil }
+	if code := runInstall(nil); code != 0 {
+		t.Fatalf("install exit %d", code)
+	}
+	if got != cfgs["personal"].Path() {
+		t.Errorf("config path %q, want the personal repo's %q", got, cfgs["personal"].Path())
+	}
+	if unitRoutes == "" {
+		t.Error("the unit must carry the routes file")
+	}
+	// An explicit --config still wins.
+	got = ""
+	if code := runInstall([]string{"--config", cfgs["projects"].Path()}); code != 0 || got != cfgs["projects"].Path() {
+		t.Errorf("explicit config: %d %q", code, got)
+	}
+}
+
+func TestRouted_InstallWithoutRoutesStillNeedsLegacyConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv(routesEnv, "")
+	old := installTaskFn
+	defer func() { installTaskFn = old }()
+	called := false
+	installTaskFn = func(string) error { called = true; return nil }
+	if code := runInstall(nil); code == 0 || called {
+		t.Errorf("legacy install without a config must fail: %d %v", code, called)
+	}
+}

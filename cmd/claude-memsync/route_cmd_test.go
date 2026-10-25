@@ -440,3 +440,41 @@ func TestRouteHome_ClientAToClientBNeedsFlag(t *testing.T) {
 		t.Fatalf("%d %s", code, e)
 	}
 }
+
+// --yes pins non-interactively when the target is a plain repo and the host
+// keeps no client or orch repo; it never stands in for the client guard.
+func TestRouteHome_YesNonInteractive(t *testing.T) {
+	p, hf := homeHost(t, map[string]string{"personal": "personal", "projects": "project"}, nil)
+	if code, _, e := runRouteCmd(t, "", false, "home", "projects", "--yes"); code != 0 {
+		t.Fatalf("--yes on a host without client repos: %d %s", code, e)
+	}
+	if f := routesOf(t, p); len(f.Routes) != 1 || f.Routes[0].Folder != hf || f.Routes[0].Repo != "projects" {
+		t.Fatalf("%+v", f.Routes)
+	}
+	// without --yes the same pin works too (no extra flag needed)
+	if code, _, e := runRouteCmd(t, "", false, "home", "personal"); code != 0 {
+		t.Fatalf("plain pin: %s", e)
+	}
+	if code, _, _ := runRouteCmd(t, "", false, "home", "--unpin", "--yes"); code == 0 {
+		t.Error("--yes does not combine with --unpin")
+	}
+}
+
+func TestRouteHome_YesDoesNotBypassTheClientGuard(t *testing.T) {
+	// a host with a client repo: the first pin of a denied folder needs consent
+	p, _ := homeHost(t, stdKinds, nil)
+	before := routesOf(t, p)
+	if code, _, e := runRouteCmd(t, "", false, "home", "projects", "--yes"); code == 0 || !strings.Contains(e, "confirm-move-out-of-client") {
+		t.Fatalf("--yes must not override the client guard: %d %s", code, e)
+	}
+	if len(routesOf(t, p).Routes) != len(before.Routes) {
+		t.Fatal("applied despite the guard")
+	}
+	// leaving an orch repo is likewise refused with --yes alone
+	if code, _, _ := runRouteCmd(t, "", false, "home", "orch-a", "--confirm-move-out-of-client"); code != 0 {
+		t.Fatal("setup")
+	}
+	if code, _, _ := runRouteCmd(t, "", false, "home", "personal", "--yes"); code == 0 {
+		t.Fatal("--yes must not move the folder out of an orch repo")
+	}
+}
