@@ -210,7 +210,8 @@ func runHost(args []string) int { return hostCmd(os.Stdout, os.Stderr, args) }
 const hostUsage = `usage: claude-memsync host list [--org ORG] [--stale-days N] [--json]
        claude-memsync host retire <label> [--apply] [--org ORG]
        claude-memsync host check-key --fingerprint SHA256:... --app SLUG | --clear
-  all take [--config PATH | --routes PATH] [--token-file FILE]`
+  all take [--config PATH | --routes PATH] [--token-file FILE | --token-cmd CMD | --github-app NAME]
+  a token flag wins over the token sources in config.json`
 
 func hostCmd(stdout, stderr io.Writer, args []string) int {
 	sel, rest, err := extractRepoFlags(args)
@@ -223,6 +224,8 @@ func hostCmd(stdout, stderr io.Writer, args []string) int {
 		return 2
 	}
 	rest, tokenFile := extractFlag(rest, "--token-file")
+	rest, tokenCmd := extractFlag(rest, "--token-cmd")
+	rest, ghApp := extractFlag(rest, "--github-app")
 	hc, err := loadHostCtx(sel)
 	if err != nil {
 		fmt.Fprintln(stderr, "host:", err)
@@ -232,8 +235,8 @@ func hostCmd(stdout, stderr io.Writer, args []string) int {
 		if abs, err := filepath.Abs(tokenFile); err == nil {
 			tokenFile = abs
 		}
-		hc.cfg.GitHubTokenFile = tokenFile
 	}
+	tokenFlags{File: tokenFile, Cmd: tokenCmd, App: ghApp}.apply(&hc.cfg)
 	return hostRun(hc, stdout, stderr, rest)
 }
 
