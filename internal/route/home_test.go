@@ -115,7 +115,7 @@ func TestSetHomePinUnknownRepoRefused(t *testing.T) {
 	}
 }
 
-func TestSetHomePinDenyRemovesPin(t *testing.T) {
+func TestSetHomePinDenyWritesDenyPinAndUnpinRemoves(t *testing.T) {
 	p := writeRoutes(t, fileOf(
 		Rule{Folder: "-home-me", Repo: "projects"},
 		Rule{Folder: "-home-me-app", Repo: "projects"},
@@ -125,8 +125,60 @@ func TestSetHomePinDenyRemovesPin(t *testing.T) {
 		t.Fatal(ch, err)
 	}
 	f, _ := Load(p)
+	if len(f.Routes) != 2 || f.Routes[0].Folder != "-home-me" || !f.Routes[0].Deny || f.Routes[0].Repo != "" {
+		t.Fatalf("%+v", f.Routes)
+	}
+	if r, ok := f.HomePin("-home-me"); !ok || r != "" {
+		t.Fatal("deny pin not seen as a pin")
+	}
+	if ch, err := SetHomePin(p, "-home-me", "", HomeOpts{}); err != nil || ch.Changed {
+		t.Fatalf("second deny: %+v %v", ch, err)
+	}
+	if ch, err := SetHomePin(p, "-home-me", "", HomeOpts{Unpin: true}); err != nil || !ch.Changed {
+		t.Fatal(ch, err)
+	}
+	f, _ = Load(p)
 	if len(f.Routes) != 1 || f.Routes[0].Folder != "-home-me-app" {
 		t.Fatalf("%+v", f.Routes)
+	}
+}
+
+// N1: removing the pin would let the broader rule behind it take the home
+// folder out of the client repo; deny keeps it denied.
+func TestHomeDenyKeepsClientFolderDeniedUnpinNeedsConsent(t *testing.T) {
+	f := fileOf(Rule{Folder: "-home-x", Repo: "client-a"}, Rule{Folder: "-home-x*", Repo: "projects"})
+	p := writeRoutes(t, f)
+	if _, err := SetHomePin(p, "-home-x", "", HomeOpts{Unpin: true}); !errors.Is(err, ErrNeedsConfirm) {
+		t.Fatalf("unpin out of client: %v", err)
+	}
+	if g, _ := Load(p); len(g.Routes) != 2 || g.Routes[0].Repo != "client-a" {
+		t.Fatal("refused unpin changed the file")
+	}
+	if _, err := SetHomePin(p, "-home-x", "", HomeOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	g, _ := Load(p)
+	if got := g.Effective("-home-x"); got != "" {
+		t.Fatalf("home folder routes to %q after deny", got)
+	}
+}
+
+// N3: removing a deny pin on a host that keeps client notes.
+func TestUnpinDenyPinOnClientHostNeedsConsent(t *testing.T) {
+	f := fileOf(Rule{Folder: "-home-x", Deny: true}, Rule{Folder: "-home-x*", Repo: "projects"})
+	p := writeRoutes(t, f)
+	if _, err := SetHomePin(p, "-home-x", "", HomeOpts{Unpin: true}); !errors.Is(err, ErrNeedsConfirm) {
+		t.Fatalf("%v", err)
+	}
+	if _, err := SetHomePin(p, "-home-x", "", HomeOpts{Unpin: true, ConfirmMoveOutOfClient: true}); err != nil {
+		t.Fatal(err)
+	}
+	// Without client repos nothing is asked.
+	g := f
+	delete(g.Repos, "client-a")
+	p = writeRoutes(t, g)
+	if _, err := SetHomePin(p, "-home-x", "", HomeOpts{Unpin: true}); err != nil {
+		t.Fatal(err)
 	}
 }
 

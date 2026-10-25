@@ -41,6 +41,9 @@ type HomeOpts struct {
 	// ConfirmMoveOutOfClient allows taking the folder out of a client or
 	// orchestrator repo into a non-client repo.
 	ConfirmMoveOutOfClient bool
+	// Unpin removes the pin instead of writing one: the folder then routes by
+	// the other rules. With repo "" and Unpin unset, a deny pin is written.
+	Unpin bool
 	// Logf receives the log line of a move out of a client repo (default: none).
 	Logf func(format string, args ...any)
 }
@@ -72,7 +75,7 @@ func (f File) Effective(folder string) string {
 	return r.Decide(folder).Repo
 }
 
-// WithHome returns f with the folder's pin set to repo ("" removes it), and
+// WithHome returns f with the folder's pin set to repo ("" writes a deny pin; Unpin removes the pin), and
 // says what changed. It enforces the guards that hold everywhere: the repo must
 // be in repos, and a move out of a client or orch repo into another kind needs
 // consent.
@@ -87,22 +90,12 @@ func (f File) WithHome(folder, repo string, o HomeOpts) (File, HomeChange, error
 		}
 	}
 	ch.From = f.Effective(folder)
-	if ch.From == "" {
-		ch.From, _ = f.HomePin(folder)
-	}
-	// Pinning the home folder to a non-client repo needs consent when it is
-	// leaving a client repo, and on any host that keeps client notes at all
-	// (even from "denied": a client's notes may sit in the home folder).
-	if toPlain := repo != "" && !f.Repos[repo].IsClient(); toPlain && !o.ConfirmMoveOutOfClient {
-		if from, ok := f.Repos[ch.From]; ok && from.IsClient() {
-			return f, ch, fmt.Errorf("the home folder is routed to the client repo %q; moving it to the non-client repo %q puts its notes where the catalog and other hosts can see them: %w if that is intended", ch.From, repo, ErrNeedsConfirm)
-		}
-		if f.HasClientRepo() {
-			return f, ch, fmt.Errorf("this host keeps client notes: pinning the home folder to the non-client repo %q: %w", repo, ErrNeedsConfirm)
-		}
-	}
 	routes := make([]Rule, 0, len(f.Routes)+1)
-	if repo != "" {
+	switch {
+	case o.Unpin:
+	case repo == "":
+		routes = append(routes, Rule{Folder: folder, Deny: true})
+	default:
 		routes = append(routes, Rule{Folder: folder, Repo: repo})
 	}
 	for _, r := range f.Routes {
@@ -117,9 +110,23 @@ func (f File) WithHome(folder, repo string, o HomeOpts) (File, HomeChange, error
 	if err := g.validate(); err != nil {
 		return f, ch, err
 	}
-	if o.Logf != nil && ch.Changed {
-		if from, ok := f.Repos[ch.From]; ok && from.IsClient() && repo != "" && !f.Repos[repo].IsClient() {
-			o.Logf("route: folder %s moved from client repo %q to non-client repo %q; its notes will now sync there, and the old repo keeps a frozen copy", hash8(folder), ch.From, repo)
+	// The consent check runs on the resulting route, whatever the edit was:
+	// out of a client or orch repo into a non-client one, or from denied into
+	// one on a host that keeps client notes (a client's notes may sit in the
+	// home folder).
+	ch.To = g.Effective(folder)
+	if ch.To != "" && !g.Repos[ch.To].IsClient() && ch.To != ch.From {
+		fromClient := f.Repos[ch.From].IsClient()
+		if !o.ConfirmMoveOutOfClient {
+			if fromClient {
+				return f, ch, fmt.Errorf("the home folder is routed to the client repo %q; this would route it to the non-client repo %q, where the catalog and other hosts can see its notes: %w if that is intended", ch.From, ch.To, ErrNeedsConfirm)
+			}
+			if ch.From == "" && f.HasClientRepo() {
+				return f, ch, fmt.Errorf("this host keeps client notes: routing the home folder to the non-client repo %q: %w", ch.To, ErrNeedsConfirm)
+			}
+		}
+		if fromClient && ch.Changed && o.Logf != nil {
+			o.Logf("route: folder %s moved from client repo %q to non-client repo %q; its notes will now sync there, and the old repo keeps a frozen copy", hash8(folder), ch.From, ch.To)
 		}
 	}
 	return g, ch, nil
@@ -139,7 +146,7 @@ func SetHomePin(path, folder, repo string, o HomeOpts) (HomeChange, error) {
 }
 
 // ruleKeys are the fields of a rule this version knows.
-var ruleKeys = map[string]bool{"folder": true, "path": true, "remote": true, "aliases": true, "repo": true}
+var ruleKeys = map[string]bool{"folder": true, "path": true, "remote": true, "aliases": true, "deny": true, "repo": true}
 
 // EditRoutes reads path under its lock, applies edit, and writes the result
 // atomically if the routes differ. Only the "routes" list may change: every

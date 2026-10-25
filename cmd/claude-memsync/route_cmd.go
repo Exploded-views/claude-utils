@@ -31,7 +31,7 @@ func runRoute(args []string) int { return routeCmd(args, os.Stdin, os.Stdout, os
 
 const routeUsage = `usage:
   claude-memsync route home [<repo>|deny] [--folder F] [--confirm-move-out-of-client]
-  claude-memsync route home --suggest | --ask
+  claude-memsync route home --unpin | --suggest | --ask
   claude-memsync route publish --as <label> [--registry DIR]
   claude-memsync route inherit <label> [--home] [--yes] [--confirm-move-out-of-client] [--registry DIR]
 all take --routes <file>`
@@ -98,6 +98,7 @@ func routeHome(args []string, in io.Reader, out, errw io.Writer) int {
 	folder := fs.String("folder", "", "home folder name (default: from $HOME)")
 	confirm := fs.Bool("confirm-move-out-of-client", false, "allow taking the home folder out of a client or orch repo")
 	suggest := fs.Bool("suggest", false, "print a suggested choice and the reason; changes nothing")
+	unpin := fs.Bool("unpin", false, "remove the home pin (the folder then routes by the other rules)")
 	ask := fs.Bool("ask", false, "choose interactively (needs a terminal)")
 	pos, err := parseMixed(fs, args)
 	if err != nil {
@@ -127,7 +128,10 @@ func routeHome(args []string, in io.Reader, out, errw io.Writer) int {
 	if err != nil {
 		return fail("%v", err)
 	}
-	opts := route.HomeOpts{ConfirmMoveOutOfClient: *confirm, Logf: func(format string, a ...any) {
+	if *unpin && (len(pos) > 0 || *suggest || *ask) {
+		return fail("--unpin takes no repo and cannot be combined with --suggest or --ask")
+	}
+	opts := route.HomeOpts{ConfirmMoveOutOfClient: *confirm, Unpin: *unpin, Logf: func(format string, a ...any) {
 		fmt.Fprintf(errw, format+"\n", a...)
 	}}
 	apply := func(target string) int {
@@ -140,6 +144,10 @@ func routeHome(args []string, in io.Reader, out, errw io.Writer) int {
 			return fail("%v", err)
 		}
 		switch {
+		case *unpin && !ch.Changed:
+			fmt.Fprintln(out, "home folder: no pin to remove")
+		case *unpin:
+			fmt.Fprintln(out, "home pin removed; the folder now routes by the other rules\nRestart the daemon to apply it.")
 		case !ch.Changed:
 			fmt.Fprintf(out, "home folder: unchanged (%s)\n", describeTarget(target))
 		default:
@@ -183,12 +191,16 @@ func routeHome(args []string, in io.Reader, out, errw io.Writer) int {
 			}
 		}
 		return apply(choice)
+	case *unpin:
+		return apply("")
 	case len(pos) == 1:
 		return apply(pos[0])
 	}
 	pin, has := f.HomePin(hf)
 	eff := f.Effective(hf)
-	if has {
+	if has && pin == "" {
+		fmt.Fprintln(out, "home folder: pinned: deny")
+	} else if has {
 		fmt.Fprintf(out, "home folder: pinned to %s\n", pin)
 	} else {
 		fmt.Fprintln(out, "home folder: no pin")

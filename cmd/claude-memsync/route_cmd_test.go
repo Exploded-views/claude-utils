@@ -89,12 +89,21 @@ func TestRouteHome_SetReplaceDenyAndShow(t *testing.T) {
 		t.Fatal("deny failed")
 	}
 	f = routesOf(t, p)
-	if len(f.Routes) != 1 || f.Routes[0].Folder != "-x" {
-		t.Fatalf("pin not removed: %+v", f.Routes)
+	if len(f.Routes) != 2 || !f.Routes[0].Deny || f.Routes[0].Folder != hf {
+		t.Fatalf("deny pin not written: %+v", f.Routes)
 	}
 	_, out, _ = runRouteCmd(t, "", false, "home")
-	if !strings.Contains(out, "denied") {
+	if !strings.Contains(out, "pinned: deny") || !strings.Contains(out, "denied") {
 		t.Fatalf("show after deny: %q", out)
+	}
+	if code, _, e := runRouteCmd(t, "", false, "home", "--unpin"); code != 0 {
+		t.Fatalf("unpin: %s", e)
+	}
+	if f = routesOf(t, p); len(f.Routes) != 1 || f.Routes[0].Folder != "-x" {
+		t.Fatalf("pin not removed: %+v", f.Routes)
+	}
+	if code, _, _ := runRouteCmd(t, "", false, "home", "--unpin", "lab"); code == 0 {
+		t.Fatal("--unpin with a repo accepted")
 	}
 }
 
@@ -233,8 +242,8 @@ func TestRouteHome_AskChoices(t *testing.T) {
 	if code, _, e := runRouteCmd(t, denyN+"\n", true, "home", "--ask"); code != 0 {
 		t.Fatalf("%s", e)
 	}
-	if len(routesOf(t, p).Routes) != 0 {
-		t.Fatalf("deny by number: %+v", routesOf(t, p).Routes)
+	if r := routesOf(t, p).Routes; len(r) != 1 || !r[0].Deny {
+		t.Fatalf("deny by number: %+v", r)
 	}
 	// Junk is refused.
 	if code, _, _ := runRouteCmd(t, "zzz\n", true, "home", "--ask"); code == 0 {
@@ -392,5 +401,22 @@ func TestRouteInherit_RefusesWhenFileChangedAfterTheDiff(t *testing.T) {
 	}
 	if f := routesOf(t, p); len(f.Routes) != 1 || f.Routes[0].Repo != "client-a" {
 		t.Fatalf("file overwritten: %+v", f.Routes)
+	}
+}
+
+func TestRouteHome_UnpinNeedsConsentOutOfClient(t *testing.T) {
+	_, hf := homeHost(t, stdKinds, nil)
+	runRouteCmd(t, "", false, "home", "client-a")
+	p := os.Getenv(routesEnv)
+	f := routesOf(t, p)
+	f.Routes = append(f.Routes, route.Rule{Folder: hf + "*", Repo: "projects"})
+	b, _ := json.Marshal(f)
+	os.WriteFile(p, b, 0600)
+	code, _, e := runRouteCmd(t, "", false, "home", "--unpin")
+	if code == 0 || !strings.Contains(e, "--confirm-move-out-of-client") {
+		t.Fatalf("%d %s", code, e)
+	}
+	if code, _, e := runRouteCmd(t, "", false, "home", "--unpin", "--confirm-move-out-of-client"); code != 0 {
+		t.Fatal(e)
 	}
 }
