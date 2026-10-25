@@ -168,7 +168,7 @@ func writeFile(t *testing.T, dir, name, body string) string {
 
 func TestRunCheckExitCodesAndTable(t *testing.T) {
 	dir := t.TempDir()
-	prof := writeFile(t, dir, "cover.out", "mode: set\nexample.test/m/a/x.go:1.1,2.2 10 1\n")
+	prof := writeFile(t, dir, "cover.out", "mode: set\nexample.test/m/a/x.go:1.1,2.2 5 1\nexample.test/m/a/x.go:3.1,4.2 5 0\n")
 	good := writeFile(t, dir, "good.json", `{"`+pkgA+`": 10.0}`)
 	bad := writeFile(t, dir, "bad.json", `{"`+pkgA+`": 99.0}`)
 
@@ -196,14 +196,14 @@ func TestRunCheckExitCodesAndTable(t *testing.T) {
 
 func TestRunRatchetWritesFloorsAndOut(t *testing.T) {
 	dir := t.TempDir()
-	prof := writeFile(t, dir, "cover.out", "mode: set\nexample.test/m/a/x.go:1.1,2.2 10 1\n")
+	prof := writeFile(t, dir, "cover.out", "mode: set\nexample.test/m/a/x.go:1.1,2.2 5 1\nexample.test/m/a/x.go:3.1,4.2 5 0\n")
 	fl := writeFile(t, dir, "f.json", `{"`+pkgA+`": 10.0}`)
 	var out, errb bytes.Buffer
 	if code := run([]string{"ratchet", "-profile", prof, "-floors", fl}, &out, &errb); code != 0 {
 		t.Fatalf("code %d err %s", code, errb.String())
 	}
 	b, _ := os.ReadFile(fl)
-	if !strings.Contains(string(b), `"`+pkgA+`": 100.0`) {
+	if !strings.Contains(string(b), `"`+pkgA+`": 50.0`) {
 		t.Errorf("floors not raised: %s", b)
 	}
 	// -out leaves the input alone
@@ -215,7 +215,7 @@ func TestRunRatchetWritesFloorsAndOut(t *testing.T) {
 	if b, _ := os.ReadFile(fl2); !strings.Contains(string(b), "10.0") {
 		t.Errorf("input changed: %s", b)
 	}
-	if b, _ := os.ReadFile(dst); !strings.Contains(string(b), "100.0") {
+	if b, _ := os.ReadFile(dst); !strings.Contains(string(b), "50.0") {
 		t.Errorf("out not written: %s", b)
 	}
 }
