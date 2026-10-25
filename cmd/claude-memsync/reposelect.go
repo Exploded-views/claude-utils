@@ -87,7 +87,9 @@ func resolveRepo(sel repoSel, explicit bool) (cfg config.Config, name string, er
 		}
 		return c, sel.Repo, nil
 	case sel.Config != "":
-		cfg, err = loadDistillConfig(sel.Config)
+		// An explicit path is never replaced by defaults: a typo must not
+		// act on the default repo.
+		cfg, err = config.Load(sel.Config)
 		if err == nil && set != nil {
 			name = set.repoForSyncDir(cfg.SyncDir)
 		}
@@ -113,8 +115,10 @@ func resolveRepo(sel repoSel, explicit bool) (cfg config.Config, name string, er
 // isPersonalRepo reports whether cfg is the repo that holds the distilled
 // catalog: the personal repo of a routes file, or the only repo in single-repo
 // mode.
-func isPersonalRepo(cfg config.Config) bool {
-	path, ok, err := resolveRoutesPath("")
+func isPersonalRepo(cfg config.Config) bool { return isPersonalRepoIn("", cfg) }
+
+func isPersonalRepoIn(routesFlag string, cfg config.Config) bool {
+	path, ok, err := resolveRoutesPath(routesFlag)
 	if err != nil || !ok {
 		return true
 	}

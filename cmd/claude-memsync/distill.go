@@ -33,6 +33,10 @@ func runDistill(args []string) int {
 		fmt.Fprintln(os.Stderr, "distill:", err)
 		return 1
 	}
+	if !isPersonalRepoIn(*routesFlag, cfg) {
+		fmt.Fprintln(os.Stderr, "distill: the catalog lives in the personal repo; this repo is not it")
+		return 1
+	}
 	opts := distill.Options{
 		ProjectsDir:  cfg.ClaudeProjectsDir,
 		DistilledDir: cfg.DistilledPath(),

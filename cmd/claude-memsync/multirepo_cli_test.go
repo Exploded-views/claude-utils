@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -10,6 +12,7 @@ import (
 	"testing"
 
 	"filippo.io/age"
+	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/lock"
@@ -133,12 +136,16 @@ func TestRoutedDistill_RepoFlagTargetsThatRepoDefaultStaysPersonal(t *testing.T)
 	if !fileExists(idx("personal")) || fileExists(idx("projects")) {
 		t.Fatal("default distill must write the personal repo only")
 	}
-	os.Remove(idx("personal"))
-	if code, out := captureStdout(t, func() int { return runDistill([]string{"--repo", "projects"}) }); code != 0 {
-		t.Fatalf("--repo: %d %s", code, out)
+	// The catalog lives in the personal repo only.
+	if code, _ := captureStdout(t, func() int { return runDistill([]string{"--repo", "projects"}) }); code == 0 || fileExists(idx("projects")) {
+		t.Fatal("--repo of a non-personal repo must be refused and write nothing")
 	}
-	if !fileExists(idx("projects")) || fileExists(idx("personal")) {
-		t.Fatal("--repo projects must write the projects repo only")
+	if code, _ := captureStdout(t, func() int { return runDistill([]string{"--config", cfgs["projects"].Path()}) }); code == 0 || fileExists(idx("projects")) {
+		t.Fatal("--config of a non-personal repo must be refused too")
+	}
+	os.Remove(idx("personal"))
+	if code, out := captureStdout(t, func() int { return runDistill([]string{"--repo", "personal"}) }); code != 0 || !fileExists(idx("personal")) {
+		t.Fatalf("--repo personal: %d %s", code, out)
 	}
 	if code, _ := captureStdout(t, func() int { return runDistill([]string{"--repo", "nope"}) }); code == 0 {
 		t.Error("unknown repo must fail")
@@ -147,16 +154,16 @@ func TestRoutedDistill_RepoFlagTargetsThatRepoDefaultStaysPersonal(t *testing.T)
 		t.Error("--repo with --config must be refused")
 	}
 	// Pruning rewrites synced files: it takes that repo's lock, and only that repo's.
-	held, err := lock.Acquire(cfgs["projects"].SyncDir)
+	held, err := lock.Acquire(cfgs["personal"].SyncDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer held.Release()
-	if code, _ := captureStdout(t, func() int { return runDistill([]string{"--repo", "projects", "--prune"}) }); code == 0 {
+	if code, _ := captureStdout(t, func() int { return runDistill([]string{"--prune"}) }); code == 0 {
 		t.Error("prune under a held lock must be refused")
 	}
-	if code, _ := captureStdout(t, func() int { return runDistill([]string{"--prune"}) }); code != 0 {
-		t.Error("prune on personal must not care about projects' lock")
+	if code, _ := captureStdout(t, func() int { return runDistill([]string{"--dry-run"}) }); code != 0 {
+		t.Error("a dry run needs no lock")
 	}
 }
 
@@ -321,5 +328,138 @@ func TestInit_DistilledOnlyForPersonalOrLegacy(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cfgP.SyncDir, "distilled")); err == nil {
 		t.Error("init created distilled/ in a non-personal repo")
+	}
+}
+
+// A mistyped --config must fail, never fall back to the default repo.
+func TestExplicitMissingConfigIsAnError(t *testing.T) {
+	for _, routed := range []bool{false, true} {
+		if routed {
+			routedHost(t, []string{"personal", "projects"}, "personal", nil)
+		} else {
+			initEnv(t)
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("XDG_CONFIG_HOME", "")
+			t.Setenv(routesEnv, "")
+			// A default repo that a fallback would hit.
+			def := config.Defaults()
+			if err := os.MkdirAll(def.SyncDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := config.Save(def); err != nil {
+				t.Fatal(err)
+			}
+		}
+		typo := filepath.Join(t.TempDir(), "typo", "config.json")
+		if code, _, errs := runRcpt("--config", typo, "add", newAgeKey(t)); code == 0 || !strings.Contains(errs, "typo") {
+			t.Errorf("routed=%v recipients --config typo: exit %d %q", routed, code, errs)
+		}
+		if code, _ := captureStdout(t, func() int { return runDistill([]string{"--config", typo, "--prune"}) }); code == 0 {
+			t.Errorf("routed=%v distill --prune --config typo must fail", routed)
+		}
+		if routed {
+			if _, err := os.Stat(filepath.Join(filepath.Dir(typo))); err == nil {
+				t.Error("nothing may be created for a typo")
+			}
+		}
+	}
+}
+
+// With no identity, a real edit must still be reported, never hidden as
+// "unchanged" because both ends failed to decrypt the same way.
+func TestHook_UndecryptableChangeIsStillReported(t *testing.T) {
+	cfg, repo, _ := agedClone(t)
+	const dir = "-home-alice-src-app/memory/"
+	addNotes(t, cfg.Path(), map[string]string{dir + "a.md": "alpha\n"})
+	in := hookJSON("s1", "/home/alice/src/app", "UserPromptSubmit")
+	args := []string{"--config", cfg.Path(), "--hook"}
+	runHook(t, in, args...) // baseline
+	addNotes(t, cfg.Path(), map[string]string{dir + "a.md": "edited\n"})
+	if err := os.Remove(agecrypt.IdentityPath(repo)); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errs := runHook(t, in, args...)
+	if code != 0 || !strings.Contains(out, "a.md") {
+		t.Errorf("exit %d stdout %q stderr %q: an unreadable change must be reported", code, out, errs)
+	}
+}
+
+func captureStderr(t *testing.T, f func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	f()
+	w.Close()
+	os.Stderr = old
+	b, _ := io.ReadAll(r)
+	return string(b)
+}
+
+func TestInit_NonPersonalRepoPrintsNoCatalogHint(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "projects"}, "personal", nil)
+	for name, want := range map[string]bool{"projects": false, "personal": true} {
+		c, _ := initFixture(t)
+		cfg := cfgs[name]
+		os.RemoveAll(cfg.SyncDir)
+		cfg.RemoteURL, cfg.ClaudeProjectsDir, cfg.MergeDriverPath = c.RemoteURL, c.ClaudeProjectsDir, c.MergeDriverPath
+		t.Setenv("HOME", filepath.Dir(filepath.Dir(cfg.SyncDir)))
+		errs := captureStderr(t, func() {
+			if err := bootstrapOwned(cfg, false, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if got := strings.Contains(errs, "distilled") || strings.Contains(errs, "/distill skills"); got != want {
+			t.Errorf("%s: catalog hint shown = %v, want %v:\n%s", name, got, want, errs)
+		}
+	}
+}
+
+func TestRoutedDoctor_TokenFileAppliesToEveryRepo(t *testing.T) {
+	const tok = "routed-file-token"
+	seen := ""
+	privateRouted(t, map[string]string{
+		"a": "git@github.com:Org/mem-project-a.git",
+		"b": "git@github.com:Org/mem-project-b.git",
+	}, func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Get("Authorization")
+		routedAPI("")(w, r)
+	})
+	t.Setenv("MEMSYNC_GITHUB_TOKEN", "")
+	tf := filepath.Join(t.TempDir(), "tok")
+	os.WriteFile(tf, []byte(tok+"\n"), 0o600)
+	var out, errb bytes.Buffer
+	if code := doctorCmd(&out, &errb, []string{"--org", "Org"}); code == 0 {
+		t.Fatal("without any token the routed doctor must fail")
+	}
+	out.Reset()
+	errb.Reset()
+	if code := doctorCmd(&out, &errb, []string{"--org", "Org", "--token-file", tf}); code != 0 {
+		t.Fatalf("exit %d: %s %s", code, out.String(), errb.String())
+	}
+	if !strings.Contains(seen, tok) {
+		t.Errorf("API saw %q", seen)
+	}
+}
+
+func TestStatus_SingleRepoLoopFailedAndUnknownServiceError(t *testing.T) {
+	initEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv(routesEnv, "")
+	old := statusFn
+	t.Cleanup(func() { statusFn = old })
+	cfg := config.Defaults()
+	statusFn = func() (string, error) { return "running", nil }
+	failed := loopFailedPath(cfg.SyncDir)
+	os.MkdirAll(filepath.Dir(failed), 0o700)
+	os.WriteFile(failed, []byte("2026-10-25T00:00:00Z boom\n"), 0o600)
+	if code, out := captureStdout(t, func() int { return runStatus(nil) }); code == 0 || !strings.Contains(out, "boom") {
+		t.Errorf("single repo with a failed loop: exit %d\n%s", code, out)
+	}
+	os.Remove(failed)
+	statusFn = func() (string, error) { return "", errors.New("dbus gone") }
+	if code, out := captureStdout(t, func() int { return runStatus(nil) }); code == 0 || !strings.Contains(out, "dbus gone") {
+		t.Errorf("unknown service error: exit %d\n%s", code, out)
 	}
 }

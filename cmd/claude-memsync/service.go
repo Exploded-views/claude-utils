@@ -241,18 +241,27 @@ var statusFn = statusTask
 // when a repo is in an error state or the routing cannot be read.
 func runStatus(args []string) int {
 	st, err := statusFn()
+	code := 0
 	switch {
 	case errors.Is(err, service.ErrNotInstalled):
 		fmt.Println("service: not installed")
 	case err != nil:
 		fmt.Printf("service: unknown (%v)\n", err)
+		code = 1
 	default:
 		fmt.Println(st)
 	}
-	if handled, code := routedStatus(); handled {
+	if handled, c := routedStatus(); handled {
+		if c > code {
+			code = c
+		}
 		return code
 	}
 	if cfg, err := loadDistillConfig(""); err == nil {
+		if b, err := os.ReadFile(loopFailedPath(cfg.SyncDir)); err == nil {
+			fmt.Println("loop stopped, restarting with backoff: " + strings.TrimSpace(string(b)))
+			code = 1
+		}
 		if line := pausedLine(cfg); line != "" {
 			fmt.Println(line)
 		}
@@ -263,7 +272,7 @@ func runStatus(args []string) int {
 			fmt.Println(line)
 		}
 	}
-	return 0
+	return code
 }
 
 // routedStatus prints the routing part of status. handled is false only when no
