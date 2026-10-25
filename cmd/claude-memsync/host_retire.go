@@ -109,6 +109,8 @@ func (hc *hostCtx) planRetire(c *ghguard.Client, org, label string) (retirePlan,
 			}
 		case others == 0:
 			plan.Cannot = append(plan.Cannot, cannotItem{n, "the retired host is the only recipient there, so no one could read it afterwards"})
+		case l.Cfg.ReadOnly:
+			plan.Cannot = append(plan.Cannot, cannotItem{n, "this host is a read-only member of the repo and never commits"})
 		case agecrypt.CheckKeyed(repo) != nil:
 			plan.Cannot = append(plan.Cannot, cannotItem{n, "this host cannot read the repo, so it cannot re-encrypt it"})
 		default:
@@ -123,6 +125,10 @@ func (hc *hostCtx) planRetire(c *ghguard.Client, org, label string) (retirePlan,
 		if h, ok := reg[label]; ok {
 			plan.InRegistry = true
 			plan.CheckKey = h.CheckKey
+			if hc.registryReadOnly {
+				plan.InRegistry = false
+				plan.Cannot = append(plan.Cannot, cannotItem{"registry", "this host is a read-only member of the registry; remove hosts/" + label + "/ from a writable host"})
+			}
 		}
 	}
 	return plan, nil

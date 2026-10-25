@@ -1382,6 +1382,31 @@ no key material is ever printed. With `--apply`:
 Retiring this host's own label is refused; run it from another host. A repeat run
 is safe: keys already gone are counted, and recipients already removed are skipped.
 
+### Read-only membership
+
+    claude-memsync init --remote <url> --read-only
+
+A read-only member pulls and applies notes but never writes back. The daemon pulls
+on its usual interval and copies what arrived into the Claude tree (new notes,
+edits and deletions), and that is all: it mirrors nothing from `~/.claude`, makes no
+commit and no push. Every command that would commit refuses with a clear message
+(`recipients add|remove`, `relate`, `unrelate`, `route publish`, `host check-key`);
+`recipients accept` only pins the reviewed set and does not re-encrypt. `status`
+shows `read-only`. The setting is `readOnly: true` in config.json; it is kept
+across a re-init, so an `init --force` never makes a read-only host writable. The
+remote must already hold the repo: a read-only host cannot make its first commit.
+A note you write locally on a read-only host stays local, and a pulled version of
+the same note replaces it.
+
+Give such a host a deploy key **without** write access (`gh repo deploy-key add
+<key-file> -t <label>`, leaving out `-w`), so GitHub itself refuses a push. In
+`host list` its keys show as `ro`. When a read-only host is retired, repos it is a
+member of are listed under "cannot re-encrypt here" (it never commits).
+
+*TODO(join):* this base has no `join` command. When one exists, `join request
+--read-only` should mark the request so the accepting member's output reminds them
+to add the deploy key without `-w`.
+
 ### Check-App keys
 
 A host may have its own private key for a GitHub App used for checks. Record its

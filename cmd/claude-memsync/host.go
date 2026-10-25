@@ -36,8 +36,11 @@ type hostCtx struct {
 	org         string
 	local       []localRepo
 	registryDir string
-	ownLabels   []string
-	now         time.Time // zero: time.Now()
+	// registryReadOnly: this host is a read-only member of the registry repo
+	// and so never commits into it.
+	registryReadOnly bool
+	ownLabels        []string
+	now              time.Time // zero: time.Now()
 }
 
 func (hc *hostCtx) clock() time.Time {
@@ -106,7 +109,18 @@ func loadHostCtx(sel repoSel) (*hostCtx, error) {
 		add("", cfg)
 	}
 	hc.ownLabels = uniq(hc.ownLabels)
+	for _, l := range hc.local {
+		if hc.registryDir != "" && sameDir(l.Dir, hc.registryDir) && l.Cfg.ReadOnly {
+			hc.registryReadOnly = true
+		}
+	}
 	return hc, nil
+}
+
+func sameDir(a, b string) bool {
+	ra, err1 := resolvePath(a)
+	rb, err2 := resolvePath(b)
+	return err1 == nil && err2 == nil && ra == rb
 }
 
 func uniq(in []string) []string {
@@ -435,6 +449,10 @@ func hostCheckKey(hc *hostCtx, stdout, stderr io.Writer, args []string) int {
 	}
 	if hc.registryDir == "" {
 		fmt.Fprintln(stderr, "host check-key: no registry configured (routes.json \"registry\")")
+		return 1
+	}
+	if hc.registryReadOnly {
+		fmt.Fprintln(stderr, "host check-key: this host is a read-only member of the registry and never commits; record it from a writable host")
 		return 1
 	}
 	if *clear {

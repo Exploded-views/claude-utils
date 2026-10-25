@@ -84,6 +84,11 @@ type Config struct {
 	// false (upstream behaviour); `init --archive-deletes` sets it.
 	ArchiveDeletes bool `json:"archiveDeletes"`
 
+	// ReadOnly makes this a read-only member: the daemon pulls and propagates
+	// notes into the Claude tree but never commits or pushes, and every command
+	// that would commit refuses. Set by `init --read-only`.
+	ReadOnly bool `json:"readOnly,omitempty"`
+
 	// HostLabel is the name this host goes by in deploy-key titles, recipient
 	// comments ("# host:<label>") and the registry (hosts/<label>/). A name
 	// you choose, never the machine's host name. Set by `init --host-label`.

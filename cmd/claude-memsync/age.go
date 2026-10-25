@@ -86,6 +86,10 @@ func recipientsCmd(stdout, stderr io.Writer, args []string) int {
 		fmt.Fprintln(stderr, "recipients: the sync repo is not encrypted (init it with --encrypt)")
 		return 1
 	}
+	if cfg.ReadOnly && (args[0] == "add" || args[0] == "remove") {
+		fmt.Fprintln(stderr, "recipients: this host is read-only and never commits; run it on a writable member host")
+		return 1
+	}
 	switch args[0] {
 	case "list":
 		keys, err := agecrypt.ListRecipients(cfg.SyncDir)
@@ -109,7 +113,11 @@ func recipientsCmd(stdout, stderr io.Writer, args []string) int {
 			fmt.Fprintln(stderr, "recipients: review the change above; if you trust every added key, run `claude-memsync recipients accept --yes`")
 			return 1
 		}
-		if err := withSyncLock(cfg.SyncDir, func() error { return agecrypt.AcceptRecipients(repo) }); err != nil {
+		accept := agecrypt.AcceptRecipients
+		if cfg.ReadOnly {
+			accept = agecrypt.PinCurrent // pin, but never re-encrypt and commit
+		}
+		if err := withSyncLock(cfg.SyncDir, func() error { return accept(repo) }); err != nil {
 			return recipientsFail(stderr, err)
 		}
 		fmt.Fprintln(stderr, "recipients accepted; syncing resumes on the next cycle")
@@ -161,6 +169,14 @@ func recipientsFail(stderr io.Writer, err error) int {
 // encryptionLines is the encryption part of `status`: nothing for an
 // unencrypted repo; otherwise whether this host can read the repo, and any
 // unreviewed upstream change to the recipients.
+// readOnlyLine is the status line of a read-only member, "" for a writable host.
+func readOnlyLine(cfg config.Config) string {
+	if !cfg.ReadOnly {
+		return ""
+	}
+	return "read-only: this host pulls notes into the Claude tree but never commits or pushes"
+}
+
 func encryptionLines(cfg config.Config) []string {
 	repo := gitwt.New(cfg.SyncDir)
 	if !repo.IsRepo() || !agecrypt.Enabled(repo) {

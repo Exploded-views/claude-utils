@@ -59,6 +59,7 @@ func runInit(args []string) int {
 	ghHost := flags.String("github-host", "", "git host remotes must use (default github.com); saved to config")
 	tokenFile := flags.String("token-file", "", "file holding a GitHub token for the private-only check (or set MEMSYNC_GITHUB_TOKEN)")
 	hostLabel := flags.String("host-label", "", "a name you choose for this host (such as laptop-2): titles its deploy keys, labels its age recipient, names it in the registry; saved to config")
+	readOnly := flags.Bool("read-only", false, "read-only member: pull and apply notes into the Claude tree, never commit or push (the remote must already hold the repo); saved to config")
 	force := flags.Bool("force", false, "re-init even if sync-dir already exists")
 	archiveDeletes := flags.Bool("archive-deletes", false, "archive instead of delete: a note removed from a Claude folder moves to archive/ in the repo (sets archiveDeletes in config.json)")
 	denylist := flags.String("denylist", "", "UTF-8 file of regexes (one per line) to install as the denylist before the first commit")
@@ -98,6 +99,7 @@ func runInit(args []string) int {
 	}
 	cfg := config.Defaults()
 	cfg.HostLabel = *hostLabel
+	cfg.ReadOnly = *readOnly
 	if *syncDir != "" {
 		cfg.SyncDir = *syncDir
 	}
@@ -272,6 +274,10 @@ func bootstrapFull(cfg config.Config, force bool, denylist []byte, enc *encryptS
 		}
 	}
 
+	if cfg.ReadOnly && !repo.HasHead() {
+		return fmt.Errorf("the remote holds no commits and this host is read-only: a read-only host cannot create the repo's first commit; init it from a writable host first")
+	}
+
 	// Private-only: git must push where we verified, not where an
 	// insteadOf rule sends it. Nothing has been committed or pushed yet.
 	if cfg.PrivateOnly {
@@ -322,6 +328,7 @@ func bootstrapFull(cfg config.Config, force bool, denylist []byte, enc *encryptS
 	// Step 4: write config.json. A re-init keeps the guard settings of the
 	// config it replaces: the list is not an init flag, and dropping it would
 	// switch the foreign-writer guard off.
+	cfg = mergeReinit(cfg, cfg.Path())
 	if old, err := config.Load(cfg.Path()); err == nil {
 		if len(cfg.ForeignWriters) == 0 {
 			cfg.ForeignWriters = old.ForeignWriters
@@ -329,12 +336,7 @@ func bootstrapFull(cfg config.Config, force bool, denylist []byte, enc *encryptS
 		if cfg.StartQuietSec == nil {
 			cfg.StartQuietSec = old.StartQuietSec
 		}
-		if cfg.HostLabel == "" {
-			cfg.HostLabel = old.HostLabel
-		}
-		if cfg.CheckKeyWarn == 0 {
-			cfg.CheckKeyWarn = old.CheckKeyWarn
-		}
+
 	}
 	// init is the migration moment: the next start gets the quiet window again.
 	_ = os.Remove(quietMarker(cfg.SyncDir))
@@ -363,23 +365,39 @@ func bootstrapFull(cfg config.Config, force bool, denylist []byte, enc *encryptS
 	// First-time init: no manifest yet. Pass nil so Reconcile doesn't try
 	// to propagate deletes (with no prior state, "missing in Claude" can't
 	// be distinguished from "this PC never had it").
-	report, err := syncpkg.Reconcile(roots, nil)
-	if err != nil {
-		return fmt.Errorf("reconcile: %w", err)
+	if cfg.ReadOnly {
+		n, err := syncpkg.PopulateClaude(roots)
+		if err != nil {
+			return fmt.Errorf("copy notes into the Claude tree: %w", err)
+		}
+		if n > 0 {
+			fmt.Fprintf(os.Stderr, "copied %d files mirror → Claude\n", n)
+		}
+	} else {
+		report, err := syncpkg.Reconcile(roots, nil)
+		if err != nil {
+			return fmt.Errorf("reconcile: %w", err)
+		}
+		printReport(report)
 	}
-	printReport(report)
 
 	// Step 6: stage + commit + push.
-	committed, err := syncpkg.CommitMirror(repo, cfg, "init: bootstrap from "+hostname())
-	if err != nil {
-		return fmt.Errorf("git commit: %w", err)
-	}
-	if committed {
-		fmt.Fprintln(os.Stderr, "committed bootstrap snapshot")
+	committed := false
+	if cfg.ReadOnly {
+		fmt.Fprintln(os.Stderr, "read-only: nothing committed or pushed")
 	} else {
-		fmt.Fprintln(os.Stderr, "no local changes to commit")
+		var err error
+		committed, err = syncpkg.CommitMirror(repo, cfg, "init: bootstrap from "+hostname())
+		if err != nil {
+			return fmt.Errorf("git commit: %w", err)
+		}
+		if committed {
+			fmt.Fprintln(os.Stderr, "committed bootstrap snapshot")
+		} else {
+			fmt.Fprintln(os.Stderr, "no local changes to commit")
+		}
 	}
-	if cloned || committed {
+	if !cfg.ReadOnly && (cloned || committed) {
 		if enc != nil {
 			if err := agecrypt.PushGuard(repo, defaultBranch); err != nil {
 				return err
@@ -412,6 +430,27 @@ func bootstrapFull(cfg config.Config, force bool, denylist []byte, enc *encryptS
 		printDistillPermissionHint(cfg)
 	}
 	return nil
+}
+
+// mergeReinit keeps, across a re-init, the settings init has no flag to clear:
+// a read-only host stays read-only (a re-init must never make it writable),
+// and the host label and check-key threshold survive.
+func mergeReinit(cfg config.Config, oldPath string) config.Config {
+	old, err := config.Load(oldPath)
+	if err != nil {
+		return cfg
+	}
+	if old.ReadOnly && !cfg.ReadOnly {
+		cfg.ReadOnly = true
+		fmt.Fprintln(os.Stderr, "init: this host was read-only and stays so; edit readOnly in config.json to change that")
+	}
+	if cfg.HostLabel == "" {
+		cfg.HostLabel = old.HostLabel
+	}
+	if cfg.CheckKeyWarn == 0 {
+		cfg.CheckKeyWarn = old.CheckKeyWarn
+	}
+	return cfg
 }
 
 // prepareIdentity makes sure the identity file exists (generating an X25519 key

@@ -294,6 +294,11 @@ func routePublish(args []string, out, errw io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
+	if rf, lerr := route.Load(path); lerr == nil {
+		if dir, derr := route.RegistryDir(rf, *reg); derr == nil && syncDirReadOnly(dir) {
+			return fail(fmt.Errorf("this host is a read-only member of the registry and never commits; publish from a writable host"))
+		}
+	}
 	hf, _ := route.HomeFolder()
 	hd, _ := os.UserHomeDir()
 	p, err := route.PublishTemplate(path, *reg, *label, hf, hd)

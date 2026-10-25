@@ -108,7 +108,7 @@ func (l *Loop) Run(ctx context.Context) error {
 	// stopped rebase or merge holds conflict markers, and the parked mirror
 	// copies of an unfinished park differ from the Claude ones.
 	if !l.held() && l.startCycle(repo, roots) {
-		if _, err := Reconcile(roots, manifest); err != nil {
+		if err := l.reconcile(roots, manifest); err != nil {
 			l.logln("initial reconcile:", newPathGuard(l.Cfg).Err(err))
 		}
 	}
@@ -170,6 +170,17 @@ func (l *Loop) Run(ctx context.Context) error {
 			l.pullTick(repo, roots)
 		}
 	}
+}
+
+// reconcile is Reconcile, except on a read-only host, where notes only flow
+// from the mirror into the Claude tree.
+func (l *Loop) reconcile(roots Roots, m *Manifest) error {
+	if l.Cfg.ReadOnly {
+		_, err := PopulateClaude(roots)
+		return err
+	}
+	_, err := Reconcile(roots, m)
+	return err
 }
 
 func (l *Loop) held() bool { return l.Hold != nil && l.Hold() }
@@ -281,7 +292,7 @@ func (l *Loop) pullTick(repo *gitwt.Repo, roots Roots) {
 		m = NewManifest()
 	}
 	if !l.held() && l.startCycle(repo, roots) {
-		if _, err := Reconcile(roots, m); err != nil {
+		if err := l.reconcile(roots, m); err != nil {
 			l.logln("reconcile:", newPathGuard(l.Cfg).Err(err))
 		}
 	}
@@ -300,8 +311,8 @@ func (l *Loop) pullTick(repo *gitwt.Repo, roots Roots) {
 // (handled, error). handled=true means the change was relevant and should
 // trigger a debounced flush.
 func (l *Loop) handleEvent(watcher *fsnotify.Watcher, roots Roots, ev fsnotify.Event) (bool, error) {
-	if l.held() {
-		return false, nil
+	if l.held() || l.Cfg.ReadOnly {
+		return false, nil // a read-only host mirrors nothing it could not commit
 	}
 	rel, err := filepath.Rel(roots.Claude, ev.Name)
 	if err != nil {
@@ -409,7 +420,7 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	}
 	clearPaused(repo)
 	logUnreviewed(repo)
-	if includeLocal {
+	if includeLocal && !l.Cfg.ReadOnly {
 		_, err := CommitMirror(repo, l.Cfg, fmt.Sprintf("auto: %s @ %s", l.Hostname, time.Now().UTC().Format(time.RFC3339)))
 		// Unreviewed recipients stop commits and pushes; pulling goes on.
 		if err != nil && !errors.Is(err, agecrypt.ErrRecipientsUnreviewed) {
@@ -500,6 +511,9 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 		return conflictErr // nothing to push: origin is ahead
 	}
 
+	if l.Cfg.ReadOnly {
+		return nil // pulled and propagated; a read-only host never pushes
+	}
 	if l.PushAllowed != nil && !l.PushAllowed() {
 		return nil
 	}
