@@ -16,7 +16,7 @@ import (
 
 var (
 	labelRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
-	fpRe    = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}$`)
+	fpRe    = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}=?$`)
 	slugRe  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,63}$`)
 )
 
@@ -26,6 +26,15 @@ func ValidLabel(s string) bool { return labelRe.MatchString(s) }
 // ValidFingerprint reports whether s is a SHA256:... key fingerprint as GitHub
 // shows it. Anything else, key text in particular, is refused.
 func ValidFingerprint(s string) bool { return fpRe.MatchString(s) }
+
+// CanonicalFingerprint returns the padded form GitHub shows ("SHA256:" and 43
+// base64 characters and "="), accepting it with or without the padding.
+func CanonicalFingerprint(s string) (string, bool) {
+	if !fpRe.MatchString(s) {
+		return "", false
+	}
+	return strings.TrimSuffix(s, "=") + "=", true
+}
 
 // ValidSlug reports whether s can be a GitHub App slug.
 func ValidSlug(s string) bool { return slugRe.MatchString(s) }
@@ -58,7 +67,12 @@ func ReadRegistry(dir string) (map[string]RegHost, error) {
 		}
 		if b, err := os.ReadFile(filepath.Join(hd, "check-key")); err == nil {
 			var ck CheckKey
-			if json.Unmarshal(b, &ck) == nil && fpRe.MatchString(ck.Fingerprint) && slugRe.MatchString(ck.App) {
+			cf, ok := "", false
+			if json.Unmarshal(b, &ck) == nil {
+				cf, ok = CanonicalFingerprint(ck.Fingerprint)
+			}
+			if ok && slugRe.MatchString(ck.App) {
+				ck.Fingerprint = cf
 				h.CheckKey = &ck
 			} else {
 				h.Problem = "check-key file is not a SHA256 fingerprint and app slug"
@@ -105,9 +119,11 @@ func hostFile(dir, label, name string) (string, string, error) {
 // hosts/<label>/check-key and commits that file locally. Only a SHA256
 // fingerprint is accepted, never key text. It reports whether anything changed.
 func WriteCheckKey(dir, label string, ck CheckKey) (bool, error) {
-	if !fpRe.MatchString(ck.Fingerprint) {
-		return false, errors.New("the fingerprint must look like SHA256:<43 base64 characters>, as GitHub shows it; never the key itself")
+	cf, ok := CanonicalFingerprint(ck.Fingerprint)
+	if !ok {
+		return false, errors.New("the fingerprint must look like SHA256:<43 base64 characters>=, as GitHub shows it; never the key itself")
 	}
+	ck.Fingerprint = cf
 	if !slugRe.MatchString(ck.App) {
 		return false, errors.New("the app slug must be letters, digits and '-'")
 	}

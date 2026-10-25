@@ -679,6 +679,14 @@ newhome ck6
 runboot --host testhost --role homelab --yes --org-app-id 12345 --org-app-key-cmd "cat $BASE/app.pem"
 check "--org-app-id without --org-app is refused" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'go with --org-app'" _ "$OUT"
 
+newhome ck7
+prompt_setup
+printf '[{"name":"memsync-admin","appId":"999","org":"Exploded-views","keyCmd":["cat","/nonexistent"]}]\n' >"$H/.config/claude-memsync/apps.json"; chmod 600 "$H/.config/claude-memsync/apps.json"
+rundoc 1
+check "dry run with a pre-existing admin entry is refused" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'already has an entry named memsync-admin'" _ "$OUT"
+rundoc 2
+check "pre-existing admin entry: refused, nothing created, the entry is neither replaced nor deleted" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'already has an entry named memsync-admin' && ! grep -q 'repo create' '$STUB_DIR/gh.log' && grep -q '\"999\"' '$H/.config/claude-memsync/apps.json' && grep -q /nonexistent '$H/.config/claude-memsync/apps.json'" _ "$OUT"
+
 echo "--- check key recorded in the registry"
 newhome reg
 prompt_setup
@@ -690,7 +698,7 @@ rundoc 2
 [ "$RC" -eq 0 ] || echo "$OUT" | tail -20
 check "registry configured: the run keeps it and exits 0" bash -c "[ $RC -eq 0 ] && grep -q '\"registry\"' '$H/.config/claude-memsync/routes.json'" _ "$OUT"
 check "registry configured: host check-key called with the fingerprint and the app slug" has "$STUB_DIR/memsync.log" 'host check-key --fingerprint SHA256:[^ ]+ --app memsync-check'
-check "registry configured: hosts/testhost/check-key committed with the fingerprint, no key" bash -c "git -C '$H/registry' show HEAD:hosts/testhost/check-key | grep -q 'SHA256:' && git -C '$H/registry' show HEAD:hosts/testhost/check-key | grep -q memsync-check && ! git -C '$H/registry' log -p | grep -qF -- '$(sed -n 2p "$BASE/check.pem")'"
+check "registry configured: hosts/testhost/check-key committed with the fingerprint, no key" bash -c "git -C '$H/registry' show HEAD:hosts/testhost/check-key | grep -qE 'SHA256:[A-Za-z0-9+/]{43}=' && git -C '$H/registry' show HEAD:hosts/testhost/check-key | grep -q memsync-check && ! git -C '$H/registry' log -p | grep -qF -- '$(sed -n 2p "$BASE/check.pem")'"
 
 echo
 echo "passed=$PASS failed=$FAIL pending=$PENDING"

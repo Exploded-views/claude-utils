@@ -94,7 +94,7 @@ func MintWith(ctx context.Context, p Params) (Token, error) {
 	if err != nil {
 		return Token{}, err
 	}
-	if p.Fingerprint != "" && Fingerprint(&key.PublicKey) != p.Fingerprint {
+	if p.Fingerprint != "" && !SameFingerprint(Fingerprint(&key.PublicKey), p.Fingerprint) {
 		return Token{}, errFingerprint
 	}
 	jwt, err := signJWT(key, p.AppID, now())

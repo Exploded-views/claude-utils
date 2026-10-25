@@ -98,3 +98,28 @@ func TestAppValidateFingerprintFormat(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+func TestFingerprintAcceptedPaddedOrNot(t *testing.T) {
+	for _, fp := range []string{vectorFP, strings.TrimSuffix(vectorFP, "=")} {
+		a := App{Name: "a", AppID: "1", Org: "o", KeyFile: "/k", KeyFingerprint: fp}
+		if err := a.Validate(); err != nil {
+			t.Errorf("%q: %v", fp, err)
+		}
+	}
+	if (App{Name: "a", AppID: "1", Org: "o", KeyFile: "/k", KeyFingerprint: vectorFP + "="}).Validate() == nil {
+		t.Error("double padding accepted")
+	}
+	if !SameFingerprint(vectorFP, strings.TrimSuffix(vectorFP, "=")) || SameFingerprint(vectorFP, "SHA256:"+strings.Repeat("A", 43)) {
+		t.Error("SameFingerprint")
+	}
+}
+
+func TestMintFingerprintMatchesEitherForm(t *testing.T) {
+	k := genKey(t)
+	gh := newFakeGH(t, &k.PublicKey)
+	for _, fp := range []string{Fingerprint(&k.PublicKey), strings.TrimSuffix(Fingerprint(&k.PublicKey), "=")} {
+		if _, err := MintWith(context.Background(), Params{AppID: "1", Key: pkcs1PEM(k), Org: testOrg, APIBase: gh.URL, Fingerprint: fp}); err != nil {
+			t.Errorf("%q refused: %v", fp, err)
+		}
+	}
+}

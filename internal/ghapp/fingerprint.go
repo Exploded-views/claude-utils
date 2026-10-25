@@ -7,9 +7,16 @@ import (
 	"encoding/base64"
 	"errors"
 	"regexp"
+	"strings"
 )
 
-var fpRE = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}=$`)
+// fpRE accepts a fingerprint with or without the trailing "=" padding.
+var fpRE = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}=?$`)
+
+// SameFingerprint compares two fingerprints after stripping a trailing "=".
+func SameFingerprint(a, b string) bool {
+	return strings.TrimSuffix(a, "=") == strings.TrimSuffix(b, "=")
+}
 
 // Fingerprint is the key fingerprint GitHub shows in an app's settings:
 // "SHA256:" and the standard base64 of the SHA-256 of the DER-encoded public

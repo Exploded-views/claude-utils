@@ -383,6 +383,15 @@ os.replace(tmp, p)
 PY
 }
 
+apps_has() { # name: is there an entry of that name?
+  python3 -I -c '
+import json, sys
+try:
+    sys.exit(0 if any(a.get("name") == sys.argv[2] for a in json.load(open(sys.argv[1]))) else 1)
+except Exception:
+    sys.exit(1)' "$APPS" "$1"
+}
+
 app_entry() { # name id keyfile|"" keycmd-json|"" [fingerprint]
   BS_N="$1" BS_I="$2" BS_F="$3" BS_C="$4" BS_P="${5:-}" BS_O="$ORG" BS_B="$APP_API_BASE" python3 -I -c '
 import json, os
@@ -398,12 +407,17 @@ print(json.dumps(e))'
 admin_entry_add() {
   [ -n "$ORG_APP_ID" ] || return 0
   if [ "$DRY_RUN" -eq 1 ]; then
+    if [ -e "$APPS" ] && apps_has "$ORG_APP"; then die "$APPS already has an entry named $ORG_APP; refusing to replace it"; fi
     say "  would add the app entry $ORG_APP to $APPS (key command only), and remove it when the run ends"
     return 0
   fi
-  apps_edit upsert "$ORG_APP" "$(app_entry "$ORG_APP" "$ORG_APP_ID" "" "$(split_args json "$ORG_APP_KEY_CMD")")"
+  # An entry the owner put there is never replaced, and so never deleted.
+  if [ -e "$APPS" ] && apps_has "$ORG_APP"; then
+    die "$APPS already has an entry named $ORG_APP; refusing to replace it (and delete it at the end). Drop --org-app-id/--org-app-key-cmd to use that entry, or remove it first."
+  fi
   ADMIN_WRITTEN=1
   trap admin_entry_remove EXIT
+  apps_edit upsert "$ORG_APP" "$(app_entry "$ORG_APP" "$ORG_APP_ID" "" "$(split_args json "$ORG_APP_KEY_CMD")")"
 }
 admin_entry_remove() {
   [ "$ADMIN_WRITTEN" -eq 1 ] || return 0
@@ -882,14 +896,13 @@ step_token_split() {
       apps_edit upsert "$CHECK_APP" "$(app_entry "$CHECK_APP" "$CHECK_APP_ID" "$CHECK_KEY_FILE" "" "$fp")"
       say "  wrote the $CHECK_APP entry to $APPS (0600) with key fingerprint $fp"
       if python3 -I -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("registry") else 1)' "$ROUTES" 2>/dev/null; then
-        rfp="${fp%=}"   # the registry keeps the 43-character form; apps.json keeps the padded one
-        if "$BIN/claude-memsync" host check-key --fingerprint "$rfp" --app "$slug"; then :; else
-          warn "could not record the check key in the registry; run: claude-memsync host check-key --fingerprint $rfp --app $slug (on a writable host)"
-          NEXT_STEPS+=("record the check key: claude-memsync host check-key --fingerprint $rfp --app $slug")
+        if "$BIN/claude-memsync" host check-key --fingerprint "$fp" --app "$slug"; then :; else
+          warn "could not record the check key in the registry; run: claude-memsync host check-key --fingerprint $fp --app $slug (on a writable host)"
+          NEXT_STEPS+=("record the check key: claude-memsync host check-key --fingerprint $fp --app $slug")
         fi
       else
         say "  no registry in routes.json: the check key is not recorded there"
-        NEXT_STEPS+=("when a registry is configured: claude-memsync host check-key --fingerprint ${fp%=} --app $slug")
+        NEXT_STEPS+=("when a registry is configured: claude-memsync host check-key --fingerprint $fp --app $slug")
       fi
     fi
   elif [ -f "$tf" ] && [ "$(stat -c %a "$tf" 2>/dev/null || stat -f %Lp "$tf")" = 600 ]; then

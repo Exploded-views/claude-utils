@@ -199,7 +199,7 @@ func TestReadRegistry(t *testing.T) {
 	if reg["vm-b"].Expiry.Format("2006-01-02") != "2026-03-04" {
 		t.Errorf("vm-b: %+v", reg["vm-b"])
 	}
-	if ck := reg["vm-c"].CheckKey; ck == nil || ck.Fingerprint != fp || ck.App != "my-check-app" {
+	if ck := reg["vm-c"].CheckKey; ck == nil || ck.Fingerprint != fp+"=" || ck.App != "my-check-app" {
 		t.Errorf("vm-c: %+v", reg["vm-c"])
 	}
 	if _, ok := reg["Bad_Label"]; ok {
@@ -247,6 +247,32 @@ func headCount(t *testing.T, dir string) string {
 	return strings.TrimSpace(string(out))
 }
 
+func TestCheckKeyFingerprintBothFormsStoreOnePaddedForm(t *testing.T) {
+	core := "SHA256:" + strings.Repeat("d", 43)
+	for _, in := range []string{core, core + "="} {
+		dir := newRegistryRepo(t)
+		if _, err := WriteCheckKey(dir, "vm-a", CheckKey{Fingerprint: in, App: "chk"}); err != nil {
+			t.Fatalf("%q: %v", in, err)
+		}
+		b, _ := os.ReadFile(filepath.Join(dir, "hosts", "vm-a", "check-key"))
+		if !strings.Contains(string(b), core+"=\"") || strings.Contains(string(b), core+"\"") {
+			t.Errorf("%q stored as %s", in, b)
+		}
+		if _, err := WriteCheckKey(dir, "vm-a", CheckKey{Fingerprint: core + "==", App: "chk"}); err == nil {
+			t.Error("double padding accepted")
+		}
+	}
+	// an older unpadded record on disk reads back in the canonical form
+	dir := newRegistryRepo(t)
+	hd := filepath.Join(dir, "hosts", "vm-b")
+	os.MkdirAll(hd, 0o700)
+	os.WriteFile(filepath.Join(hd, "check-key"), []byte(`{"fingerprint":"`+core+`","app":"chk"}`), 0o600)
+	reg, _ := ReadRegistry(dir)
+	if reg["vm-b"].CheckKey == nil || reg["vm-b"].CheckKey.Fingerprint != core+"=" {
+		t.Errorf("%+v", reg["vm-b"])
+	}
+}
+
 func TestWriteCheckKey_CommitsAndReadsBack(t *testing.T) {
 	dir := newRegistryRepo(t)
 	fp := "SHA256:" + strings.Repeat("c", 43)
@@ -255,7 +281,7 @@ func TestWriteCheckKey_CommitsAndReadsBack(t *testing.T) {
 		t.Fatal(changed, err)
 	}
 	reg, _ := ReadRegistry(dir)
-	if reg["vm-a"].CheckKey == nil || reg["vm-a"].CheckKey.Fingerprint != fp {
+	if reg["vm-a"].CheckKey == nil || reg["vm-a"].CheckKey.Fingerprint != fp+"=" {
 		t.Errorf("%+v", reg)
 	}
 	before := headCount(t, dir)

@@ -93,7 +93,7 @@ scripts/bootstrap.sh --host <label> --role <role> [--sha <commit>] [--org Explod
                      [--dry-run] [--yes]
 ```
 
-`--org-app-id` with `--org-app-key-cmd` adds the admin app's `apps.json` entry (a key command, never a key file) for the run and removes it when the script exits, whether it succeeded or not. `--check-app` needs `--check-app-id` and `--check-key-file`; see step 7b.
+`--org-app-id` with `--org-app-key-cmd` adds the admin app's `apps.json` entry (a key command, never a key file) for the run and removes it when the script exits, whether it succeeded or not. An existing entry of that name is never replaced: the script refuses instead. `--check-app` needs `--check-app-id` and `--check-key-file`; see step 7b.
 
 Roles (table at the top of the script):
 
