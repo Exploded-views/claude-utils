@@ -19,8 +19,9 @@ import (
 func runArchive(args []string) int { return archiveCmd(os.Stdout, os.Stderr, args) }
 
 const archiveUsage = `usage:
-  claude-memsync archive list [--since YYYY-MM-DD] [--config path] [--routes path]
-  claude-memsync archive search <term> [--show] [--config path] [--routes path]`
+  claude-memsync archive list [--since YYYY-MM-DD] [--repo name | --config path] [--routes path]
+  claude-memsync archive search <term> [--show] [--repo name | --config path] [--routes path]
+With a routes file and neither --repo nor --config, every repo is read and each line is labelled [repo].`
 
 func archiveCmd(stdout, stderr io.Writer, args []string) int {
 	if len(args) == 0 {
@@ -31,6 +32,7 @@ func archiveCmd(stdout, stderr io.Writer, args []string) int {
 	flags := flag.NewFlagSet("archive "+sub, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	cfgPath := flags.String("config", "", "path to config.json (default: ~/.claudesync/config.json)")
+	repoName := flags.String("repo", "", "with a routes file: read only this repo (a key of routes.json repos)")
 	routes := flags.String("routes", "", "path to routes.json (default: $"+routesEnv+", then ~/.config/claude-memsync/routes.json if it exists)")
 	since := flags.String("since", "", "list: only archive dates on or after this one")
 	show := flags.Bool("show", false, "search: print the matching lines, not only paths and line counts")
@@ -59,14 +61,14 @@ func archiveCmd(stdout, stderr io.Writer, args []string) int {
 		return 2
 	}
 
-	targets, err := archiveTargets(*cfgPath, *routes)
+	targets, err := archiveTargets(*repoName, *cfgPath, *routes)
 	if err != nil {
 		fmt.Fprintln(stderr, "archive:", err)
 		return 1
 	}
 	for _, t := range targets {
 		prefix := ""
-		if len(targets) > 1 {
+		if t.name != "" {
 			prefix = "[" + t.name + "] "
 		}
 		hide, hidden := t.hider(stderr), 0
@@ -143,13 +145,29 @@ func (t archiveTarget) hider(stderr io.Writer) func(string) bool {
 // archiveTargets are the repos to read: the one named by --config, else every
 // repo of the routes file this host has, else the default sync dir. Archives
 // are per repo, so each is read on its own.
-func archiveTargets(cfgPath, routesFlag string) ([]archiveTarget, error) {
-	if cfgPath != "" {
-		cfg, err := config.Load(cfgPath)
+func archiveTargets(repoName, cfgPath, routesFlag string) ([]archiveTarget, error) {
+	if repoName != "" || cfgPath != "" {
+		if repoName != "" && cfgPath != "" {
+			return nil, errors.New("--repo and --config both name a repo; give one")
+		}
+		if cfgPath != "" {
+			cfg, err := config.Load(cfgPath)
+			if err != nil {
+				return nil, err
+			}
+			name := ""
+			if path, ok, err := resolveRoutesPath(routesFlag); err == nil && ok {
+				if set, err := loadRouted(path); err == nil {
+					name = set.repoForSyncDir(cfg.SyncDir)
+				}
+			}
+			return []archiveTarget{{name, cfg.SyncDir, cfg.DenylistPath()}}, nil
+		}
+		cfg, name, err := resolveRepo(repoSel{Repo: repoName, Routes: routesFlag}, true)
 		if err != nil {
 			return nil, err
 		}
-		return []archiveTarget{{"", cfg.SyncDir, cfg.DenylistPath()}}, nil
+		return []archiveTarget{{name, cfg.SyncDir, cfg.DenylistPath()}}, nil
 	}
 	path, ok, err := resolveRoutesPath(routesFlag)
 	if err != nil {

@@ -130,10 +130,10 @@ and SSH keys. None require root.
 | `claude-memsync uninstall` | Remove the auto-start hook. |
 | `claude-memsync start` | Start the daemon now. |
 | `claude-memsync stop` | Stop the running daemon. |
-| `claude-memsync status` | Print `running (pid N)` or `stopped`. |
+| `claude-memsync status` | Print `running (pid N)`, `stopped` or `service: not installed` (a foreground or dry run), then the routing and per-repo state. Exits non-zero only when a repo is in an error state (its loop keeps failing) or the routes file is unusable. |
 | `claude-memsync run` | Run in the foreground (for debugging). |
 | `claude-memsync changes --since <rev>` or `--marker <file>` | List memory files changed in the sync repo since a point (`--project`, `--json`, `--limit`, `--update-marker`, `--hook`). See [Telling a running session what changed](#telling-a-running-session-what-changed). |
-| `claude-memsync distill` | Rebuild the distilled-memory catalog index (`--prune`, `--dry-run`). See [distilling-memories.md](distilling-memories.md). |
+| `claude-memsync distill` | Rebuild the distilled-memory catalog index (`--prune`, `--dry-run`, and with several repos `--repo <name>` or `--config <path>`, `--routes <path>`). See [distilling-memories.md](distilling-memories.md). |
 | `claude-memsync version` | Print version. |
 
 ## How it works
@@ -814,15 +814,15 @@ What happens:
 Reading the archive (the tool only reads it):
 
 ```
-claude-memsync archive list [--since 2026-10-01]
-claude-memsync archive search <term> [--show]
+claude-memsync archive list [--since 2026-10-01] [--repo <name> | --config <path>]
+claude-memsync archive search <term> [--show] [--repo <name> | --config <path>]
 ```
 
 Symlinks in the archive are never followed, and paths matching the denylist
 are not printed (they are counted instead). `search` matches file names and contents, case-insensitively, and prints the
 matching paths with a count of matching lines. `--show` also prints the lines.
 Archived notes are not injected into sessions; search them on demand. With
-several repos, each repo's archive is listed or searched in turn.
+several repos, each repo's archive is listed or searched in turn and every line is labelled `[repo]`; `--repo <name>` (a key of `routes.json` `repos`) or `--config` reads just one.
 
 **Purging is not a tool command.** The one exception to "never delete" is a
 deliberate purge, for example a leaked secret in an archived note. That is a git
@@ -926,14 +926,14 @@ there is no re-check; schedule `doctor`.
 ### doctor
 
 ```sh
-claude-memsync doctor --org <org>
+claude-memsync doctor --org <org> [--token-file <path>] [--config <path>] [--routes <path>]
 ```
 
 Lists the org's repos and exits non-zero, naming each one, if any `mem-*` repo
 is public or internal, or if the repo this host joined is not private or lacks
 the `mem-` prefix. Public repos without the prefix are ignored. Output is repo
 names only. `--org` defaults to `githubOrg` in `config.json`, else the owner of
-the remote. `repo create` resolves the org the same way and refuses if none is set.
+the remote. `--token-file` names a file holding the GitHub token for this run, as `init --token-file` does (it is not written to `config.json`; `MEMSYNC_GITHUB_TOKEN` also works); with a routes file it applies to every repo. `--config` checks the one repo that config names. `repo create` resolves the org the same way and refuses if none is set.
 
 `claude-memsync doctor --install-timer` writes a daily systemd user timer
 (Linux) or launchd agent (macOS) into `~/.config/systemd/user` or
@@ -1053,10 +1053,12 @@ Install the unit as usual (`claude-memsync install --config ~/.claudesync.d/pers
 
 ### Commands
 
-- `status` lists each repo with the number of folders it owns, the number of denied folders, and the rules an earlier rule of the same kind shadows (a later rule that can never be reached first).
+- `status` works without an installed service (it prints `service: not installed` and carries on) and lists each repo with the number of folders it owns, the number of denied folders, and the rules an earlier rule of the same kind shadows (a later rule that can never be reached first).
 - `stop` clears the pull marker of every repo.
 - `changes --hook` reports, for the project directory, the notes changed in each routed repo, each against its own per-session marker. A repo reports only the folders it owns.
 - `distill` and `changes` without `--config` use the personal repo's config (the primary one); an explicit `--config` always means that single repo.
+- `distill`, `archive` and `recipients` take `--repo <name>` (a key of `routes.json` `repos`) or `--config <path>`, and `--routes <path>`; giving both `--repo` and `--config` is an error. `distill` still defaults to the personal repo and still drops client folders from its worklist. `archive` without either reads every repo and labels each line `[repo]`. `recipients` never assumes a repo: with a routes file and neither flag it refuses and lists the repos. `distill --prune` and every `recipients` action that writes take that repo's sync-dir lock, so they refuse while that repo's daemon runs (other repos are unaffected).
+- `init` shows the distilled catalog path and the permissions hint only for the personal repo (or in single-repo mode).
 - `distill --prune` leaves an entry alone when the folder it came from is not in `~/.claude/projects` on this host: the entry was made on another host, and "file gone" is not the same as "folder never here".
 
 ### Home folder and setting up a new host
@@ -1195,10 +1197,10 @@ that can read the repo:
     claude-memsync recipients list
     claude-memsync recipients remove <public-key>
 
-Each edits `.age-recipients`, re-encrypts every file to the new set and commits
+With several repos, name the one: `recipients --repo <name> add <public-key>` (or `--config <path>`); without it the command refuses and lists the repos. Each edits `.age-recipients`, re-encrypts every file to the new set and commits
 (the daemon pushes). The commit is built from HEAD alone: anything else staged
 in the sync repo is neither committed nor unstaged. These actions (and
-`accept --yes`) refuse to run while the daemon holds the sync dir; stop it first. A removed key cannot read content written after the change,
+`accept --yes`) refuse to run while the daemon holds the sync dir; stop it first. The re-encryption commit is not reported by `changes --hook`: files whose text is the same at both ends are skipped, so a recipients change does not announce every note as changed. A removed key cannot read content written after the change,
 but it still reads everything it already fetched; rewriting history does not
 help once a key has fetched it, so treat removal as "stop future leakage".
 
