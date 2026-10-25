@@ -572,20 +572,18 @@ func TestRouted_StartWiresHoldAndReloadAndRestartRecheck(t *testing.T) {
 	}
 	// A supervised restart rechecks.
 	h.units["old-sync.timer"] = "enabled"
-	oldRun := runLoop
-	oldMin := loopBackoffMin
-	loopBackoffMin = time.Millisecond
-	t.Cleanup(func() { runLoop = oldRun; loopBackoffMin = oldMin })
+	// A fake loop supervised beside the running set: no package variable is
+	// assigned while the set's goroutines read them.
 	ctx, cancel := context.WithCancel(context.Background())
 	calls := 0
-	runLoop = func(c context.Context, l *syncpkg.Loop) error {
+	fake := func(c context.Context, l *syncpkg.Loop) error {
 		calls++
 		if calls >= 2 {
 			cancel()
 		}
 		return errors.New("died")
 	}
-	superviseLoop(ctx, r.loops[0], func() { set.recheckForeign() })
+	superviseLoopWith(ctx, r.loops[0], func() { set.recheckForeign() }, fake, time.Millisecond)
 	if !r.loops[0].Hold() {
 		t.Error("a loop restart must recheck the foreign writers")
 	}
