@@ -21,3 +21,10 @@
 /.github/workflows/                 @gitgat
 /.github/CODEOWNERS                 @gitgat
 /docs/security.md                   @gitgat
+# fork CI and coverage tooling
+/.gitleaksignore                    @gitgat
+/coverage-floors.json               @gitgat
+/tools/coverfloors/                 @gitgat
+/Makefile                           @gitgat
+/scripts/bootstrap_test.sh          @gitgat
+/scripts/gen-reference.sh           @gitgat
