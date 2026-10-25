@@ -151,6 +151,9 @@ func appRegister(stdout, stderr io.Writer, args []string) int {
 			if cerr := f.Close(); err == nil {
 				err = cerr
 			}
+			if err != nil {
+				os.Remove(*keyOut) // we created it (O_EXCL); never leave a partial key
+			}
 		}
 		if err != nil {
 			fmt.Fprintf(stderr, "app register: the app exists (id %d) but --key-out could not be written (%v)\n", conv.ID, err)
