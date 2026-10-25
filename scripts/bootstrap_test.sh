@@ -3,6 +3,17 @@
 # systemctl, claude, go and ssh-keyscan on PATH, and local bare repos standing
 # in for the GitHub remotes. It never touches the real HOME, ~/.ssh, systemd or
 # GitHub. Usage: scripts/bootstrap_test.sh [workdir]
+#
+# claude-memsync is the REAL binary built from this tree (MEMSYNC_BIN and
+# MEMMERGE_BIN name prebuilt ones; otherwise it is built with go, or with docker
+# on Linux). The "go build" the bootstrap runs installs a thin recording
+# wrapper that execs the real binary for every subcommand except:
+#   install, start, stop  stubbed (they would register a real service)
+#   doctor                stubbed (it calls the live GitHub API)
+# and for `init`, which would also call the live GitHub API, the wrapper drops
+# --private-only and the token flags before it execs the real binary (the
+# recorded log line keeps the original arguments, which the checks assert on).
+# app-token is real too: it talks to a loopback fake of the GitHub App API.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -22,9 +33,20 @@ bad()     { FAIL=$((FAIL + 1)); printf 'FAIL    %s\n' "$1"; }
 pending() { PENDING=$((PENDING + 1)); printf 'PENDING %s\n' "$1"; }
 check()   { if "${@:2}"; then ok "$1"; else bad "$1"; fi; }
 
-# --- does the CLI in this tree have join and --token-cmd yet? ---------------
-HAVE_CLI=1
-grep -rq 'token-cmd' "$ROOT/cmd/claude-memsync" --include='*.go' && grep -rq '"join"' "$ROOT/cmd/claude-memsync" --include='*.go' || HAVE_CLI=0
+# --- the real binary ---------------------------------------------------------
+REAL="$BASE/real"; mkdir -p "$REAL"
+if [ -n "${MEMSYNC_BIN:-}" ] && [ -n "${MEMMERGE_BIN:-}" ]; then
+  cp "$MEMSYNC_BIN" "$REAL/claude-memsync"; cp "$MEMMERGE_BIN" "$REAL/claude-memmerge"
+elif command -v go >/dev/null; then
+  (cd "$ROOT" && go build -o "$REAL/claude-memsync" ./cmd/claude-memsync && go build -o "$REAL/claude-memmerge" ./cmd/claude-memmerge)
+elif command -v docker >/dev/null; then
+  docker run --rm --user "$(id -u):$(id -g)" -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -e GOFLAGS=-buildvcs=false \
+    -v "$ROOT:/src:ro" -v "$REAL:/out" -w /src golang:1.25 \
+    sh -c 'go build -o /out/claude-memsync ./cmd/claude-memsync && go build -o /out/claude-memmerge ./cmd/claude-memmerge'
+else
+  echo "need MEMSYNC_BIN and MEMMERGE_BIN, go, or docker to build the real claude-memsync" >&2; exit 2
+fi
+chmod +x "$REAL/claude-memsync" "$REAL/claude-memmerge"
 
 # --- stubs --------------------------------------------------------------------
 STUBS="$BASE/stubs"
@@ -70,7 +92,9 @@ cat >"$STUBS/systemctl" <<'EOF'
 echo "systemctl $*" >>"$STUB_DIR/systemctl.log"
 # record whether the org token leaked into this process env (count only, never the value)
 echo "$(basename "$0"):$(env | grep -v '^STUB_' | grep -cF -- "$STUB_ORG_TOKEN")" >>"$STUB_DIR/env.log"
-[ "${STUB_OLD_TIMER:-0}" = 1 ] && exit 0
+# like the real one: the answer is on stdout, the exit status says enabled/active or not
+if [ "${STUB_OLD_TIMER:-0}" = 1 ]; then echo enabled; exit 0; fi
+case "$*" in *is-active*) echo inactive ;; *) echo disabled ;; esac
 exit 1
 EOF
 cat >"$STUBS/claude" <<'EOF'
@@ -86,51 +110,41 @@ if [ "$1" = version ]; then echo "go version go1.25.1 linux/amd64"; exit 0; fi
 out="$3"
 # record whether the org token leaked into this process env (count only, never the value)
 echo "$(basename "$0"):$(env | grep -v '^STUB_' | grep -cF -- "$STUB_ORG_TOKEN")" >>"$STUB_DIR/env.log"
-cp "$STUB_DIR/memsync-stub" "$out"; chmod +x "$out"
+case "$out" in
+  */claude-memmerge) cp "$REAL_DIR/claude-memmerge" "$out" ;;
+  *) cp "$STUB_DIR/memsync-wrap" "$out" ;;
+esac
+chmod +x "$out"
 EOF
-cat >"$STUBS/memsync-stub" <<'EOF'
+cat >"$STUBS/memsync-wrap" <<'EOF'
 #!/bin/sh
-# Stub claude-memsync: records its arguments, never the token.
+# claude-memsync as the bootstrap sees it: records its arguments (never the
+# token) and runs the real binary, except for install/start/stop/doctor.
 # record whether the org token leaked into this process env (count only, never the value)
 echo "$(basename "$0"):$(env | grep -v '^STUB_' | grep -cF -- "$STUB_ORG_TOKEN")" >>"$STUB_DIR/env.log"
 echo "memsync $*" >>"$STUB_DIR/memsync.log"
 case "$1" in
+  install | start | stop | doctor) exit 0 ;;
   init)
-    tc=""; tf=""
-    while [ $# -gt 0 ]; do
-      [ "$1" = --sync-dir ] && d="$2"
-      [ "$1" = --token-cmd ] && tc="$2"
-      [ "$1" = --token-file ] && tf="$2"
-      shift
+    # init would call the live GitHub API for --private-only; drop it and the
+    # token flags (their values were recorded above).
+    n=$#; i=0
+    while [ "$i" -lt "$n" ]; do
+      x="$1"; shift; i=$((i + 1))
+      case "$x" in
+        --private-only) ;;
+        --token-file | --token-cmd) shift; i=$((i + 1)) ;;
+        *) set -- "$@" "$x" ;;
+      esac
     done
-    mkdir -p "$d"
-    # like the real CLI: init saves the token command or file in the config
-    python3 -I - "$d/config.json" "$tc" "$tf" <<'PY'
-import json, sys
-p, tc, tf = sys.argv[1:4]
-c = {}
-if tc: c["githubTokenCmd"] = tc.split()
-if tf: c["githubTokenFile"] = tf
-json.dump(c, open(p, "w"))
-PY
-    ;;
+    exec "$REAL_DIR/claude-memsync" "$@" ;;
   join)
-    if [ "$2" = status ]; then echo "pending"; exit 0; fi
-    if [ "${STUB_NOFP:-0}" = 1 ]; then echo "join request sent"; else printf "join request sent\nfingerprint: 0123456789abcdef\n"; fi ;;
-  route)
-    if [ "$2" = home ]; then
-      R="$HOME/.config/claude-memsync/routes.json"
-      f="$(printf '%s' "$HOME" | sed 's/[^A-Za-z0-9]/-/g')"
-      python3 -I - "$R" "$f" "$3" <<'PY'
-import json, sys
-p, folder, repo = sys.argv[1:4]
-d = json.load(open(p))
-d["routes"].insert(0, {"folder": folder, "repo": repo})
-json.dump(d, open(p, "w"), indent=2)
-PY
+    if [ "$2" = request ] && { [ "${STUB_NOFP:-0}" = 1 ] || [ "${STUB_OLDFP:-0}" = 1 ]; }; then
+      "$REAL_DIR/claude-memsync" "$@" | if [ "${STUB_NOFP:-0}" = 1 ]; then grep -v '^fingerprint:'; else sed 's/^fingerprint: .*/fingerprint: 0123456789abcdef/'; fi
+      exit 0
     fi ;;
 esac
-exit 0
+exec "$REAL_DIR/claude-memsync" "$@"
 EOF
 cat >"$STUBS/ssh-keyscan" <<'EOF'
 #!/bin/sh
@@ -149,32 +163,70 @@ EOF
 chmod +x "$STUBS"/*
 ssh-keygen -q -t ed25519 -N '' -f "$BASE/other" && awk '{print $2}' "$BASE/other.pub" >"$BASE/otherkey"
 
+# --- a loopback fake of the GitHub App API (installation lookup + token) ---------
+ssh-keygen -q -t rsa -b 2048 -m PEM -N '' -f "$BASE/app" && mv "$BASE/app" "$BASE/app.pem" && chmod 600 "$BASE/app.pem"
+cat >"$BASE/fakeapi.py" <<'PY'
+import datetime, http.server, json, os, sys
+tok, logp, portp = os.environ["FAKE_TOKEN"], sys.argv[1], sys.argv[2]
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def reply(self, code, body):
+        b = json.dumps(body).encode()
+        self.send_response(code); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def do_GET(self):
+        open(logp, "a").write("GET %s\n" % self.path)
+        if self.path == "/orgs/Exploded-views/installation": return self.reply(200, {"id": 7})
+        self.reply(404, {})
+    def do_POST(self):
+        open(logp, "a").write("POST %s\n" % self.path)
+        n = int(self.headers.get("Content-Length") or 0); self.rfile.read(n)
+        if self.path == "/app/installations/7/access_tokens":
+            exp = (datetime.datetime.utcnow() + datetime.timedelta(minutes=59)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            return self.reply(201, {"token": tok, "expires_at": exp})
+        self.reply(404, {})
+s = http.server.HTTPServer(("127.0.0.1", 0), H)
+open(portp, "w").write(str(s.server_address[1]))
+s.serve_forever()
+PY
+FAKE_TOKEN="$ORGTOK" python3 "$BASE/fakeapi.py" "$BASE/fakeapi.log" "$BASE/fakeapi.port" &
+FAKE_PID=$!
+trap 'kill $FAKE_PID 2>/dev/null || true' EXIT
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -s "$BASE/fakeapi.port" ] && break; sleep 0.25; done
+[ -s "$BASE/fakeapi.port" ] || { echo "fake GitHub App API did not start" >&2; exit 2; }
+APIPORT="$(cat "$BASE/fakeapi.port")"
+
 # --- a commit of this tree to bootstrap from -----------------------------------
 git clone -q --bare "$ROOT" "$BASE/utils.git"
 SHA="$(git -C "$ROOT" rev-parse HEAD)"
 
+# An age-encrypted mem-personal that already has a member (a seed host, made
+# with the real binary), so a new host there has no key and must ask to join.
+SEED="$BASE/seed"; mkdir -p "$SEED/home/claude/-proj/memory"
+echo "seed note" >"$SEED/home/claude/-proj/memory/note.md"
+printf '[init]\n\tdefaultBranch = main\n' >"$SEED/home/.gitconfig"
+git init -q --bare -b main "$SEED/mem-personal.git"
+HOME="$SEED/home" GIT_CONFIG_NOSYSTEM=1 "$REAL/claude-memsync" init --remote "$SEED/mem-personal.git" \
+  --sync-dir "$SEED/home/sync" --claude-dir "$SEED/home/claude" --encrypt \
+  --recipient age1d6jhrdfc0q3symtxzs6ay8efyvnx7g4mln9jvxckzstkaz4re9vqysptau >/dev/null 2>&1 \
+  || { echo "cannot seed the encrypted mem-personal with the real binary" >&2; exit 2; }
+
 mkbare() { # name [with-content]
-  git init -q --bare "$BASE/remotes/$1.git"
-  if [ "${2:-}" = content ]; then
-    local w; w="$(mktemp -d)"
-    git -C "$w" init -q; echo x >"$w/a"; git -C "$w" add a
-    git -C "$w" -c user.name=t -c user.email=t@example.com commit -q -m seed
-    git -C "$w" push -q "$BASE/remotes/$1.git" HEAD:refs/heads/main; rm -rf "$w"
-  fi
+  if [ "${2:-}" = content ]; then cp -a "$SEED/$1.git" "$BASE/remotes/$1.git"; else git init -q --bare -b main "$BASE/remotes/$1.git"; fi
 }
 
 # newhome <name>: fresh fake HOME with insteadOf maps for every bare repo.
 newhome() {
   H="$BASE/$1/home"; STUB_DIR="$BASE/$1/stub"
   rm -rf "${BASE:?}/$1"; mkdir -p "$H" "$STUB_DIR"
-  cp "$STUBS/memsync-stub" "$STUB_DIR/"; cp "$BASE/otherkey" "$STUB_DIR/"
+  cp "$STUBS/memsync-wrap" "$STUB_DIR/"; cp "$BASE/otherkey" "$STUB_DIR/"
   : >"$STUB_DIR/gh.log"; : >"$STUB_DIR/memsync.log"
   rm -rf "$BASE/remotes"; mkdir -p "$BASE/remotes"
   mkbare mem-personal content
   mkdir -p "$STUB_DIR/ghstate"
   echo '{"private": true, "visibility": "private"}' >"$STUB_DIR/ghstate/mem-personal.json"
   for n in mem-infra-homelab mem-project-code-workspace mem-project-ownproj; do mkbare "$n"; done
-  : >"$H/.gitconfig"
+  printf '[init]\n\tdefaultBranch = main\n' >"$H/.gitconfig"
   for n in mem-personal mem-infra-homelab mem-project-code-workspace mem-project-ownproj; do
     git config --file "$H/.gitconfig" "url.$BASE/remotes/$n.git.insteadOf" "git@gh-$n:$ORG/$n.git"
   done
@@ -184,7 +236,7 @@ newhome() {
 # runboot <args...>: run the script in the fake HOME; sets RC and OUT.
 runboot() {
   set +e
-  OUT="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" GIT_CONFIG_NOSYSTEM=1 \
+  OUT="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" GIT_CONFIG_NOSYSTEM=1 \
     CLAUDE_UTILS_URL="https://example.invalid/claude-utils.git" \
     bash "$ROOT/scripts/bootstrap.sh" --sha "$SHA" --deny-owner Acme-Client --deny-term acmeclient ${ORGARGS[@]+"${ORGARGS[@]}"} "$@" </dev/null 2>&1)"
   RC=$?
@@ -227,15 +279,13 @@ check "binaries symlinked into ~/.local/bin" [ -L "$H/.local/bin/claude-memsync"
 check "no client/orch names anywhere" bash -c "! grep -rIiE 'mem-(client|orch)|orch-' '$H/.config' '$H/.ssh/config' '$STUB_DIR/gh.log' '$STUB_DIR/memsync.log'"
 check "dummy token never on disk" bash -c "! grep -rIl -- '$TOKEN' '$H' '$STUB_DIR/gh.log' '$STUB_DIR/memsync.log' '$STUB_DIR/claude.log'"
 check "output has no private key material" bash -c "! printf '%s' \"\$1\" | grep -q 'BEGIN OPENSSH'" _ "$OUT"
-if [ "$HAVE_CLI" -eq 1 ]; then
-  check "join request issued for existing repo" has "$STUB_DIR/memsync.log" 'join request --repo personal --label testhost'
-  check "init passes the org token file" has "$STUB_DIR/memsync.log" 'init .*--token-file .*/orgtoken'
-else
-  pending "join request (CLI in this tree lacks join; asserted against the stub only)"
-  pending "init --token-file/--token-cmd (CLI in this tree lacks it; asserted against the stub only)"
-  has "$STUB_DIR/memsync.log" 'join request --repo personal --label testhost' && ok "stub saw: join request --repo personal --label testhost"
-fi
-check "join accept one-liner printed" bash -c "printf '%s' \"\$1\" | grep -q 'claude-memsync join accept testhost --repo personal --fingerprint 0123456789abcdef'" _ "$OUT"
+check "join request issued for existing repo" has "$STUB_DIR/memsync.log" 'join request --repo personal --label testhost'
+check "init passes the org token file" has "$STUB_DIR/memsync.log" 'init .*--token-file .*/orgtoken'
+check "join accept one-liner printed with the grouped fingerprint" bash -c "printf '%s' \"\$1\" | grep -qE 'claude-memsync join accept testhost --repo personal --fingerprint \"([0-9a-f]{4} ){7}[0-9a-f]{4}\"'" _ "$OUT"
+check "real init made an encrypted, keyless clone and the join request is in the remote" bash -c "[ -f '$H/.claudesync.d/personal/.age-recipients' ] && git -C '$BASE/remotes/mem-personal.git' ls-tree -r main --name-only | grep -q '^joins/testhost'"
+check "real route home pinned the home folder" jsonok '
+import json,sys
+d=json.load(open(sys.argv[1])); assert d["routes"][0]["repo"]=="infra-homelab" and "folder" in d["routes"][0]' "$H/.config/claude-memsync/routes.json"
 
 echo "--- homelab idempotent re-run"
 K1="$(ssh-keygen -lf "$H/.ssh/mem-personal_ed25519.pub")"
@@ -317,6 +367,45 @@ ORGARGS=(--org-token-file "$BASE/orgtoken")
 newhome nofp
 STUB_NOFP=1 runboot --host testhost --role homelab --yes
 check "missing fingerprint line refuses" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'printed no .fingerprint'" _ "$OUT"
+newhome oldfp
+STUB_OLDFP=1 runboot --host testhost --role homelab --yes
+check "ungrouped 16-hex fingerprint refuses" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'printed no .fingerprint'" _ "$OUT"
+
+echo "--- org app"
+appsetup() { # apps.json + key in the fake HOME; the app's apiBase is the loopback fake
+  mkdir -p "$H/.config/claude-memsync"
+  cp "$BASE/app.pem" "$H/.config/claude-memsync/app.pem"; chmod 600 "$H/.config/claude-memsync/app.pem"
+  printf '[{"name":"testapp","appId":"12345","org":"Exploded-views","keyFile":"%s","apiBase":"http://127.0.0.1:%s"}]\n' \
+    "$H/.config/claude-memsync/app.pem" "$APIPORT" >"$H/.config/claude-memsync/apps.json"
+  chmod 600 "$H/.config/claude-memsync/apps.json"
+}
+newhome oa1
+appsetup
+: >"$BASE/fakeapi.log"
+ORGARGS=(--org-app testapp)
+STUB_ORGS="$(printf 'Exploded-views\nAcme-Client')" runboot --host testhost --role homelab --yes
+[ "$RC" -eq 0 ] || { echo "$OUT" | tail -20; }
+check "app variant runs" [ "$RC" -eq 0 ]
+check "app variant: app-token runs per org call, via the real binary" bash -c "[ \$(grep -c 'memsync app-token --app testapp' '$STUB_DIR/memsync.log') -ge 4 ] && [ \$(grep -c 'POST /app/installations/7/access_tokens' '$BASE/fakeapi.log') -ge 4 ]"
+check "app variant: every org operation used the app's token" bash -c "grep -qE '^repo create' '$STUB_DIR/gh.who' && ! grep -E '^(repo|api repos)' '$STUB_DIR/gh.who' | grep -v '|org'"
+check "app variant: ambient banner, org-token banner computed after the build" bash -c "printf '%s' \"\$1\" | grep -q \"gh login can reach Acme-Client\" && printf '%s' \"\$1\" | grep -q 'b2. Org token from app testapp'" _ "$OUT"
+check "app variant: init and doctor get --token-cmd with the app-token command" bash -c "grep -qE 'init .*--token-cmd .*/claude-memsync app-token --app testapp' '$STUB_DIR/memsync.log' && grep -qE 'doctor --org Exploded-views --token-cmd .*/claude-memsync app-token --app testapp' '$STUB_DIR/memsync.log'"
+check "app variant: org token not on disk, output or other envs" bash -c "! grep -rIl -- '$ORGTOK' '$H' '$STUB_DIR/gh.log' '$STUB_DIR/gh.who' '$STUB_DIR/memsync.log' && ! printf '%s' \"\$1\" | grep -qF -- '$ORGTOK' && [ \$(grep -v ':0\$' '$STUB_DIR/env.log' | wc -l) -eq 0 ]" _ "$OUT"
+check "app variant: no token command left in a daemon-read config" bash -c "! grep -rIlE 'githubTokenCmd|app-token' '$H/.claudesync.d'"
+newhome oa2
+appsetup
+ORGARGS=(--org-app testapp)
+runboot --host testhost --role homelab --dry-run
+check "app dry run: exits 0, would mint, mints nothing" bash -c "[ $RC -eq 0 ] && printf '%s' \"\$1\" | grep -q 'would mint the org token with: claude-memsync app-token --app testapp' && [ ! -e '$H/.local/bin/claude-memsync' ]" _ "$OUT"
+newhome oa3
+ORGARGS=(--org-app testapp --org-token-file "$BASE/orgtoken")
+runboot --host testhost --role homelab --yes
+check "app plus token file refused" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'only one of'" _ "$OUT"
+newhome oa4
+ORGARGS=(--org-app testapp)
+runboot --host testhost --role homelab --yes
+check "app without apps.json stops before any repo or key is made" bash -c "[ $RC -ne 0 ] && ! grep -q 'repo create\|deploy-key' '$STUB_DIR/gh.log' && [ ! -e '$H/.ssh/mem-personal_ed25519' ]"
+ORGARGS=(--org-token-file "$BASE/orgtoken")
 ORGARGS=(--org-token-file "$BASE/does-not-exist")
 runboot --host testhost --role homelab --yes
 check "unreadable org token stops clearly" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'cannot read the org token'" _ "$OUT"

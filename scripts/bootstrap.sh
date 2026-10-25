@@ -4,12 +4,15 @@
 #   bootstrap.sh --host <label> --role <role> [--sha <commit>] [--org Exploded-views]
 #                [--workspace <dir>]... [--own-owner <owner>]... [--deny-owner <owner>]...
 #                [--deny-term <term>]... [--repo-url <url>]
-#                --org-token-file <path> | --org-token-cmd "<argv>" [--allow-org <org>]... [--dry-run] [--yes]
+#                --org-token-file <path> | --org-token-cmd "<argv>" | --org-app <name>
+#                [--allow-org <org>]... [--dry-run] [--yes]
 #
 # Read this script before running it. --dry-run prints every step without doing
 # it. Everything lives under $HOME; the script never uses sudo, never prints a
 # private key or a token, and never creates or joins a client or orchestrator
-# repo. See docs/bootstrap.md.
+# repo. --org-app <name> mints the org token from the GitHub App entry <name> in
+# apps.json (claude-memsync app-token --app <name>), once per org call. See
+# docs/bootstrap.md.
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -29,7 +32,7 @@ AGE_RECOVERY="age1d6jhrdfc0q3symtxzs6ay8efyvnx7g4mln9jvxckzstkaz4re9vqysptau"
 UTILS_URL="${CLAUDE_UTILS_URL:-https://github.com/Exploded-views/claude-utils}"
 
 HOST="" ROLE="" SHA="" ORG="Exploded-views" DRY_RUN=0 YES=0
-WORKSPACES=() OWN_OWNERS=() DENY_OWNERS=() DENY_TERMS=() ALLOW_ORGS=() ORG_TOKEN_FILE="" ORG_TOKEN_CMD=""
+WORKSPACES=() OWN_OWNERS=() DENY_OWNERS=() DENY_TERMS=() ALLOW_ORGS=() ORG_TOKEN_FILE="" ORG_TOKEN_CMD="" ORG_APP=""
 
 R_KEYS=() R_NAMES=() R_KINDS=()   # planned repos (parallel arrays)
 RULE_LINES=""                     # "pin|folder|key" and "remote|host/owner/repo|key"
@@ -100,6 +103,7 @@ while [ $# -gt 0 ]; do
     --repo-url)   [ $# -ge 2 ] || usage; UTILS_URL="$2"; shift 2 ;;
     --org-token-file) [ $# -ge 2 ] || usage; ORG_TOKEN_FILE="$2"; shift 2 ;;
     --org-token-cmd)  [ $# -ge 2 ] || usage; ORG_TOKEN_CMD="$2"; shift 2 ;;
+    --org-app)        [ $# -ge 2 ] || usage; ORG_APP="$2"; shift 2 ;;
     --allow-org)  [ $# -ge 2 ] || usage; ALLOW_ORGS+=("$(lower "$2")"); shift 2 ;;
     --dry-run)    DRY_RUN=1; shift ;;
     --yes)        YES=1; shift ;;
@@ -108,9 +112,17 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$HOST" ] || die "--host is required"
-if [ -n "$ORG_TOKEN_FILE" ] && [ -n "$ORG_TOKEN_CMD" ]; then die "give one of --org-token-file or --org-token-cmd, not both"; fi
-if [ -z "$ORG_TOKEN_FILE" ] && [ -z "$ORG_TOKEN_CMD" ]; then die "--org-token-file <path> or --org-token-cmd \"<argv>\" is required: every org operation uses that token, never the ambient gh login"; fi
+n_tok=0
+for v in "$ORG_TOKEN_FILE" "$ORG_TOKEN_CMD" "$ORG_APP"; do [ -z "$v" ] || n_tok=$((n_tok + 1)); done
+[ "$n_tok" -le 1 ] || die "give only one of --org-token-file, --org-token-cmd or --org-app"
+[ "$n_tok" -eq 1 ] || die "--org-token-file <path>, --org-token-cmd \"<argv>\" or --org-app <name> is required: every org operation uses that token, never the ambient gh login"
+if [ -n "$ORG_APP" ]; then
+  printf '%s' "$ORG_APP" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' || die "bad --org-app '$ORG_APP'"
+  case "$HOME" in *[[:space:]\'\"\\]*) die "--org-app needs a HOME without spaces or quotes (the token command is passed as one string)" ;; esac
+  ORG_TOKEN_CMD="$HOME/.local/bin/claude-memsync app-token --app $ORG_APP"
+fi
 # Arguments that hand the same token to claude-memsync (a file path or a command, never the token).
+# An app is handed over as its app-token command, which claude-memsync runs per request.
 if [ -n "$ORG_TOKEN_FILE" ]; then ORG_TOKEN_ARGS=(--token-file "$ORG_TOKEN_FILE"); else ORG_TOKEN_ARGS=(--token-cmd "$ORG_TOKEN_CMD"); fi
 [ -n "$ROLE" ] || die "--role is required"
 printf '%s' "$HOST" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' || die "bad --host label '$HOST'"
@@ -158,6 +170,7 @@ org_token() {
     tr -d '\r\n' <"$ORG_TOKEN_FILE"
   else
     local -a argv
+    if [ -n "$ORG_APP" ] && [ ! -x "$BIN/claude-memsync" ]; then return 1; fi
     read -r -a argv <<<"$ORG_TOKEN_CMD"
     [ ${#argv[@]} -gt 0 ] || return 1
     "${argv[@]}" | tr -d '\r\n'
@@ -197,22 +210,54 @@ reach_banner() { # label orgs-output
 !!! CLIENT ORG(S) reachable through the $label: $denied. This script never creates, touches or keys any repo outside $ORG."
   printf '%s' "$b"
 }
-check_org_scope() {
-  local orgs t
-  t="$(org_token)" || die "cannot read the org token (--org-token-file / --org-token-cmd); stopping"
+check_token_readable() {
+  local t
+  t="$(org_token)" || die "cannot read the org token (--org-token-file / --org-token-cmd / --org-app); stopping"
   [ -n "$t" ] || die "the org token is empty; stopping"
   t=""
+}
+check_ambient_scope() {
+  local orgs
   if orgs="$(gh api user/orgs --paginate --jq '.[].login' 2>/dev/null)"; then
     BANNER_AMBIENT="$(reach_banner "gh login" "$orgs")"
   else
     warn "cannot list the orgs the ambient gh login can see"
   fi
+}
+check_token_scope() {
+  local orgs
   if orgs="$(org_gh api user/orgs --paginate --jq '.[].login' 2>/dev/null)"; then
     BANNER_TOKEN="$(reach_banner "org token" "$orgs")"
   else
     warn "cannot list the orgs the org token can see"
   fi
+}
+check_org_scope() {
+  if [ -n "$ORG_APP" ]; then
+    # The app's token comes from the claude-memsync built in step b, so the
+    # token itself is checked right after the build (check_app_scope).
+    check_ambient_scope
+    org_banner
+    return 0
+  fi
+  check_token_readable
+  check_ambient_scope
+  check_token_scope
   org_banner
+}
+# check_app_scope: the --org-app counterpart of the token half of
+# check_org_scope, run once the binary exists. Warns and proceeds, as there.
+check_app_scope() {
+  [ -n "$ORG_APP" ] || return 0
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  would mint the org token with: claude-memsync app-token --app $ORG_APP (after the build), and check the orgs it reaches"
+    return 0
+  fi
+  step "b2. Org token from app $ORG_APP"
+  check_token_readable
+  check_token_scope
+  [ -z "$BANNER_TOKEN" ] || printf '\n%s\n' "$BANNER_TOKEN" >&2
+  say "  ok"
 }
 
 GO_MODE=""
@@ -591,10 +636,10 @@ step_init() {
       fi
       out="$("$BIN/claude-memsync" join request --repo "$k" --label "$HOST" 2>&1)" || die "join request failed: $out"
       printf '%s\n' "$out"
-      fp="$(printf '%s\n' "$out" | sed -n 's/^fingerprint: \([0-9a-f]\{16\}\)$/\1/p' | head -n1)"
-      [ -n "$fp" ] || die "join request printed no 'fingerprint: <16 hex>' line; refusing to continue"
+      fp="$(printf '%s\n' "$out" | grep -E '^fingerprint: ([0-9a-f]{4} ){7}[0-9a-f]{4}$' | head -n1 | sed 's/^fingerprint: //' || true)"
+      [ -n "$fp" ] || die "join request printed no 'fingerprint: <8 groups of 4 hex>' line; refusing to continue"
       mark "join.$k"
-      PENDING_JOINS+=("on a member host: claude-memsync join accept $HOST --repo $k --fingerprint $fp   (check here: claude-memsync join status --repo $k)")
+      PENDING_JOINS+=("on a member host: claude-memsync join accept $HOST --repo $k --fingerprint \"$fp\"   (check here: claude-memsync join status --repo $k)")
     fi
   done
 }
@@ -702,6 +747,7 @@ if [ "$ROLE" = personal-dev ]; then discover_projects; fi
 check_sync_dirs
 confirm_plan
 step_build
+check_app_scope
 step_repos
 step_keys
 step_routes
