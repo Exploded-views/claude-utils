@@ -29,6 +29,23 @@ func syncedHeadPath(repo *gitwt.Repo) string {
 // "" when there is no record. The record may name a commit that is gone.
 func SyncedHead(repo *gitwt.Repo) (string, error) { return loadSyncedHead(repo) }
 
+// MoveSyncedHead rewrites the record from commit `from` to commit `to` when it
+// names `from` (or there is none yet). `rekey-pq` uses it: the migration keeps
+// every note's plaintext, so what ~/.claude holds still matches the new HEAD,
+// and a record left on the old history would make the restarted daemon see
+// every file as changed (spurious .from-remote-* copies, resurrected deletes).
+// A record naming anything else is left alone: it marks work not yet copied.
+func MoveSyncedHead(repo *gitwt.Repo, from, to string) error {
+	rec, err := loadSyncedHead(repo)
+	if err != nil {
+		return err
+	}
+	if rec != "" && rec != from {
+		return nil
+	}
+	return writeSynced(syncedHeadPath(repo), []byte(to+"\n"))
+}
+
 // headRev is HEAD's commit id; "" on an unborn branch.
 func headRev(repo *gitwt.Repo) string {
 	rev, err := repo.Run("rev-parse", "--verify", "--quiet", "HEAD")

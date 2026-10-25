@@ -11,6 +11,7 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
+	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
 
 const rekeyUsage = "usage: claude-memsync recipients rekey-pq (--repo <name> | --all | --config <path>) --recovery-recipient <age1pq1...> --host <label> [--fresh-root] [--apply]\n       claude-memsync recipients rekey-pq (--repo <name> | --all) --drop-backup"
@@ -156,6 +157,9 @@ func rekeyOne(stdout, stderr io.Writer, cfg config.Config, hostCfgs []config.Con
 			return err
 		}
 		plan = p
+		if err := syncpkg.MoveSyncedHead(repo, p.Tip, p.NewCommit); err != nil {
+			return err
+		}
 		// The config follows the repo from here on.
 		cfgFile := cfg.ConfigPath
 		if cfgFile == "" {
