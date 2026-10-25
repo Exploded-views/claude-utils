@@ -475,7 +475,7 @@ func PendingJoins(repo *gitwt.Repo) int {
 // host printed it) must equal the one in the file exactly; an empty or wrong
 // one is refused. The recipient is added, every file re-encrypted, and the
 // request removed, all in one commit. Nothing is pushed.
-func AcceptJoin(repo *gitwt.Repo, label, fingerprint string) error {
+func AcceptJoin(repo *gitwt.Repo, label, fingerprint string, opts AcceptOpts) error {
 	if !ValidJoinLabel(label) {
 		return fmt.Errorf("label must match %s", joinLabelRE)
 	}
@@ -500,9 +500,24 @@ func AcceptJoin(repo *gitwt.Repo, label, fingerprint string) error {
 	if NormalizeFingerprint(fingerprint) != j.Fingerprint {
 		return errors.New("fingerprint does not match the request: not accepted")
 	}
+	if opts.OwnLabel != "" && j.Label == opts.OwnLabel {
+		return fmt.Errorf("label %q is this host's own label: not accepted (a label names exactly one host)", j.Label)
+	}
+	if bound, perr := PinnedKeysForLabel(repo, j.Label); perr != nil && !errors.Is(perr, ErrLabelAmbiguous) {
+		return perr
+	} else if len(bound) > 0 || perr != nil {
+		return fmt.Errorf("label %q is already bound to a key in the pinned recipients: not accepted", j.Label)
+	}
 	cur, err := ListRecipients(repo.Dir)
 	if err != nil {
 		return err
+	}
+	if !opts.AllowUnlabelled {
+		for _, l := range cur {
+			if LabelOf(l) == "" && !isRecoveryLine(l) {
+				return fmt.Errorf("a recipient (key %s) has no host label, so its host could not be retired by name: run `claude-memsync recipients label self --host <label>` on that host first, or pass --allow-unlabelled", keyPrint(canonLine(l)))
+			}
+		}
 	}
 	// The requester's host label is recorded on its line ("# host:<label>"),
 	// the same as `recipients add --host`, so the pin binds it to the key and
@@ -534,6 +549,20 @@ func AcceptJoin(repo *gitwt.Repo, label, fingerprint string) error {
 	}
 	return reencryptHeadDrop(repo, "memsync: recipients updated", []string{path})
 }
+
+// AcceptOpts are the extra refusals of AcceptJoin. OwnLabel is this host's own
+// hostLabel (a requester may not take it). Unless AllowUnlabelled, an accept is
+// refused while any recipient other than a "# recovery" key has no host label.
+type AcceptOpts struct {
+	OwnLabel        string
+	AllowUnlabelled bool
+}
+
+var recoveryRE = regexp.MustCompile(`(?:^|\s)#\s*recovery\s*$`)
+
+// isRecoveryLine reports a recipients line marked "# recovery": an offline key
+// that belongs to no host.
+func isRecoveryLine(l string) bool { return recoveryRE.MatchString(strings.TrimSpace(l)) }
 
 // RejectJoin removes a request without admitting anyone: one commit that
 // deletes the file. Nothing is pushed.

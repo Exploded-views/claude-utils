@@ -472,3 +472,32 @@ func TestInit_HostLabelLabelsOwnRecipientAndRecipientsAddTakesHost(t *testing.T)
 		t.Error("an invalid label must be refused")
 	}
 }
+
+// doctor's host summary must use the same one-run token as the doctor run
+// itself: --token-cmd, not only --token-file.
+func TestDoctorWithHosts_UsesTokenCmdFlag(t *testing.T) {
+	f, cfg := hostFixture(t)
+	cfg.GitHubTokenFile = "" // nothing configured: only the flag can supply a token
+	cfg.SyncDir = localRecipients(t, "vm-1")
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	sel := repoSel{Config: cfg.Path()}
+	if c := doctorWithHosts(0, sel, tokenFlags{}, "Org", &out, &errb); c != 0 || len(f.calls) != 0 {
+		t.Fatalf("without a token nothing may be asked: %d %v", c, f.calls)
+	}
+	script := tokScript(t, "echo "+cmdTok)
+	doctorWithHosts(0, sel, tokenFlags{Cmd: script}, "Org", &out, &errb)
+	if len(f.calls) == 0 {
+		t.Fatalf("--token-cmd must reach the host check: stderr=%s", errb.String())
+	}
+}
+
+func TestTokenFlagsApplyAllThree(t *testing.T) {
+	var cfg config.Config
+	tokenFlags{File: "/f", Cmd: "gh auth token", App: "myapp"}.apply(&cfg)
+	if cfg.GitHubApp != "myapp" || !cfg.FromFlag("githubApp") || len(cfg.GitHubTokenCmd) != 3 || !cfg.TokenCmdFromFlag {
+		t.Errorf("flags not applied: %+v", cfg)
+	}
+}

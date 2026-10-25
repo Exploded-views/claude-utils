@@ -449,3 +449,48 @@ func commitInfo(repo *gitwt.Repo, oldRev, msg, infoText string, headOID map[stri
 	}
 	return nil
 }
+
+// LabelSelf puts "# host:<label>" on this host's own recipient line and
+// commits it (re-encrypting to the same keys, re-pinning), so the host can be
+// named later. It refuses a line that already carries another label and a
+// label that another key holds. It does nothing if the line is already so
+// labelled.
+func LabelSelf(repo *gitwt.Repo, label string) error {
+	if !labelRE.MatchString("# host:" + label) {
+		return fmt.Errorf("invalid host label %q (use 1-32 characters of a-z, 0-9 and '-')", label)
+	}
+	own, err := IdentityRecipient(IdentityPath(repo))
+	if err != nil {
+		return err
+	}
+	cur, err := ListRecipients(repo.Dir)
+	if err != nil {
+		return err
+	}
+	keys := make([]string, 0, len(cur))
+	found, changed := false, false
+	for _, l := range cur {
+		switch {
+		case canonLine(l) == own:
+			found = true
+			switch LabelOf(l) {
+			case label:
+			case "":
+				l = strings.TrimSpace(l) + hostComment + label
+				changed = true
+			default:
+				return fmt.Errorf("this host's key is already labelled %q", LabelOf(l))
+			}
+		case LabelOf(l) == label:
+			return fmt.Errorf("host label %q is already bound to another recipient", label)
+		}
+		keys = append(keys, l)
+	}
+	if !found {
+		return errors.New("this host's key is not a recipient of the repo")
+	}
+	if !changed {
+		return nil
+	}
+	return rewriteRecipients(repo, keys, "memsync: recipients updated")
+}

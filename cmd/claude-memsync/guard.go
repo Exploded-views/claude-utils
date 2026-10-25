@@ -344,10 +344,27 @@ func doctorCmd(stdout, stderr io.Writer, args []string) int {
 					set.Cfgs[n] = c
 				}
 			}
-			return doctorWithHosts(routedDoctor(set, *org, stdout, stderr), repoSel{Routes: *routes}, *tokenFile, *org, stdout, stderr)
+			return doctorWithHosts(routedDoctor(set, *org, stdout, stderr), repoSel{Routes: *routes}, tokenFlags{File: *tokenFile, Cmd: *tokenCmd, App: *ghApp}, *org, stdout, stderr)
 		}
 	}
-	return doctorWithHosts(doctorRun(cfg, *org, stdout, stderr), repoSel{Config: *cfgPath}, *tokenFile, *org, stdout, stderr)
+	return doctorWithHosts(doctorRun(cfg, *org, stdout, stderr), repoSel{Config: *cfgPath}, tokenFlags{File: *tokenFile, Cmd: *tokenCmd, App: *ghApp}, *org, stdout, stderr)
+}
+
+// tokenFlags are the one-run token sources typed on a command line:
+// --token-file, --token-cmd and --github-app. None is saved.
+type tokenFlags struct{ File, Cmd, App string }
+
+// apply sets them on cfg, marked as flags so they are always honoured.
+func (tf tokenFlags) apply(cfg *config.Config) {
+	if tf.File != "" {
+		cfg.GitHubTokenFile = tf.File
+		cfg.MarkFlag("githubTokenFile")
+	}
+	applyTokenCmdFlag(cfg, tf.Cmd)
+	if tf.App != "" {
+		cfg.GitHubApp = tf.App
+		cfg.MarkFlag("githubApp")
+	}
 }
 
 // doctorWithHosts adds the host lifecycle lines to a doctor run that passed: a
@@ -355,7 +372,7 @@ func doctorCmd(stdout, stderr io.Writer, args []string) int {
 // warning. Both are silent when there is nothing to say. A check that cannot
 // be made (the token cannot read deploy keys) is noted on stderr and never
 // changes the exit code.
-func doctorWithHosts(code int, sel repoSel, tokenFile, org string, stdout, stderr io.Writer) int {
+func doctorWithHosts(code int, sel repoSel, tf tokenFlags, org string, stdout, stderr io.Writer) int {
 	if code != 0 {
 		return code
 	}
@@ -363,9 +380,7 @@ func doctorWithHosts(code int, sel repoSel, tokenFile, org string, stdout, stder
 	if err != nil {
 		return code
 	}
-	if tokenFile != "" {
-		hc.cfg.GitHubTokenFile = tokenFile
-	}
+	tf.apply(&hc.cfg)
 	o, err := hc.orgName(org)
 	if err != nil {
 		return code

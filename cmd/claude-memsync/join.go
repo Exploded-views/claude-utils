@@ -18,7 +18,7 @@ const joinUsage = `usage:
   claude-memsync join request --repo <name> --label <host-label>   (on the new host)
   claude-memsync join status [--repo <name>]                       (on the new host)
   claude-memsync join list [--repo <name>]                         (on a member host)
-  claude-memsync join accept <label> --repo <name> --fingerprint <fp>
+  claude-memsync join accept <label> --repo <name> --fingerprint <fp> [--allow-unlabelled]
   claude-memsync join reject <label> [--repo <name>]
   (repo selection as for recipients: --repo <name> | --config <path>, --routes <path>)`
 
@@ -44,6 +44,7 @@ func joinCmd(stdout, stderr io.Writer, args []string) int {
 	flags.SetOutput(stderr)
 	flabel := flags.String("label", "", "host label (^[a-z0-9][a-z0-9-]{0,31}$)")
 	fp := flags.String("fingerprint", "", "accept: the fingerprint the requesting host printed")
+	allowUnlabelled := flags.Bool("allow-unlabelled", false, "accept: admit even though some recipient has no host label (label it first with `recipients label self`)")
 	if err := flags.Parse(rest); err != nil {
 		return 2
 	}
@@ -105,7 +106,9 @@ func joinCmd(stdout, stderr io.Writer, args []string) int {
 	case "request":
 		return joinRequest(stdout, stderr, cfg, repo, label)
 	case "accept":
-		return joinChange(stdout, stderr, cfg, repo, label, func() error { return agecrypt.AcceptJoin(repo, label, *fp) }, true)
+		return joinChange(stdout, stderr, cfg, repo, label, func() error {
+			return agecrypt.AcceptJoin(repo, label, *fp, agecrypt.AcceptOpts{OwnLabel: cfg.HostLabel, AllowUnlabelled: *allowUnlabelled})
+		}, true)
 	default:
 		return joinChange(stdout, stderr, cfg, repo, label, func() error { return agecrypt.RejectJoin(repo, label) }, false)
 	}

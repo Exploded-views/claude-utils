@@ -108,7 +108,7 @@ func TestJoinCLI_RequestListAcceptStatus(t *testing.T) {
 	if now, _ := h.ra.Run("rev-parse", "HEAD"); now != headBefore {
 		t.Fatal("refused accepts must not commit")
 	}
-	if code, _, errs := runJoinCmd("accept", "new-host", "--config", h.a.Path(), "--fingerprint", fp); code != 0 {
+	if code, _, errs := runJoinCmd("accept", "new-host", "--config", h.a.Path(), "--allow-unlabelled", "--fingerprint", fp); code != 0 {
 		t.Fatalf("accept: %d %s", code, errs)
 	}
 	files := originFiles(t, h.origin)
@@ -277,7 +277,7 @@ func TestJoinCLI_FingerprintLineFormat(t *testing.T) {
 	// the member accepts with it typed back ungrouped as well
 	runJoinCmd("list", "--config", h.a.Path())
 	plain := strings.ReplaceAll(fpOf(out), " ", "")
-	if code, _, e := runJoinCmd("accept", "new-host", "--config", h.a.Path(), "--fingerprint", plain); code != 0 {
+	if code, _, e := runJoinCmd("accept", "new-host", "--config", h.a.Path(), "--allow-unlabelled", "--fingerprint", plain); code != 0 {
 		t.Fatalf("ungrouped fingerprint: %d %s", code, e)
 	}
 }
@@ -316,7 +316,7 @@ func TestJoinCLI_StatusAfterAcceptShowsRecipientSetAndWarns(t *testing.T) {
 	h := twoHosts(t)
 	_, out, _ := runJoinCmd("request", "--config", h.b.Path(), "--label", "new-host")
 	fp := fpOf(out)
-	if code, _, e := runJoinCmd("accept", "new-host", "--config", h.a.Path(), "--fingerprint", fp); code != 0 {
+	if code, _, e := runJoinCmd("accept", "new-host", "--config", h.a.Path(), "--allow-unlabelled", "--fingerprint", fp); code != 0 {
 		t.Fatal(e)
 	}
 	if _, err := h.rb.Run("pull", "-q", "--rebase", "origin", "main"); err != nil {
@@ -348,7 +348,7 @@ func TestJoinCLI_OnlyRequestUsesTheRequestGuard(t *testing.T) {
 		t.Fatalf("request: %v", kinds)
 	}
 	kinds = nil
-	if code, _, e := runJoinCmd("accept", "new-host", "--config", h.a.Path(), "--fingerprint", fpOf(out)); code != 0 {
+	if code, _, e := runJoinCmd("accept", "new-host", "--config", h.a.Path(), "--allow-unlabelled", "--fingerprint", fpOf(out)); code != 0 {
 		t.Fatal(e)
 	}
 	if strings.Join(kinds, ",") != "normal" {
@@ -374,5 +374,18 @@ func TestJoinCLI_RequestGuidanceIsReviewFirst(t *testing.T) {
 	}
 	if strings.Contains(e, "then run `claude-memsync recipients accept --yes` here") {
 		t.Errorf("old blind-accept wording:\n%s", e)
+	}
+}
+
+func TestJoinCLI_AcceptNeedsLabelledRecipientsOrFlag(t *testing.T) {
+	h := twoHosts(t)
+	_, out, _ := runJoinCmd("request", "--config", h.b.Path(), "--label", "new-host")
+	fp := fpOf(out)
+	if _, err := h.ra.Run("pull", "-q", "--rebase", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errs := runJoinCmd("accept", "new-host", "--config", h.a.Path(), "--fingerprint", fp)
+	if code == 0 || !strings.Contains(errs, "recipients label self") || !strings.Contains(errs, "--allow-unlabelled") {
+		t.Fatalf("an unlabelled recipient must block the accept with a hint: %d %s", code, errs)
 	}
 }

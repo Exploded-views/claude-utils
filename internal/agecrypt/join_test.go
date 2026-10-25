@@ -226,14 +226,14 @@ func TestJoinAcceptEndToEnd(t *testing.T) {
 	// No fingerprint, wrong fingerprint: refused, nothing changes.
 	head := a.revHead(t)
 	for _, bad := range []string{"", "deadbeef", strings.ToUpper(fp), fp[:len(fp)-1], fp + "0"} {
-		if err := AcceptJoin(a.repo, "host-b", bad); err == nil {
+		if err := AcceptJoin(a.repo, "host-b", bad, AcceptOpts{AllowUnlabelled: true}); err == nil {
 			t.Errorf("fingerprint %q must be refused", bad)
 		}
 	}
 	if a.revHead(t) != head {
 		t.Fatal("a refused accept must not commit")
 	}
-	if err := AcceptJoin(a.repo, "host-b", fp); err != nil {
+	if err := AcceptJoin(a.repo, "host-b", fp, AcceptOpts{AllowUnlabelled: true}); err != nil {
 		t.Fatal(err)
 	}
 	if got := headTreePaths(t, a, "HEAD"); !strings.Contains(got, "D\tjoins/host-b.txt") || !strings.Contains(got, ".age-recipients") {
@@ -381,12 +381,12 @@ func TestAcceptRefusesTamperedAndInvalid(t *testing.T) {
 	evil := Join{Label: "host-x", Recipient: other, Requested: joinNow}
 	evil.Fingerprint = JoinFingerprint(other)
 	plant(t, a, "joins/host-x.txt", evil.Format())
-	if err := AcceptJoin(a.repo, "host-x", orig.Fingerprint); err == nil {
+	if err := AcceptJoin(a.repo, "host-x", orig.Fingerprint, AcceptOpts{AllowUnlabelled: true}); err == nil {
 		t.Fatal("modified join file must be refused against the original fingerprint")
 	}
 	// Invalid file: refused even with whatever fingerprint it claims.
 	plant(t, a, "joins/host-y.txt", "label: host-y\nrecipient: ssh-ed25519 AAAA\nfingerprint: 00\nrequested: now\n")
-	if err := AcceptJoin(a.repo, "host-y", "00"); err == nil {
+	if err := AcceptJoin(a.repo, "host-y", "00", AcceptOpts{AllowUnlabelled: true}); err == nil {
 		t.Fatal("invalid file must be refused")
 	}
 	list, err := ListJoins(a.repo)
@@ -412,7 +412,7 @@ func TestAcceptNeedsAKeyedHost(t *testing.T) {
 	list, _ := ListJoins(a.repo)
 	// b is keyless: it cannot accept anything.
 	b.repo.Run("fetch", "-q", "origin")
-	if err := AcceptJoin(b.repo, "host-b", list[0].Join.Fingerprint); err == nil {
+	if err := AcceptJoin(b.repo, "host-b", list[0].Join.Fingerprint, AcceptOpts{AllowUnlabelled: true}); err == nil {
 		t.Error("keyless host must not accept")
 	}
 }
@@ -513,7 +513,7 @@ func TestAcceptJoinRefusesWhileRecipientsUnreviewed(t *testing.T) {
 		t.Fatal("setup: must be unreviewed")
 	}
 	head := a.revHead(t)
-	err := AcceptJoin(a.repo, "host-b", list[0].Join.Fingerprint)
+	err := AcceptJoin(a.repo, "host-b", list[0].Join.Fingerprint, AcceptOpts{AllowUnlabelled: true})
 	if err == nil || !strings.Contains(err.Error(), "not reviewed") {
 		t.Fatalf("accept must stop at the review gate, got %v", err)
 	}
@@ -539,7 +539,7 @@ func TestAcceptLeavesOtherPendingRequestsPlaintext(t *testing.T) {
 			fp = e.Join.Fingerprint
 		}
 	}
-	if err := AcceptJoin(a.repo, "host-b", fp); err != nil {
+	if err := AcceptJoin(a.repo, "host-b", fp, AcceptOpts{AllowUnlabelled: true}); err != nil {
 		t.Fatal(err)
 	}
 	if got := a.blob(t, "HEAD", "joins/host-c.txt"); got != ctext {
@@ -559,7 +559,7 @@ func TestAcceptTakesGroupedFingerprint(t *testing.T) {
 	b.repo.Run("push", "origin", "main")
 	a.repo.Run("pull", "-q", "--rebase", "origin", "main")
 	list, _ := ListJoins(a.repo)
-	if err := AcceptJoin(a.repo, "host-b", GroupFingerprint(list[0].Join.Fingerprint)); err != nil {
+	if err := AcceptJoin(a.repo, "host-b", GroupFingerprint(list[0].Join.Fingerprint), AcceptOpts{AllowUnlabelled: true}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -685,7 +685,7 @@ func TestPendingRecipients(t *testing.T) {
 	b.repo.Run("push", "origin", "main")
 	a.repo.Run("pull", "-q", "--rebase", "origin", "main")
 	list, _ := ListJoins(a.repo)
-	AcceptJoin(a.repo, "host-b", list[0].Join.Fingerprint)
+	AcceptJoin(a.repo, "host-b", list[0].Join.Fingerprint, AcceptOpts{AllowUnlabelled: true})
 	a.repo.Run("push", "origin", "main")
 	b.repo.Run("pull", "-q", "--rebase", "origin", "main")
 	got, removed, err := PendingRecipients(b.repo)
@@ -733,7 +733,7 @@ func TestAcceptRefusesLabelBoundToAnotherKey(t *testing.T) {
 		t.Fatalf("list: %+v", list)
 	}
 	head := a.revHead(t)
-	if err := AcceptJoin(a.repo, "host-b", list[0].Join.Fingerprint); err == nil || !strings.Contains(err.Error(), "already bound") {
+	if err := AcceptJoin(a.repo, "host-b", list[0].Join.Fingerprint, AcceptOpts{AllowUnlabelled: true}); err == nil || !strings.Contains(err.Error(), "already bound") {
 		t.Fatalf("a label bound to another key must be refused: %v", err)
 	}
 	if a.revHead(t) != head {

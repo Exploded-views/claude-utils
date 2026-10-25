@@ -56,7 +56,7 @@ func runAgeTextconv(args []string) int {
 // runRecipients handles `claude-memsync recipients add|remove|list|accept`.
 func runRecipients(args []string) int { return recipientsCmd(os.Stdout, os.Stderr, args) }
 
-const recipientsUsage = "usage: claude-memsync recipients add <public-key> [--host <label>] | remove <public-key> | list | accept --yes  [--repo <name> | --config <path>] [--routes <path>]"
+const recipientsUsage = "usage: claude-memsync recipients add <public-key> [--host <label>] | remove <public-key> | list | accept --yes | label self --host <label> [--all]  [--repo <name> | --config <path>] [--routes <path>]"
 
 // recipientsCmd acts on one repo. With a routes file the repo must be named
 // (--repo or --config): the personal repo is never assumed, since a key added
@@ -72,6 +72,9 @@ func recipientsCmd(stdout, stderr io.Writer, args []string) int {
 		return 2
 	}
 	args, hostLabel := extractFlag(args, "--host")
+	if len(args) > 0 && args[0] == "label" {
+		return labelCmd(stdout, stderr, sel, args[1:], hostLabel)
+	}
 	cfg, _, err := resolveRepo(sel, true)
 	if err != nil {
 		fmt.Fprintln(stderr, "recipients:", err)
@@ -214,4 +217,110 @@ func printRecipientsDiff(w io.Writer, repo *gitwt.Repo) {
 	for _, f := range removed {
 		fmt.Fprintln(w, "  - key", f, "(pinned, gone upstream)")
 	}
+}
+
+// labelCmd is `recipients label self --host <label> [--repo <name> | --all]`:
+// it labels this host's own recipient line in an existing repo (or in every
+// repo of the routes file with --all), commits and pushes it, re-pins, and
+// records the label as the config's hostLabel.
+func labelCmd(stdout, stderr io.Writer, sel repoSel, args []string, label string) int {
+	all := false
+	var rest []string
+	for _, a := range args {
+		if a == "--all" {
+			all = true
+		} else {
+			rest = append(rest, a)
+		}
+	}
+	if len(rest) != 1 || rest[0] != "self" || label == "" {
+		fmt.Fprintln(stderr, "usage: claude-memsync recipients label self --host <label> [--repo <name> | --all]")
+		return 2
+	}
+	if !agecrypt.ValidJoinLabel(label) {
+		fmt.Fprintln(stderr, "recipients: label must match ^[a-z0-9][a-z0-9-]{0,31}$")
+		return 2
+	}
+	var cfgs []config.Config
+	if all {
+		if sel.Repo != "" || sel.Config != "" {
+			fmt.Fprintln(stderr, "recipients: --all does not go with --repo or --config")
+			return 2
+		}
+		path, ok, err := resolveRoutesPath(sel.Routes)
+		if err != nil || !ok {
+			fmt.Fprintln(stderr, "recipients: --all needs a routes file")
+			return 1
+		}
+		set, err := loadRouted(path)
+		if err != nil {
+			fmt.Fprintln(stderr, "recipients:", err)
+			return 1
+		}
+		for _, n := range set.names() {
+			cfgs = append(cfgs, set.Cfgs[n])
+		}
+	} else {
+		cfg, _, err := resolveRepo(sel, true)
+		if err != nil {
+			fmt.Fprintln(stderr, "recipients:", err)
+			return 1
+		}
+		cfgs = append(cfgs, cfg)
+	}
+	code := 0
+	for _, cfg := range cfgs {
+		if c := labelSelfOne(stdout, stderr, cfg, label); c > code {
+			code = c
+		}
+	}
+	return code
+}
+
+func labelSelfOne(stdout, stderr io.Writer, cfg config.Config, label string) int {
+	repo := gitwt.New(cfg.SyncDir)
+	if !repo.IsRepo() || !agecrypt.Enabled(repo) {
+		fmt.Fprintf(stderr, "recipients: %s: the sync repo is not encrypted\n", cfg.SyncDir)
+		return 1
+	}
+	if cfg.ReadOnly {
+		fmt.Fprintln(stderr, "recipients: this host is read-only and never commits; label it from a writable host")
+		return 1
+	}
+	if cfg.HostLabel != "" && cfg.HostLabel != label {
+		fmt.Fprintf(stderr, "recipients: this host's hostLabel is already %q\n", cfg.HostLabel)
+		return 1
+	}
+	committed := false
+	err := withSyncLock(cfg.SyncDir, func() error {
+		if err := agecrypt.SyncFromOrigin(repo); err != nil {
+			fmt.Fprintln(stderr, "recipients: could not bring in the latest remote state; working from this clone:", err)
+		}
+		if err := agecrypt.LabelSelf(repo, label); err != nil {
+			return err
+		}
+		committed = true
+		return joinPush(cfg, repo, false)
+	})
+	if err != nil {
+		if committed {
+			fmt.Fprintln(stderr, "recipients: labelled locally but the push failed; the daemon pushes it on its next cycle")
+		} else {
+			return recipientsFail(stderr, err)
+		}
+	}
+	// Record the label in the host's own config.json as it is on disk (not the
+	// trust-filtered copy), so no other key is dropped.
+	if raw, lerr := config.Load(cfg.Path()); lerr == nil {
+		raw.HostLabel = label
+		if serr := config.Save(raw); serr != nil {
+			fmt.Fprintln(stderr, "recipients: could not save hostLabel:", serr)
+			return 1
+		}
+	}
+	fmt.Fprintf(stdout, "labelled this host %s in %s\n", label, cfg.SyncDir)
+	if err != nil {
+		return 1
+	}
+	return 0
 }
