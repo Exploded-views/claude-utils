@@ -156,14 +156,18 @@ func rekeyOne(stdout, stderr io.Writer, cfg config.Config, hostCfgs []config.Con
 		}
 		plan = p
 		// The config follows the repo from here on.
-		raw, lerr := config.Load(cfg.Path())
+		cfgFile := cfg.ConfigPath
+		if cfgFile == "" {
+			cfgFile = cfg.Path()
+		}
+		raw, lerr := config.Load(cfgFile)
 		if lerr != nil {
 			return lerr
 		}
 		raw.EncryptionScheme = agecrypt.SchemePQ
 		raw.HostLabel = o.Label
 		raw.RecoveryRecipients = []string{o.Recovery}
-		if err := config.Save(raw); err != nil {
+		if err := config.SaveAt(cfgFile, raw); err != nil {
 			return err
 		}
 		if err := rekeyPush(cfg, repo, p, o.FreshRoot); err != nil {
