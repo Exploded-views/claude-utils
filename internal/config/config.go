@@ -61,6 +61,15 @@ type Config struct {
 	// var. The token itself is never stored in config.json.
 	GitHubTokenFile string `json:"githubTokenFile,omitempty"`
 
+	// GitHubTokenCmd is an argv (no shell), e.g. ["gh","auth","token"], whose
+	// stdout is the token. It is run at call time, the token is held in memory
+	// for the request only, and it is used when githubTokenFile is not set.
+	GitHubTokenCmd []string `json:"githubTokenCmd,omitempty"`
+
+	// RecheckTokenCmd false stops the daemon using githubTokenCmd for its
+	// hourly visibility re-check (nil: it does).
+	RecheckTokenCmd *bool `json:"recheckTokenCmd,omitempty"`
+
 	// GitHubAPIURL overrides the API base URL (GitHub Enterprise, tests).
 	GitHubAPIURL string `json:"githubApiUrl,omitempty"`
 
@@ -98,6 +107,15 @@ type Config struct {
 	// StartQuietSec is the start-up quiet window in seconds (nil: 15, 0 turns
 	// it off): the owned folders must not change during it, or the run refuses.
 	StartQuietSec *int `json:"startQuietSec,omitempty"`
+}
+
+// ForDaemon returns c with the token command dropped when recheckTokenCmd is
+// false, so the daemon never runs it.
+func (c Config) ForDaemon() Config {
+	if c.RecheckTokenCmd != nil && !*c.RecheckTokenCmd {
+		c.GitHubTokenCmd = nil
+	}
+	return c
 }
 
 // DefaultQuietSec is the start-up quiet window when config.json does not say.
