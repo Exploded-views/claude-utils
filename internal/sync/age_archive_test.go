@@ -198,5 +198,13 @@ func TestAgeArchive_RealRenameIsArchivePlusAdd(t *testing.T) {
 		if got, ok := h.archivedText("old.md"); !ok || got != "moved text\n" {
 			t.Errorf("%s: archive copy of the old name: %q %v", h.loop.Hostname, got, ok)
 		}
+		// The copy's name carries the hash of the plaintext, never of the
+		// ciphertext stored in git, and no cycle "repaired" it.
+		if !h.treeHas(archPath("p1", "old.md", "moved text\n")) {
+			t.Errorf("%s: archive copy is not named for the plaintext hash:\n%s", h.loop.Hostname, headTree(t, h.repo))
+		}
+		if log := mustGit(t, h.repo, "log", "--format=%s"); strings.Contains(log, "restore edited notes") {
+			t.Errorf("%s: a clean archive was 'restored':\n%s", h.loop.Hostname, log)
+		}
 	}
 }
