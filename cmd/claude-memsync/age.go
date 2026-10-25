@@ -173,6 +173,9 @@ func encryptionLines(cfg config.Config) []string {
 	if u, _ := agecrypt.Unreviewed(repo); u {
 		out = append(out, "recipients UNREVIEWED: .age-recipients differs from the set pinned on this host; nothing is committed or pushed. Review with `claude-memsync recipients list`, then `recipients accept --yes`")
 	}
+	if l := joinStatusLine(cfg); l != "" {
+		out = append(out, l)
+	}
 	return out
 }
 

@@ -132,6 +132,12 @@ func rewriteRecipients(repo *gitwt.Repo, keys []string, msg string) error {
 // commit touched are updated in the real index, and only where the entry still
 // equals HEAD's; other staged entries are left as they are.
 func reencryptHead(repo *gitwt.Repo, msg string) error {
+	return reencryptHeadDrop(repo, msg, nil)
+}
+
+// reencryptHeadDrop is reencryptHead that also removes the given paths from
+// the commit's tree (and, when unchanged, from the work-tree).
+func reencryptHeadDrop(repo *gitwt.Repo, msg string, drop []string) error {
 	if !repo.HasHead() {
 		return nil // nothing committed yet: the first cycle commits the recipients
 	}
@@ -203,6 +209,29 @@ func reencryptHead(repo *gitwt.Repo, msg string) error {
 		}
 		fmt.Fprintf(&info, "100644 %s\t%s\x00", strings.TrimSpace(oid), RecipientsFile)
 	}
+	if err := addDrops(repo, &info, headOID, drop); err != nil {
+		return err
+	}
+	return commitInfo(repo, oldRev, msg, info.String(), headOID, drop)
+}
+
+// addDrops adds index-info lines that delete each path HEAD holds.
+func addDrops(repo *gitwt.Repo, info *strings.Builder, headOID map[string]string, drop []string) error {
+	for _, d := range drop {
+		oid, err := repo.Run("rev-parse", "--verify", "--quiet", "HEAD:"+d)
+		if err != nil {
+			continue // not in HEAD: nothing to drop
+		}
+		headOID[d] = strings.TrimSpace(oid)
+		fmt.Fprintf(info, "0 %s\t%s\x00", strings.Repeat("0", 40), d)
+	}
+	return nil
+}
+
+// commitInfo builds one commit on oldRev from HEAD's tree with the given
+// index-info applied, in a private index, with a compare-and-swap ref update;
+// then brings the real index (and dropped work-tree files) along.
+func commitInfo(repo *gitwt.Repo, oldRev, msg, infoText string, headOID map[string]string, drop []string) error {
 	gitDir, err := gitCommonDir(repo)
 	if err != nil {
 		return err
@@ -213,7 +242,7 @@ func reencryptHead(repo *gitwt.Repo, msg string) error {
 	if _, err := repo.RunEnv(env, nil, "read-tree", "HEAD"); err != nil {
 		return err
 	}
-	if _, err := repo.RunEnv(env, []byte(info.String()), "update-index", "-z", "--index-info"); err != nil {
+	if _, err := repo.RunEnv(env, []byte(infoText), "update-index", "-z", "--index-info"); err != nil {
 		return fmt.Errorf("re-encrypt: %w", err)
 	}
 	tree, err := repo.RunEnv(env, nil, "write-tree")
@@ -245,7 +274,7 @@ func reencryptHead(repo *gitwt.Repo, msg string) error {
 		}
 	}
 	var upd strings.Builder
-	for _, rec := range strings.Split(info.String(), "\x00") {
+	for _, rec := range strings.Split(infoText, "\x00") {
 		tab := strings.IndexByte(rec, '\t')
 		if tab < 0 {
 			continue
@@ -259,6 +288,15 @@ func reencryptHead(repo *gitwt.Repo, msg string) error {
 	if upd.Len() > 0 {
 		if _, err := repo.RunStdin([]byte(upd.String()), "update-index", "-z", "--index-info"); err != nil {
 			return fmt.Errorf("re-encrypt: update index: %w", err)
+		}
+	}
+	for _, d := range drop {
+		// A dropped file the work-tree still holds, unchanged, goes too.
+		fp := filepath.Join(repo.Dir, filepath.FromSlash(d))
+		if want, ok := headOID[d]; ok {
+			if got, err := repo.Run("hash-object", "--no-filters", "--", fp); err == nil && strings.TrimSpace(got) == want {
+				_ = os.Remove(fp)
+			}
 		}
 	}
 	return nil

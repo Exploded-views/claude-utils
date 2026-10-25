@@ -30,7 +30,7 @@ var (
 func runRoute(args []string) int { return routeCmd(args, os.Stdin, os.Stdout, os.Stderr) }
 
 const routeUsage = `usage:
-  claude-memsync route home [<repo>|deny] [--folder F] [--confirm-move-out-of-client]
+  claude-memsync route home [<repo>|deny] [--folder F] [--yes] [--confirm-move-out-of-client]
   claude-memsync route home --unpin | --suggest | --ask
   claude-memsync route publish --as <label> [--registry DIR]
   claude-memsync route inherit <label> [--home] [--yes] [--confirm-move-out-of-client] [--registry DIR]
@@ -100,6 +100,7 @@ func routeHome(args []string, in io.Reader, out, errw io.Writer) int {
 	suggest := fs.Bool("suggest", false, "print a suggested choice and the reason; changes nothing")
 	unpin := fs.Bool("unpin", false, "remove the home pin (the folder then routes by the other rules)")
 	ask := fs.Bool("ask", false, "choose interactively (needs a terminal)")
+	yes := fs.Bool("yes", false, "confirm non-interactively: pins a repo with no prompt; never replaces --confirm-move-out-of-client (a client/orch repo involved still refuses)")
 	pos, err := parseMixed(fs, args)
 	if err != nil {
 		return 2
@@ -110,6 +111,9 @@ func routeHome(args []string, in io.Reader, out, errw io.Writer) int {
 	}
 	if len(pos) > 1 {
 		return fail("one repo name or deny, not %d arguments", len(pos))
+	}
+	if *yes && (*suggest || *ask || *unpin) {
+		return fail("--yes goes with a repo: claude-memsync route home <repo>|deny --yes")
 	}
 	if *ask && !stdinIsTTY() {
 		return fail("stdin is not a terminal: pass the repo instead: claude-memsync route home <repo>|deny")

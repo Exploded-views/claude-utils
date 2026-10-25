@@ -59,6 +59,9 @@ func runPull(repo *gitwt.Repo, branch string) error {
 	if err := repo.Fetch(branch); err != nil {
 		return err
 	}
+	if err := refuseLocalOnly(repo, branch); err != nil {
+		return err
+	}
 	afterFetch(repo)
 	nonce, err := markPull(repo)
 	if err != nil {

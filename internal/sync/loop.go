@@ -48,6 +48,20 @@ type Loop struct {
 	// before flush, so flush does not repeat it: a path whose restore keeps
 	// failing is counted once per cycle.
 	recovered *recovery
+	// refused is the last pull-refused reason logged, so it is logged once.
+	refused string
+}
+
+// alreadyLogged is an error a cycle has already logged itself.
+func alreadyLogged(err error) bool {
+	return errors.Is(err, errHandResolving) || errors.Is(err, ErrLocalOnlyTracked)
+}
+
+func (l *Loop) logRefusal(err error) {
+	if m := err.Error(); m != l.refused {
+		l.refused = m
+		l.logln(m)
+	}
 }
 
 type recovery struct{ err error }
@@ -113,7 +127,7 @@ func (l *Loop) Run(ctx context.Context) error {
 		}
 	}
 	if err := l.flush(repo, roots, true); err != nil {
-		if !errors.Is(err, errHandResolving) { // already logged
+		if !alreadyLogged(err) { // already logged
 			l.logln("initial flush:", newPathGuard(l.Cfg).Err(err))
 		}
 		if l.OnFlush != nil {
@@ -153,7 +167,7 @@ func (l *Loop) Run(ctx context.Context) error {
 
 		case <-debounce.C:
 			err := l.flush(repo, roots, true)
-			if err != nil && !errors.Is(err, errHandResolving) {
+			if err != nil && !alreadyLogged(err) {
 				l.logln("flush (local):", newPathGuard(l.Cfg).Err(err))
 			}
 			l.refreshManifest(roots)
@@ -198,7 +212,9 @@ func (l *Loop) keylessPull(repo *gitwt.Repo) {
 		return
 	}
 	if err := runPull(repo, l.Branch); err != nil {
-		if repo.RebaseInProgress() {
+		if errors.Is(err, ErrLocalOnlyTracked) {
+			l.logRefusal(err)
+		} else if repo.RebaseInProgress() {
 			_ = abortRebaseConflict(repo)
 		} else {
 			log.Println("pull:", newPathGuard(l.Cfg).Err(err))
@@ -286,7 +302,7 @@ func (l *Loop) pullTick(repo *gitwt.Repo, roots Roots) {
 		}
 	}
 	err = l.flush(repo, roots, true)
-	if err != nil && !errors.Is(err, errHandResolving) {
+	if err != nil && !alreadyLogged(err) {
 		l.logln("flush (pull):", newPathGuard(l.Cfg).Err(err))
 	}
 	l.refreshManifest(roots)
@@ -445,6 +461,11 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	// The marker names the rebase for the reflog, so the next start knows a
 	// rebase found stopped is ours to abort; it stays while one is.
 	if err := runPull(repo, l.Branch); err != nil {
+		if errors.Is(err, ErrLocalOnlyTracked) {
+			l.logRefusal(err)
+			return err // nothing merged, nothing pushed
+		}
+		l.refused = ""
 		if repo.RebaseInProgress() && l.Cfg.ArchiveDeletes {
 			// Two hosts archiving one note conflict in a way that needs no
 			// decision (see archive_resolve.go); anything else stays stopped.

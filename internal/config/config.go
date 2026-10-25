@@ -61,6 +61,15 @@ type Config struct {
 	// var. The token itself is never stored in config.json.
 	GitHubTokenFile string `json:"githubTokenFile,omitempty"`
 
+	// GitHubTokenCmd is an argv (no shell), e.g. ["gh","auth","token"], whose
+	// stdout is the token. It is run at call time, the token is held in memory
+	// for the request only, and it is used when githubTokenFile is not set.
+	GitHubTokenCmd []string `json:"githubTokenCmd,omitempty"`
+
+	// RecheckTokenCmd false stops the daemon using githubTokenCmd for its
+	// hourly visibility re-check (nil: it does).
+	RecheckTokenCmd *bool `json:"recheckTokenCmd,omitempty"`
+
 	// GitHubAPIURL overrides the API base URL (GitHub Enterprise, tests).
 	GitHubAPIURL string `json:"githubApiUrl,omitempty"`
 
@@ -98,6 +107,23 @@ type Config struct {
 	// StartQuietSec is the start-up quiet window in seconds (nil: 15, 0 turns
 	// it off): the owned folders must not change during it, or the run refuses.
 	StartQuietSec *int `json:"startQuietSec,omitempty"`
+
+	// ConfigPath is the file Load read this config from ("" for a config that
+	// was not loaded). Not part of config.json.
+	ConfigPath string `json:"-"`
+
+	// TokenCmdFromFlag marks GitHubTokenCmd as typed on this command line
+	// (--token-cmd) rather than read from config.json. Not saved.
+	TokenCmdFromFlag bool `json:"-"`
+}
+
+// ForDaemon returns c with the token command dropped when recheckTokenCmd is
+// false, so the daemon never runs it.
+func (c Config) ForDaemon() Config {
+	if c.RecheckTokenCmd != nil && !*c.RecheckTokenCmd {
+		c.GitHubTokenCmd = nil
+	}
+	return c
 }
 
 // DefaultQuietSec is the start-up quiet window when config.json does not say.
@@ -180,6 +206,7 @@ func Load(path string) (Config, error) {
 	if c.StartQuietSec != nil && *c.StartQuietSec < 0 {
 		return Config{}, fmt.Errorf("%s: startQuietSec must not be negative", path)
 	}
+	c.ConfigPath = path
 	return c, nil
 }
 

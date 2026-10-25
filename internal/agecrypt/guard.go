@@ -83,10 +83,23 @@ func CheckKeyed(repo *gitwt.Repo) error {
 // must be age ciphertext. It catches a clone whose filter config went missing.
 // It returns nil when encryption is off.
 func PushGuard(repo *gitwt.Repo, branch string) error {
+	return pushGuard(repo, branch, true)
+}
+
+// PushGuardJoinRequest is PushGuard without the recipients-review gate, for
+// pushing a join request: that commit encrypts nothing, so an unreviewed
+// recipient set cannot leak through it, and a host waiting to be admitted has
+// by definition not reviewed the set that will include it. Every blob is still
+// checked: only valid join requests may be plaintext.
+func PushGuardJoinRequest(repo *gitwt.Repo, branch string) error {
+	return pushGuard(repo, branch, false)
+}
+
+func pushGuard(repo *gitwt.Repo, branch string, requireReviewed bool) error {
 	if !Enabled(repo) {
 		return nil
 	}
-	if u, _ := Unreviewed(repo); u {
+	if u, _ := Unreviewed(repo); u && requireReviewed {
 		return ErrRecipientsUnreviewed
 	}
 	// What gets pushed is the branch, not whatever HEAD is.
@@ -106,6 +119,7 @@ func PushGuard(repo *gitwt.Repo, branch string) error {
 	}
 	seen := map[string]bool{}
 	var oids, paths []string
+	var joinOIDs, joinPaths []string
 	for _, line := range strings.Split(out, "\n") {
 		tab := strings.IndexByte(line, '\t')
 		if !strings.HasPrefix(line, ":") || tab < 0 {
@@ -117,6 +131,12 @@ func PushGuard(repo *gitwt.Repo, branch string) error {
 		}
 		seen[f[3]+line[tab:]] = true
 		path := line[tab+1:]
+		if IsJoinPath(path) {
+			// Plaintext is allowed here, but only a strictly valid request.
+			joinOIDs = append(joinOIDs, f[3])
+			joinPaths = append(joinPaths, path)
+			continue
+		}
 		if Exempt(path) {
 			continue
 		}
@@ -128,6 +148,15 @@ func PushGuard(repo *gitwt.Repo, branch string) error {
 		return err
 	}
 	var bad int
+	jb, err := repo.BlobContents(joinOIDs)
+	if err != nil {
+		return err
+	}
+	for i, b := range jb {
+		if !ValidJoinBlob(joinPaths[i], b) {
+			bad++
+		}
+	}
 	for i, b := range blobs {
 		if !IsCiphertext(b) {
 			bad++

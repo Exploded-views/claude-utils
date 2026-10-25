@@ -133,12 +133,13 @@ func IdentityPath(repo *gitwt.Repo) string {
 var exempt = map[string]bool{".gitattributes": true, ".gitignore": true, RecipientsFile: true}
 
 // Exempt reports whether a repo-root path is stored in the clear.
-func Exempt(path string) bool { return exempt[path] }
+func Exempt(path string) bool { return exempt[path] || IsJoinPath(path) }
 
 // Attributes is the .gitattributes content of an encrypted repo.
 func Attributes() string {
 	return `# Managed by claude-memsync: every file is age-encrypted in the repo.
-# Exempt (stored in the clear): this file, .gitignore and the public recipients.
+# Exempt (stored in the clear): this file, .gitignore, the public recipients
+# and join requests.
 * filter=memage diff=memage merge=memtext
 MEMORY.md filter=memage diff=memage merge=claude-memory-index
 # The archive index is append-only: decrypt, keep both sides' lines, encrypt.
@@ -147,6 +148,8 @@ archive/INDEX.md filter=memage diff=memage merge=memunion
 /.gitattributes !filter !diff !merge
 /.gitignore !filter !diff !merge
 /.age-recipients !filter !diff merge=union
+# Join requests (joins/<label>.txt) carry a public key only and stay plaintext.
+/joins/*.txt !filter !diff !merge
 `
 }
 

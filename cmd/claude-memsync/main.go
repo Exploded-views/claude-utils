@@ -36,6 +36,8 @@ func main() {
 		os.Exit(runAgeTextconv(os.Args[2:]))
 	case "recipients":
 		os.Exit(runRecipients(os.Args[2:]))
+	case "join":
+		os.Exit(runJoin(os.Args[2:]))
 	case "route":
 		os.Exit(runRoute(os.Args[2:]))
 	case "changes":
@@ -82,6 +84,7 @@ Subcommands:
   unrelate    Remove a relation
   related     List relations; "related sync" fetches read clones, "related context" prints a session index
   recipients  add | remove | list | accept the age recipients of an encrypted repo
+  join        join request|status|list|accept|reject: add a new host as an age recipient of an existing repo
   install     Install as a system service (Windows Service / systemd unit / launchd plist)
   uninstall   Remove the system service
   start       Start the system service

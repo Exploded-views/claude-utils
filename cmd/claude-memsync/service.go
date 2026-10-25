@@ -14,6 +14,7 @@ import (
 	"github.com/kardianos/service"
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
+	"github.com/MarimerLLC/claude-utils/internal/route"
 	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
 
@@ -155,15 +156,37 @@ func removePidFileAt(path string) error {
 	return nil
 }
 
+// installTaskFn is installTask; tests replace it so no service is touched.
+var installTaskFn = installTask
+
+// primaryConfigPath is the config.json of the routes file's primary repo.
+func primaryConfigPath(routesPath string) (string, error) {
+	set, err := loadRouted(routesPath)
+	if err != nil {
+		return "", err
+	}
+	if _, ok := set.Primary(); !ok {
+		return "", fmt.Errorf("%s: this host has none of the repos; initialise one first", routesPath)
+	}
+	name := set.File.Personal
+	if _, ok := set.Cfgs[name]; !ok || name == "" {
+		name = ""
+		for _, n := range set.File.RepoNames() {
+			if _, have := set.Cfgs[n]; have {
+				name = n
+				break
+			}
+		}
+	}
+	return route.ExpandHome(set.File.Repos[name].Config), nil
+}
+
 func runInstall(args []string) int {
 	flags := flag.NewFlagSet("install", flag.ContinueOnError)
 	cfgPath := flags.String("config", "", "path to config.json (default: ~/.claudesync/config.json)")
 	routesFlag := flags.String("routes", "", "path to routes.json to run several repos (default: $"+routesEnv+", then ~/.config/claude-memsync/routes.json if it exists)")
 	if err := flags.Parse(args); err != nil {
 		return 2
-	}
-	if *cfgPath == "" {
-		*cfgPath = defaultConfigPath()
 	}
 	if rp, ok, err := resolveRoutesPath(*routesFlag); err != nil {
 		fmt.Fprintln(os.Stderr, "install:", err)
@@ -175,6 +198,19 @@ func runInstall(args []string) int {
 			return 1
 		}
 		unitRoutes = abs
+		if *cfgPath == "" {
+			// Routed mode: the legacy ~/.claudesync/config.json need not exist;
+			// the personal (primary) repo's config stands in for it.
+			p, err := primaryConfigPath(rp)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "install:", err)
+				return 1
+			}
+			*cfgPath = p
+		}
+	}
+	if *cfgPath == "" {
+		*cfgPath = defaultConfigPath()
 	}
 	abs, err := filepath.Abs(*cfgPath)
 	if err != nil {
@@ -185,7 +221,7 @@ func runInstall(args []string) int {
 		fmt.Fprintf(os.Stderr, "config %s not found — run `claude-memsync init` first\n", abs)
 		return 1
 	}
-	if err := installTask(abs); err != nil {
+	if err := installTaskFn(abs); err != nil {
 		fmt.Fprintln(os.Stderr, "install:", err)
 		return 1
 	}
@@ -271,6 +307,10 @@ func runStatus(args []string) int {
 		if line := pausedLine(cfg); line != "" {
 			fmt.Println(line)
 		}
+		if line := syncpkg.PullRefusedLine(cfg.SyncDir); line != "" {
+			fmt.Println(line)
+			code = 1
+		}
 		if line := visibilityLine(cfg); line != "" {
 			fmt.Println(line)
 		}
@@ -308,6 +348,10 @@ func routedStatus() (handled bool, code int) {
 	for _, name := range set.names() {
 		cfg := set.Cfgs[name]
 		var lines []string
+		if l := syncpkg.PullRefusedLine(cfg.SyncDir); l != "" {
+			lines = append(lines, l)
+			code = 1
+		}
 		if l := visibilityLine(cfg); l != "" {
 			lines = append(lines, l)
 		}
