@@ -5,14 +5,19 @@
 #                [--workspace <dir>]... [--own-owner <owner>]... [--deny-owner <owner>]...
 #                [--deny-term <term>]... [--repo-url <url>]
 #                --org-token-file <path> | --org-token-cmd "<argv>" | --org-app <name>
+#                [--org-app-id <id> --org-app-key-cmd "<argv>"]
+#                [--check-app <name> --check-app-id <id> --check-key-file <path>]
 #                [--allow-org <org>]... [--dry-run] [--yes]
 #
 # Read this script before running it. --dry-run prints every step without doing
 # it. Everything lives under $HOME; the script never uses sudo, never prints a
 # private key or a token, and never creates or joins a client or orchestrator
 # repo. --org-app <name> mints the org token from the GitHub App entry <name> in
-# apps.json (claude-memsync app-token --app <name>), once per org call. See
-# docs/bootstrap.md.
+# apps.json (claude-memsync app-token --app <name>), once per org call. With
+# --org-app-id and --org-app-key-cmd the script adds that entry (a key command,
+# never a key file) and removes it again when it exits: the admin key does not
+# stay configured on the host. --check-app points the daemon's hourly re-check
+# at this host's own Metadata-read key. See docs/bootstrap.md.
 set -euo pipefail
 
 # The org token is read into variables and env of single commands; an xtrace
@@ -39,6 +44,7 @@ UTILS_URL="${CLAUDE_UTILS_URL:-https://github.com/Exploded-views/claude-utils}"
 
 HOST="" ROLE="" SHA="" ORG="Exploded-views" DRY_RUN=0 YES=0
 WORKSPACES=() OWN_OWNERS=() DENY_OWNERS=() DENY_TERMS=() ALLOW_ORGS=() ORG_TOKEN_FILE="" ORG_TOKEN_CMD="" ORG_APP=""
+ORG_APP_ID="" ORG_APP_KEY_CMD="" CHECK_APP="" CHECK_APP_ID="" CHECK_KEY_FILE="" APP_API_BASE="${BOOTSTRAP_APP_API_BASE:-}" ADMIN_WRITTEN=0
 
 R_KEYS=() R_NAMES=() R_KINDS=()   # planned repos (parallel arrays)
 RULE_LINES=""                     # "pin|folder|key" and "remote|host/owner/repo|key"
@@ -63,7 +69,7 @@ run() {
   "$@"
 }
 
-usage() { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 done_p() { [ -e "$STATE/$HOST.$1" ]; }
 mark()   { [ "$DRY_RUN" -eq 1 ] && return 0; mkdir -p "$STATE"; : >"$STATE/$HOST.$1"; }
@@ -156,6 +162,12 @@ while [ $# -gt 0 ]; do
     --org-token-file) [ $# -ge 2 ] || usage; ORG_TOKEN_FILE="$2"; shift 2 ;;
     --org-token-cmd)  [ $# -ge 2 ] || usage; ORG_TOKEN_CMD="$2"; shift 2 ;;
     --org-app)        [ $# -ge 2 ] || usage; ORG_APP="$2"; shift 2 ;;
+    --org-app-id)      [ $# -ge 2 ] || usage; ORG_APP_ID="$2"; shift 2 ;;
+    --org-app-key-cmd) [ $# -ge 2 ] || usage; ORG_APP_KEY_CMD="$2"; shift 2 ;;
+    --check-app)       [ $# -ge 2 ] || usage; CHECK_APP="$2"; shift 2 ;;
+    --check-app-id)    [ $# -ge 2 ] || usage; CHECK_APP_ID="$2"; shift 2 ;;
+    --check-key-file)  [ $# -ge 2 ] || usage; CHECK_KEY_FILE="$2"; shift 2 ;;
+    --app-api-base)    [ $# -ge 2 ] || usage; APP_API_BASE="$2"; shift 2 ;;   # GitHub Enterprise, and the test fake
     --allow-org)  [ $# -ge 2 ] || usage; ALLOW_ORGS+=("$(lower "$2")"); shift 2 ;;
     --split-args-json) [ $# -ge 2 ] || usage; split_args json "$2"; exit $? ;;   # test hook
     --dry-run)    DRY_RUN=1; shift ;;
@@ -173,6 +185,18 @@ if [ -n "$ORG_APP" ]; then
   printf '%s' "$ORG_APP" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' || die "bad --org-app '$ORG_APP'"
   case "$HOME" in *[[:space:]\'\"\\]*) die "--org-app needs a HOME without spaces or quotes (the token command is passed as one string)" ;; esac
   ORG_TOKEN_CMD="$HOME/.local/bin/claude-memsync app-token --app $ORG_APP"
+fi
+if [ -n "$ORG_APP_ID" ] || [ -n "$ORG_APP_KEY_CMD" ]; then
+  [ -n "$ORG_APP" ] || die "--org-app-id / --org-app-key-cmd go with --org-app <name>"
+  [ -n "$ORG_APP_ID" ] && [ -n "$ORG_APP_KEY_CMD" ] || die "give both --org-app-id and --org-app-key-cmd"
+  printf '%s' "$ORG_APP_ID" | grep -Eq '^[0-9]{1,20}$' || die "bad --org-app-id (numeric)"
+  split_args json "$ORG_APP_KEY_CMD" >/dev/null || die "unbalanced quote in --org-app-key-cmd"
+fi
+if [ -n "$CHECK_APP$CHECK_APP_ID$CHECK_KEY_FILE" ]; then
+  [ -n "$CHECK_APP" ] && [ -n "$CHECK_APP_ID" ] && [ -n "$CHECK_KEY_FILE" ] || die "give --check-app, --check-app-id and --check-key-file together"
+  printf '%s' "$CHECK_APP" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' || die "bad --check-app '$CHECK_APP'"
+  printf '%s' "$CHECK_APP_ID" | grep -Eq '^[0-9]{1,20}$' || die "bad --check-app-id (numeric)"
+  [ "$CHECK_APP" != "$ORG_APP" ] || die "--check-app must differ from --org-app: the admin app never serves the daemon"
 fi
 ORG_TOKEN_ARGV=()
 if [ -n "$ORG_TOKEN_CMD" ]; then
@@ -328,6 +352,78 @@ check_app_scope() {
   say "  ok"
 }
 
+# apps.json helpers. The file is written 0600 and atomically; entries are
+# replaced by name and the others kept. Nothing secret goes in: a key command
+# or key file path, an app id, a fingerprint.
+APPS="$CFG/apps.json"
+apps_edit() { # upsert|remove <name> [entry-json]
+  BS_APPS="$APPS" BS_OP="$1" BS_NAME="$2" BS_ENTRY="${3:-}" python3 -I - <<'PY'
+import json, os, sys
+p, op, name = os.environ["BS_APPS"], os.environ["BS_OP"], os.environ["BS_NAME"]
+try:
+    apps = json.load(open(p))
+except FileNotFoundError:
+    apps = []
+if not isinstance(apps, list):
+    sys.exit("apps.json is not a JSON array")
+apps = [a for a in apps if a.get("name") != name]
+if op == "upsert":
+    apps.append(json.loads(os.environ["BS_ENTRY"]))
+if not apps and op == "remove":
+    if os.path.exists(p):
+        os.remove(p)
+    sys.exit(0)
+os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
+tmp = p + ".tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump(apps, f, indent=2); f.write("\n")
+os.chmod(tmp, 0o600)
+os.replace(tmp, p)
+PY
+}
+
+app_entry() { # name id keyfile|"" keycmd-json|"" [fingerprint]
+  BS_N="$1" BS_I="$2" BS_F="$3" BS_C="$4" BS_P="${5:-}" BS_O="$ORG" BS_B="$APP_API_BASE" python3 -I -c '
+import json, os
+e = {"name": os.environ["BS_N"], "appId": os.environ["BS_I"], "org": os.environ["BS_O"]}
+if os.environ["BS_F"]: e["keyFile"] = os.environ["BS_F"]
+if os.environ["BS_C"]: e["keyCmd"] = json.loads(os.environ["BS_C"])
+if os.environ["BS_B"]: e["apiBase"] = os.environ["BS_B"]
+if os.environ["BS_P"]: e["keyFingerprint"] = os.environ["BS_P"]
+print(json.dumps(e))'
+}
+
+# The admin app entry exists only for the length of this run.
+admin_entry_add() {
+  [ -n "$ORG_APP_ID" ] || return 0
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  would add the app entry $ORG_APP to $APPS (key command only), and remove it when the run ends"
+    return 0
+  fi
+  apps_edit upsert "$ORG_APP" "$(app_entry "$ORG_APP" "$ORG_APP_ID" "" "$(split_args json "$ORG_APP_KEY_CMD")")"
+  ADMIN_WRITTEN=1
+  trap admin_entry_remove EXIT
+}
+admin_entry_remove() {
+  [ "$ADMIN_WRITTEN" -eq 1 ] || return 0
+  ADMIN_WRITTEN=0
+  apps_edit remove "$ORG_APP" || printf 'WARNING: could not remove the %s entry from %s; remove it by hand\n' "$ORG_APP" "$APPS" >&2
+}
+
+# check_key_file: the per-host check key must be a plain file of ours, 0600, one link.
+check_key_file() {
+  local f="$CHECK_KEY_FILE" m u n
+  case "$f" in /*) ;; *) die "--check-key-file must be an absolute path" ;; esac
+  [ -f "$f" ] && [ ! -L "$f" ] || die "check key file $f is missing or not a plain file"
+  m="$(stat -c %a "$f" 2>/dev/null || stat -f %Lp "$f")"
+  u="$(stat -c %u "$f" 2>/dev/null || stat -f %u "$f")"
+  n="$(stat -c %h "$f" 2>/dev/null || stat -f %l "$f")"
+  [ "$m" = 600 ] || die "check key file $f must be mode 0600 (is $m)"
+  [ "$u" = "$(id -u)" ] || die "check key file $f must be owned by you"
+  [ "$n" = 1 ] || die "check key file $f must have one hard link (has $n)"
+}
+
 GO_MODE=""
 preflight() {
   step "a. Preflight"
@@ -339,6 +435,8 @@ preflight() {
     command -v "$c" >/dev/null || die "$c not found"
   done
   gh auth status >/dev/null 2>&1 || die "gh is not logged in (run: gh auth login)"
+  [ -z "$CHECK_APP" ] || check_key_file
+  admin_entry_add
   check_org_scope
   if command -v go >/dev/null && version_ge "$(go version | sed -E 's/.*go([0-9]+\.[0-9]+).*/\1/')" 1.25; then
     GO_MODE=go
@@ -638,7 +736,7 @@ plan_routes_json() {
   for i in "${!R_KEYS[@]}"; do spec="${spec}repo|${R_KEYS[$i]}|${R_NAMES[$i]}|${R_KINDS[$i]}
 "; done
   spec="$spec$RULE_LINES"
-  BS_SPEC="$spec" BS_SYNC_ROOT="$SYNC_ROOT" BS_HOME="$HOME" python3 -I - <<'PY'
+  BS_SPEC="$spec" BS_SYNC_ROOT="$SYNC_ROOT" BS_HOME="$HOME" BS_OLD="$ROUTES" python3 -I - <<'PY'
 import json, os
 repos, routes, pins = {}, [], []
 personal = None
@@ -663,6 +761,12 @@ out = {"repos": repos, "routes": pins + routes, "default": "deny",
            {"claudePlugin": "memsync@memsync", "onlyIfFile": home + "/.config/memsync/config.json"}]}
 if personal:
     out["personal"] = personal
+try:   # a registry the owner configured survives a regeneration
+    reg = json.load(open(os.environ["BS_OLD"])).get("registry")
+    if reg:
+        out["registry"] = reg
+except Exception:
+    pass
 print(json.dumps(out, indent=2))
 PY
 }
@@ -760,30 +864,55 @@ step_init() {
 }
 
 # Token split: the bootstrap uses the org token (init, repo create, doctor).
-# The daemon's hourly re-check never uses it: recheckTokenCmd is false, and
-# githubTokenFile points at a Metadata-read PAT file if the owner put one
-# there. This script never creates or writes that file.
+# The daemon's hourly re-check never uses it: recheckTokenCmd is false. With
+# --check-app the re-check mints from this host's own Metadata-read key
+# (githubApp in each config; the key file and its fingerprint in apps.json and
+# the registry). Without it, githubTokenFile points at a Metadata-read PAT file
+# if the owner put one there. This script never creates or writes that PAT file.
 step_token_split() {
   step "f2. Daemon re-check token"
-  local tf="$CFG/github-token" i k cfg usefile=0
-  if [ -f "$tf" ] && [ "$(stat -c %a "$tf" 2>/dev/null || stat -f %Lp "$tf")" = 600 ]; then
+  local tf="$CFG/github-token" i k cfg usefile=0 fp="" slug="$CHECK_APP"
+  if [ -n "$CHECK_APP" ]; then
+    say "  check app $CHECK_APP (app id $CHECK_APP_ID, org $ORG): key file $CHECK_KEY_FILE"
+    if [ "$DRY_RUN" -eq 1 ]; then
+      say "  would record the key's fingerprint in $APPS and, if routes.json names a registry, with: claude-memsync host check-key --fingerprint <fingerprint> --app $slug"
+    else
+      fp="$("$BIN/claude-memsync" app key-fingerprint --key-file "$CHECK_KEY_FILE")" || die "cannot fingerprint the check key"
+      printf '%s' "$fp" | grep -Eq '^SHA256:[A-Za-z0-9+/=_-]+$' || die "unexpected key fingerprint output"
+      apps_edit upsert "$CHECK_APP" "$(app_entry "$CHECK_APP" "$CHECK_APP_ID" "$CHECK_KEY_FILE" "" "$fp")"
+      say "  wrote the $CHECK_APP entry to $APPS (0600) with key fingerprint $fp"
+      if python3 -I -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("registry") else 1)' "$ROUTES" 2>/dev/null; then
+        if "$BIN/claude-memsync" host check-key --fingerprint "$fp" --app "$slug"; then :; else
+          warn "could not record the check key in the registry; run: claude-memsync host check-key --fingerprint $fp --app $slug (on a writable host)"
+          NEXT_STEPS+=("record the check key: claude-memsync host check-key --fingerprint $fp --app $slug")
+        fi
+      else
+        say "  no registry in routes.json: the check key is not recorded there"
+        NEXT_STEPS+=("when a registry is configured: claude-memsync host check-key --fingerprint $fp --app $slug")
+      fi
+    fi
+  elif [ -f "$tf" ] && [ "$(stat -c %a "$tf" 2>/dev/null || stat -f %Lp "$tf")" = 600 ]; then
     usefile=1; say "  found $tf (0600): the daemon re-check will use it"
   else
-    warn "no Metadata-read PAT at $tf (0600): the hourly private re-check is OFF until it exists. Add it with: install -m 600 /dev/stdin $tf  (paste the token, then Ctrl-D), then re-run this bootstrap."
+    warn "no Metadata-read PAT at $tf (0600): the hourly private re-check is OFF until it exists. Add it with: install -m 600 /dev/stdin $tf  (paste the token, then Ctrl-D), then re-run this bootstrap. Or use --check-app."
     NEXT_STEPS+=("add the Metadata-read PAT file $tf (mode 0600) to turn the hourly re-check on")
   fi
   for i in "${!R_KEYS[@]}"; do
     k="${R_KEYS[$i]}"; cfg="$SYNC_ROOT/$k/config.json"
-    say "  $k: recheckTokenCmd=false$([ "$usefile" -eq 1 ] && echo ", githubTokenFile=$tf")"
+    if [ -n "$CHECK_APP" ]; then say "  $k: githubApp=$CHECK_APP, recheckTokenCmd=false"
+    else say "  $k: recheckTokenCmd=false$([ "$usefile" -eq 1 ] && echo ", githubTokenFile=$tf")"; fi
     [ "$DRY_RUN" -eq 1 ] && continue
-    python3 -I - "$cfg" "$([ "$usefile" -eq 1 ] && echo "$tf")" <<'PY'
+    python3 -I - "$cfg" "$([ "$usefile" -eq 1 ] && echo "$tf")" "$CHECK_APP" <<'PY'
 import json, sys
-p, tf = sys.argv[1], sys.argv[2]
+p, tf, app = sys.argv[1], sys.argv[2], sys.argv[3]
 d = json.load(open(p))
 d["recheckTokenCmd"] = False
 d.pop("githubTokenCmd", None)   # never leave the org-token command in a daemon-read config
-d.pop("githubTokenFile", None)  # nor the org-token file; only the Metadata-read PAT below
-if tf:
+d.pop("githubTokenFile", None)  # nor the org-token file; only the check key or Metadata-read PAT below
+d.pop("githubApp", None)
+if app:
+    d["githubApp"] = app
+elif tf:
     d["githubTokenFile"] = tf
 json.dump(d, open(p, "w"), indent=2)
 PY
@@ -872,3 +1001,4 @@ step_home
 step_plugin
 step_service
 step_summary
+admin_entry_remove
