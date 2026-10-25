@@ -138,3 +138,26 @@ func TestReadOnly_NeverPushesAnEarlierLocalCommit(t *testing.T) {
 		t.Error("a read-only host pushed an earlier local commit")
 	}
 }
+
+// With archiveDeletes on, a pull can bring an archive copy whose bytes no
+// longer match its name; a writable host repairs that with a commit. A
+// read-only host must leave it alone.
+func TestReadOnly_NeverCommitsAnArchiveRepair(t *testing.T) {
+	archClock(t)
+	captureLog(t)
+	f := newPullFixture(t, map[string]string{"a.md": "a\n"})
+	f.loop.Cfg.ArchiveDeletes = true
+	f.loop.Cfg.ReadOnly = true
+	v0, v1 := bigNote+"v0\n", bigNote+"v1 edited\n"
+	p := archPath("p1", "x.md", v0)
+	f.peerWrite(p, v0) // a proper archive copy
+	f.loop.pullTick(f.repo, f.roots)
+	f.peerWrite(p, v1) // an edit merged into the copy: the name no longer matches
+	f.loop.pullTick(f.repo, f.roots)
+	if f.head() != f.originHead() {
+		t.Errorf("a read-only host made a commit of its own (repair): head %s, origin %s", f.head(), f.originHead())
+	}
+	if n := f.autoCommitsOnOrigin(); n != "" {
+		t.Errorf("origin has commits from this host: %s", n)
+	}
+}

@@ -479,7 +479,7 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	// The marker names the rebase for the reflog, so the next start knows a
 	// rebase found stopped is ours to abort; it stays while one is.
 	if err := runPull(repo, l.Branch); err != nil {
-		if repo.RebaseInProgress() && l.Cfg.ArchiveDeletes {
+		if repo.RebaseInProgress() && l.Cfg.ArchiveDeletes && !l.Cfg.ReadOnly {
 			// Two hosts archiving one note conflict in a way that needs no
 			// decision (see archive_resolve.go); anything else stays stopped.
 			n, rerr := resolveArchiveConflicts(repo)
@@ -507,7 +507,7 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 		return pause()
 	}
 	postRev, _ := repo.Run("rev-parse", "HEAD")
-	if conflictErr == nil && l.Cfg.ArchiveDeletes && strings.TrimSpace(preRev) != strings.TrimSpace(postRev) && strings.TrimSpace(preRev) != "" {
+	if conflictErr == nil && l.Cfg.ArchiveDeletes && !l.Cfg.ReadOnly && strings.TrimSpace(preRev) != strings.TrimSpace(postRev) && strings.TrimSpace(preRev) != "" {
 		// An edit that merged into an archive copy is put back (archive_repair.go).
 		n, rerr := repairEditedArchives(repo, l.Cfg, strings.TrimSpace(preRev), strings.TrimSpace(postRev))
 		if rerr != nil {
