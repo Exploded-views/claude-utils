@@ -907,8 +907,16 @@ A deploy key cannot call the GitHub API, so the check needs a token (a
 read-only fine-grained token with Metadata read is enough for checks; creating
 a repo needs more). Configure it with the `MEMSYNC_GITHUB_TOKEN` env var, a
 different var via `githubTokenEnv`, or a file via `githubTokenFile` (or
-`init --token-file`). The token is never written to `config.json`, logs or
-error messages.
+`init --token-file`), or a command that prints the token on stdout, such as
+your password manager's CLI. The command is `githubTokenCmd`, a JSON array so
+that spaces survive (`["<cli>", "read", "<reference with spaces>"]`), or
+`--token-cmd "<cli> read '<reference with spaces>'"` on the command line, where
+"double" and 'single' quotes group words. It is run directly with no shell (no
+expansion of `$VAR`, backticks, globs or `;`), with a 10 second timeout, and its
+stderr is discarded. When several sources are set the first configured one is
+used, in the order file, command, env var; a configured source that fails is an
+error, never a silent fall-through to the next. The token is never written to
+`config.json`, logs or error messages.
 
 | When | Token required | Behaviour |
 |---|---|---|
@@ -928,26 +936,38 @@ there is no re-check; schedule `doctor`.
 Instead of a token file or env var, `githubTokenCmd` in `config.json` is an
 argv array (no shell), for example `["gh", "auth", "token"]`; its stdout is the
 token. It is used when `githubTokenFile` is not set (the file wins; the env var
-is the fallback). One-run flags: `--token-cmd "<argv split on spaces>"` on
-`init`, `doctor` and `repo create` (no quoting: arguments cannot contain
-spaces). `doctor` and `repo create` do not save it; `init` saves the command
+is the fallback). One-run flags: `--token-cmd "<command>"` on
+`init`, `doctor` and `repo create` (shell-style quotes group words; no shell
+is run). `doctor` and `repo create` do not save it; `init` saves the command
 (`githubTokenCmd`), never the token.
 
 - The command runs when a token is needed, with a 10 second timeout. Its
   output is held in memory for that request only: never written to disk,
   `config.json`, logs or error text (the command's stdout and stderr are not
   put in errors either).
-- The command is honoured only from a trusted `config.json`: it must be owned
-  by the user, have no group or other permission bits (mode 0600), and, being in
-  the sync work-tree, not be tracked by git (at HEAD or in the index). Otherwise
-  it is ignored with a warning, since a remote could plant a `config.json` that
-  names a command. A command typed as `--token-cmd` is always honoured.
+- The command is honoured only from a trusted `config.json` (see "Which
+  config.json keys are trusted" below); a command typed as `--token-cmd` is
+  always honoured.
 - A command that fails, times out or prints nothing means *no token*: the
   existing no-token behaviour applies (init and doctor refuse; the daemon
   skips the API check).
 - The daemon's hourly visibility re-check runs the command too. Set
   `"recheckTokenCmd": false` to keep the daemon from running it (then the
   re-check needs a file or env token, or does not run).
+
+### Which config.json keys are trusted
+
+`config.json` lives in the sync work-tree, so a remote could try to plant one.
+The keys that run a command, name a credential or pick an endpoint
+(`githubTokenCmd`, `githubTokenFile`, `githubApp`, `githubApiUrl`,
+`mergeDriverPath`) are therefore honoured only when `config.json` is owned by
+you, has no group or other permission bits (mode 0600), has a single hard link
+and is not tracked by git in whatever repo it really lies in (symlinks are
+resolved first). Otherwise they are ignored, with one warning in the log that
+names the keys, and the tool behaves as if they were unset. Values you type on
+the command line (`--token-cmd`, `--token-file`, `--github-app`) are always
+honoured. The daemon also refuses to pull a remote tree that tracks per-host
+files such as `config.json`.
 
 ### doctor
 
@@ -981,7 +1001,7 @@ must pair with the API: github.com with api.github.com, or another host with
 refuses ssh remotes while `core.sshCommand`, `GIT_SSH_COMMAND` or `GIT_SSH` is
 set, and the daemon re-checks the push URL and these overrides before every push.
 
-Config keys: `githubHost`, `recheckMaxFailures`, `recheckMaxAgeHours`, `privateOnly`, `githubTokenEnv`, `githubTokenFile`, `githubTokenCmd`, `recheckTokenCmd`, `githubApiUrl`, `githubOrg`.
+Config keys: `githubApp`, `githubHost`, `recheckMaxFailures`, `recheckMaxAgeHours`, `privateOnly`, `githubTokenEnv`, `githubTokenFile`, `githubTokenCmd`, `recheckTokenCmd`, `githubApiUrl`, `githubOrg`.
 
 ### Per-PC files never arrive from the remote
 
@@ -992,6 +1012,123 @@ If a fetched tree tracks any of them, the pull is refused before anything is
 merged: the daemon logs it once, commits nothing from the remote, pushes
 nothing, and `claude-memsync status` says `syncing paused, pull refused`. It
 resumes by itself once the remote tree no longer tracks them.
+
+## GitHub App authentication
+
+Instead of a long-lived personal access token, the checks (`init`, `doctor`,
+`repo create`, the daemon's re-check) can use a GitHub App. The tool signs a
+short-lived JWT with the app's private key and exchanges it for an installation
+token that expires in an hour. Nothing else changes: the token is only used for
+the same API calls as before, and App auth is optional. Without it, the
+`MEMSYNC_GITHUB_TOKEN`, `githubTokenFile` and `githubTokenCmd` sources behave
+exactly as described under "Where the check runs".
+
+### apps.json
+
+`~/.config/claude-memsync/apps.json` (or `$XDG_CONFIG_HOME/claude-memsync/`) must
+be mode 0600 because it can name a command that gets run. It is a JSON array,
+one entry per app on this host:
+
+```json
+[
+  {"name": "<app-name>", "appId": "<numeric app id>", "org": "<org>",
+   "keyFile": "/path/to/<app-name>.pem", "keyFingerprint": "SHA256:<base64>"}
+]
+```
+
+Give each entry exactly one of `keyFile` (a PEM file that must be mode 0600:
+a looser file is refused unread) or `keyCmd` (a command that prints the PEM on
+stdout). `keyCmd` is a JSON array, `["<secret-manager-cli>", "read", "<reference
+with spaces>"]`, so spaces survive; a plain string is also accepted and split
+with shell-style quotes. Either way it is run directly with no shell, a 10
+second timeout and its stderr discarded. PKCS#1 and PKCS#8 RSA keys both work.
+The key is never stored in `apps.json`.
+
+`apiBase` (default `https://api.github.com`; an `https` URL, set it for GitHub
+Enterprise) is the only place the app's JWT is ever sent. It lives here, not in
+`config.json`, on purpose: a JWT proves control of the app, and `config.json`
+sits in a synced work-tree. The `githubApiUrl` in `config.json` is never used
+for minting, and if it names a different API than the app's `apiBase` the tool
+refuses to use the app at all.
+
+The tool overwrites the key buffers it controls with zeros once the key is
+parsed, as a best effort. It cannot clear copies made by the Go runtime, the
+parsed key, swap or the secret manager, so treat the host, not the process
+memory, as the boundary.
+
+### One key per host
+
+Give each host its own private key for the app (generate it in the app's
+settings page; GitHub cannot create keys through the API) so a lost host can be
+cut off by deleting just its key. `keyFingerprint` is optional but recommended:
+when set, a key that does not match is refused before any request is made, which
+catches a wrong file or a rotated key. `app register` records it for you.
+
+```sh
+claude-memsync app key-fingerprint --key-file <pem>
+```
+
+prints `SHA256:<base64>`, the value GitHub shows next to the key in the app's
+settings (SHA-256 of the DER-encoded public key, standard base64; the same as
+GitHub's documented `openssl rsa -in <pem> -pubout -outform DER | openssl sha256
+-binary | openssl base64`). Use it to confirm a downloaded key is the one you
+meant, or to fill in `keyFingerprint` by hand. The command reads the key (it
+need not be mode 0600, since nothing is sent anywhere) but prints only the
+fingerprint.
+
+### Using an app
+
+```sh
+claude-memsync app-token --app <app-name> [--org <org>] [--repo <name>]... [--perm metadata:read]...
+```
+
+prints one installation token on stdout, so another tool can use the command as
+its own token command. `--org` overrides the entry's org, and `--repo` and
+`--perm` narrow the token below what the installation grants. `--apps-file`
+overrides the path.
+
+To use an app for the private-only checks, set `"githubApp": "<app-name>"` in
+`config.json` (or `init --github-app <app-name>`, `doctor --github-app
+<app-name>`). Precedence among token sources is `githubApp`, then
+`githubTokenFile`, then `githubTokenCmd`, then the env var; the first one
+configured is used, and if it fails the command fails rather than trying the
+next. The daemon keeps one token in memory, never longer than an hour whatever
+expiry the server reports, and mints a new one when fewer than five minutes
+remain. Tokens, JWTs and keys never appear in logs or errors, and the daily
+doctor timer accepts `githubApp` as its token source. Like the other
+credential keys, `githubApp` is ignored when `config.json` is not trusted (see
+"Which config.json keys are trusted").
+
+### Registering an app
+
+```sh
+claude-memsync app register --name <app-name> --org <org> --url <homepage-url> \
+  --perm administration:write --perm metadata:read \
+  (--key-out <path> | --key-cmd-store "<store command>" --key-cmd "<read command>")
+```
+
+uses GitHub's manifest flow, so there is no form to fill in by hand. The command
+writes a local HTML file (mode 0600) and prints its path and `file://` URL; open
+it in a browser where you are signed in to GitHub as an owner of the org. The
+page posts a private app manifest (no webhook, no event subscriptions, only the
+`--perm` permissions) to GitHub, which asks you to confirm and then calls back
+on `127.0.0.1:<random port>`. A callback whose random `state` is wrong is
+refused and ignored (any local program can hit that port), and the command keeps
+waiting for the real one; it gives up after 30 minutes. The one-time code is
+exchanged unauthenticated, and the command prints the app id, slug and the
+install URL (`https://github.com/apps/<slug>/installations/new`). It never opens
+a browser and contacts GitHub only after a correct callback.
+
+The private key exists only in that one response. It is written to `--key-out`
+(mode 0600; an existing file is refused before anything is created) or piped to
+the stdin of `--key-cmd-store`, whose matching read command you give as
+`--key-cmd`. Both commands are run directly with no shell; shell-style quotes
+group words, e.g. `--key-cmd "<secret-manager-cli> read '<reference with
+spaces>'"`. The key is never printed. The apps.json entry (with `apiBase` set
+from `--api-url`, if you gave one) is written last, only after the key is safely
+stored. If storing fails, the app already exists on GitHub: delete it or add a
+key to it in the app's settings. `--github-url` and `--api-url` target GitHub
+Enterprise.
 
 ## Several repos per host
 

@@ -70,6 +70,11 @@ type Config struct {
 	// hourly visibility re-check (nil: it does).
 	RecheckTokenCmd *bool `json:"recheckTokenCmd,omitempty"`
 
+	// GitHubApp names an entry in apps.json: the token is minted from that
+	// GitHub App's installation. It wins over githubTokenFile,
+	// githubTokenCmd and the env var.
+	GitHubApp string `json:"githubApp,omitempty"`
+
 	// GitHubAPIURL overrides the API base URL (GitHub Enterprise, tests).
 	GitHubAPIURL string `json:"githubApiUrl,omitempty"`
 
@@ -115,6 +120,32 @@ type Config struct {
 	// TokenCmdFromFlag marks GitHubTokenCmd as typed on this command line
 	// (--token-cmd) rather than read from config.json. Not saved.
 	TokenCmdFromFlag bool `json:"-"`
+
+	// flagKeys names the keys set from this run's command line rather than
+	// read from config.json (see MarkFlag). Not saved.
+	flagKeys map[string]bool
+}
+
+// MarkFlag records that key was set from a command-line flag of this run.
+func (c *Config) MarkFlag(key string) {
+	if key == "githubTokenCmd" {
+		c.TokenCmdFromFlag = true
+		return
+	}
+	m := make(map[string]bool, len(c.flagKeys)+1)
+	for k, v := range c.flagKeys {
+		m[k] = v
+	}
+	m[key] = true
+	c.flagKeys = m
+}
+
+// FromFlag reports whether key was set from a flag of this run.
+func (c Config) FromFlag(key string) bool {
+	if key == "githubTokenCmd" {
+		return c.TokenCmdFromFlag
+	}
+	return c.flagKeys[key]
 }
 
 // ForDaemon returns c with the token command dropped when recheckTokenCmd is

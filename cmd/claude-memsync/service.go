@@ -39,7 +39,7 @@ func (p *program) Start(s service.Service) error {
 		p.run, err = set.Start(context.Background())
 		return err
 	}
-	cfg, err := config.Load(p.configPath)
+	cfg, err := loadConfig(p.configPath)
 	if err != nil {
 		return fmt.Errorf("load config %s: %w", p.configPath, err)
 	}
@@ -406,7 +406,7 @@ func runService(configPath, routesFlag string, opts guardOpts) int {
 		}
 	} else {
 		routes = ""
-		if c, err := config.Load(configPath); err == nil {
+		if c, err := loadConfig(configPath); err == nil {
 			pidDir = c.SyncDir
 		}
 	}

@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/route"
 )
 
@@ -410,7 +409,7 @@ func knownFolders(f route.File) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, n := range f.RepoNames() {
-		cfg, err := config.Load(route.ExpandHome(f.Repos[n].Config))
+		cfg, err := loadConfig(route.ExpandHome(f.Repos[n].Config))
 		if err != nil {
 			continue
 		}

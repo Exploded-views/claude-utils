@@ -1,12 +1,12 @@
 package ghguard
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/MarimerLLC/claude-utils/internal/secretcmd"
 )
 
 // TokenCmdTimeout bounds one run of a token command.
@@ -19,27 +19,11 @@ func RunTokenCmd(argv []string, timeout time.Duration) (string, error) {
 	if len(argv) == 0 || argv[0] == "" {
 		return "", errors.New("token command is empty")
 	}
-	if timeout <= 0 {
-		timeout = TokenCmdTimeout
+	out, err := secretcmd.Run(context.Background(), argv, timeout)
+	if err != nil {
+		return "", errors.New(strings.Replace(err.Error(), "secret command", "token command", 1))
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = nil // discarded
-	cmd.WaitDelay = time.Second
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() != nil {
-			return "", errors.New("token command timed out")
-		}
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			return "", errors.New("token command failed")
-		}
-		return "", errors.New("token command could not be started")
-	}
-	tok := strings.TrimSpace(out.String())
+	tok := strings.TrimSpace(string(out))
 	if tok == "" {
 		return "", errors.New("token command printed no token")
 	}

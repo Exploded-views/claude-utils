@@ -89,7 +89,7 @@ func resolveRepo(sel repoSel, explicit bool) (cfg config.Config, name string, er
 	case sel.Config != "":
 		// An explicit path is never replaced by defaults: a typo must not
 		// act on the default repo.
-		cfg, err = config.Load(sel.Config)
+		cfg, err = loadConfig(sel.Config)
 		if err == nil && set != nil {
 			name = set.repoForSyncDir(cfg.SyncDir)
 		}
