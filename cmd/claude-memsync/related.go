@@ -295,6 +295,10 @@ func relatedCmd(stdout, stderr io.Writer, args []string) int {
 			return relatedContextCmd(stdout, stderr, args[1:])
 		case "accept":
 			return relatedAcceptCmd(stdout, stderr, args[1:])
+		case "suggest":
+			return relatedSuggestCmd(stdout, stderr, args[1:])
+		case "dismiss":
+			return relatedDismissCmd(stdout, stderr, args[1:])
 		}
 	}
 	fs := flag.NewFlagSet("related", flag.ContinueOnError)
@@ -302,7 +306,7 @@ func relatedCmd(stdout, stderr io.Writer, args []string) int {
 	routesFlag := fs.String("routes", "", "path to routes.json")
 	pos, err := parseInterspersed(fs, args)
 	if err != nil || len(pos) > 1 {
-		fmt.Fprintln(stderr, "usage: claude-memsync related [<repo>] | related sync | related context --project DIR")
+		fmt.Fprintln(stderr, "usage: claude-memsync related [<repo>] | related sync | related context --project DIR | related suggest | related accept | related dismiss")
 		return 2
 	}
 	rc, err := loadRelCtx(*routesFlag)
@@ -594,6 +598,9 @@ func relatedContextCmd(stdout, stderr io.Writer, args []string) int {
 		return 0
 	}
 	fmt.Fprint(stdout, related.Render(rc.readBlocks(owner), related.Budgets{PerRelation: *per, Total: *total}))
+	if line := rc.suggestionLine(owner); line != "" {
+		fmt.Fprintln(stdout, line)
+	}
 	return 0
 }
 
@@ -692,13 +699,22 @@ func relatedAcceptCmd(stdout, stderr io.Writer, args []string) int {
 	fs.SetOutput(stderr)
 	routesFlag := fs.String("routes", "", "path to routes.json")
 	yes := fs.Bool("yes", false, "pin the changes shown")
-	if fs.Parse(args) != nil {
+	share := fs.Bool("share", false, "with <from> <to>: also record the edge in the registry (committed locally)")
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
+		return 2
+	}
+	if len(pos) != 0 && len(pos) != 2 || len(pos) == 0 && *share || len(pos) == 2 && *yes {
+		fmt.Fprintln(stderr, "usage: claude-memsync related accept [--yes] | related accept <from> <to> [--share]")
 		return 2
 	}
 	rc, err := loadRelCtx(*routesFlag)
 	if err != nil {
 		fmt.Fprintln(stderr, "related accept:", err)
 		return 1
+	}
+	if len(pos) == 2 {
+		return acceptOne(stdout, stderr, rc, pos[0], pos[1], *share)
 	}
 	allowed, _ := rc.reg.Active(rc.checker)
 	_, pending := rc.acc.Split(allowed)

@@ -185,6 +185,9 @@ type File struct {
 	RelatedFetchTimeoutSec int `json:"relatedFetchTimeoutSec,omitempty"`
 	// RelatedMaxMB caps the exported size of one read clone (default 64).
 	RelatedMaxMB int `json:"relatedMaxMB,omitempty"`
+	// RelatedSuggestBudgetSec bounds one refresh of the related-suggestion
+	// cache on the daemon's tick (default 5).
+	RelatedSuggestBudgetSec int `json:"relatedSuggestBudgetSec,omitempty"`
 }
 
 // DefaultRenameGraceDays is the grace period when routes.json does not say.

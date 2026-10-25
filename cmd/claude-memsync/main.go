@@ -88,7 +88,7 @@ Subcommands:
   changes     List memory files changed in the sync repo since a commit (for hooks)
   relate      Declare a read or join relation between two memory repos (registry)
   unrelate    Remove a relation
-  related     List relations; "related sync" fetches read clones, "related context" prints a session index
+  related     List relations; "related sync" fetches read clones, "related context" prints a session index, "related suggest" offers edges from this host's data
   recipients  add | remove | list | accept the age recipients of an encrypted repo
   join        join request|status|list|accept|reject: add a new host as an age recipient of an existing repo
   install     Install as a system service (Windows Service / systemd unit / launchd plist)
