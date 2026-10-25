@@ -26,6 +26,8 @@ type relHost struct {
 // newRelHost builds the host. keys maps routes.json key -> remote name+kind.
 func newRelHost(t *testing.T, own map[string][2]string, remotes map[string]string) *relHost {
 	t.Helper()
+	skipCloneURLCheck = true // local bare repositories stand in for GitHub
+	t.Cleanup(func() { skipCloneURLCheck = false })
 	keys := []string{"registry"}
 	for k := range own {
 		keys = append(keys, k)

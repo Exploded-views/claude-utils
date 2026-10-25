@@ -260,10 +260,7 @@ func runDoctor(args []string) int {
 				fmt.Fprintln(os.Stderr, "doctor:", err)
 				return 1
 			}
-			if primary, ok := set.Primary(); ok {
-				cfg = primary
-			}
-			return doctorRunJoined(cfg, *org, set.remotes(), os.Stdout, os.Stderr)
+			return routedDoctor(set, *org, os.Stdout, os.Stderr)
 		}
 	}
 	return doctorRun(cfg, *org, os.Stdout, os.Stderr)
@@ -406,4 +403,43 @@ func visibilityLine(cfg config.Config) string {
 		return "pushing stopped: repo " + s + "; commits stay local"
 	}
 	return ""
+}
+
+// routedDoctor runs doctor over every routed repo with that repo's own org (or
+// --org) and its own API settings, so repos spanning orgs are each listed in
+// their own org. Repos sharing an org and API are grouped into one run.
+func routedDoctor(set *routedSet, flagOrg string, out, errw io.Writer) int {
+	type group struct {
+		cfg    config.Config
+		org    string
+		joined []string
+	}
+	var order []string
+	groups := map[string]*group{}
+	for _, name := range set.names() {
+		cfg := set.Cfgs[name]
+		org, err := orgFor(cfg, flagOrg)
+		if err != nil {
+			fmt.Fprintf(errw, "doctor: repo %q: %v\n", name, err)
+			return 2
+		}
+		key := strings.ToLower(org) + "|" + cfg.GitHubAPIURL + "|" + cfg.GitHubHost
+		g := groups[key]
+		if g == nil {
+			g = &group{cfg: cfg, org: org}
+			groups[key] = g
+			order = append(order, key)
+		}
+		if cfg.RemoteURL != "" {
+			g.joined = append(g.joined, cfg.RemoteURL)
+		}
+	}
+	code := 0
+	for _, k := range order {
+		g := groups[k]
+		if c := doctorRunJoined(g.cfg, g.org, g.joined, out, errw); c > code {
+			code = c
+		}
+	}
+	return code
 }

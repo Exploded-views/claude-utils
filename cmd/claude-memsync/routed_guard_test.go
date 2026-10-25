@@ -132,3 +132,30 @@ func TestRouted_StartWiresPushAllowedPerRepo(t *testing.T) {
 		}
 	}
 }
+
+// Routed repos in different orgs are each listed in their own org, not only
+// the primary's.
+func TestRouted_DoctorListsEachReposOwnOrg(t *testing.T) {
+	api := func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/orgs/OrgB/repos":
+			_ = json.NewEncoder(w).Encode([]repoJSON{{Name: "mem-project-leak", Private: tb(false), Visibility: "public"}})
+		case strings.HasPrefix(r.URL.Path, "/orgs/"):
+			_ = json.NewEncoder(w).Encode([]repoJSON{})
+		default:
+			_ = json.NewEncoder(w).Encode(repoJSON{Name: "x", Private: tb(true), Visibility: "private"})
+		}
+	}
+	privateRouted(t, map[string]string{
+		"a": "git@github.com:OrgA/mem-project-a.git", // the primary
+		"b": "git@github.com:OrgB/mem-project-b.git",
+	}, api)
+	set, err := loadRouted(os.Getenv(routesEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	if code := routedDoctor(set, "", &out, &errb); code == 0 || !strings.Contains(errb.String(), "mem-project-leak") {
+		t.Fatalf("a public repo in the non-primary org must fail doctor: %d %q", code, errb.String())
+	}
+}

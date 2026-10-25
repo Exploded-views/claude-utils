@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -17,10 +18,6 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/scrub"
 )
 
-// relatedVisibility builds the private-only check applied to both ends of every
-// relation (see ghVisibility).
-var relatedVisibility = newGHVisibility
-
 // relatedOpener reads the related clones: plaintext as it is, an age-encrypted
 // clone decrypted with this host's identity when it is one of its recipients;
 // otherwise the clone is "not readable on this host".
@@ -32,6 +29,7 @@ type relCtx struct {
 	reg     *related.Registry
 	acc     *related.Accepted
 	checker related.Checker
+	vis     *ghVisibility
 	root    string
 	timeout time.Duration
 	maxMB   int
@@ -113,8 +111,9 @@ func loadRelCtx(routesFlag string) (*relCtx, error) {
 	if err != nil {
 		return nil, fmt.Errorf("related-accepted.json: %w", err)
 	}
-	rc := &relCtx{set: set, reg: reg, acc: acc, stderr: io.Discard,
-		checker: related.Checker{Lookup: set.lookupNode, Visible: relatedVisibility(set)}}
+	vis := newGHVisibility(set)
+	rc := &relCtx{set: set, reg: reg, acc: acc, stderr: io.Discard, vis: vis,
+		checker: related.Checker{Lookup: set.lookupNode, Visible: vis}}
 	rc.maxMB = set.File.RelatedMaxMB
 	if n := set.File.RelatedFetchTimeoutSec; n > 0 {
 		rc.timeout = time.Duration(n) * time.Second
@@ -126,6 +125,7 @@ func loadRelCtx(routesFlag string) (*relCtx, error) {
 	if err := rc.checkRoot(); err != nil {
 		return nil, err
 	}
+	vis.cachePath = filepath.Join(rc.root, ".state", "visibility.json")
 	return rc, nil
 }
 
@@ -415,6 +415,10 @@ func (rc *relCtx) syncRelated() []string {
 			lines = append(lines, fmt.Sprintf("%s: refused: %v", e.To, err))
 			continue
 		}
+		if err := rc.vis.CheckCloneURL(e.To, url, rc.set.File.RelatedOwners); err != nil {
+			lines = append(lines, fmt.Sprintf("%s: refused: %v", e.To, err))
+			continue
+		}
 		c.Timeout = rc.timeout
 		c.MaxBytes = int64(rc.maxMB) << 20
 		err = c.Fetch()
@@ -486,12 +490,35 @@ func (rc *relCtx) owningRepoRemote(project string) (string, bool) {
 	return rc.set.remoteName(d.Repo), true
 }
 
+// activeFor is active() for the edges that have owner as an end: a hook checks
+// the visibility of those repos only.
+func (rc *relCtx) activeFor(owner string) (ok []related.Edge, refused []related.Refusal) {
+	var allowed []related.Edge
+	for _, e := range rc.reg.Edges() {
+		if e.From != owner && e.To != owner {
+			continue
+		}
+		if err := rc.checker.Check(e.From, e.To, e.Mode); err != nil {
+			refused = append(refused, related.Refusal{Edge: e, Err: err})
+			continue
+		}
+		allowed = append(allowed, e)
+	}
+	ok, _ = rc.acc.Split(allowed)
+	return ok, refused
+}
+
 // readBlocks gives the read clones of the active read relations of owner.
 // Relations that cannot be shown carry a Skipped reason.
 func (rc *relCtx) readBlocks(owner string) []related.Block {
-	ok, _, _ := rc.active()
+	ok, refused := rc.activeFor(owner)
 	hide := rc.hider(owner)
 	var out []related.Block
+	for _, r := range refused {
+		if r.Edge.From == owner && r.Edge.Mode == related.ModeRead && errors.Is(r.Err, errUnverified) {
+			out = append(out, related.Block{Repo: r.Edge.To, Skipped: "visibility unverified (GitHub could not be asked); not shown"})
+		}
+	}
 	for _, e := range ok {
 		if e.From != owner || e.Mode != related.ModeRead {
 			continue
@@ -558,6 +585,7 @@ func relatedContextCmd(stdout, stderr io.Writer, args []string) int {
 		return quiet(err)
 	}
 	rc.stderr = stderr
+	rc.vis.quick = true
 	owner, ok := rc.owningRepoRemote(*project)
 	if !ok {
 		return 0
@@ -574,6 +602,7 @@ func relatedHookLines(routesFlag, project, session string, limit int) (lines []s
 	if err != nil || rc.set.File.Registry == "" {
 		return nil, nil, err
 	}
+	rc.vis.quick = true
 	owner, ok := rc.owningRepoRemote(project)
 	if !ok {
 		return nil, nil, nil
