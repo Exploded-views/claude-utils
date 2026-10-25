@@ -1,0 +1,8 @@
+{
+  "name": "memory-notices",
+  "version": "0.1.0",
+  "description": "On top of claude-memsync: inject the shared (distilled) memory index into every session, and tell running sessions which memory notes changed on another machine.",
+  "author": { "name": "gitgat" },
+  "license": "MIT",
+  "keywords": ["memory", "claude-memsync", "hooks"]
+}

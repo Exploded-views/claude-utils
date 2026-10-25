@@ -1,0 +1,7 @@
+{
+  "name": "claude-utils",
+  "owner": { "name": "gitgat" },
+  "plugins": [
+    { "name": "memory-notices", "source": "./plugins/memory-notices", "description": "Shared memory index at session start and changed-note notices from claude-memsync." }
+  ]
+}
