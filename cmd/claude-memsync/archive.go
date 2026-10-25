@@ -70,6 +70,8 @@ func archiveCmd(stdout, stderr io.Writer, args []string) int {
 			prefix = "[" + t.name + "] "
 		}
 		hide, hidden := t.hider(stderr), 0
+		restoreRead := useArchiveReader(t.syncDir)
+		defer restoreRead()
 		switch sub {
 		case "list":
 			entries, err := archive.List(t.syncDir, *since)

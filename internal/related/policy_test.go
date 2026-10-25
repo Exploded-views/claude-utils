@@ -178,3 +178,43 @@ func TestCheck_OrchAllEveryOtherTarget(t *testing.T) {
 		t.Errorf("orch-all join: %v", err)
 	}
 }
+
+type recVis struct{ asked *[]string }
+
+func (r recVis) CheckPrivate(repo string) error { *r.asked = append(*r.asked, repo); return nil }
+
+// Check validates the mode first (only the exact values read and join), and
+// asks the visibility hook about both ends of an allowed relation; the zero
+// Checker falls back to the name check.
+func TestCheck_ModeIsValidatedBeforeVisibilityAndBothEndsAreAsked(t *testing.T) {
+	for _, m := range []Mode{"", "READ", "Join", "read ", "write", "readjoin"} {
+		var asked []string
+		c := Checker{Visible: recVis{&asked}}
+		if err := c.Check("mem-project-a", "mem-project-b", m); err == nil || !strings.Contains(err.Error(), "mode") {
+			t.Errorf("mode %q: err = %v, want a mode refusal", m, err)
+		}
+		if len(asked) != 0 {
+			t.Errorf("mode %q: visibility asked before the mode was refused: %v", m, asked)
+		}
+	}
+	for _, m := range []Mode{ModeRead, ModeJoin} {
+		var asked []string
+		c := Checker{Visible: recVis{&asked}}
+		if err := c.Check("mem-project-a", "mem-project-b", m); err != nil {
+			t.Fatalf("mode %q: %v", m, err)
+		}
+		if len(asked) != 2 || asked[0] != "mem-project-a" || asked[1] != "mem-project-b" {
+			t.Errorf("mode %q: visibility asked %v, want both ends in order", m, asked)
+		}
+	}
+	// The ghguard-backed hook may refuse either end.
+	for _, bad := range []string{"mem-project-a", "mem-project-b"} {
+		c := Checker{Visible: denyVis{bad: bad}}
+		if err := c.Check("mem-project-a", "mem-project-b", ModeRead); err == nil || !strings.Contains(err.Error(), bad) {
+			t.Errorf("rejecting %s: %v", bad, err)
+		}
+	}
+	if err := (Checker{}).Check("mem-project-a", "notes", ModeRead); err == nil {
+		t.Error("the zero Checker must still apply the name check")
+	}
+}

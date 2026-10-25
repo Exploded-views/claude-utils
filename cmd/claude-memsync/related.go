@@ -17,15 +17,14 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/scrub"
 )
 
-// relatedVisibility is the private-only check applied to both ends of every
-// relation. PLACEHOLDER: the default checks names only; the branch that
-// provides the real check replaces this.
-var relatedVisibility related.Visibility = related.NameOnly{}
+// relatedVisibility builds the private-only check applied to both ends of every
+// relation (see ghVisibility).
+var relatedVisibility = newGHVisibility
 
-// relatedOpener reads the related clones. PLACEHOLDER for decryption: the
-// default reads plaintext only, so an encrypted clone is "not readable on this
-// host". The age branch supplies an Opener that can decrypt.
-var relatedOpener related.Opener = related.PlainOpener{}
+// relatedOpener reads the related clones: plaintext as it is, an age-encrypted
+// clone decrypted with this host's identity when it is one of its recipients;
+// otherwise the clone is "not readable on this host".
+var relatedOpener related.Opener = ageOpener{}
 
 // relCtx is routes.json plus its registry.
 type relCtx struct {
@@ -115,7 +114,7 @@ func loadRelCtx(routesFlag string) (*relCtx, error) {
 		return nil, fmt.Errorf("related-accepted.json: %w", err)
 	}
 	rc := &relCtx{set: set, reg: reg, acc: acc, stderr: io.Discard,
-		checker: related.Checker{Lookup: set.lookupNode, Visible: relatedVisibility}}
+		checker: related.Checker{Lookup: set.lookupNode, Visible: relatedVisibility(set)}}
 	rc.maxMB = set.File.RelatedMaxMB
 	if n := set.File.RelatedFetchTimeoutSec; n > 0 {
 		rc.timeout = time.Duration(n) * time.Second
