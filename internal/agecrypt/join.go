@@ -210,7 +210,8 @@ const (
 // and nothing else. It is the one commit a keyless host may make, so it does
 // not go through the keyless check; the commit is built from HEAD's tree and
 // that single new blob in a private index, so whatever is staged in the real
-// index is never committed. It does not push. Calling it again for a key that
+// index is never committed. It encrypts nothing, so it does not need the
+// recipients to be reviewed (push it with PushGuardJoinRequest). It does not push. Calling it again for a key that
 // already has a request changes nothing.
 func RequestJoin(repo *gitwt.Repo, label string, now time.Time) (Join, JoinResult, error) {
 	var j Join
@@ -222,9 +223,6 @@ func RequestJoin(repo *gitwt.Repo, label string, now time.Time) (Join, JoinResul
 	}
 	if !repo.HasHead() {
 		return j, "", errors.New("the repo has no commits yet; nothing to join")
-	}
-	if u, _ := Unreviewed(repo); u {
-		return j, "", ErrRecipientsUnreviewed
 	}
 	own, err := IdentityRecipient(IdentityPath(repo))
 	if err != nil {

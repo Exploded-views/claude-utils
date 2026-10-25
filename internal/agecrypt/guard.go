@@ -83,10 +83,23 @@ func CheckKeyed(repo *gitwt.Repo) error {
 // must be age ciphertext. It catches a clone whose filter config went missing.
 // It returns nil when encryption is off.
 func PushGuard(repo *gitwt.Repo, branch string) error {
+	return pushGuard(repo, branch, true)
+}
+
+// PushGuardJoinRequest is PushGuard without the recipients-review gate, for
+// pushing a join request: that commit encrypts nothing, so an unreviewed
+// recipient set cannot leak through it, and a host waiting to be admitted has
+// by definition not reviewed the set that will include it. Every blob is still
+// checked: only valid join requests may be plaintext.
+func PushGuardJoinRequest(repo *gitwt.Repo, branch string) error {
+	return pushGuard(repo, branch, false)
+}
+
+func pushGuard(repo *gitwt.Repo, branch string, requireReviewed bool) error {
 	if !Enabled(repo) {
 		return nil
 	}
-	if u, _ := Unreviewed(repo); u {
+	if u, _ := Unreviewed(repo); u && requireReviewed {
 		return ErrRecipientsUnreviewed
 	}
 	// What gets pushed is the branch, not whatever HEAD is.
