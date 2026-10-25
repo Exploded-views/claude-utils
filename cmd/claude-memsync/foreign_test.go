@@ -499,19 +499,41 @@ func TestRouted_ForeignWriterHoldsOnlyThatRepoAndRechecks(t *testing.T) {
 	if !set.held("projects") || set.held("other") || set.held("personal") {
 		t.Fatalf("only the repo that lists the writer is held")
 	}
-	set.recheckForeign() // already held: no second log line (checked below)
+	// Sticky: the writer going away does not lift the hold, because what it
+	// left behind would be mirrored. Only a restart does.
 	h.units["old-sync.timer"] = "disabled"
 	set.recheckForeign()
-	if set.held("projects") {
-		t.Error("released once the writer is gone")
+	if !set.held("projects") {
+		t.Fatal("the hold must stay until a daemon restart")
 	}
-	// A flaky systemctl keeps the previous verdict instead of flipping it.
+	if b, err := os.ReadFile(foreignHeldPath(cfgs["projects"].SyncDir)); err != nil || !strings.Contains(string(b), "restart after cleanup") {
+		t.Errorf("held marker for status: %q %v", b, err)
+	}
+	if _, err := os.Stat(foreignHeldPath(cfgs["other"].SyncDir)); err == nil {
+		t.Error("only the held repo gets a marker")
+	}
+	set2, _ := loadRouted(os.Getenv(routesEnv))
+	set2.recheckForeign()
+	if set2.held("projects") {
+		t.Fatal("a fresh daemon with the writer gone resumes")
+	}
+	if _, err := os.Stat(foreignHeldPath(cfgs["projects"].SyncDir)); err == nil {
+		t.Error("a restart clears the marker")
+	}
 	h.units["old-sync.timer"] = "enabled"
+	set = set2
+	// A flaky systemctl keeps the previous verdict instead of flipping it.
 	set.recheckForeign()
 	h.noSys = true
 	set.recheckForeign()
 	if !set.held("projects") {
 		t.Error("an unanswerable check must not release a hold")
+	}
+	// ...and an unanswerable check never sets one.
+	set3, _ := loadRouted(os.Getenv(routesEnv))
+	set3.recheckForeign()
+	if set3.held("projects") {
+		t.Error("an unanswerable check must not hold a repo")
 	}
 }
 
@@ -523,10 +545,11 @@ func TestRouted_HoldLogsOnce(t *testing.T) {
 	set, _ := loadRouted(os.Getenv(routesEnv))
 	var buf strings.Builder
 	set.logf = func(f string, a ...any) { fmt.Fprintf(&buf, f+"\n", a...) }
+	h.units["old-sync.timer"] = "enabled"
 	set.recheckForeign()
 	set.recheckForeign()
 	set.recheckForeign()
-	if n := strings.Count(buf.String(), "foreign writer"); n != 1 {
+	if n := strings.Count(buf.String(), "restart after cleanup"); n != 1 {
 		t.Errorf("want one log line, got %d:\n%s", n, buf.String())
 	}
 }
@@ -569,8 +592,8 @@ func TestRouted_StartWiresHoldAndReloadAndRestartRecheck(t *testing.T) {
 	// A routes reload rechecks too.
 	h.units["old-sync.timer"] = "disabled"
 	set.reload()
-	if r.loops[0].Hold() {
-		t.Error("a reload must recheck the foreign writers")
+	if !r.loops[0].Hold() {
+		t.Error("a reload does not lift a hold either")
 	}
 }
 
@@ -584,6 +607,14 @@ func TestStatus_RoutedShowsHeldRepo(t *testing.T) {
 	t.Cleanup(func() { statusFn = old })
 	code, out := captureStdout(t, func() int { return runStatus(nil) })
 	if code == 0 || !strings.Contains(out, "[projects] blocked: foreign writer systemdUnit old-sync.timer") || strings.Contains(out, "[personal] blocked") {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+	// A daemon held it: status keeps saying so after the writer is gone.
+	set, _ := loadRouted(os.Getenv(routesEnv))
+	set.recheckForeign()
+	h.units["old-sync.timer"] = "disabled"
+	code, out = captureStdout(t, func() int { return runStatus(nil) })
+	if code == 0 || !strings.Contains(out, "[projects] held: foreign writer seen: restart after cleanup") || strings.Contains(out, "[personal] held") {
 		t.Fatalf("exit %d:\n%s", code, out)
 	}
 }

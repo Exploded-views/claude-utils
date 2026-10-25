@@ -104,7 +104,8 @@ type routedSet struct {
 
 	fmu     sync.Mutex
 	fglobal []foreign.Writer // routes.json foreignWriters, replaced on reload
-	fheld   map[string]bool  // repos paused because a foreign writer is active
+	fheld   map[string]bool  // repos paused because a foreign writer was seen; sticky until restart
+	finit   bool             // the first recheck of this daemon has cleared old markers
 	logf    func(string, ...any)
 }
 
@@ -124,11 +125,29 @@ func (s *routedSet) held(name string) bool {
 	return s.fheld[name]
 }
 
+// foreignHeldPath is the marker a held repo leaves for `status`, which runs in
+// another process. A daemon restart removes it.
+func foreignHeldPath(syncDir string) string {
+	return filepath.Join(syncDir, ".state", "foreign-held")
+}
+
 // recheckForeign asks again, for every repo, whether a foreign writer is
-// active, and logs each change once. A check that cannot be answered keeps the
-// previous verdict. The daemon does not exit: the other repos keep running.
+// active. The first sighting pauses the repo, logged once, and the pause is
+// sticky: it lasts until the daemon restarts, because the copies the writer
+// left behind would be mirrored the moment it stopped. A check that cannot be
+// answered changes nothing. The daemon does not exit: other repos keep running.
 func (s *routedSet) recheckForeign() {
+	s.fmu.Lock()
+	first := !s.finit
+	s.finit = true
+	s.fmu.Unlock()
 	for _, name := range s.names() {
+		if first { // a restart: whatever an earlier daemon held is over
+			_ = os.Remove(foreignHeldPath(s.Cfgs[name].SyncDir))
+		}
+		if s.held(name) {
+			continue
+		}
 		r := foreign.Inspect(s.writersFor(name), foreignEnv())
 		s.fmu.Lock()
 		if s.fheld == nil {
@@ -138,22 +157,16 @@ func (s *routedSet) recheckForeign() {
 		if logf == nil {
 			logf = log.Printf
 		}
-		was := s.fheld[name]
 		switch {
 		case len(r.Active) > 0:
 			s.fheld[name] = true
-			if !was {
-				logf("[%s] paused: %s is active; nothing is mirrored, committed or pushed for this repo until it stops", name, r.Active[0])
+			logf("[%s] foreign writer seen: restart after cleanup (%s); nothing is mirrored, committed or pushed for this repo until the daemon restarts", name, r.Active[0])
+			p := foreignHeldPath(s.Cfgs[name].SyncDir)
+			if err := os.MkdirAll(filepath.Dir(p), 0o700); err == nil {
+				_ = os.WriteFile(p, []byte(time.Now().UTC().Format(time.RFC3339)+" foreign writer seen: restart after cleanup ("+r.Active[0].String()+")\n"), 0o600)
 			}
 		case len(r.Unchecked) > 0:
-			if !was {
-				logf("[%s] %s could not be checked; keeping the repo running", name, r.Unchecked[0])
-			}
-		default:
-			s.fheld[name] = false
-			if was {
-				logf("[%s] foreign writer gone; resuming", name)
-			}
+			logf("[%s] %s could not be checked; keeping the repo running", name, r.Unchecked[0])
 		}
 		s.fmu.Unlock()
 	}
@@ -165,6 +178,13 @@ func (s *routedSet) foreignLines() []string {
 	for _, name := range s.names() {
 		for _, a := range foreign.Check(s.writersFor(name), foreignEnv()) {
 			out = append(out, fmt.Sprintf("  [%s] blocked: %s", name, a))
+		}
+		if b, err := os.ReadFile(foreignHeldPath(s.Cfgs[name].SyncDir)); err == nil {
+			msg := strings.TrimSpace(string(b))
+			if _, rest, ok := strings.Cut(msg, " "); ok {
+				msg = rest // drop the timestamp
+			}
+			out = append(out, fmt.Sprintf("  [%s] held: %s", name, msg))
 		}
 	}
 	return out

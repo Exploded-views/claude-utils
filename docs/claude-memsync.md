@@ -1144,11 +1144,17 @@ kind and the configured value (never a note name), and `status` shows
 `--ignore-foreign-writers` starts anyway and logs a warning per entry.
 
 While a routed daemon runs, the list is checked again on every routes reload
-and every supervised loop restart. If an entry has become active, the repo it
-applies to stops mirroring, committing, pulling and pushing, logged once and
-shown in `status`; the daemon keeps running and the other repos carry on. The
-repo resumes when the writer is gone. Notes mirrored before the writer was seen
+and every supervised loop restart. The first time an entry is seen active, the
+repo it applies to stops mirroring, committing, pulling and pushing. This is
+logged once (`foreign writer seen: restart after cleanup`) and shown in
+`status`. The hold is sticky: it does not lift when the writer stops, because
+the copies it left behind would then be mirrored. Clean up those copies, then
+restart the daemon; the start-up check runs again. The daemon itself keeps
+running and the other repos carry on. Notes mirrored before the writer was seen
 are not undone.
+
+Single-repo mode has no runtime recheck: the list is checked at `run` and
+`init` only.
 
 ### Quiet window
 
