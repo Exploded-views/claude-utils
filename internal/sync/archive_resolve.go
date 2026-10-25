@@ -126,9 +126,9 @@ func planArchiveResolution(entries []gitwt.UnmergedEntry) ([]resolution, bool) {
 }
 
 // planArchiveResolutionWith is planArchiveResolution plus a resolver for the one
-// shape that needs the file contents: a live note modified upstream and deleted
-// (archived) by the commit being replayed, stages {1,2}. nil leaves it unsafe.
-func planArchiveResolutionWith(entries []gitwt.UnmergedEntry, modDel func(p, base, upstream string) (resolution, bool)) ([]resolution, bool) {
+// shape that needs the file contents: a live note modified on one side and deleted
+// (archived) on the other, stages {1,2} or {1,3}. nil leaves it unsafe.
+func planArchiveResolutionWith(entries []gitwt.UnmergedEntry, modDel func(p, base, other string) (resolution, bool)) ([]resolution, bool) {
 	if len(entries) == 0 {
 		return nil, false
 	}
@@ -168,9 +168,12 @@ func planArchiveResolutionWith(entries []gitwt.UnmergedEntry, modDel func(p, bas
 			}
 			if _, _, ok := splitMirrorPath(p); ok && modDel != nil && len(st) == 2 {
 				base, has1 := st[1]
-				up, has2 := st[2]
+				other, has2 := st[2] // modified upstream, archived by the commit
+				if !has2 {
+					other, has2 = st[3] // archived upstream, modified by the commit
+				}
 				if has1 && has2 {
-					if r, ok := modDel(p, base, up); ok {
+					if r, ok := modDel(p, base, other); ok {
 						plan = append(plan, r)
 						continue
 					}
@@ -187,15 +190,14 @@ func resolvedLine(n int) string {
 	return fmt.Sprintf("pull: auto-resolved %d archive conflict(s) (both archive copies kept)", n)
 }
 
-// modifyDeleteResolver decides a live note that upstream changed while the
-// commit being replayed archived it. It applies only when the commit really
-// holds an archive copy of the base text, so a plain deletion is never taken
-// for an archive. If the upstream text is the base text (an encrypted repo
+// modifyDeleteResolver decides a live note that one side changed while the other
+// archived it. It applies only when the archiving side really holds an archive copy of the base text, so a plain deletion is never taken
+// for an archive. If the changed side's text is the base text (an encrypted repo
 // re-encrypts every file when a recipient joins, which looks like a change
 // of the ciphertext), the deletion stands. If the text was edited, the edit
 // stays at the note's live path and the archive copy keeps the original: both
 // versions survive, as in repairEditedArchives.
-func modifyDeleteResolver(repo *gitwt.Repo) func(p, base, upstream string) (resolution, bool) {
+func modifyDeleteResolver(repo *gitwt.Repo) func(p, base, other string) (resolution, bool) {
 	plainOf := agecrypt.PlainReader(repo)
 	read := func(oid string) ([]byte, bool) {
 		raw, err := repo.Run("cat-file", "blob", oid)
@@ -205,13 +207,13 @@ func modifyDeleteResolver(repo *gitwt.Repo) func(p, base, upstream string) (reso
 		b, err := plainOf([]byte(raw))
 		return b, err == nil
 	}
-	return func(p, baseOid, upOid string) (resolution, bool) {
+	return func(p, baseOid, otherOid string) (resolution, bool) {
 		folder, name, ok := splitMirrorPath(p)
 		if !ok {
 			return resolution{}, false
 		}
 		base, ok1 := read(baseOid)
-		up, ok2 := read(upOid)
+		up, ok2 := read(otherOid)
 		if !ok1 || !ok2 {
 			return resolution{}, false
 		}
@@ -231,24 +233,27 @@ func modifyDeleteResolver(repo *gitwt.Repo) func(p, base, upstream string) (reso
 		if _, err := repo.Run("add", "--", gitwt.Literal(path.Join(archive.Dir, archive.IndexName))); err != nil {
 			return resolution{}, false
 		}
-		return resolution{p, upOid}, true
+		return resolution{p, otherOid}, true
 	}
 }
 
-// replayedArchiveCopy finds, in the commit the rebase is replaying, the archive
-// copy of folder/name whose name carries the hash prefix of the given text.
+// replayedArchiveCopy finds, in the commit the rebase is replaying or in
+// upstream, the archive copy of folder/name whose name carries the hash prefix
+// of the given text.
 func replayedArchiveCopy(repo *gitwt.Repo, folder, name, hash string) (string, bool) {
-	out, err := repo.Run("ls-tree", "-r", "--name-only", "-z", "REBASE_HEAD", "--", gitwt.Literal(archive.Dir))
-	if err != nil {
-		return "", false
-	}
-	for _, p := range strings.Split(out, "\x00") {
-		parts := strings.Split(p, "/")
-		if len(parts) != 4 || parts[2] != folder {
+	for _, rev := range []string{"REBASE_HEAD", "HEAD"} {
+		out, err := repo.Run("ls-tree", "-r", "--name-only", "-z", rev, "--", gitwt.Literal(archive.Dir))
+		if err != nil {
 			continue
 		}
-		if orig, prefix, ok := archiveNameHash(parts[3]); ok && orig == name && strings.HasPrefix(hash, prefix) {
-			return p, true
+		for _, p := range strings.Split(out, "\x00") {
+			parts := strings.Split(p, "/")
+			if len(parts) != 4 || parts[2] != folder {
+				continue
+			}
+			if orig, prefix, ok := archiveNameHash(parts[3]); ok && orig == name && strings.HasPrefix(hash, prefix) {
+				return p, true
+			}
 		}
 	}
 	return "", false

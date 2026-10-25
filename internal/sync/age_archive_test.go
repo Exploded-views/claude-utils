@@ -115,3 +115,88 @@ func TestAgeArchive_TwoHostsAppendingIndexMergeAsUnion(t *testing.T) {
 		t.Error("lost an unrelated note")
 	}
 }
+
+// archivedText finds the archive copy of a note in the work-tree and returns its text.
+func (h *ageHost) archivedText(name string) (string, bool) {
+	ext := filepath.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	var got string
+	var found bool
+	filepath.Walk(filepath.Join(h.repo.Dir, "archive"), func(p string, fi os.FileInfo, err error) error {
+		if err == nil && !fi.IsDir() && strings.HasPrefix(fi.Name(), stem+".") && strings.HasSuffix(fi.Name(), ext) && fi.Name() != "INDEX.md" {
+			b, _ := os.ReadFile(p)
+			got, found = string(b), true
+		}
+		return nil
+	})
+	return got, found
+}
+
+func (h *ageHost) settle(others ...*ageHost) {
+	h.t.Helper()
+	for i := 0; i < 2; i++ {
+		for _, x := range append([]*ageHost{h}, others...) {
+			if err := x.flushRetry(); err != nil {
+				h.t.Fatalf("%s: %v", x.loop.Hostname, err)
+			}
+			x.loop.pullTick(x.repo, x.roots)
+		}
+	}
+}
+
+// Under age a moved note never pairs as a rename (every blob is ciphertext), so
+// an edit on one host and the archive of the same note on another is a
+// modify/delete conflict. The archive resolver must settle it, keeping both
+// versions, instead of aborting every cycle.
+func TestAgeArchive_EditVsArchive_KeepsBothAndDoesNotWedge(t *testing.T) {
+	for _, archiverPushesFirst := range []bool{true, false} {
+		a, b := ageArchiveHosts(t, map[string]string{"n.md": "original\n", "keep.md": "k\n"})
+		a.userDeletes("n.md")
+		b.edit("n.md", "edited on b\n")
+		first, second := a, b
+		if !archiverPushesFirst {
+			first, second = b, a
+		}
+		if err := first.flushRetry(); err != nil {
+			t.Fatal(err)
+		}
+		if err := second.flushRetry(); err != nil {
+			t.Fatalf("archiverPushesFirst=%v: the second host's pull must resolve, not abort: %v", archiverPushesFirst, err)
+		}
+		a.settle(b)
+		for _, h := range []*ageHost{a, b} {
+			h.clean()
+			if got := h.claude("n.md"); got != "edited on b\n" {
+				t.Errorf("%s: the edit must survive live, got %q", h.loop.Hostname, got)
+			}
+			if got, ok := h.archivedText("n.md"); !ok || got != "original\n" {
+				t.Errorf("%s: the archive copy must keep the original, got %q %v", h.loop.Hostname, got, ok)
+			}
+			if h.claude("keep.md") != "k\n" {
+				t.Errorf("%s: lost an unrelated note", h.loop.Hostname)
+			}
+		}
+		// And it stays settled: another cycle has nothing to abort.
+		if err := a.flushRetry(); err != nil {
+			t.Errorf("not settled: %v", err)
+		}
+	}
+}
+
+// A real move is an archive plus an add under age (no rename pairing). Nothing
+// is lost: the new name is live everywhere and the old text sits in the archive.
+func TestAgeArchive_RealRenameIsArchivePlusAdd(t *testing.T) {
+	a, b := ageArchiveHosts(t, map[string]string{"old.md": "moved text\n", "keep.md": "k\n"})
+	a.userDeletes("old.md")
+	a.edit("new.md", "moved text\n")
+	a.settle(b)
+	for _, h := range []*ageHost{a, b} {
+		h.clean()
+		if h.claude("new.md") != "moved text\n" || h.claude("old.md") != "" {
+			t.Errorf("%s: new=%q old=%q", h.loop.Hostname, h.claude("new.md"), h.claude("old.md"))
+		}
+		if got, ok := h.archivedText("old.md"); !ok || got != "moved text\n" {
+			t.Errorf("%s: archive copy of the old name: %q %v", h.loop.Hostname, got, ok)
+		}
+	}
+}
