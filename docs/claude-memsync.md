@@ -923,6 +923,27 @@ line per state change, and `claude-memsync status` says so. A failed API call
 keeps the last known state, is logged once, and does not block. Without a token
 there is no re-check; schedule `doctor`.
 
+### Token from a command
+
+Instead of a token file or env var, `githubTokenCmd` in `config.json` is an
+argv array (no shell), for example `["gh", "auth", "token"]`; its stdout is the
+token. It is used when `githubTokenFile` is not set (the file wins; the env var
+is the fallback). One-run flags: `--token-cmd "<argv split on spaces>"` on
+`init`, `doctor` and `repo create` (no quoting: arguments cannot contain
+spaces). `doctor` and `repo create` do not save it; `init` saves the command
+(`githubTokenCmd`), never the token.
+
+- The command runs when a token is needed, with a 10 second timeout. Its
+  output is held in memory for that request only: never written to disk,
+  `config.json`, logs or error text (the command's stdout and stderr are not
+  put in errors either).
+- A command that fails, times out or prints nothing means *no token*: the
+  existing no-token behaviour applies (init and doctor refuse; the daemon
+  skips the API check).
+- The daemon's hourly visibility re-check runs the command too. Set
+  `"recheckTokenCmd": false` to keep the daemon from running it (then the
+  re-check needs a file or env token, or does not run).
+
 ### doctor
 
 ```sh
@@ -955,7 +976,7 @@ must pair with the API: github.com with api.github.com, or another host with
 refuses ssh remotes while `core.sshCommand`, `GIT_SSH_COMMAND` or `GIT_SSH` is
 set, and the daemon re-checks the push URL and these overrides before every push.
 
-Config keys: `githubHost`, `recheckMaxFailures`, `recheckMaxAgeHours`, `privateOnly`, `githubTokenEnv`, `githubTokenFile`, `githubApiUrl`, `githubOrg`.
+Config keys: `githubHost`, `recheckMaxFailures`, `recheckMaxAgeHours`, `privateOnly`, `githubTokenEnv`, `githubTokenFile`, `githubTokenCmd`, `recheckTokenCmd`, `githubApiUrl`, `githubOrg`.
 
 ## Several repos per host
 
@@ -1049,7 +1070,7 @@ Editing a route moves a folder. The new repo treats the folder's files as Claude
 
 There is still one service unit (`claude-memsync`), one process and one PID file. The PID file lives in the personal repo's sync dir (else the first repo's by name). Each sync dir takes a lock (`.state/daemon.lock`) for the life of the process, and a daemon, routed or not, refuses to start when another one holds any of the dirs it needs. The lock is released when the process dies, so a crash leaves nothing stale. One loop failing does not stop the others.
 
-Install the unit as usual (`claude-memsync install --config ~/.claudesync.d/personal/config.json`); with a routes file present, `run` loads every repo of `routes.json` this host has.
+Install the unit as usual; with a routes file present, `run` loads every repo of `routes.json` this host has, and `claude-memsync install` needs no legacy `~/.claudesync/config.json`: without `--config` it uses the personal (primary) repo's config (`--config <path>` still wins).
 
 ### Commands
 
@@ -1069,6 +1090,7 @@ The home folder is the Claude folder of sessions started in your home directory 
 claude-memsync route home                  # show the pin and where the folder routes today
 claude-memsync route home <repo>           # set or replace the pin (the repo must be in "repos")
 claude-memsync route home deny             # write a deny pin: the folder is denied, whatever other rules say
+claude-memsync route home <repo> --yes     # same pin, stated non-interactively (never replaces --confirm-move-out-of-client)
 claude-memsync route home --unpin          # remove the pin; the folder then routes by the other rules
 claude-memsync route home --folder <name>  # use another folder name than the one computed from $HOME
 claude-memsync route home --suggest        # print one suggestion and why; changes nothing
@@ -1090,7 +1112,7 @@ claude-memsync route inherit laptop-2 --home --yes
 
 `publish` writes `hosts/<label>/routes.json` in the registry repo and commits that one file locally; the registry's own sync pushes it. It holds the rules and the names and kinds of the repos they name, and nothing else: no config paths, sync dirs, remote URLs, keys or tokens. `client` and `orch` repos are left out, and every rule naming one (or a repo this host lacks) is published as a deny: `{"folder": "{home}-<client>*", "deny": true}` keeps the pattern and names no repo, so a host that inherits it denies those folders instead of letting a broader rule catch them. The patterns are kept, so client names can appear in the registry; use a private registry. A client host's own client rules are written by hand on that host. The home pin is stored as "home", and a leading home in a folder or path pattern (`-home-<user>`, `/Users/<user>`) as `{home}`, which `inherit` expands for the local user. Other patterns (remote globs, folder names) are published as written, so do not put a name in them that you would not put in the registry. The label is a name you choose (`^[a-z0-9][a-z0-9-]{0,31}$`); the machine's host name is never used or recorded.
 
-`inherit` keeps the new host's `repos` and every setting of its own and replaces its rules with the template's, keeping only rules whose repo exists in this host's `repos` with the same kind. A rule it cannot take over (its repo is missing here, or has another kind) is printed with the reason and stays as a deny in its place, so a broader rule behind it never catches its folders. A client route is never added for a repo the host lacks. The template's home pin applies to this host's home folder only with `--home`; without it the host's own pin stays. It then shows the changes and asks before writing (`--yes` skips the question; without a terminal and without `--yes` nothing is written). It also routes every folder this host has, and one probe per client or orch rule, under the old and the new rules; if any folder would leave a client or orch repo (a dropped or shadowed client rule), or the home folder would newly go to a non-client repo on a host that keeps client notes, it lists them and refuses without `--confirm-move-out-of-client`. The check is repeated under the file lock before writing. Only the `routes` list is rewritten; every other field of `routes.json` is kept as it was. `route home` likewise needs `--confirm-move-out-of-client` for a non-client target on a host with any client or orch repo, and `--ask` then wants a typed `yes`.
+`inherit` keeps the new host's `repos` and every setting of its own and replaces its rules with the template's, keeping only rules whose repo exists in this host's `repos` with the same kind. A rule it cannot take over (its repo is missing here, or has another kind) is printed with the reason and stays as a deny in its place, so a broader rule behind it never catches its folders. A client route is never added for a repo the host lacks. The template's home pin applies to this host's home folder only with `--home`; without it the host's own pin stays. It then shows the changes and asks before writing (`--yes` skips the question; without a terminal and without `--yes` nothing is written). It also routes every folder this host has, and one probe per client or orch rule, under the old and the new rules; if any folder would leave a client or orch repo (a dropped or shadowed client rule), or the home folder would newly go to a non-client repo on a host that keeps client notes, it lists them and refuses without `--confirm-move-out-of-client`. The check is repeated under the file lock before writing. Only the `routes` list is rewritten; every other field of `routes.json` is kept as it was. `route home <repo>` pins without a prompt when the host keeps no client or orch repo (`--yes` states that for scripts and changes nothing else). It likewise needs `--confirm-move-out-of-client` for a non-client target on a host with any client or orch repo, and `--ask` then wants a typed `yes`.
 
 ## Migrating from another sync tool
 
@@ -1283,6 +1305,59 @@ in the sync repo is neither committed nor unstaged. These actions (and
 `accept --yes`) refuse to run while the daemon holds the sync dir; stop it first. The re-encryption commit is not reported by `changes --hook`: files whose text is the same at both ends are skipped, so a recipients change does not announce every note as changed. A removed key cannot read content written after the change,
 but it still reads everything it already fetched; rewriting history does not
 help once a key has fetched it, so treat removal as "stop future leakage".
+
+### Adding a host to an existing repo (join requests)
+
+`recipients add` needs the new host's public key to travel to a member by hand.
+A join request does that through the repo itself, with a person confirming a
+fingerprint. Nothing is ever accepted automatically, and no daemon code path
+accepts.
+
+**On the new host** (after `init --encrypt` against the remote, which leaves it
+keyless):
+
+    claude-memsync join request --repo <name> --label <host-label>
+    claude-memsync join status [--repo <name>]
+
+`--label` matches `^[a-z0-9][a-z0-9-]{0,31}$`. `request` writes
+`joins/<host-label>.txt`, commits **only that path** and pushes. The file holds
+exactly four lines, a public key and no secret:
+
+    label: <host-label>
+    recipient: <this host's age public key>
+    fingerprint: <short sha256 of the recipient>
+    requested: <UTC RFC3339 time>
+
+It stays plaintext: `joins/*.txt` is exempt in `.gitattributes` and
+`$GIT_DIR/info/attributes`. The commit is built in a private index from HEAD
+plus that one file, so whatever else is staged is never committed, even though
+the host is keyless. The push guard accepts plaintext only for paths matching
+`^joins/[a-z0-9-]+\.txt$` whose content matches the format above; anything else
+is still refused. The command prints the fingerprint: give it to the person
+who will accept. Running it again is harmless (it reports the pending request);
+`join status` shows `pending` or `accepted`.
+
+**On a member host** (one that can decrypt the repo):
+
+    claude-memsync join list [--repo <name>]
+    claude-memsync join accept <host-label> --repo <name> --fingerprint <fp>
+    claude-memsync join reject <host-label> [--repo <name>]
+
+`list` fetches and shows each pending request as label, fingerprint and time (a
+file that is not in the strict format is listed as INVALID and cannot be
+accepted). `status` also says `N join request(s) pending` per repo. `accept`
+requires `--fingerprint` to equal, exactly, the fingerprint in the file; without
+one, or with a different one, it refuses. Compare it with what the new host
+printed, over a channel you trust. On success it adds the recipient (as
+`recipients add` does: re-encrypts HEAD to the new set), removes the request
+file in the same commit, and pushes. `reject` removes the file in its own commit
+and pushes. Like `recipients`, these refuse while the daemon holds the sync dir.
+
+**Back on the new host:** its next pull brings the new `.age-recipients`. Its
+own key is then a change to the pinned set, so the existing gate applies: run
+`claude-memsync recipients accept --yes` (it shows the added key as a short
+fingerprint). Only then does the host start to commit and sync. `join status`
+says `accepted` and points at this step.
 
 ### Reviewing recipient changes
 
