@@ -279,7 +279,7 @@ fw=json.dumps(d["foreignWriters"])
 for s in ("jsonKeyNonEmpty","memsync.timer","memsync.service","memsync/bin/memsync","memsync@memsync","onlyIfFile"): assert s in fw, s
 assert d["routes"][0]["repo"]=="infra-homelab"' "$H/.config/claude-memsync/routes.json"
 check "denylists contain the deny term" bash -c "grep -qix acmeclient '$H/.config/claude-memsync/denylist-personal.txt' && grep -qix acmeclient '$H/.config/claude-memsync/denylist-infra.txt'"
-check "init has age recovery recipient and private-only" has "$STUB_DIR/memsync.log" 'init .*--recipient age1d6jhrdfc0q3symtxzs6ay8efyvnx7g4mln9jvxckzstkaz4re9vqysptau.*--private-only'
+check "init has age recovery recipient and private-only" has "$STUB_DIR/memsync.log" 'init .*--recovery-recipient age1d6jhrdfc0q3symtxzs6ay8efyvnx7g4mln9jvxckzstkaz4re9vqysptau.*--private-only'
 check "home pinned to infra-homelab" has "$STUB_DIR/memsync.log" 'route home infra-homelab --yes'
 check "claude plugin calls" bash -c "grep -q 'plugin marketplace add .*claude-utils-$SHA' '$STUB_DIR/claude.log' && grep -q 'plugin install memory-notices@claude-utils' '$STUB_DIR/claude.log'"
 check "service install/start/status/doctor" bash -c "grep -q 'memsync install' '$STUB_DIR/memsync.log' && grep -q 'memsync start' '$STUB_DIR/memsync.log' && grep -q 'doctor --org Exploded-views' '$STUB_DIR/memsync.log'"
@@ -291,8 +291,8 @@ check "join request issued for existing repo" has "$STUB_DIR/memsync.log" 'join 
 check "init passes the org token file" has "$STUB_DIR/memsync.log" 'init .*--token-file .*/orgtoken'
 check "join accept one-liner printed with the grouped fingerprint" bash -c "printf '%s' \"\$1\" | grep -qE 'claude-memsync join accept testhost --repo personal --fingerprint \"([0-9a-f]{4} ){7}[0-9a-f]{4}\"'" _ "$OUT"
 check "real init made an encrypted, keyless clone and the join request is in the remote" bash -c "[ -f '$H/.claudesync.d/personal/.age-recipients' ] && git -C '$BASE/remotes/mem-personal.git' ls-tree -r main --name-only | grep -q '^joins/testhost'"
-check "init gets the host label and a marked recovery recipient" has "$STUB_DIR/memsync.log" 'init .*--host-label testhost --recipient age1d6jhrdfc0q3symtxzs6ay8efyvnx7g4mln9jvxckzstkaz4re9vqysptau # recovery --archive-deletes'
-check "first host of a new repo is labelled in its recipients and config" bash -c "grep -q '# host:testhost' '$H/.claudesync.d/infra-homelab/.age-recipients' && grep -q '# recovery' '$H/.claudesync.d/infra-homelab/.age-recipients' && grep -q '\"hostLabel\": \"testhost\"' '$H/.claudesync.d/infra-homelab/config.json'"
+check "init gets the host label and a marked recovery recipient" has "$STUB_DIR/memsync.log" 'init .*--host-label testhost --recovery-recipient age1d6jhrdfc0q3symtxzs6ay8efyvnx7g4mln9jvxckzstkaz4re9vqysptau --archive-deletes'
+check "first host of a new repo is labelled in its recipients and config" bash -c "grep -q '# host:testhost' '$H/.claudesync.d/infra-homelab/.age-recipients' && grep -q '# recovery' '$H/.claudesync.d/infra-homelab/.age-recipients' && grep -q 'age1d6jhrdfc0q3symtxzs6ay8efyvnx7g4mln9jvxckzstkaz4re9vqysptau' '$H/.claudesync.d/infra-homelab/config.json' && grep -q '\"hostLabel\": \"testhost\"' '$H/.claudesync.d/infra-homelab/config.json'"
 check "the real init did save the token source (so its removal below means something)" has "$STUB_DIR/memsync.log" '^init-saved-token '
 check "after a real init with a token file, no daemon-read config keeps githubTokenCmd or githubTokenFile" bash -c "! grep -rIlE 'githubTokenCmd|githubTokenFile' '$H/.claudesync.d'"
 check "real route home pinned the home folder" jsonok '

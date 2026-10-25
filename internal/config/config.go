@@ -115,6 +115,12 @@ type Config struct {
 	// you choose, never the machine's host name. Set by `init --host-label`.
 	HostLabel string `json:"hostLabel,omitempty"`
 
+	// RecoveryRecipients are the offline recovery keys of the encrypted repo
+	// (public age/ssh keys). Only a recipient line with one of these keys is
+	// exempt from `join accept`'s no-unlabelled-recipient check. Set by
+	// `init --recovery-recipient` and `recipients label recovery`.
+	RecoveryRecipients []string `json:"recoveryRecipients,omitempty"`
+
 	// CheckKeyWarn is the count of live check-App keys at which `host list`
 	// and `doctor` warn (default 20; GitHub allows 25 per app).
 	CheckKeyWarn int `json:"checkKeyWarn,omitempty"`

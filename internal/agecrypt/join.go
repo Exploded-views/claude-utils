@@ -514,7 +514,7 @@ func AcceptJoin(repo *gitwt.Repo, label, fingerprint string, opts AcceptOpts) er
 	}
 	if !opts.AllowUnlabelled {
 		for _, l := range cur {
-			if LabelOf(l) == "" && !isRecoveryLine(l) {
+			if LabelOf(l) == "" && !isRecoveryKey(l, opts.RecoveryKeys) {
 				return fmt.Errorf("a recipient (key %s) has no host label, so its host could not be retired by name: run `claude-memsync recipients label self --host <label>` on that host first, or pass --allow-unlabelled", keyPrint(canonLine(l)))
 			}
 		}
@@ -552,17 +552,28 @@ func AcceptJoin(repo *gitwt.Repo, label, fingerprint string, opts AcceptOpts) er
 
 // AcceptOpts are the extra refusals of AcceptJoin. OwnLabel is this host's own
 // hostLabel (a requester may not take it). Unless AllowUnlabelled, an accept is
-// refused while any recipient other than a "# recovery" key has no host label.
+// refused while any recipient other than a configured recovery key has no host
+// label.
 type AcceptOpts struct {
 	OwnLabel        string
 	AllowUnlabelled bool
+	// RecoveryKeys are the recovery recipients configured on this host
+	// (config recoveryRecipients). Only a line whose key is one of them is
+	// exempt from the unlabelled check; a "# recovery" comment alone is not.
+	RecoveryKeys []string
 }
 
-var recoveryRE = regexp.MustCompile(`(?:^|\s)#\s*recovery\s*$`)
-
-// isRecoveryLine reports a recipients line marked "# recovery": an offline key
-// that belongs to no host.
-func isRecoveryLine(l string) bool { return recoveryRE.MatchString(strings.TrimSpace(l)) }
+// isRecoveryKey reports whether the line's key is one of the configured
+// recovery recipients.
+func isRecoveryKey(l string, keys []string) bool {
+	k := canonLine(l)
+	for _, r := range keys {
+		if k != "" && k == canonLine(r) {
+			return true
+		}
+	}
+	return false
+}
 
 // RejectJoin removes a request without admitting anyone: one commit that
 // deletes the file. Nothing is pushed.

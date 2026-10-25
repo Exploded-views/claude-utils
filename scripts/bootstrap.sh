@@ -736,7 +736,7 @@ step_init() {
     if ! done_p "init.$k"; then
       [ "$DRY_RUN" -eq 1 ] || { git ls-remote "$url" 2>/dev/null | grep -q . && content=1; }
       run "$BIN/claude-memsync" init --remote "$url" --sync-dir "$SYNC_ROOT/$k" --encrypt \
-        --host-label "$HOST" --recipient "$AGE_RECOVERY # recovery" --archive-deletes --private-only \
+        --host-label "$HOST" --recovery-recipient "$AGE_RECOVERY" --archive-deletes --private-only \
         "${ORG_TOKEN_ARGS[@]}" --denylist "$CFG/denylist-$kind.txt"
       mark "init.$k"
       [ "$content" -eq 1 ] && mark "needjoin.$k"

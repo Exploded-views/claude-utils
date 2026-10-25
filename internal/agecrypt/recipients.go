@@ -494,3 +494,40 @@ func LabelSelf(repo *gitwt.Repo, label string) error {
 	}
 	return rewriteRecipients(repo, keys, "memsync: recipients updated")
 }
+
+// LabelRecovery marks the recipient line for key as the recovery key
+// ("# recovery"), commits and re-pins. The caller records the key in the
+// config's recoveryRecipients; the mark alone exempts nothing. A line that
+// carries a host label is refused.
+func LabelRecovery(repo *gitwt.Repo, key string) error {
+	key = canonLine(strings.TrimSpace(key))
+	if key == "" {
+		return errors.New("no recovery key given")
+	}
+	cur, err := ListRecipients(repo.Dir)
+	if err != nil {
+		return err
+	}
+	keys := make([]string, 0, len(cur))
+	found, changed := false, false
+	for _, l := range cur {
+		if canonLine(l) == key {
+			found = true
+			if LabelOf(l) != "" {
+				return errors.New("that recipient carries a host label; it is a host's key, not a recovery key")
+			}
+			if !strings.HasSuffix(strings.TrimSpace(l), "# recovery") {
+				l = key + " # recovery"
+				changed = true
+			}
+		}
+		keys = append(keys, l)
+	}
+	if !found {
+		return errors.New("that key is not a recipient of the repo")
+	}
+	if !changed {
+		return nil
+	}
+	return rewriteRecipients(repo, keys, "memsync: recipients updated")
+}

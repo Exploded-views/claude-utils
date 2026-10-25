@@ -107,7 +107,7 @@ func joinCmd(stdout, stderr io.Writer, args []string) int {
 		return joinRequest(stdout, stderr, cfg, repo, label)
 	case "accept":
 		return joinChange(stdout, stderr, cfg, repo, label, func() error {
-			return agecrypt.AcceptJoin(repo, label, *fp, agecrypt.AcceptOpts{OwnLabel: cfg.HostLabel, AllowUnlabelled: *allowUnlabelled})
+			return agecrypt.AcceptJoin(repo, label, *fp, agecrypt.AcceptOpts{OwnLabel: cfg.HostLabel, AllowUnlabelled: *allowUnlabelled, RecoveryKeys: cfg.RecoveryRecipients})
 		}, true)
 	default:
 		return joinChange(stdout, stderr, cfg, repo, label, func() error { return agecrypt.RejectJoin(repo, label) }, false)

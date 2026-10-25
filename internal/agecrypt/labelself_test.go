@@ -103,17 +103,63 @@ func TestAcceptRefusesUnlabelledRecipientUnlessAllowed(t *testing.T) {
 	}
 }
 
-func TestAcceptExemptsRecoveryKey(t *testing.T) {
+func TestAcceptExemptsOnlyTheConfiguredRecoveryKey(t *testing.T) {
 	a, b := pair(t)
 	_, rec := newIdentity(t, "rec")
-	if err := AddRecipient(a.repo, rec+" # recovery"); err != nil {
+	_, stranger := newIdentity(t, "stranger")
+	if err := AddRecipient(a.repo, rec); err != nil {
 		t.Fatal(err)
+	}
+	if err := LabelRecovery(a.repo, rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := LabelRecovery(a.repo, rec); err != nil { // idempotent
+		t.Fatal(err)
+	}
+	if err := LabelRecovery(a.repo, stranger); err == nil {
+		t.Error("a key that is not a recipient cannot be marked")
 	}
 	if err := LabelSelf(a.repo, "host-a"); err != nil {
 		t.Fatal(err)
 	}
+	if err := LabelRecovery(a.repo, a.rcpt); err == nil {
+		t.Error("a host's labelled key is not a recovery key")
+	}
 	fp := request(t, a, b, "host-b")
-	if err := AcceptJoin(a.repo, "host-b", fp, AcceptOpts{}); err != nil {
-		t.Fatalf("a recovery-marked line is not an unlabelled host: %v", err)
+	// not configured as recovery: the comment gives no exemption
+	if err := AcceptJoin(a.repo, "host-b", fp, AcceptOpts{}); err == nil {
+		t.Fatal("a # recovery line whose key is not configured must block the accept")
+	}
+	if err := AcceptJoin(a.repo, "host-b", fp, AcceptOpts{RecoveryKeys: []string{stranger}}); err == nil {
+		t.Fatal("configuring a different key must not exempt this one")
+	}
+	if err := AcceptJoin(a.repo, "host-b", fp, AcceptOpts{RecoveryKeys: []string{rec}}); err != nil {
+		t.Fatalf("the configured recovery key passes: %v", err)
+	}
+}
+
+// A "# recovery" comment on a stranger's key, added by someone with write
+// access to the remote, must not earn an exemption.
+func TestAcceptFakeRecoveryCommentOnStrangerBlocks(t *testing.T) {
+	a, b := pair(t)
+	_, rec := newIdentity(t, "rec")
+	_, stranger := newIdentity(t, "stranger")
+	if err := LabelSelf(a.repo, "host-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddRecipient(a.repo, rec+" # recovery"); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddRecipient(a.repo, stranger+" # recovery"); err != nil {
+		t.Fatal(err)
+	}
+	fp := request(t, a, b, "host-b")
+	head := a.revHead(t)
+	err := AcceptJoin(a.repo, "host-b", fp, AcceptOpts{RecoveryKeys: []string{rec}})
+	if err == nil || !strings.Contains(err.Error(), "no host label") {
+		t.Fatalf("the stranger's fake recovery line must block: %v", err)
+	}
+	if a.revHead(t) != head {
+		t.Error("a refused accept must not commit")
 	}
 }

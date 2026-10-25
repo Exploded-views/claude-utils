@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/config"
@@ -56,7 +57,7 @@ func runAgeTextconv(args []string) int {
 // runRecipients handles `claude-memsync recipients add|remove|list|accept`.
 func runRecipients(args []string) int { return recipientsCmd(os.Stdout, os.Stderr, args) }
 
-const recipientsUsage = "usage: claude-memsync recipients add <public-key> [--host <label>] | remove <public-key> | list | accept --yes | label self --host <label> [--all]  [--repo <name> | --config <path>] [--routes <path>]"
+const recipientsUsage = "usage: claude-memsync recipients add <public-key> [--host <label>] | remove <public-key> | list | accept --yes | label self --host <label> | label recovery <public-key> [--all]  [--repo <name> | --config <path>] [--routes <path>]"
 
 // recipientsCmd acts on one repo. With a routes file the repo must be named
 // (--repo or --config): the personal repo is never assumed, since a key added
@@ -233,12 +234,21 @@ func labelCmd(stdout, stderr io.Writer, sel repoSel, args []string, label string
 			rest = append(rest, a)
 		}
 	}
-	if len(rest) != 1 || rest[0] != "self" || label == "" {
-		fmt.Fprintln(stderr, "usage: claude-memsync recipients label self --host <label> [--repo <name> | --all]")
-		return 2
-	}
-	if !agecrypt.ValidJoinLabel(label) {
-		fmt.Fprintln(stderr, "recipients: label must match ^[a-z0-9][a-z0-9-]{0,31}$")
+	recovery := ""
+	switch {
+	case len(rest) == 1 && rest[0] == "self" && label != "":
+		if !agecrypt.ValidJoinLabel(label) {
+			fmt.Fprintln(stderr, "recipients: label must match ^[a-z0-9][a-z0-9-]{0,31}$")
+			return 2
+		}
+	case len(rest) == 2 && rest[0] == "recovery" && label == "":
+		recovery = strings.TrimSpace(rest[1])
+		if _, err := agecrypt.ParseRecipients([]byte(recovery + "\n")); err != nil || recovery == "" {
+			fmt.Fprintln(stderr, "recipients: not a valid age or ssh public key")
+			return 2
+		}
+	default:
+		fmt.Fprintln(stderr, "usage: claude-memsync recipients label self --host <label> | label recovery <public-key>  [--repo <name> | --all]")
 		return 2
 	}
 	var cfgs []config.Config
@@ -270,7 +280,13 @@ func labelCmd(stdout, stderr io.Writer, sel repoSel, args []string, label string
 	}
 	code := 0
 	for _, cfg := range cfgs {
-		if c := labelSelfOne(stdout, stderr, cfg, label); c > code {
+		var c int
+		if recovery != "" {
+			c = labelRecoveryOne(stdout, stderr, cfg, recovery)
+		} else {
+			c = labelSelfOne(stdout, stderr, cfg, label)
+		}
+		if c > code {
 			code = c
 		}
 	}
@@ -319,6 +335,57 @@ func labelSelfOne(stdout, stderr io.Writer, cfg config.Config, label string) int
 		}
 	}
 	fmt.Fprintf(stdout, "labelled this host %s in %s\n", label, cfg.SyncDir)
+	if err != nil {
+		return 1
+	}
+	return 0
+}
+
+// labelRecoveryOne marks the recipient line for key as the recovery key in one
+// repo and records the key in that repo's config as a recoveryRecipient.
+func labelRecoveryOne(stdout, stderr io.Writer, cfg config.Config, key string) int {
+	repo := gitwt.New(cfg.SyncDir)
+	if !repo.IsRepo() || !agecrypt.Enabled(repo) {
+		fmt.Fprintf(stderr, "recipients: %s: the sync repo is not encrypted\n", cfg.SyncDir)
+		return 1
+	}
+	if cfg.ReadOnly {
+		fmt.Fprintln(stderr, "recipients: this host is read-only and never commits; mark the key from a writable host")
+		return 1
+	}
+	committed := false
+	err := withSyncLock(cfg.SyncDir, func() error {
+		if err := agecrypt.SyncFromOrigin(repo); err != nil {
+			fmt.Fprintln(stderr, "recipients: could not bring in the latest remote state; working from this clone:", err)
+		}
+		if err := agecrypt.LabelRecovery(repo, key); err != nil {
+			return err
+		}
+		committed = true
+		return joinPush(cfg, repo, false)
+	})
+	if err != nil {
+		if !committed {
+			return recipientsFail(stderr, err)
+		}
+		fmt.Fprintln(stderr, "recipients: marked locally but the push failed; the daemon pushes it on its next cycle")
+	}
+	if raw, lerr := config.Load(cfg.Path()); lerr == nil {
+		have := false
+		for _, r := range raw.RecoveryRecipients {
+			if r == key {
+				have = true
+			}
+		}
+		if !have {
+			raw.RecoveryRecipients = append(raw.RecoveryRecipients, key)
+		}
+		if serr := config.Save(raw); serr != nil {
+			fmt.Fprintln(stderr, "recipients: could not save recoveryRecipients:", serr)
+			return 1
+		}
+	}
+	fmt.Fprintf(stdout, "marked the recovery key in %s\n", cfg.SyncDir)
 	if err != nil {
 		return 1
 	}

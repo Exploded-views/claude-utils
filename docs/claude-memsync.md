@@ -1537,7 +1537,9 @@ printed, over a channel you trust. On success it adds the recipient (as
 file in the same commit, and pushes. The recipient is recorded with the requester's
 label (`# host:<label>`), as `recipients add --host` does. `accept` refuses a label that
 is this host's own `hostLabel` or is already bound in the pin, and refuses while any
-recipient other than a `# recovery` key has no host label (run
+recipient other than a configured recovery key (`recoveryRecipients` in config.json, set by
+`init --recovery-recipient <key>` or `recipients label recovery <key> [--repo <name> | --all]`;
+a `# recovery` comment alone exempts nothing) has no host label (run
 `recipients label self --host <label>` on that host first, or pass `--allow-unlabelled`).
 `reject` removes the file in its own commit
 and pushes. Like `recipients`, these refuse while the daemon holds the sync dir.
