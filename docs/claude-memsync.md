@@ -1320,6 +1320,50 @@ would need name hashing or a different tool.
   paths (re-run `init --force`, or fix the `filter.memage.*` and `merge.*` git
   config).
 
+## Host lifecycle
+
+Hosts are often disposable machines. Each one goes by a **label**, a name you
+choose (`^[a-z0-9][a-z0-9-]{0,31}$`, for example `vm-3`; the machine's host name
+is never used). Set it with `init --host-label <label>` (saved as `hostLabel` in
+config.json). The label ties together what a host leaves behind:
+
+- its **deploy keys** are titled with the label (`gh repo deploy-key add <key-file> -t <label>`);
+- its **age recipient** in each repo's `.age-recipients` carries a trailing comment
+  `# host:<label>`. `init --encrypt --host-label` writes it for the first host of a repo,
+  and `recipients add <public-key> --host <label>` for the next ones. Lines without the
+  comment stay valid and are treated as unlabelled;
+- the **registry** may hold `hosts/<label>/` (routing template, expiry, check-key record).
+
+### host list
+
+    claude-memsync host list [--org <org>] [--stale-days N] [--json] [--check-key-warn N]
+
+For every `mem-*` repo in the org (never any other repo) it lists the deploy keys
+(read/write or read-only, last used), joins them with the labelled recipients of
+the repos this host has and with the registry, and prints one row per label: last
+use, flags, keys per repo, recipient presence, registry presence, expiry and
+check-key fingerprint. `stale` means no key of the host was used in N days (default
+30; a key never used is judged by its age). `expired` means the host's published
+expiry date has passed. Listing deploy keys needs a token with **Administration:
+read** on the repos; the token is read from the usual places (`githubTokenFile`,
+`MEMSYNC_GITHUB_TOKEN`, `--token-file`). Output never contains key text.
+`doctor` prints a one-line summary of stale and expired hosts when there are any.
+
+### Check-App keys
+
+A host may have its own private key for a GitHub App used for checks. Record its
+fingerprint (as GitHub shows it, `SHA256:...`) and the App's slug, never the key:
+
+    claude-memsync host check-key --fingerprint SHA256:<fingerprint> --app <app-slug>
+    claude-memsync host check-key --clear
+
+This writes `hosts/<label>/check-key` in the registry (committed locally; the
+registry's own sync pushes it). `host list` shows it per host and counts the live
+keys per App: hosts still in the registry that have a fingerprint. GitHub allows at
+most 25 keys per App and they can only be deleted in the GitHub UI, so `host list`
+and `doctor` warn from 20 live keys (`--check-key-warn`, or `checkKeyWarn` in
+config.json). With no check key recorded, nothing is shown or counted.
+
 ## Limitations / known issues
 
 - **Path consistency required**: Claude derives the per-project memory directory

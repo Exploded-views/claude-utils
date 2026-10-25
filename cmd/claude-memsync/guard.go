@@ -17,6 +17,7 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/ghguard"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
+	"github.com/MarimerLLC/claude-utils/internal/hosts"
 )
 
 // guardClient builds an API client from config. A nil client with a nil error
@@ -276,10 +277,48 @@ func doctorCmd(stdout, stderr io.Writer, args []string) int {
 					set.Cfgs[n] = c
 				}
 			}
-			return routedDoctor(set, *org, stdout, stderr)
+			return doctorWithHosts(routedDoctor(set, *org, stdout, stderr), repoSel{Routes: *routes}, *tokenFile, *org, stdout, stderr)
 		}
 	}
-	return doctorRun(cfg, *org, stdout, stderr)
+	return doctorWithHosts(doctorRun(cfg, *org, stdout, stderr), repoSel{Config: *cfgPath}, *tokenFile, *org, stdout, stderr)
+}
+
+// doctorWithHosts adds the host lifecycle lines to a doctor run that passed: a
+// one-line summary of stale and expired hosts, and the check-key capacity
+// warning. Both are silent when there is nothing to say. A check that cannot
+// be made (the token cannot read deploy keys) is noted on stderr and never
+// changes the exit code.
+func doctorWithHosts(code int, sel repoSel, tokenFile, org string, stdout, stderr io.Writer) int {
+	if code != 0 {
+		return code
+	}
+	hc, err := loadHostCtx(sel)
+	if err != nil {
+		return code
+	}
+	if tokenFile != "" {
+		hc.cfg.GitHubTokenFile = tokenFile
+	}
+	o, err := hc.orgName(org)
+	if err != nil {
+		return code
+	}
+	c, err := hc.client()
+	if err != nil {
+		return code
+	}
+	rep, err := hc.buildReport(c, o, hosts.DefaultStaleDays, hc.cfg.CheckKeyWarn)
+	if err != nil {
+		fmt.Fprintln(stderr, "doctor: hosts not checked:", err)
+		return code
+	}
+	if s := rep.Summary(); s != "" {
+		fmt.Fprintln(stdout, s)
+	}
+	for _, w := range rep.Warnings() {
+		fmt.Fprintln(stdout, "warning:", w)
+	}
+	return code
 }
 
 // installTimerRun writes the generated unit files. It never enables or starts

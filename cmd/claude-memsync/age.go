@@ -56,7 +56,7 @@ func runAgeTextconv(args []string) int {
 // runRecipients handles `claude-memsync recipients add|remove|list|accept`.
 func runRecipients(args []string) int { return recipientsCmd(os.Stdout, os.Stderr, args) }
 
-const recipientsUsage = "usage: claude-memsync recipients add <public-key> | remove <public-key> | list | accept --yes  [--repo <name> | --config <path>] [--routes <path>]"
+const recipientsUsage = "usage: claude-memsync recipients add <public-key> [--host <label>] | remove <public-key> | list | accept --yes  [--repo <name> | --config <path>] [--routes <path>]"
 
 // recipientsCmd acts on one repo. With a routes file the repo must be named
 // (--repo or --config): the personal repo is never assumed, since a key added
@@ -71,10 +71,15 @@ func recipientsCmd(stdout, stderr io.Writer, args []string) int {
 		fmt.Fprintln(stderr, recipientsUsage)
 		return 2
 	}
+	args, hostLabel := extractFlag(args, "--host")
 	cfg, _, err := resolveRepo(sel, true)
 	if err != nil {
 		fmt.Fprintln(stderr, "recipients:", err)
 		return 1
+	}
+	if hostLabel != "" && (len(args) == 0 || args[0] != "add") {
+		fmt.Fprintln(stderr, "recipients: --host only goes with add")
+		return 2
 	}
 	repo := gitwt.New(cfg.SyncDir)
 	if !repo.IsRepo() || !agecrypt.Enabled(repo) {
@@ -115,7 +120,7 @@ func recipientsCmd(stdout, stderr io.Writer, args []string) int {
 		}
 		err = withSyncLock(cfg.SyncDir, func() error {
 			if args[0] == "add" {
-				return agecrypt.AddRecipient(repo, args[1])
+				return agecrypt.AddRecipientLabelled(repo, args[1], hostLabel)
 			}
 			return agecrypt.RemoveRecipient(repo, args[1])
 		})

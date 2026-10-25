@@ -66,6 +66,7 @@ func ParseRecipients(data []byte) (*Recipients, error) {
 			}
 			r.canon = append(r.canon, f[0]+" "+f[1]) // drop the comment
 		default:
+			line = stripTrailingComment(line)
 			rcs, err := age.ParseRecipients(strings.NewReader(line))
 			if err != nil {
 				return nil, fmt.Errorf("recipients line %d: %w", i+1, err)

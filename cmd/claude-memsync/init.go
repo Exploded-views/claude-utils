@@ -13,6 +13,7 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
+	"github.com/MarimerLLC/claude-utils/internal/route"
 	"github.com/MarimerLLC/claude-utils/internal/scrub"
 	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
@@ -57,6 +58,7 @@ func runInit(args []string) int {
 	apiURL := flags.String("github-api-url", "", "GitHub API base URL (GitHub Enterprise); saved to config")
 	ghHost := flags.String("github-host", "", "git host remotes must use (default github.com); saved to config")
 	tokenFile := flags.String("token-file", "", "file holding a GitHub token for the private-only check (or set MEMSYNC_GITHUB_TOKEN)")
+	hostLabel := flags.String("host-label", "", "a name you choose for this host (such as laptop-2): titles its deploy keys, labels its age recipient, names it in the registry; saved to config")
 	force := flags.Bool("force", false, "re-init even if sync-dir already exists")
 	archiveDeletes := flags.Bool("archive-deletes", false, "archive instead of delete: a note removed from a Claude folder moves to archive/ in the repo (sets archiveDeletes in config.json)")
 	denylist := flags.String("denylist", "", "UTF-8 file of regexes (one per line) to install as the denylist before the first commit")
@@ -88,7 +90,14 @@ func runInit(args []string) int {
 		}
 	}
 
+	if *hostLabel != "" {
+		if err := route.ValidLabel(*hostLabel); err != nil {
+			fmt.Fprintln(os.Stderr, "init: --host-label:", err)
+			return 2
+		}
+	}
 	cfg := config.Defaults()
+	cfg.HostLabel = *hostLabel
 	if *syncDir != "" {
 		cfg.SyncDir = *syncDir
 	}
@@ -280,7 +289,11 @@ func bootstrapFull(cfg config.Config, force bool, denylist []byte, enc *encryptS
 		if err := agecrypt.CheckKeyed(repo); err != nil {
 			keyless = true
 			fmt.Fprintln(os.Stderr, "this host cannot read the repo yet:", err)
-			fmt.Fprintln(os.Stderr, "send this public key to a host that can, to run `claude-memsync recipients add` with it, then pull:")
+			add := "`claude-memsync recipients add`"
+			if cfg.HostLabel != "" {
+				add = "`claude-memsync recipients add --host " + cfg.HostLabel + "`"
+			}
+			fmt.Fprintln(os.Stderr, "send this public key to a host that can, to run "+add+" with it, then pull:")
 			fmt.Fprintln(os.Stderr, "  ", ownRecipient)
 		}
 	}
@@ -315,6 +328,12 @@ func bootstrapFull(cfg config.Config, force bool, denylist []byte, enc *encryptS
 		}
 		if cfg.StartQuietSec == nil {
 			cfg.StartQuietSec = old.StartQuietSec
+		}
+		if cfg.HostLabel == "" {
+			cfg.HostLabel = old.HostLabel
+		}
+		if cfg.CheckKeyWarn == 0 {
+			cfg.CheckKeyWarn = old.CheckKeyWarn
 		}
 	}
 	// init is the migration moment: the next start gets the quiet window again.
@@ -452,7 +471,11 @@ func setupEncryption(repo *gitwt.Repo, cfg config.Config, enc *encryptSpec, ownR
 	}
 	keys := append([]string{}, enc.Recipients...)
 	if ownRecipient != "" {
-		keys = append([]string{ownRecipient}, keys...)
+		line := ownRecipient
+		if cfg.HostLabel != "" {
+			line += " # host:" + cfg.HostLabel // lets `host retire` find this line by name
+		}
+		keys = append([]string{line}, keys...)
 	}
 	if err := agecrypt.WriteRecipients(cfg.SyncDir, keys); err != nil {
 		return fmt.Errorf("write %s: %w", agecrypt.RecipientsFile, err)

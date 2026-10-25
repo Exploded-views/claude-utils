@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
@@ -20,6 +22,86 @@ func canonLine(line string) string {
 		return f[0]
 	}
 	return ""
+}
+
+// stripTrailingComment drops a " # ..." comment from an age key line.
+func stripTrailingComment(line string) string {
+	if i := strings.Index(line, " #"); i >= 0 {
+		return strings.TrimSpace(line[:i])
+	}
+	if i := strings.Index(line, "\t#"); i >= 0 {
+		return strings.TrimSpace(line[:i])
+	}
+	return line
+}
+
+var labelRE = regexp.MustCompile(`(?:^|\s)#\s*host:([a-z0-9][a-z0-9-]{0,31})\s*$`)
+
+// LabelOf is the host label a recipients line carries in a trailing comment
+// "# host:<label>", or "" for a line without one.
+func LabelOf(line string) string {
+	if m := labelRE.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// ListLabels returns the sorted, distinct host labels of the work-tree's
+// recipients file.
+func ListLabels(dir string) ([]string, error) {
+	lines, err := ListRecipients(dir)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, l := range lines {
+		if lb := LabelOf(l); lb != "" && !seen[lb] {
+			seen[lb] = true
+			out = append(out, lb)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// AddRecipientLabelled is AddRecipient with the host's label recorded on the
+// line as a trailing comment "# host:<label>", so the host can later be found
+// and retired by name.
+func AddRecipientLabelled(repo *gitwt.Repo, key, label string) error {
+	if label == "" {
+		return AddRecipient(repo, key)
+	}
+	if !labelRE.MatchString("# host:" + label) {
+		return fmt.Errorf("invalid host label %q (use 1-32 characters of a-z, 0-9 and '-')", label)
+	}
+	return AddRecipient(repo, strings.TrimSpace(key)+" # host:"+label)
+}
+
+// RemoveRecipientLabel removes every recipient line labelled label,
+// re-encrypts HEAD to the rest and commits (as RemoveRecipient does). History
+// stays readable to the removed key.
+func RemoveRecipientLabel(repo *gitwt.Repo, label string) error {
+	cur, err := ListRecipients(repo.Dir)
+	if err != nil {
+		return err
+	}
+	var keep []string
+	removed := 0
+	for _, l := range cur {
+		if LabelOf(l) == label && label != "" {
+			removed++
+			continue
+		}
+		keep = append(keep, l)
+	}
+	switch {
+	case removed == 0:
+		return errors.New("no recipient with that label")
+	case len(keep) == 0:
+		return errors.New("refusing to remove the last recipient")
+	}
+	return rewriteRecipients(repo, keep, "memsync: recipients updated")
 }
 
 func isKeyLine(line string) bool {

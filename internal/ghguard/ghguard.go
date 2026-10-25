@@ -264,41 +264,67 @@ func (c *Client) CreateRepo(org, name string) error {
 	return c.CheckPrivate(org, name)
 }
 
+// StatusError is an unexpected HTTP status from the API. Its text names the
+// status and the operation, never a response body.
+type StatusError struct {
+	Code int
+	What string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("GitHub API returned HTTP %d %s", e.Code, e.What)
+}
+
 var nextRE = regexp.MustCompile(`<([^>]+)>\s*;\s*rel="next"`)
 
-// ListOrgRepos returns every repo of org, following Link headers. It never
-// follows a next link to a different host than the base URL.
-func (c *Client) ListOrgRepos(org string) ([]Repo, error) {
+// getPages GETs first and every rel="next" page, calling each with the body.
+// It never follows a next link to a different host than the base URL.
+func (c *Client) getPages(first, what string, each func(b []byte) error) error {
 	baseU, err := url.Parse(c.base())
 	if err != nil {
-		return nil, c.scrub(err)
+		return c.scrub(err)
 	}
-	next := c.base() + "/orgs/" + url.PathEscape(org) + "/repos?type=all&per_page=100"
-	var all []Repo
+	next := first
 	for pages := 0; next != ""; pages++ {
 		if pages > 1000 {
-			return nil, errors.New("too many pages listing org repos")
+			return fmt.Errorf("too many pages listing %s", what)
 		}
 		code, b, h, err := c.do("GET", next, nil)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if code != http.StatusOK {
-			return nil, fmt.Errorf("GitHub API returned HTTP %d listing %s repos", code, org)
+			return &StatusError{Code: code, What: "listing " + what}
 		}
-		var page []Repo
-		if err := json.Unmarshal(b, &page); err != nil {
-			return nil, fmt.Errorf("unreadable API response listing %s repos", org)
+		if err := each(b); err != nil {
+			return fmt.Errorf("unreadable API response listing %s", what)
 		}
-		all = append(all, page...)
 		next = ""
 		if m := nextRE.FindStringSubmatch(h.Get("Link")); m != nil {
 			nu, err := url.Parse(m[1])
 			if err != nil || nu.Host != baseU.Host || nu.Scheme != baseU.Scheme {
-				return nil, errors.New("pagination link points to a different host; refusing to follow")
+				return errors.New("pagination link points to a different host; refusing to follow")
 			}
 			next = m[1]
 		}
+	}
+	return nil
+}
+
+// ListOrgRepos returns every repo of org, following Link headers. It never
+// follows a next link to a different host than the base URL.
+func (c *Client) ListOrgRepos(org string) ([]Repo, error) {
+	var all []Repo
+	err := c.getPages(c.base()+"/orgs/"+url.PathEscape(org)+"/repos?type=all&per_page=100", org+" repos", func(b []byte) error {
+		var page []Repo
+		if err := json.Unmarshal(b, &page); err != nil {
+			return err
+		}
+		all = append(all, page...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return all, nil
 }

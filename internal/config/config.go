@@ -84,6 +84,15 @@ type Config struct {
 	// false (upstream behaviour); `init --archive-deletes` sets it.
 	ArchiveDeletes bool `json:"archiveDeletes"`
 
+	// HostLabel is the name this host goes by in deploy-key titles, recipient
+	// comments ("# host:<label>") and the registry (hosts/<label>/). A name
+	// you choose, never the machine's host name. Set by `init --host-label`.
+	HostLabel string `json:"hostLabel,omitempty"`
+
+	// CheckKeyWarn is the count of live check-App keys at which `host list`
+	// and `doctor` warn (default 20; GitHub allows 25 per app).
+	CheckKeyWarn int `json:"checkKeyWarn,omitempty"`
+
 	// DebounceMs is how long to wait after a file change before committing.
 	DebounceMs int `json:"debounceMs"`
 
