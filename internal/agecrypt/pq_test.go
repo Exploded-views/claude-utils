@@ -380,3 +380,42 @@ func TestPQ_IdentityNeverInRecipientsOrErrors(t *testing.T) {
 		t.Error("error text must not carry the secret")
 	}
 }
+
+// forgeClassic commits a classic-ciphertext blob as legacy.md on h's branch.
+func forgeClassic(t *testing.T, h *host) {
+	t.Helper()
+	_, cl := newIdentity(t, "c")
+	ct, _ := Encrypt([]byte("legacy"), mustRecipients(t, cl))
+	oid, err := h.repo.RunStdin(ct, "hash-object", "-w", "--no-filters", "--stdin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.repo.Run("update-index", "--add", "--cacheinfo", "100644,"+strings.TrimSpace(oid)+",legacy.md"); err != nil {
+		t.Fatal(err)
+	}
+	h.repo.Commit("legacy")
+}
+
+// A clone whose memage.scheme went missing is still pq if its recipients are:
+// the guard must not fall back to accepting classic ciphertext.
+func TestPQ_SchemeOfFallsBackToTheRecipientsFile(t *testing.T) {
+	gitEnv(t)
+	a := newHostPQ(t, bareRemote(t), true)
+	a.write(t, "n.md", "ok\n")
+	a.commit(t, "memsync: 1 files")
+	if _, err := a.repo.Run("config", "--unset", SchemeConfigKey); err != nil {
+		t.Fatal(err)
+	}
+	if got := SchemeOf(a.repo); got != SchemePQ {
+		t.Fatalf("SchemeOf without memage.scheme but with a hybrid recipients file = %q, want pq", got)
+	}
+	forgeClassic(t, a)
+	if err := PushGuard(a.repo, "main"); err == nil {
+		t.Fatal("classic ciphertext must not be pushed from a repo with hybrid recipients")
+	}
+	// a classic repo stays classic
+	c := newHost(t, bareRemote(t), true)
+	if got := SchemeOf(c.repo); got != SchemeClassic {
+		t.Errorf("classic repo reads as %q", got)
+	}
+}
