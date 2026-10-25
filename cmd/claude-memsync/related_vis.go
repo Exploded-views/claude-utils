@@ -26,6 +26,9 @@ var (
 	visTTL = time.Hour
 	// quickTimeout bounds an API call made from a hook or the session context.
 	quickTimeout = 2 * time.Second
+	// visMaxStale is how old a cached verdict may be and still serve when the
+	// API cannot be reached; older ones fail closed.
+	visMaxStale = 24 * time.Hour
 )
 
 type verdict struct {
@@ -51,6 +54,7 @@ type ghVisibility struct {
 	remote    func(repo string) string // the configured remote URL of a repo this host has, or ""
 	cachePath string
 	quick     bool
+	maxStale  time.Duration // 0: visMaxStale
 	now       func() time.Time
 	mu        sync.Mutex
 }
@@ -127,7 +131,11 @@ func (v *ghVisibility) verify(repo, owner, name string) error {
 	}
 	r, err := v.api().GetRepo(owner, name)
 	if err != nil {
-		if have && v.quick {
+		limit := v.maxStale
+		if limit <= 0 {
+			limit = visMaxStale
+		}
+		if have && v.quick && v.now().Sub(cached.At) < limit {
 			return privateErr(repo, cached.Private)
 		}
 		return fmt.Errorf("%w: cannot check that %s is private: %v", errUnverified, repo, err)

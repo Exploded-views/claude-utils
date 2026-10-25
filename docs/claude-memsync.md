@@ -1107,6 +1107,8 @@ If the copy is encrypted (`.age-recipients`) and this host cannot decrypt it, it
 **Session context.** Put `claude-memsync related context --project "$CLAUDE_PROJECT_DIR"` in a SessionStart hook. It prints, for the repo that owns the project, one entry per read relation: the repo name, note count, read-only path and the headings of its `MEMORY.md` (never note bodies), within `--per-relation` (default 2000) and `--total` (default 6000) characters. Headings and changed paths that match the owning repo's denylist are counted, never printed. It prints nothing for a project without relations and never fails the session. `changes --hook` also lists, under a "related, read-only repos" label, the paths that changed in those clones since the session last looked. Allow `Read(<relatedRoot>/**)` and nothing wider.
 ## Encryption at rest
 
+**`$GIT_DIR/info/attributes` is tool-owned.** In an encrypted clone it holds the filter and merge rules (every file through the age filter, `MEMORY.md` and `archive/INDEX.md` with their own merge drivers). It outranks every `.gitattributes`, so nothing pulled can switch encryption off. The daemon rewrites it, and the filter and merge-driver settings in the clone's git config, at every start; edits made there by hand are lost. The programs the config already names are kept while they exist. A missing one is replaced by the running executable, unless that runs from a temp dir or a go build cache, in which case nothing is rewritten and one line is logged.
+
 `claude-memsync init --encrypt --remote <url>` encrypts every file in the sync
 repo with [age](https://age-encryption.org) before it reaches git, so the remote
 host stores only ciphertext. It is opt-in: a repo made without `--encrypt` is

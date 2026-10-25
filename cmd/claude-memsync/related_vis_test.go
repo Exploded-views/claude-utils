@@ -238,3 +238,36 @@ func TestVis_LocalRepoRenamedRemoteKeepsRelationsViaPinnedName(t *testing.T) {
 		t.Fatal("routes.json pins the remote name: the repo must still be found under it")
 	}
 }
+
+// A cached verdict serves for a hook when the API is down only while it is
+// younger than visMaxStale; older ones fail closed.
+func TestVis_StaleVerdictBeyondTheCapFailsClosed(t *testing.T) {
+	api := newFakeAPI(t)
+	visHost(t, api, nil)
+	oldQ := quickTimeout
+	quickTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { quickTimeout = oldQ })
+	if code, _, errs := relate("mem-project-a", "mem-project-b", "--read"); code != 0 {
+		t.Fatalf("relate: %s", errs)
+	}
+	path := visCachePathOf(t)
+	api.set(func() { api.delay = 300 * time.Millisecond })
+	for _, tc := range []struct {
+		age  time.Duration
+		want bool // unverified
+	}{{23 * time.Hour, false}, {25 * time.Hour, true}} {
+		at := time.Now().Add(-tc.age)
+		m := map[string]verdict{
+			"org/mem-project-a": {Private: true, At: at},
+			"org/mem-project-b": {Private: true, At: at},
+		}
+		b, _ := json.Marshal(m)
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, ctx, _ := contextFor("/proj/x")
+		if got := strings.Contains(ctx, "unverified"); got != tc.want {
+			t.Errorf("verdict %v old: unverified=%v, want %v\n%s", tc.age, got, tc.want, ctx)
+		}
+	}
+}

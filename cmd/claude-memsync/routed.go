@@ -237,24 +237,104 @@ func (r *running) Stop() error {
 // Wait blocks until every loop has ended.
 func (r *running) Wait() { r.wg.Wait() }
 
+// executable is os.Executable; tests replace it.
+var executable = os.Executable
+
+// configuredExe is the program a clone's git config names in key (its first,
+// shell-quoted word), or "".
+func configuredExe(repo *gitwt.Repo, key string) string {
+	out, err := repo.Run("config", "--get", key)
+	if err != nil {
+		return ""
+	}
+	v := strings.TrimSpace(out)
+	if !strings.HasPrefix(v, "'") {
+		return ""
+	}
+	var b strings.Builder
+	for i := 1; i < len(v); i++ {
+		switch {
+		case strings.HasPrefix(v[i:], `'\''`):
+			b.WriteByte('\'')
+			i += 3
+		case v[i] == '\'':
+			return strings.ReplaceAll(b.String(), "%%", "%")
+		default:
+			b.WriteByte(v[i])
+		}
+	}
+	return ""
+}
+
+func fileExists(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && !st.IsDir()
+}
+
+// tempRoots are the directories whose binaries count as throwaways.
+var tempRoots = func() []string { return []string{os.TempDir(), "/tmp"} }
+
+// underTemp reports a path in a temp dir or a go build cache: a binary there is
+// a throwaway, not something to point a clone's git config at.
+func underTemp(p string) bool {
+	p = filepath.ToSlash(p)
+	if strings.Contains(p, "/go-build") {
+		return true
+	}
+	for _, d := range tempRoots() {
+		d = strings.TrimRight(filepath.ToSlash(d), "/")
+		if d != "" && (p == d || strings.HasPrefix(p, d+"/")) {
+			return true
+		}
+	}
+	return false
+}
+
+var refreshWarned sync.Map
+
+func warnRefreshOnce(dir, msg string) {
+	if _, dup := refreshWarned.LoadOrStore(dir+msg, true); !dup {
+		log.Printf("encryption: %s", msg)
+	}
+}
+
 // refreshEncryption updates an encrypted clone's attributes and merge drivers
-// to this build's, at daemon start. Unencrypted repos are left alone.
+// to this build's, at daemon start. Unencrypted repos are left alone. The
+// programs the clone already names are kept while they exist; a missing one is
+// replaced by this build's, unless that is a throwaway under a temp dir, in
+// which case nothing is rewritten.
 func refreshEncryption(cfg config.Config) error {
 	repo := gitwt.New(cfg.SyncDir)
 	if !repo.IsRepo() || !agecrypt.Configured(repo) {
 		return nil
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	mm := cfg.MergeDriverPath
-	if mm == "" {
-		if mm, err = config.DiscoverMergeDriver(); err != nil {
+	ms := configuredExe(repo, "filter."+agecrypt.FilterName+".process")
+	if ms == "" || !fileExists(ms) {
+		exe, err := executable()
+		if err != nil {
 			return err
 		}
+		if underTemp(exe) {
+			warnRefreshOnce(cfg.SyncDir, "the configured claude-memsync is missing and this one runs from a temp dir; encryption settings left as they are")
+			return nil
+		}
+		ms = exe
 	}
-	return agecrypt.Refresh(repo, exe, mm)
+	mm := configuredExe(repo, "merge.claude-memory-index.driver")
+	if mm == "" || !fileExists(mm) {
+		mm = cfg.MergeDriverPath
+		var err error
+		if mm == "" {
+			if mm, err = config.DiscoverMergeDriver(); err != nil {
+				return err
+			}
+		}
+		if underTemp(mm) {
+			warnRefreshOnce(cfg.SyncDir, "the configured claude-memmerge is missing and the replacement is in a temp dir; encryption settings left as they are")
+			return nil
+		}
+	}
+	return agecrypt.Refresh(repo, ms, mm)
 }
 
 // startSingle runs one Loop on cfg, as before routing existed, but refuses a

@@ -164,6 +164,9 @@ type File struct {
 	// RelatedOwners lists the GitHub owners, besides this host's own org, that a
 	// read clone's URL may name.
 	RelatedOwners []string `json:"relatedOwners,omitempty"`
+	// RelatedMaxStaleHours is how old a cached visibility verdict may be and
+	// still serve when GitHub cannot be reached (default 24).
+	RelatedMaxStaleHours int `json:"relatedMaxStaleHours,omitempty"`
 	// RelatedFetchTimeoutSec bounds one fetch of a read clone (default 60).
 	RelatedFetchTimeoutSec int `json:"relatedFetchTimeoutSec,omitempty"`
 	// RelatedMaxMB caps the exported size of one read clone (default 64).

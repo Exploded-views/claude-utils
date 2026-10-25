@@ -125,6 +125,9 @@ func loadRelCtx(routesFlag string) (*relCtx, error) {
 	if err := rc.checkRoot(); err != nil {
 		return nil, err
 	}
+	if h := set.File.RelatedMaxStaleHours; h > 0 {
+		vis.maxStale = time.Duration(h) * time.Hour
+	}
 	vis.cachePath = filepath.Join(rc.root, ".state", "visibility.json")
 	return rc, nil
 }

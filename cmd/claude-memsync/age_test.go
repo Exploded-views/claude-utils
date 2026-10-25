@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
+	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/testenv"
 )
@@ -176,5 +177,65 @@ func TestRefreshEncryption_OldStyleCloneGainsTheCurrentRules(t *testing.T) {
 	plain, _ := initFixture(t)
 	if err := refreshEncryption(plain); err != nil {
 		t.Fatalf("plain repo: %v", err)
+	}
+}
+
+func agedClone(t *testing.T) (config.Config, *gitwt.Repo, string) {
+	t.Helper()
+	cfg, _ := initFixture(t)
+	t.Setenv("HOME", t.TempDir())
+	ms, mm := testenv.Binaries(t)
+	cfg.MergeDriverPath = mm
+	enc := &encryptSpec{IdentityPath: filepath.Join(t.TempDir(), "k", "identity.txt"), MemsyncExe: ms}
+	if err := bootstrapWith(cfg, false, nil, enc); err != nil {
+		t.Fatal(err)
+	}
+	return cfg, gitwt.New(cfg.SyncDir), ms
+}
+
+// Refresh leaves the programs the clone names alone while they exist.
+func TestRefreshEncryption_KeepsExistingBinaryPaths(t *testing.T) {
+	cfg, repo, ms := agedClone(t)
+	old := executable
+	executable = func() (string, error) { return "/opt/elsewhere/claude-memsync", nil }
+	defer func() { executable = old }()
+	if err := refreshEncryption(cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := repo.Run("config", "--get", "filter.memage.process")
+	if !strings.Contains(got, ms) || strings.Contains(got, "elsewhere") {
+		t.Errorf("filter repointed: %q (want %s)", got, ms)
+	}
+}
+
+// A missing configured binary is replaced by this build's, unless this build
+// runs from a temp dir: then nothing is rewritten.
+func TestRefreshEncryption_MissingBinaryTempDirRefusedElsewhereReplaced(t *testing.T) {
+	cfg, repo, _ := agedClone(t)
+	gone := filepath.Join(t.TempDir(), "gone", "claude-memsync")
+	repo.ConfigSet("filter.memage.process", "'"+gone+"' age-filter")
+	old := executable
+	defer func() { executable = old }()
+
+	oldRoots := tempRoots
+	tempRoots = func() []string { return []string{filepath.Join(os.TempDir(), "never-matches")} }
+	defer func() { tempRoots = oldRoots }()
+	executable = func() (string, error) { return filepath.Join(os.TempDir(), "go-build123", "claude-memsync"), nil }
+	if err := refreshEncryption(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := repo.Run("config", "--get", "filter.memage.process"); !strings.Contains(got, gone) {
+		t.Errorf("a temp-dir executable must not be written into the config: %q", got)
+	}
+
+	real := filepath.Join(os.Getenv("HOME"), "bin", "claude-memsync")
+	os.MkdirAll(filepath.Dir(real), 0o755)
+	os.WriteFile(real, []byte("x"), 0o755)
+	executable = func() (string, error) { return real, nil }
+	if err := refreshEncryption(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := repo.Run("config", "--get", "filter.memage.process"); !strings.Contains(got, real) {
+		t.Errorf("a missing binary should be replaced by the stable executable: %q", got)
 	}
 }
