@@ -219,10 +219,14 @@ func loadCfgOptional(path string) config.Config {
 }
 
 // runDoctor handles `claude-memsync doctor`.
-func runDoctor(args []string) int {
+func runDoctor(args []string) int { return doctorCmd(os.Stdout, os.Stderr, args) }
+
+func doctorCmd(stdout, stderr io.Writer, args []string) int {
 	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	flags.SetOutput(stderr)
 	org := flags.String("org", "", "GitHub org to check (default: config githubOrg, else owner of the remote)")
 	cfgPath := flags.String("config", "", "path to config.json")
+	tokenFile := flags.String("token-file", "", "file holding a GitHub token for this run (as for init; or set MEMSYNC_GITHUB_TOKEN); not saved")
 	routes := flags.String("routes", "", "path to routes.json: check every repo it routes (default: as for run, unless --config is given)")
 	timer := flags.Bool("install-timer", false, "write a daily user timer (systemd) or launchd agent for doctor; does not enable it")
 	unitDir := flags.String("unit-dir", "", "with --install-timer: directory to write units into")
@@ -230,15 +234,21 @@ func runDoctor(args []string) int {
 		return 2
 	}
 	cfg := loadCfgOptional(*cfgPath)
+	if *tokenFile != "" {
+		if abs, err := filepath.Abs(*tokenFile); err == nil {
+			*tokenFile = abs // a timer unit must not depend on the working directory
+		}
+		cfg.GitHubTokenFile = *tokenFile
+	}
 	if *timer {
 		o, err := orgFor(cfg, *org)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "doctor:", err)
+			fmt.Fprintln(stderr, "doctor:", err)
 			return 2
 		}
 		exe, err := os.Executable()
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "doctor:", err)
+			fmt.Fprintln(stderr, "doctor:", err)
 			return 1
 		}
 		cp := *cfgPath
@@ -248,22 +258,28 @@ func runDoctor(args []string) int {
 		if abs, err := filepath.Abs(cp); err == nil {
 			cp = abs
 		}
-		return installTimerRun(runtime.GOOS, exe, o, cp, cfg.GitHubTokenFile, *unitDir, os.Stdout, os.Stderr)
+		return installTimerRun(runtime.GOOS, exe, o, cp, cfg.GitHubTokenFile, *unitDir, stdout, stderr)
 	}
 	if *cfgPath == "" {
 		if path, ok, err := resolveRoutesPath(*routes); err != nil {
-			fmt.Fprintln(os.Stderr, "doctor:", err)
+			fmt.Fprintln(stderr, "doctor:", err)
 			return 1
 		} else if ok {
 			set, err := loadRouted(path)
 			if err != nil {
-				fmt.Fprintln(os.Stderr, "doctor:", err)
+				fmt.Fprintln(stderr, "doctor:", err)
 				return 1
 			}
-			return routedDoctor(set, *org, os.Stdout, os.Stderr)
+			if *tokenFile != "" {
+				for n, c := range set.Cfgs {
+					c.GitHubTokenFile = *tokenFile
+					set.Cfgs[n] = c
+				}
+			}
+			return routedDoctor(set, *org, stdout, stderr)
 		}
 	}
-	return doctorRun(cfg, *org, os.Stdout, os.Stderr)
+	return doctorRun(cfg, *org, stdout, stderr)
 }
 
 // installTimerRun writes the generated unit files. It never enables or starts

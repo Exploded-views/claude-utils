@@ -362,10 +362,15 @@ func bootstrapFull(cfg config.Config, force bool, denylist []byte, enc *encryptS
 	fmt.Fprintln(os.Stderr, "init OK")
 	fmt.Fprintln(os.Stderr, "  sync dir:        ", cfg.SyncDir)
 	fmt.Fprintln(os.Stderr, "  claude projects: ", cfg.ClaudeProjectsDir)
-	fmt.Fprintln(os.Stderr, "  distilled:       ", cfg.DistilledPath())
+	personal := isPersonalRepo(cfg) // only that repo has a catalog
+	if personal {
+		fmt.Fprintln(os.Stderr, "  distilled:       ", cfg.DistilledPath())
+	}
 	fmt.Fprintln(os.Stderr, "  remote:          ", cfg.RemoteURL)
 	fmt.Fprintln(os.Stderr, "  merge driver:    ", cfg.MergeDriverPath)
-	printDistillPermissionHint(cfg)
+	if personal {
+		printDistillPermissionHint(cfg)
+	}
 	return nil
 }
 

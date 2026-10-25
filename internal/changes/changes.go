@@ -220,6 +220,7 @@ func Compute(opts Options) (Result, error) {
 		return res, err
 	}
 	all := parse(out, opts.ClaudeDir)
+	all = dropReencrypted(repo, since, head, all)
 	if opts.Keep != nil {
 		kept := all[:0]
 		for _, c := range all {
@@ -262,6 +263,53 @@ func Compute(opts Options) (Result, error) {
 		}
 	}
 	return res, nil
+}
+
+// dropReencrypted removes the "changed" files whose text is the same at both
+// ends. In an encrypted repo a recipients change rewrites every blob (age
+// output is never the same twice) without touching a note, and the hook must
+// not announce all of them. Plain repos are untouched (identical text is not a
+// diff there), and so is any file one end of which cannot be decrypted: when
+// in doubt a change is reported.
+func dropReencrypted(repo *gitwt.Repo, since, head string, list []Change) []Change {
+	if !agecrypt.Enabled(repo) {
+		return list
+	}
+	var idx []int
+	var specs []string
+	for i, c := range list {
+		if c.Status != "changed" || strings.ContainsAny(c.Path, "\n") {
+			continue
+		}
+		idx = append(idx, i)
+		specs = append(specs, since+":"+c.Path, head+":"+c.Path)
+	}
+	if len(idx) == 0 {
+		return list
+	}
+	blobs, err := repo.BlobContents(specs)
+	if err != nil {
+		return list
+	}
+	plain := agecrypt.PlainReader(repo)
+	same := map[int]bool{}
+	for k, i := range idx {
+		a, errA := plain(blobs[2*k])
+		b, errB := plain(blobs[2*k+1])
+		if errA == nil && errB == nil && bytes.Equal(a, b) {
+			same[i] = true
+		}
+	}
+	if len(same) == 0 {
+		return list
+	}
+	kept := list[:0]
+	for i, c := range list {
+		if !same[i] {
+			kept = append(kept, c)
+		}
+	}
+	return kept
 }
 
 // markLocalKept sets LocalKept on the non-deleted changes whose local file

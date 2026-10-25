@@ -232,13 +232,23 @@ func runStop(args []string) int {
 	return 0
 }
 
+// statusFn reports the service state; tests replace it.
+var statusFn = statusTask
+
+// runStatus prints the service state, then the routing and per-repo state.
+// A service that is not installed (a foreground run, a dry run) is one line,
+// not a failure: the repos are still described. The exit code is non-zero only
+// when a repo is in an error state or the routing cannot be read.
 func runStatus(args []string) int {
-	st, err := statusTask()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "status:", err)
-		return 1
+	st, err := statusFn()
+	switch {
+	case errors.Is(err, service.ErrNotInstalled):
+		fmt.Println("service: not installed")
+	case err != nil:
+		fmt.Printf("service: unknown (%v)\n", err)
+	default:
+		fmt.Println(st)
 	}
-	fmt.Println(st)
 	if handled, code := routedStatus(); handled {
 		return code
 	}
@@ -275,7 +285,22 @@ func routedStatus() (handled bool, code int) {
 	for _, l := range set.statusLines() {
 		fmt.Println(l)
 	}
-	return true, 0
+	code = 0
+	for _, name := range set.names() {
+		cfg := set.Cfgs[name]
+		var lines []string
+		if l := visibilityLine(cfg); l != "" {
+			lines = append(lines, l)
+		}
+		lines = append(lines, encryptionLines(cfg)...)
+		for _, l := range lines {
+			fmt.Printf("  [%s] %s\n", name, l)
+		}
+		if _, err := os.Stat(loopFailedPath(cfg.SyncDir)); err == nil {
+			code = 1 // a repo whose loop keeps dying is in an error state
+		}
+	}
+	return true, code
 }
 
 // pausedLine says that syncing is paused for a rebase or merge being resolved by

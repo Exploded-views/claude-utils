@@ -9,6 +9,7 @@ import (
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/distill"
+	"github.com/MarimerLLC/claude-utils/internal/lock"
 )
 
 // runDistill implements `claude-memsync distill`. It regenerates the
@@ -19,13 +20,15 @@ import (
 func runDistill(args []string) int {
 	flags := flag.NewFlagSet("distill", flag.ContinueOnError)
 	cfgPath := flags.String("config", "", "path to config.json (default: ~/.claudesync/config.json)")
+	repoName := flags.String("repo", "", "with a routes file: the repo to rebuild (a key of routes.json repos; default: the personal repo)")
+	routesFlag := flags.String("routes", "", "path to routes.json (default: $"+routesEnv+", then ~/.config/claude-memsync/routes.json if it exists)")
 	prune := flags.Bool("prune", false, "remove catalog entries whose source memory lost the marker or vanished (archived instead when archiveDeletes is on)")
 	dryRun := flags.Bool("dry-run", false, "report what would change without writing the index or pruning")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 
-	cfg, err := loadDistillConfig(*cfgPath)
+	cfg, _, err := resolveRepo(repoSel{*repoName, *cfgPath, *routesFlag}, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "distill:", err)
 		return 1
@@ -38,7 +41,7 @@ func runDistill(args []string) int {
 	// catalog, whatever --config says: a client's notes never enter the worklist.
 	// A routes file that cannot be used stops distill rather than lifting the
 	// filter.
-	keep, err := distillKeep()
+	keep, err := distillKeep(*routesFlag)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "distill:", err)
 		return 1
@@ -49,10 +52,19 @@ func runDistill(args []string) int {
 	}
 
 	var res distill.Result
-	if *dryRun {
+	switch {
+	case *dryRun:
 		res, err = distill.Preview(opts)
-	} else {
-		res, err = distill.Run(opts, *prune)
+	case *prune:
+		// Pruning deletes or archives synced catalog files: it must not race
+		// the daemon of this repo, so it takes that sync dir's lock. (The
+		// index alone is a git-ignored derived file; rebuilding it needs none.)
+		err = withSyncLock(cfg.SyncDir, func() (e error) { res, e = distill.Run(opts, true); return })
+		if errors.Is(err, lock.ErrHeld) {
+			fmt.Fprintln(os.Stderr, "distill: the daemon is running on this sync dir; run `claude-memsync stop`, then --prune, then `claude-memsync start`")
+		}
+	default:
+		res, err = distill.Run(opts, false)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "distill:", err)
@@ -65,8 +77,8 @@ func runDistill(args []string) int {
 
 // distillKeep is the worklist filter: nil without a routes file, an error when
 // one exists and is unusable.
-func distillKeep() (func(string) bool, error) {
-	path, ok, err := resolveRoutesPath("")
+func distillKeep(routesFlag string) (func(string) bool, error) {
+	path, ok, err := resolveRoutesPath(routesFlag)
 	if err != nil || !ok {
 		return nil, err
 	}
