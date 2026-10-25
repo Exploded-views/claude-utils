@@ -32,6 +32,9 @@ const denylistRel = "denylist.txt"
 // merge or rebase is unresolved, a file with conflict markers is never staged:
 // CommitMirror fails instead (see refuseConflictMarkers).
 func CommitMirror(repo *gitwt.Repo, cfg config.Config, msg string) (bool, error) {
+	if cfg.ReadOnly {
+		return false, ErrReadOnly
+	}
 	encrypted := agecrypt.Enabled(repo)
 	if encrypted {
 		// Keyless: staging would store nothing useful and the work-tree holds

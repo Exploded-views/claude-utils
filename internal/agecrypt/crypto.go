@@ -64,14 +64,17 @@ func ParseRecipients(data []byte) (*Recipients, error) {
 			if len(f) < 2 {
 				return nil, fmt.Errorf("recipients line %d: malformed ssh key", i+1)
 			}
-			r.canon = append(r.canon, f[0]+" "+f[1]) // drop the comment
+			// Free comment text is dropped; the host label is part of what is reviewed.
+			r.canon = append(r.canon, f[0]+" "+f[1]+labelSuffix(LabelOf(line)))
 		default:
+			lbl := LabelOf(line)
+			line = stripTrailingComment(line)
 			rcs, err := age.ParseRecipients(strings.NewReader(line))
 			if err != nil {
 				return nil, fmt.Errorf("recipients line %d: %w", i+1, err)
 			}
 			r.list = append(r.list, rcs...)
-			r.canon = append(r.canon, line)
+			r.canon = append(r.canon, line+labelSuffix(lbl))
 		}
 	}
 	return r, nil

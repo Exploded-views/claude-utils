@@ -1584,6 +1584,140 @@ would need name hashing or a different tool.
   paths (re-run `init --force`, or fix the `filter.memage.*` and `merge.*` git
   config).
 
+## Host lifecycle
+
+Hosts are often disposable machines. Each one goes by a **label**, a name you
+choose (`^[a-z0-9][a-z0-9-]{0,31}$`, for example `vm-3`; the machine's host name
+is never used). Set it with `init --host-label <label>` (saved as `hostLabel` in
+config.json). The label ties together what a host leaves behind:
+
+- its **deploy keys** are titled with the label (`gh repo deploy-key add <key-file> -t <label>`);
+- its **age recipient** in each repo's `.age-recipients` carries a trailing comment
+  `# host:<label>`. `init --encrypt --host-label` writes it for the first host of a repo,
+  and `recipients add <public-key> --host <label>` for the next ones (a label already
+  bound to another key is refused). Lines without the comment stay valid and are treated
+  as unlabelled. **The label is part of what the pin reviews**: it is recorded with the
+  key in the set this host pinned, so a label changed or swapped upstream shows up as an
+  unreviewed recipients change (`recipients list`, `recipients accept`), and `host retire`
+  resolves a label through the pin, never through the comment text;
+- the **registry** may hold `hosts/<label>/` (routing template, expiry, check-key record).
+
+### host list
+
+    claude-memsync host list [--org <org>] [--stale-days N] [--json] [--check-key-warn N]
+
+For every `mem-*` repo in the org (never any other repo) it lists the deploy keys
+(read/write or read-only, last used), joins them with the labelled recipients of
+the repos this host has and with the registry, and prints one row per label: last
+use, flags, keys per repo, recipient presence, registry presence, expiry and
+check-key fingerprint. `stale` means no key of the host was used in N days (default
+30; a key never used is judged by its age). `expired` means the host's published
+expiry date has passed. Listing deploy keys needs a token with **Administration:
+read** on the repos; the token is read from the usual places (`githubTokenFile`,
+`MEMSYNC_GITHUB_TOKEN`, `--token-file`). Output never contains key text.
+`doctor` prints a one-line summary of stale and expired hosts when there are any.
+
+### host retire
+
+    claude-memsync host retire <label> [--org <org>]            # plan only (dry run, the default)
+    claude-memsync host retire <label> [--org <org>] --apply    # act
+
+Retiring a host closes what it could still reach. The plan lists counts and names;
+no key material is ever printed. With `--apply`:
+
+1. **Deploy keys.** Every deploy key titled `<label>` is deleted on every `mem-*`
+   repo of the org (nothing else is touched). This needs a token with
+   **Administration: write**; without it the command stops at the first refusal with
+   a message naming the permission, before anything else is changed.
+2. **Recipients.** For each repo this host has, the label is resolved through the
+   pin to one key; that recipient is removed, HEAD is re-encrypted for the remaining
+   recipients and the commit is made (the daemon pushes it). The plan prints the short
+   fingerprint of the key per repo. The command **refuses**, before changing anything,
+   when the label is bound to more than one key in a repo or to different keys in
+   different repos. It needs the daemon off: the sync-dir locks of every repo it
+   writes to are taken first and **held until the command ends**, and if one is held
+   the command stops with nothing changed. **History stays readable to the retired
+   key and is not rewritten**: it keeps everything it already fetched; only new
+   content is closed to it.
+3. **Cannot re-encrypt here.** A repo the host had a key for but this host lacks,
+   a repo this host cannot decrypt, a repo whose recipients changed upstream and are
+   not reviewed here, and a repo where the retired host was the only
+   recipient are listed as `cannot re-encrypt here: run retire on a member host, or
+   archive the repo`. Nothing is changed there.
+4. **Registry.** `hosts/<label>/` is removed from the registry work-tree and the
+   removal committed locally (the registry's own sync pushes it). If the host
+   recorded a check-App key, the plan and the result print the exact page to delete
+   it (`https://<git host>/organizations/<org>/settings/apps/<app-slug>`, from your
+   config and the registry) and its fingerprint, as a manual step: GitHub only lets
+   you delete App keys in the UI. The fingerprint is printed *as recorded in the
+   registry*; verify it in GitHub's UI before deleting, since anyone who can write to
+   the registry can change it (the live-key count in `host list` has the same caveat).
+   With no check key recorded, nothing is printed.
+
+Retiring this host's own label is refused; run it from another host. The command ends
+with a summary: `retire complete`, or a `still pending` list (for example `STILL A
+RECIPIENT in mem-x: re-run`). A re-run is idempotent: keys already gone are counted,
+recipients already removed are skipped, and once nothing is left it reports `nothing
+to retire` and changes nothing.
+
+### Read-only membership
+
+    claude-memsync init --remote <url> --read-only
+
+A read-only member pulls and applies notes but never writes back. The daemon pulls
+on its usual interval and copies what arrived into the Claude tree (new notes,
+edits and deletions), and that is all: it mirrors nothing from `~/.claude`, makes no
+commit and no push. Every command that would commit refuses with a clear message
+(`recipients add|remove`, `relate`, `unrelate`, `route publish`, `host check-key`);
+`recipients accept` only pins the reviewed set and does not re-encrypt. `status`
+shows `read-only`. The setting is `readOnly: true` in config.json; it is kept
+across a re-init, so an `init --force` never makes a read-only host writable. The
+remote must already hold the repo: a read-only host cannot make its first commit.
+A note you write locally on a read-only host stays local, and a pulled version of
+the same note replaces it.
+
+Give such a host a deploy key **without** write access (`gh repo deploy-key add
+<key-file> -t <label>`, leaving out `-w`), so GitHub itself refuses a push. In
+`host list` its keys show as `ro`. When a read-only host is retired, repos it is a
+member of are listed under "cannot re-encrypt here" (it never commits).
+
+*TODO(join):* this base has no `join` command. When one exists, `join request
+--read-only` should mark the request so the accepting member's output reminds them
+to add the deploy key without `-w`.
+
+### Expiry
+
+    claude-memsync init --remote <url> --expires 2026-12-31
+
+For a host that is meant to be disposable, `--expires <YYYY-MM-DD>` (config
+`expiresAt`) sets the last day it syncs. The day after (UTC), the daemon holds
+exactly as it does for a foreign writer: nothing is mirrored, committed, pulled or
+pushed, and it logs why once. `status` says `expired: retire me`, and before the
+date it shows `expires on <date>`. A malformed `expiresAt` makes the config fail to
+load instead of silently never expiring. To extend a host, edit `expiresAt` and
+restart the daemon.
+
+When the host has a `hostLabel` and the routes file names a registry, the daemon
+publishes the date at start as `hosts/<label>/expiry` (committed locally; the
+registry's own sync pushes it; skipped on a read-only member of the registry), so
+`host list` on other hosts flags the host `expired` once the date has passed. The
+file is removed with the rest of `hosts/<label>/` by `host retire`.
+
+### Check-App keys
+
+A host may have its own private key for a GitHub App used for checks. Record its
+fingerprint (as GitHub shows it, `SHA256:...`) and the App's slug, never the key:
+
+    claude-memsync host check-key --fingerprint SHA256:<fingerprint> --app <app-slug>
+    claude-memsync host check-key --clear
+
+This writes `hosts/<label>/check-key` in the registry (committed locally; the
+registry's own sync pushes it). `host list` shows it per host and counts the live
+keys per App: hosts still in the registry that have a fingerprint. GitHub allows at
+most 25 keys per App and they can only be deleted in the GitHub UI, so `host list`
+and `doctor` warn from 20 live keys (`--check-key-warn`, or `checkKeyWarn` in
+config.json). With no check key recorded, nothing is shown or counted.
+
 ## Limitations / known issues
 
 - **Path consistency required**: Claude derives the per-project memory directory

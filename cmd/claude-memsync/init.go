@@ -9,10 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
+	"github.com/MarimerLLC/claude-utils/internal/route"
 	"github.com/MarimerLLC/claude-utils/internal/scrub"
 	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
@@ -57,8 +59,11 @@ func runInit(args []string) int {
 	apiURL := flags.String("github-api-url", "", "GitHub API base URL (GitHub Enterprise); saved to config")
 	ghHost := flags.String("github-host", "", "git host remotes must use (default github.com); saved to config")
 	tokenFile := flags.String("token-file", "", "file holding a GitHub token for the private-only check (or set MEMSYNC_GITHUB_TOKEN)")
-	tokenCmd := flags.String("token-cmd", "", "command (argv split on spaces, no shell) printing a GitHub token, e.g. \"gh auth token\"; saved as githubTokenCmd (the command, never the token)")
+	tokenCmd := flags.String("token-cmd", "", "command (shell-style quotes, no shell) printing a GitHub token, e.g. \"gh auth token\"; saved as githubTokenCmd (the command, never the token)")
 	ghApp := flags.String("github-app", "", "apps.json entry to mint the GitHub token from (see app-token); saved to config")
+	hostLabel := flags.String("host-label", "", "a name you choose for this host (such as laptop-2): titles its deploy keys, labels its age recipient, names it in the registry; saved to config")
+	readOnly := flags.Bool("read-only", false, "read-only member: pull and apply notes into the Claude tree, never commit or push (the remote must already hold the repo); saved to config")
+	expires := flags.String("expires", "", "last day this host syncs (YYYY-MM-DD); the day after, the daemon holds and status says to retire it; saved to config and published to the registry")
 	force := flags.Bool("force", false, "re-init even if sync-dir already exists")
 	archiveDeletes := flags.Bool("archive-deletes", false, "archive instead of delete: a note removed from a Claude folder moves to archive/ in the repo (sets archiveDeletes in config.json)")
 	denylist := flags.String("denylist", "", "UTF-8 file of regexes (one per line) to install as the denylist before the first commit")
@@ -90,7 +95,27 @@ func runInit(args []string) int {
 		}
 	}
 
+	if *hostLabel != "" {
+		if err := route.ValidLabel(*hostLabel); err != nil {
+			fmt.Fprintln(os.Stderr, "init: --host-label:", err)
+			return 2
+		}
+	}
+	if *expires != "" {
+		d, err := time.Parse("2006-01-02", *expires)
+		switch {
+		case err != nil:
+			fmt.Fprintln(os.Stderr, "init: --expires must be a date like 2026-12-31")
+			return 2
+		case time.Now().UTC().Truncate(24 * time.Hour).After(d):
+			fmt.Fprintln(os.Stderr, "init: --expires is in the past")
+			return 2
+		}
+	}
 	cfg := config.Defaults()
+	cfg.ExpiresAt = *expires
+	cfg.HostLabel = *hostLabel
+	cfg.ReadOnly = *readOnly
 	if *syncDir != "" {
 		cfg.SyncDir = *syncDir
 	}
@@ -283,6 +308,10 @@ func bootstrapFull(cfg config.Config, force bool, denylist []byte, enc *encryptS
 		}
 	}
 
+	if cfg.ReadOnly && !repo.HasHead() {
+		return fmt.Errorf("the remote holds no commits and this host is read-only: a read-only host cannot create the repo's first commit; init it from a writable host first")
+	}
+
 	// Private-only: git must push where we verified, not where an
 	// insteadOf rule sends it. Nothing has been committed or pushed yet.
 	if cfg.PrivateOnly {
@@ -300,7 +329,11 @@ func bootstrapFull(cfg config.Config, force bool, denylist []byte, enc *encryptS
 		if err := agecrypt.CheckKeyed(repo); err != nil {
 			keyless = true
 			fmt.Fprintln(os.Stderr, "this host cannot read the repo yet:", err)
-			fmt.Fprintln(os.Stderr, "send this public key to a host that can, to run `claude-memsync recipients add` with it, then pull:")
+			add := "`claude-memsync recipients add`"
+			if cfg.HostLabel != "" {
+				add = "`claude-memsync recipients add --host " + cfg.HostLabel + "`"
+			}
+			fmt.Fprintln(os.Stderr, "send this public key to a host that can, to run "+add+" with it, then pull:")
 			fmt.Fprintln(os.Stderr, "  ", ownRecipient)
 		}
 	}
@@ -331,6 +364,9 @@ func bootstrapFull(cfg config.Config, force bool, denylist []byte, enc *encryptS
 	// switch the foreign-writer guard off.
 	// Only a config this host already had: one that came with a clone is never
 	// read (the clone is refused above if the remote tracks one).
+	if existed {
+		cfg = mergeReinit(cfg, cfg.Path())
+	}
 	if old, err := config.Load(cfg.Path()); existed && err == nil {
 		if len(cfg.ForeignWriters) == 0 {
 			cfg.ForeignWriters = old.ForeignWriters
@@ -338,6 +374,7 @@ func bootstrapFull(cfg config.Config, force bool, denylist []byte, enc *encryptS
 		if cfg.StartQuietSec == nil {
 			cfg.StartQuietSec = old.StartQuietSec
 		}
+
 	}
 	// init is the migration moment: the next start gets the quiet window again.
 	_ = os.Remove(quietMarker(cfg.SyncDir))
@@ -366,23 +403,39 @@ func bootstrapFull(cfg config.Config, force bool, denylist []byte, enc *encryptS
 	// First-time init: no manifest yet. Pass nil so Reconcile doesn't try
 	// to propagate deletes (with no prior state, "missing in Claude" can't
 	// be distinguished from "this PC never had it").
-	report, err := syncpkg.Reconcile(roots, nil)
-	if err != nil {
-		return fmt.Errorf("reconcile: %w", err)
+	if cfg.ReadOnly {
+		n, err := syncpkg.PopulateClaude(roots)
+		if err != nil {
+			return fmt.Errorf("copy notes into the Claude tree: %w", err)
+		}
+		if n > 0 {
+			fmt.Fprintf(os.Stderr, "copied %d files mirror → Claude\n", n)
+		}
+	} else {
+		report, err := syncpkg.Reconcile(roots, nil)
+		if err != nil {
+			return fmt.Errorf("reconcile: %w", err)
+		}
+		printReport(report)
 	}
-	printReport(report)
 
 	// Step 6: stage + commit + push.
-	committed, err := syncpkg.CommitMirror(repo, cfg, "init: bootstrap from "+hostname())
-	if err != nil {
-		return fmt.Errorf("git commit: %w", err)
-	}
-	if committed {
-		fmt.Fprintln(os.Stderr, "committed bootstrap snapshot")
+	committed := false
+	if cfg.ReadOnly {
+		fmt.Fprintln(os.Stderr, "read-only: nothing committed or pushed")
 	} else {
-		fmt.Fprintln(os.Stderr, "no local changes to commit")
+		var err error
+		committed, err = syncpkg.CommitMirror(repo, cfg, "init: bootstrap from "+hostname())
+		if err != nil {
+			return fmt.Errorf("git commit: %w", err)
+		}
+		if committed {
+			fmt.Fprintln(os.Stderr, "committed bootstrap snapshot")
+		} else {
+			fmt.Fprintln(os.Stderr, "no local changes to commit")
+		}
 	}
-	if cloned || committed {
+	if !cfg.ReadOnly && (cloned || committed) {
 		if enc != nil {
 			if err := agecrypt.PushGuard(repo, defaultBranch); err != nil {
 				return err
@@ -415,6 +468,27 @@ func bootstrapFull(cfg config.Config, force bool, denylist []byte, enc *encryptS
 		printDistillPermissionHint(cfg)
 	}
 	return nil
+}
+
+// mergeReinit keeps, across a re-init, the settings init has no flag to clear:
+// a read-only host stays read-only (a re-init must never make it writable),
+// and the host label and check-key threshold survive.
+func mergeReinit(cfg config.Config, oldPath string) config.Config {
+	old, err := config.Load(oldPath)
+	if err != nil {
+		return cfg
+	}
+	if old.ReadOnly && !cfg.ReadOnly {
+		cfg.ReadOnly = true
+		fmt.Fprintln(os.Stderr, "init: this host was read-only and stays so; edit readOnly in config.json to change that")
+	}
+	if cfg.HostLabel == "" {
+		cfg.HostLabel = old.HostLabel
+	}
+	if cfg.CheckKeyWarn == 0 {
+		cfg.CheckKeyWarn = old.CheckKeyWarn
+	}
+	return cfg
 }
 
 // prepareIdentity makes sure the identity file exists (generating an X25519 key
@@ -474,7 +548,11 @@ func setupEncryption(repo *gitwt.Repo, cfg config.Config, enc *encryptSpec, ownR
 	}
 	keys := append([]string{}, enc.Recipients...)
 	if ownRecipient != "" {
-		keys = append([]string{ownRecipient}, keys...)
+		line := ownRecipient
+		if cfg.HostLabel != "" {
+			line += " # host:" + cfg.HostLabel // lets `host retire` find this line by name
+		}
+		keys = append([]string{line}, keys...)
 	}
 	if err := agecrypt.WriteRecipients(cfg.SyncDir, keys); err != nil {
 		return fmt.Errorf("write %s: %w", agecrypt.RecipientsFile, err)

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -38,6 +39,9 @@ type Loop struct {
 	// active in the Claude folders.
 	Hold func() bool
 
+	// Now is the clock the expiry check reads (nil: time.Now); tests inject one.
+	Now func() time.Time
+
 	// Name labels this loop's log lines when several repos run in one process.
 	Name string
 	// Owns gates which Claude folders this loop may touch (see Roots.Owns).
@@ -49,7 +53,8 @@ type Loop struct {
 	// failing is counted once per cycle.
 	recovered *recovery
 	// refused is the last pull-refused reason logged, so it is logged once.
-	refused string
+	refused    string
+	expiryOnce sync.Once
 }
 
 // alreadyLogged is an error a cycle has already logged itself.
@@ -122,7 +127,7 @@ func (l *Loop) Run(ctx context.Context) error {
 	// stopped rebase or merge holds conflict markers, and the parked mirror
 	// copies of an unfinished park differ from the Claude ones.
 	if !l.held() && l.startCycle(repo, roots) {
-		if _, err := Reconcile(roots, manifest); err != nil {
+		if err := l.reconcile(roots, manifest); err != nil {
 			l.logln("initial reconcile:", newPathGuard(l.Cfg).Err(err))
 		}
 	}
@@ -186,7 +191,36 @@ func (l *Loop) Run(ctx context.Context) error {
 	}
 }
 
-func (l *Loop) held() bool { return l.Hold != nil && l.Hold() }
+// reconcile is Reconcile, except on a read-only host, where notes only flow
+// from the mirror into the Claude tree.
+func (l *Loop) reconcile(roots Roots, m *Manifest) error {
+	if l.Cfg.ReadOnly {
+		_, err := PopulateClaude(roots)
+		return err
+	}
+	_, err := Reconcile(roots, m)
+	return err
+}
+
+// held is the pause: a foreign writer is active, or the host has expired.
+func (l *Loop) held() bool { return (l.Hold != nil && l.Hold()) || l.Expired() }
+
+// Expired reports whether this host's expiresAt date has passed. An expired
+// loop holds exactly like a foreign-writer hold: nothing is mirrored,
+// committed, pulled or pushed.
+func (l *Loop) Expired() bool {
+	now := time.Now
+	if l.Now != nil {
+		now = l.Now
+	}
+	if !l.Cfg.Expired(now()) {
+		return false
+	}
+	l.expiryOnce.Do(func() {
+		l.logln("this host expired on", l.Cfg.ExpiresAt+": syncing is held; run `claude-memsync host retire` for it from another host, or set a later expiresAt")
+	})
+	return true
+}
 
 // keyless reports (and logs) that encryption is on but this host's identity
 // cannot read the repo.
@@ -297,7 +331,7 @@ func (l *Loop) pullTick(repo *gitwt.Repo, roots Roots) {
 		m = NewManifest()
 	}
 	if !l.held() && l.startCycle(repo, roots) {
-		if _, err := Reconcile(roots, m); err != nil {
+		if err := l.reconcile(roots, m); err != nil {
 			l.logln("reconcile:", newPathGuard(l.Cfg).Err(err))
 		}
 	}
@@ -316,8 +350,8 @@ func (l *Loop) pullTick(repo *gitwt.Repo, roots Roots) {
 // (handled, error). handled=true means the change was relevant and should
 // trigger a debounced flush.
 func (l *Loop) handleEvent(watcher *fsnotify.Watcher, roots Roots, ev fsnotify.Event) (bool, error) {
-	if l.held() {
-		return false, nil
+	if l.held() || l.Cfg.ReadOnly {
+		return false, nil // a read-only host mirrors nothing it could not commit
 	}
 	rel, err := filepath.Rel(roots.Claude, ev.Name)
 	if err != nil {
@@ -425,7 +459,7 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 	}
 	clearPaused(repo)
 	logUnreviewed(repo)
-	if includeLocal {
+	if includeLocal && !l.Cfg.ReadOnly {
 		_, err := CommitMirror(repo, l.Cfg, fmt.Sprintf("auto: %s @ %s", l.Hostname, time.Now().UTC().Format(time.RFC3339)))
 		// Unreviewed recipients stop commits and pushes; pulling goes on.
 		if err != nil && !errors.Is(err, agecrypt.ErrRecipientsUnreviewed) {
@@ -466,7 +500,7 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 			return err // nothing merged, nothing pushed
 		}
 		l.refused = ""
-		if repo.RebaseInProgress() && l.Cfg.ArchiveDeletes {
+		if repo.RebaseInProgress() && l.Cfg.ArchiveDeletes && !l.Cfg.ReadOnly {
 			// Two hosts archiving one note conflict in a way that needs no
 			// decision (see archive_resolve.go); anything else stays stopped.
 			n, rerr := resolveArchiveConflicts(repo)
@@ -494,7 +528,7 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 		return pause()
 	}
 	postRev, _ := repo.Run("rev-parse", "HEAD")
-	if conflictErr == nil && l.Cfg.ArchiveDeletes && strings.TrimSpace(preRev) != strings.TrimSpace(postRev) && strings.TrimSpace(preRev) != "" {
+	if conflictErr == nil && l.Cfg.ArchiveDeletes && !l.Cfg.ReadOnly && strings.TrimSpace(preRev) != strings.TrimSpace(postRev) && strings.TrimSpace(preRev) != "" {
 		// An edit that merged into an archive copy is put back (archive_repair.go).
 		n, rerr := repairEditedArchives(repo, l.Cfg, strings.TrimSpace(preRev), strings.TrimSpace(postRev))
 		if rerr != nil {
@@ -521,6 +555,9 @@ func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err erro
 		return conflictErr // nothing to push: origin is ahead
 	}
 
+	if l.Cfg.ReadOnly {
+		return nil // pulled and propagated; a read-only host never pushes
+	}
 	if l.PushAllowed != nil && !l.PushAllowed() {
 		return nil
 	}

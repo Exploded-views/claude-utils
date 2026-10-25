@@ -252,6 +252,15 @@ func TestJoinAcceptEndToEnd(t *testing.T) {
 	if !strings.Contains(strings.Join(keys, "\n"), b.rcpt) {
 		t.Error("recipient not added")
 	}
+	// The requester's label is on its line and bound by the pin, so
+	// `host retire host-b` finds the key.
+	if labels, _ := ListLabels(a.repo.Dir); len(labels) != 1 || labels[0] != "host-b" {
+		t.Errorf("labels after accept: %v", labels)
+	}
+	pk, perr := PinnedKeysForLabel(a.repo, "host-b")
+	if perr != nil || len(pk) != 1 || !strings.HasPrefix(b.rcpt, pk[0]) {
+		t.Errorf("pin must bind host-b to the requester's key: %v %v", pk, perr)
+	}
 	if err := PushGuard(a.repo, "main"); err != nil {
 		t.Fatal(err)
 	}
@@ -702,5 +711,32 @@ func TestPendingRecipients(t *testing.T) {
 	}
 	if own != 1 || other != 1 {
 		t.Errorf("%+v", got)
+	}
+}
+
+// An accept refuses a label already bound to a different key.
+func TestAcceptRefusesLabelBoundToAnotherKey(t *testing.T) {
+	a, b := pair(t)
+	_, other := newIdentity(t, "other")
+	if err := AddRecipientLabelled(a.repo, other, "host-b"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := RequestJoin(b.repo, "host-b", joinNow); err != nil {
+		t.Fatal(err)
+	}
+	b.repo.Run("push", "origin", "main")
+	if _, err := a.repo.Run("pull", "-q", "--rebase", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	list, _ := ListJoins(a.repo)
+	if len(list) != 1 {
+		t.Fatalf("list: %+v", list)
+	}
+	head := a.revHead(t)
+	if err := AcceptJoin(a.repo, "host-b", list[0].Join.Fingerprint); err == nil || !strings.Contains(err.Error(), "already bound") {
+		t.Fatalf("a label bound to another key must be refused: %v", err)
+	}
+	if a.revHead(t) != head {
+		t.Error("a refused accept must not commit")
 	}
 }

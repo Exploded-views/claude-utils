@@ -184,7 +184,7 @@ func hasRecipient(r *Recipients, key string) bool {
 		return false
 	}
 	for _, c := range r.canon {
-		if c == key {
+		if k, _ := splitCanon(c); k == key { // the reviewed label is not part of the key
 			return true
 		}
 	}
@@ -285,6 +285,7 @@ func VerifyJoinPush(repo *gitwt.Repo, label string) (needPush bool, err error) {
 type PendingRecipient struct {
 	Key         string
 	Fingerprint string // JoinFingerprint of the key, as join list shows it
+	Label       string // host label on the line, if any
 	New         bool   // not in the pinned set
 	Own         bool   // this host's key
 }
@@ -313,7 +314,8 @@ func PendingRecipients(repo *gitwt.Repo) (list []PendingRecipient, removed int, 
 	in := map[string]bool{}
 	for _, c := range cur.canon {
 		in[c] = true
-		list = append(list, PendingRecipient{Key: c, Fingerprint: JoinFingerprint(c), New: !pinned[c], Own: c == own})
+		k, l := splitCanon(c)
+		list = append(list, PendingRecipient{Key: k, Label: l, Fingerprint: JoinFingerprint(k), New: !pinned[c], Own: k == own})
 	}
 	for c := range pinned {
 		if !in[c] {
@@ -502,15 +504,27 @@ func AcceptJoin(repo *gitwt.Repo, label, fingerprint string) error {
 	if err != nil {
 		return err
 	}
-	keys := cur
+	// The requester's host label is recorded on its line ("# host:<label>"),
+	// the same as `recipients add --host`, so the pin binds it to the key and
+	// `host retire <label>` can find the host.
+	for _, l := range cur {
+		if LabelOf(l) == j.Label && canonLine(l) != j.Recipient {
+			return fmt.Errorf("host label %q is already bound to another recipient", j.Label)
+		}
+	}
+	keys := make([]string, 0, len(cur)+1)
 	have := false
 	for _, l := range cur {
 		if canonLine(l) == j.Recipient {
 			have = true
+			if LabelOf(l) == "" {
+				l = strings.TrimSpace(l) + hostComment + j.Label
+			}
 		}
+		keys = append(keys, l)
 	}
 	if !have {
-		keys = append(append([]string(nil), cur...), j.Recipient)
+		keys = append(keys, j.Recipient+hostComment+j.Label)
 	}
 	if err := WriteRecipients(repo.Dir, keys); err != nil {
 		return err

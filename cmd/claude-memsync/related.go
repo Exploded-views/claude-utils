@@ -234,6 +234,10 @@ func relateCmd(stdout, stderr io.Writer, args []string) int {
 		fmt.Fprintln(stderr, "relate:", err)
 		return 1
 	}
+	if syncDirReadOnly(rc.reg.Dir) {
+		fmt.Fprintln(stderr, "relate: this host is a read-only member of the registry and never commits; run it on a writable host")
+		return 1
+	}
 	if err := rc.reg.Relate(rc.checker, pos[0], pos[1], mode); err != nil {
 		fmt.Fprintln(stderr, "relate: refused:", err)
 		return 1
@@ -268,6 +272,10 @@ func unrelateCmd(stdout, stderr io.Writer, args []string) int {
 	rc, err := loadRelCtx(*routesFlag)
 	if err != nil {
 		fmt.Fprintln(stderr, "unrelate:", err)
+		return 1
+	}
+	if syncDirReadOnly(rc.reg.Dir) {
+		fmt.Fprintln(stderr, "unrelate: this host is a read-only member of the registry and never commits; run it on a writable host")
 		return 1
 	}
 	if !rc.reg.Unrelate(pos[0], pos[1]) {
@@ -751,4 +759,19 @@ func relatedAcceptCmd(stdout, stderr io.Writer, args []string) int {
 	}
 	fmt.Fprintln(stdout, "accepted")
 	return 0
+}
+
+// syncDirReadOnly reports whether dir is the sync dir of a repo this host is a
+// read-only member of: nothing may be committed into it.
+func syncDirReadOnly(dir string) bool {
+	cfgs, err := allConfigs()
+	if err != nil {
+		return false
+	}
+	for _, c := range cfgs {
+		if c.ReadOnly && sameDir(c.SyncDir, dir) {
+			return true
+		}
+	}
+	return false
 }

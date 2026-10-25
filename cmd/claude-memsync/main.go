@@ -52,6 +52,8 @@ func main() {
 		os.Exit(runUnrelate(os.Args[2:]))
 	case "related":
 		os.Exit(runRelated(os.Args[2:]))
+	case "host":
+		os.Exit(runHost(os.Args[2:]))
 	case "install":
 		os.Exit(runInstall(os.Args[2:]))
 	case "uninstall":
@@ -91,6 +93,7 @@ Subcommands:
   related     List relations; "related sync" fetches read clones, "related context" prints a session index, "related suggest" offers edges from this host's data
   recipients  add | remove | list | accept the age recipients of an encrypted repo
   join        join request|status|list|accept|reject: add a new host as an age recipient of an existing repo
+  host        list | check-key: the machines that share these repos (deploy keys, recipients, expiry)
   install     Install as a system service (Windows Service / systemd unit / launchd plist)
   uninstall   Remove the system service
   start       Start the system service

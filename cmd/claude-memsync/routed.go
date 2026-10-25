@@ -493,6 +493,7 @@ func (s *routedSet) Start(ctx context.Context) (*running, error) {
 			return nil, fmt.Errorf("repo %q: refresh encryption settings: %w", name, err)
 		}
 	}
+	s.publishExpiries()
 	for _, m := range s.Missing {
 		log.Printf("routing: repo %q is not on this host; folders routed to it are denied", m)
 	}
@@ -660,4 +661,30 @@ func (s *routedSet) statusLines() []string {
 		lines = append(lines, fmt.Sprintf("  shadowed: rule %d is never reached first (rule %d matches the same folders)", sh.Rule, sh.By))
 	}
 	return lines
+}
+
+// publishExpiries publishes the expiry of this host into the registry, if a
+// registry is configured. Best effort: a failure is logged, never fatal.
+func (s *routedSet) publishExpiries() {
+	if s.File.Registry == "" {
+		return
+	}
+	dir := route.ExpandHome(s.File.Registry)
+	ro := false
+	for _, n := range s.names() {
+		if c := s.Cfgs[n]; c.ReadOnly && sameDir(c.SyncDir, dir) {
+			ro = true
+		}
+	}
+	done := map[string]bool{}
+	for _, n := range s.names() {
+		c := s.Cfgs[n]
+		if c.ExpiresAt == "" || done[c.HostLabel+c.ExpiresAt] {
+			continue
+		}
+		done[c.HostLabel+c.ExpiresAt] = true
+		if err := publishExpiry(c, dir, ro, log.Printf); err != nil {
+			log.Printf("routing: %v", err)
+		}
+	}
 }

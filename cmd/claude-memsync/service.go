@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kardianos/service"
 
@@ -304,6 +305,12 @@ func runStatus(args []string) int {
 			fmt.Println("loop stopped, restarting with backoff: " + strings.TrimSpace(string(b)))
 			code = 1
 		}
+		if line := readOnlyLine(cfg); line != "" {
+			fmt.Println(line)
+		}
+		if line := expiryLine(cfg, time.Now()); line != "" {
+			fmt.Println(line)
+		}
 		if line := pausedLine(cfg); line != "" {
 			fmt.Println(line)
 		}
@@ -348,6 +355,12 @@ func routedStatus() (handled bool, code int) {
 	for _, name := range set.names() {
 		cfg := set.Cfgs[name]
 		var lines []string
+		if l := readOnlyLine(cfg); l != "" {
+			lines = append(lines, l)
+		}
+		if l := expiryLine(cfg, time.Now()); l != "" {
+			lines = append(lines, l)
+		}
 		if l := syncpkg.PullRefusedLine(cfg.SyncDir); l != "" {
 			lines = append(lines, l)
 			code = 1

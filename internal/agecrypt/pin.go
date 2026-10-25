@@ -177,12 +177,12 @@ func RecipientsDiff(repo *gitwt.Repo) (added, removed []string, err error) {
 	}
 	for _, c := range cur.canon {
 		if !in(pin.canon, c) {
-			added = append(added, keyPrint(c))
+			added = append(added, printWithLabel(c))
 		}
 	}
 	for _, c := range pin.canon {
 		if !in(cur.canon, c) {
-			removed = append(removed, keyPrint(c))
+			removed = append(removed, printWithLabel(c))
 		}
 	}
 	if d, err := gitCommonDir(repo); err == nil {
@@ -192,6 +192,16 @@ func RecipientsDiff(repo *gitwt.Repo) (added, removed []string, err error) {
 		}
 	}
 	return added, removed, nil
+}
+
+// printWithLabel is the short fingerprint of a reviewed entry's key, with its
+// host label when it has one, so a swapped label is visible in the review.
+func printWithLabel(c string) string {
+	k, l := splitCanon(c)
+	if l == "" {
+		return keyPrint(k)
+	}
+	return keyPrint(k) + " (host:" + l + ")"
 }
 
 // PinnedFingerprints lists the short fingerprint of each pinned key.
