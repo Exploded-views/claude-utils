@@ -1249,6 +1249,58 @@ check "both lists set: the prompt fails with the mutual-exclusion usage error" b
 pjdoc doc-pj4
 DOC_WS="$H/code" DOC_LITERAL=1 rundoc 3
 check "the doc's own empty defaults (PROJECTS=\"\", SKIP_PROJECTS=\"\") run as written: nothing skipped by choice" bash -c "[ $RC -eq 0 ] && ! printf '%s\n' \"\$1\" | grep -q 'skipped by choice'" _ "$OUT"
+
+echo "--- exit codes: a missing, malformed or conflicting flag is a usage error (2); a runtime failure is 1"
+newhome xc
+# rawboot <args...>: the script with exactly these arguments (no defaults added); RAWSCRIPT names another copy of it
+rawboot() {
+  set +e
+  OUT="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" GIT_CONFIG_NOSYSTEM=1 \
+    CLAUDE_UTILS_URL="https://example.invalid/claude-utils.git" "$BASH" "${RAWSCRIPT:-$ROOT/scripts/bootstrap.sh}" "$@" </dev/null 2>&1)"
+  RC=$?
+  set -e
+}
+XB=(--host testhost --role homelab --sha "$SHA" --org-token-file "$BASE/orgtoken" --org "$ORG" --recovery-recipient "$PQREC")
+without() { # flag: XB minus that flag and its value, into XA
+  XA=(); local skip=0 a
+  for a in "${XB[@]}"; do
+    if [ "$skip" -eq 1 ]; then skip=0; continue; fi
+    if [ "$a" = "$1" ]; then skip=1; continue; fi
+    XA+=("$a")
+  done
+}
+mkdir -p "$BASE/nogit/scripts"; cp "$ROOT/scripts/bootstrap.sh" "$BASE/nogit/scripts/bootstrap.sh"
+for f in --host --role --org --recovery-recipient; do
+  without "$f"; rawboot "${XA[@]}" --dry-run
+  check "omitting $f exits 2 (usage), with a message naming it" bash -c "[ $RC -eq 2 ] && printf '%s\n' \"\$1\" | grep -q -- '$f'" _ "$OUT"
+done
+without --sha; RAWSCRIPT="$BASE/nogit/scripts/bootstrap.sh" rawboot "${XA[@]}" --dry-run
+check "omitting --sha outside a git checkout exits 2" bash -c "[ $RC -eq 2 ] && printf '%s\n' \"\$1\" | grep -q -- '--sha is required'" _ "$OUT"
+rawboot "${XB[@]}" --host 'Bad_Host' --dry-run
+check "a malformed --host exits 2" [ "$RC" -eq 2 ]
+rawboot "${XB[@]}" --org 'bad org!' --dry-run
+check "a malformed --org exits 2" [ "$RC" -eq 2 ]
+rawboot "${XB[@]}" --sha zzz --dry-run
+check "a malformed --sha exits 2" [ "$RC" -eq 2 ]
+rawboot "${XB[@]}" --recovery-recipient age1classic --dry-run
+check "a classic (non post-quantum) --recovery-recipient exits 2" [ "$RC" -eq 2 ]
+rawboot "${XB[@]}" --role nosuch --dry-run
+check "an unknown --role exits 2" [ "$RC" -eq 2 ]
+rawboot "${XB[@]}" --keep-out-owner "$ORG" --dry-run
+check "--org that is also a keep-out owner exits 2" [ "$RC" -eq 2 ]
+rawboot --host testhost --role homelab --sha "$SHA" --org "$ORG" --recovery-recipient "$PQREC" --org-app 'bad name' --dry-run
+check "a malformed --org-app exits 2" [ "$RC" -eq 2 ]
+rawboot "${XB[@]}" --check-app memsync-check --check-app-id notnumeric --check-key-file "$BASE/check.pem" --dry-run
+check "a malformed --check-app-id exits 2" [ "$RC" -eq 2 ]
+rawboot "${XB[@]}" --check-app memsync-check --check-app-id 1 --check-key-file relative.pem --dry-run
+check "a relative --check-key-file exits 2" [ "$RC" -eq 2 ]
+rawboot "${XB[@]}" --delete-org-token-file --org-token-cmd 'echo x' --dry-run
+check "--delete-org-token-file with a token command (conflicting flags) exits 2" [ "$RC" -eq 2 ]
+rawboot --host testhost --role homelab --sha "$SHA" --org "$ORG" --recovery-recipient "$PQREC" --org-token-cmd 'echo "x' --dry-run
+check "an unbalanced quote in --org-token-cmd exits 2" [ "$RC" -eq 2 ]
+newhome xc2
+STUB_PUBLIC=1 rawboot "${XB[@]}" --yes
+check "a runtime failure (a repo that is not private) still exits 1" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'NOT private'" _ "$OUT"
 # <<< fast-setup
 
 newhome rtdiff
