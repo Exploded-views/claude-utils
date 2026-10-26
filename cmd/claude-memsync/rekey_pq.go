@@ -317,6 +317,17 @@ func rekeyOne(stdout, stderr io.Writer, cfg config.Config, hostCfgs []config.Con
 			return nil
 		case agecrypt.StageSynced:
 			synced = st
+			if !st.Finished() {
+				// Pushed and synced on top, but the crash came before
+				// config.json and the stage were saved: finish the tail.
+				raw.EncryptionScheme = agecrypt.SchemePQ
+				raw.HostLabel = st.Label
+				raw.RecoveryRecipients = []string{st.Recovery}
+				if err := config.SaveAt(cfgFile, raw); err != nil {
+					return fmt.Errorf("config.json could not be saved: %w (set encryptionScheme to pq, hostLabel and recoveryRecipients by hand)", err)
+				}
+				return agecrypt.UpdateRekeyState(repo, func(s *agecrypt.PreRekeyState) { s.Stage = agecrypt.RekeyRecPublished })
+			}
 			return nil
 		case agecrypt.StageFresh:
 			p, aerr := agecrypt.ApplyRekeyPQ(repo, o)
