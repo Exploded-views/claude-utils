@@ -25,10 +25,12 @@ dev container together.
 | `vet` | `go vet ./...` for linux and `GOOS=windows` |
 | `gofmt` | `gofmt -l .` prints nothing |
 | `test` | `go test -race -coverprofile=cover.out ./...`, then the coverage floor check |
-| `shellcheck` | `scripts/*.sh` with ShellCheck v0.10.0 (pinned by image digest), warning level and up |
+| `shellcheck` | `scripts/*.sh` with ShellCheck v0.10.0 (pinned by image digest), warning level and up; then `scripts/lint-portability.sh` (and its test): the scripts must run on stock macOS tools, so no regex repeat bound above 255 (BSD `grep` and bash `[[ =~ ]]` stop there), no `sed -i` without a suffix argument, `grep -P`, `\s`/`\w`/`\b` in `grep`/`sed`, `readlink -f`, `xargs -r`, `find -printf`/`-regex`, `stat -c` without a `stat -f` fallback, `date -d`, `base64 -w`, `mktemp -p`; `portability-ok` on a line opts it out |
 | `bootstrap-harness` | `bash scripts/bootstrap_test.sh` against the real binaries (`MEMSYNC_BIN`, `MEMMERGE_BIN`) in a fake HOME with stubbed `gh`, `systemctl` and friends; needs only git, python3 and ssh-keygen, which `ubuntu-latest` has |
 | `gitleaks` | `gitleaks git --log-opts=HEAD`: every commit reachable from the tested HEAD, not other fetched refs; reviewed test fixtures are listed in `.gitleaksignore` by fingerprint (commit, file, rule, line), so each entry names a commit that must be an ancestor of the tested HEAD |
 | `reference-current` | `sh scripts/gen-reference.sh` then `git diff --exit-code docs/reference.md` |
+| `release-layout` | `bash scripts/package-release_test.sh`: runs `scripts/package-release.sh` (the script `release.yml` calls) for linux/amd64 and asserts the archive holds the binaries, `LICENSE`, `README.md` and `scripts/bootstrap.sh`, that `SHA256SUMS` verifies, that the binary reports the release version, and that the extracted `bootstrap.sh --prebuilt-dir <extracted> --dry-run` (throwaway HOME, stub `gh`, fake required flags except the recovery key, which is a real-length post-quantum key made by the extracted binary's own `init`) gets past argument parsing and the prerequisite checks, on `ubuntu-latest` (linux/amd64) and `macos-latest` (darwin/arm64, under the system `/bin/bash` 3.2) |
+| `workflow-lint` | `scripts/lint-workflows.sh` on `.github/workflows` (see below), after its own test, `scripts/lint-workflows_test.sh`, which feeds it bad fixture workflows |
 
 Permissions are least privilege: the workflow sets `permissions: {}` and each job
 asks for `contents: read` only. Checkouts use `persist-credentials: false`. A new
@@ -36,6 +38,20 @@ push to the same ref cancels the older run. Every job has a timeout.
 
 gitleaks runs as a binary pinned by version and sha256 rather than through
 `gitleaks-action`, which needs a licence for organisations.
+
+## Release packaging (fork-only)
+
+`release.yml` is changed in this fork only (a comment at its top says so): the packaging loop lives in `scripts/package-release.sh <version> <outdir> [os/arch ...]`, which `release.yml` calls. Every archive `claude-utils-<tag>-<os>-<arch>` now also contains `scripts/bootstrap.sh`, so `SHA256SUMS` covers it, and a host can bootstrap from a verified download with `--prebuilt-dir` (see `docs/bootstrap.md`, "Crewkit host"). The `release-layout` job and `scripts/package-release_test.sh` (runnable locally; `GO="sh /path/to/dev.sh go"` wraps Go) test the same script, so the release workflow's packaging is exercised on every push.
+
+## Workflow lint
+
+The house rule is GitHub-hosted runners only and pinned actions. `scripts/lint-workflows.sh [dir]` (bash and python3 standard library only, no YAML library, self-contained so a shared version can replace it) fails, one line per finding, on any `*.yml` or `*.yaml` under `.github/workflows` that has:
+
+- a `runs-on` that is not a GitHub-hosted label: `ubuntu-*`, `windows-*` and `macos-*` (including `-latest` and versioned labels) are allowed, alone, in a list, or as `${{ matrix.<key> }}` whose matrix values are all hosted labels; `self-hosted`, runner groups and anything else are rejected;
+- a `pull_request_target` trigger;
+- a `uses:` that is not pinned to a full 40-hex commit SHA (`./` local actions are allowed; `docker://` must carry an `@sha256:` digest).
+
+Upstream's `ci.yml` and `release.yml` and this fork's `fork-ci.yml` pass without exemptions. The `workflow-lint` job runs it.
 
 ## The coverage ratchet
 

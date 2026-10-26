@@ -16,6 +16,9 @@
 # log line keeps the original arguments, which the checks assert on). The token
 # flags go through, so init saves them in config.json like the real thing.
 # app-token is real too: it talks to a loopback fake of the GitHub App API.
+#
+# BT_QUICK=1 stops after the new-flag sections (prerequisites, pause, token file,
+# prebuilt dir), for a fast loop while editing; CI runs everything.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -62,6 +65,7 @@ if [ "$GH_TOKEN" = "$STUB_ORG_TOKEN" ]; then m=org; else m=ambient; fi
 echo "$* |$m" >>"$STUB_DIR/gh.who"
 need_org() { [ "$m" = org ] || { echo "HTTP 401: bad credentials for org call" >&2; exit 1; }; }
 S="$STUB_DIR/ghstate"; mkdir -p "$S"
+if [ "${STUB_HANG:-0}" = 1 ] && [ "$1" = repo ] && [ "$2" = create ]; then : >"$STUB_DIR/hung"; sleep 20; fi
 case "$1 $2" in
   "auth status") exit 0 ;;
   "auth token") echo "$STUB_TOKEN"; exit 0 ;;
@@ -115,7 +119,8 @@ echo "$(basename "$0"):$(env | grep -v '^STUB_' | grep -cF -- "$STUB_ORG_TOKEN")
 EOF
 cat >"$STUBS/go" <<'EOF'
 #!/bin/sh
-if [ "$1" = version ]; then echo "go version go1.25.1 linux/amd64"; exit 0; fi
+if [ "$1" = version ]; then echo "go version go${STUB_GOVER:-1.25.1} linux/amd64"; exit 0; fi
+echo "go $*" >>"$STUB_DIR/go.log"
 # go build -o <out> <pkg>: write a stub binary
 out="$3"
 # record whether the org token leaked into this process env (count only, never the value)
@@ -238,6 +243,9 @@ mkbare() { # name [with-content]
 # newhome <name>: fresh fake HOME with insteadOf maps for every bare repo.
 newhome() {
   H="${HROOT:-$BASE}/$1/home"; STUB_DIR="${HROOT:-$BASE}/$1/stub"
+  # The runner's own XDG_CONFIG_HOME (GitHub's ubuntu images export one) must not
+  # leak into a fake HOME: the real binary resolves its config dir through it.
+  export XDG_CONFIG_HOME="$H/.config"
   rm -rf "${HROOT:-${BASE:?}}/$1"; mkdir -p "$H" "$STUB_DIR"
   cp "$STUBS/memsync-wrap" "$STUB_DIR/"; cp "$BASE/otherkey" "$STUB_DIR/"
   : >"$STUB_DIR/gh.log"; : >"$STUB_DIR/memsync.log"
@@ -255,10 +263,11 @@ newhome() {
 
 # runboot <args...>: run the script in the fake HOME; sets RC and OUT.
 runboot() {
+  local SHAARGS=(--sha "$SHA"); [ -z "${NO_SHA:-}" ] || SHAARGS=()
   set +e
-  OUT="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="${REAL_RUN:-$REAL}" GIT_CONFIG_NOSYSTEM=1 \
+  OUT="$(HOME="$H" PATH="${BOOT_PATH:-$STUBS:$PATH}" STUB_DIR="$STUB_DIR" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="${REAL_RUN:-$REAL}" GIT_CONFIG_NOSYSTEM=1 \
     BOOTSTRAP_APP_API_BASE="http://127.0.0.1:$APIPORT" CLAUDE_UTILS_URL="https://example.invalid/claude-utils.git" \
-    bash "$ROOT/scripts/bootstrap.sh" --sha "$SHA" --deny-owner Acme-Client --deny-term acmeclient ${ORGARGS[@]+"${ORGARGS[@]}"} "${REQ[@]}" "$@" </dev/null 2>&1)"
+    "$BASH" "$ROOT/scripts/bootstrap.sh" ${SHAARGS[@]+"${SHAARGS[@]}"} --deny-owner Acme-Client --deny-term acmeclient ${ORGARGS[@]+"${ORGARGS[@]}"} "${REQ[@]}" "$@" </dev/null 2>&1)"
   RC=$?
   set -e
 }
@@ -267,6 +276,490 @@ has()    { grep -qE -- "$2" "$1"; }
 hasnt()  { ! grep -qE -- "$2" "$1"; }
 mode()   { [ "$(stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1")" = "$2" ]; }
 jsonok() { python3 -I -c "$1" "$2"; }
+
+# --- helpers for the new-flag sections ----------------------------------------------
+# minipath <omit...>: a bin dir holding only the tools the script needs (the
+# stubs for gh, go and friends, the real rest), minus the ones named, so a
+# missing tool is really missing.
+MININ=0
+MINI_TOOLS="cmp git python3 ssh-keygen ssh-keyscan gh systemctl launchctl claude go sed awk grep tr cut sort head tail find dirname basename cat id uname stat mktemp chmod mkdir ln rm cp mv touch date env wc tee readlink sleep sh bash shred dd tar sha256sum"
+minipath() {
+  local d="$BASE/mini.$MININ" t p; MININ=$((MININ + 1))
+  rm -rf "$d"; mkdir -p "$d"
+  for t in $MINI_TOOLS; do
+    case " $* " in *" $t "*) continue ;; esac
+    if [ -x "$STUBS/$t" ]; then ln -s "$STUBS/$t" "$d/$t"
+    elif p="$(type -P "$t")" && [ -n "$p" ]; then ln -s "$p" "$d/$t"; fi
+  done
+  printf '%s' "$d"
+}
+mkgit() { # dir remote
+  mkdir -p "$1"; git -C "$1" init -q; git -C "$1" remote add origin "$2"
+}
+untouched() { [ -z "$(find "$H" -mindepth 1 -not -name .gitconfig | head -1)" ] && [ ! -s "$STUB_DIR/gh.log" ]; }
+quick_exit() { # after the new-flag sections, when BT_QUICK is set
+  [ -n "${BT_QUICK:-}" ] || return 0
+  echo; echo "passed=$PASS failed=$FAIL pending=$PENDING (BT_QUICK: stopped early)"; [ "$FAIL" -eq 0 ]; exit $?
+}
+
+# ============================ recovery key validation ==========================
+echo "--- valid_pq_recipient: no regex repeat count (BSD grep refuses anything above 255)"
+eval "$(sed -n '/^valid_pq_recipient() {/,/^}/p' "$ROOT/scripts/bootstrap.sh")"
+invalid() { ! valid_pq_recipient "$1"; }
+check "the key made by the real binary is real length (over 1,900 characters)" [ "${#PQREC}" -gt 1900 ]
+check "a real-length post-quantum key is accepted" valid_pq_recipient "$PQREC"
+check "a wrong prefix is refused" invalid "age1xx${PQREC#age1pq1}"
+check "a classic age1 key is refused" invalid "age1$(printf 'q%.0s' $(seq 1 58))"
+check "a character outside the bech32 set is refused (uppercase)" invalid "${PQREC%?}Q"
+check "a character outside the bech32 set is refused (the digit 1, in the middle)" invalid "${PQREC:0:900}1${PQREC:901}"
+check "a short key is refused" invalid "${PQREC:0:500}"
+check "the bare prefix is refused" invalid "age1pq1"
+check "an empty value is refused" invalid ""
+check "no script under scripts/ has a regex repeat bound above 255 or a GNU-only flag" bash "$ROOT/scripts/lint-portability.sh"
+
+# ============================ prerequisites ====================================
+echo "--- prerequisites: one line per missing tool, exit 1, nothing changed (also in --dry-run)"
+newhome pq0
+BOOT_PATH="$(minipath)" runboot --host testhost --role homelab --dry-run
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -8
+check "control: a minimal PATH with every tool passes a dry run" [ "$RC" -eq 0 ]
+case "$(uname -s)" in Darwin) SVC=launchctl ;; *) SVC=systemctl ;; esac
+for mode in --dry-run --yes; do
+  for t in git python3 ssh-keygen ssh-keyscan gh $SVC go; do
+    newhome pq
+    BOOT_PATH="$(minipath "$t")" runboot --host testhost --role homelab "$mode"
+    check "without $t ($mode): exit 1 and a 'missing prerequisite: $t' line" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -qE '^missing prerequisite: $t( |\$)'" _ "$OUT"
+    check "without $t ($mode): nothing was changed" untouched
+  done
+done
+newhome pq
+BOOT_PATH="$(minipath git python3 ssh-keygen gh)" runboot --host testhost --role homelab --yes
+check "four tools missing: four lines, one each, then exit 1" bash -c "[ $RC -eq 1 ] && [ \$(printf '%s\n' \"\$1\" | grep -c '^missing prerequisite: ') -eq 4 ]" _ "$OUT"
+newhome pq
+BOOT_PATH="$(minipath)" STUB_GOVER=1.24.0 runboot --host testhost --role homelab --yes
+check "go older than go.mod: its own line, exit 1, nothing changed" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -qE '^missing prerequisite: go 1\.24 is too old \(need >= 1\.25' " _ "$OUT"
+check "go too old: nothing was changed" untouched
+
+# ============================ pause for a missing check key ====================
+echo "--- missing check key: exit 3 (paused, needs a human), exact instructions, nothing changed"
+for mode in --dry-run --yes; do
+  newhome pause
+  NOKEY="$H/.config/claude-memsync/memsync-check.pem"
+  ORGARGS=()
+  runboot --host testhost --role homelab "$mode" --org-app memsync-admin --org-app-id 12345 --org-app-key-cmd "cat $BASE/app.pem" \
+    --check-app memsync-check --check-app-id 54321 --check-key-file "$NOKEY"
+  ORGARGS=(--org-token-file "$BASE/orgtoken")
+  check "missing check key ($mode): exit 3" [ "$RC" -eq 3 ]
+  check "missing check key ($mode): the UI path, step by step" bash -c "printf '%s\n' \"\$1\" | grep -qF 'GitHub > Settings > Developer settings > GitHub Apps > memsync-check' && printf '%s\n' \"\$1\" | grep -qF '\"Generate a private key\"'" _ "$OUT"
+  check "missing check key ($mode): copy to the path, chmod 600, delete the download, rerun" bash -c "printf '%s\n' \"\$1\" | grep -qF 'copy the downloaded .pem to $NOKEY' && printf '%s\n' \"\$1\" | grep -qF 'chmod 600 $NOKEY' && printf '%s\n' \"\$1\" | grep -qi 'delete the download' && printf '%s\n' \"\$1\" | grep -qi 'rerun the same command'" _ "$OUT"
+  check "missing check key ($mode): nothing was changed, no gh call, no apps.json" untouched
+done
+newhome pause2
+ORGARGS=()
+runboot --host testhost --role homelab --yes --org-app memsync-admin --org-app-id 12345 --org-app-key-cmd "cat $BASE/app.pem" \
+  --check-app memsync-check --check-app-id 54321 --check-key-file "relative/key.pem"
+ORGARGS=(--org-token-file "$BASE/orgtoken")
+check "a relative --check-key-file is an error (exit 1), not a pause" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'must be an absolute path'" _ "$OUT"
+
+
+# ============================ --delete-org-token-file ==========================
+echo "--- --delete-org-token-file: read, then shredded on every exit path"
+TFN=0
+mktok() { # sets TF: a fresh 0600 token file holding the dummy org token
+  TFN=$((TFN + 1)); TF="$BASE/tokfile.$TFN"; printf '%s\n' "$ORGTOK" >"$TF"; chmod 600 "$TF"
+}
+tokrun() { # extra args: runboot with TF as the org token file, DEL flag on
+  ORGARGS=(--org-token-file "$TF" --delete-org-token-file)
+  runboot --host testhost --role homelab "$@"
+  ORGARGS=(--org-token-file "$BASE/orgtoken")
+}
+notoken() { ! printf '%s' "$OUT" | grep -qF -- "$ORGTOK"; }
+newhome td1; mktok
+tokrun --dry-run
+check "token file deleted: a successful dry run exits 0" [ "$RC" -eq 0 ]
+check "dry run: the token file is NOT deleted (a dry run changes nothing), unchanged" bash -c "[ -f '$TF' ] && [ \"\$(cat '$TF')\" = '$ORGTOK' ]"
+check "dry run: says the file would be deleted on a real run" bash -c "printf '%s\n' \"\$1\" | grep -qF 'dry run: the org token file would be deleted on a real run'" _ "$OUT"
+tokrun --yes
+check "the same token file then serves the real run, which deletes it" bash -c "[ $RC -eq 0 ] && [ ! -e '$TF' ]"
+check "token file deleted: the token is not in the output" notoken
+newhome td2; mktok
+tokrun --yes
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -8
+check "token file deleted: a full run exits 0 and the file is gone" bash -c "[ $RC -eq 0 ] && [ ! -e '$TF' ]"
+check "token file deleted: the full run used it (gh calls were made with the org token)" bash -c "grep -q '|org' '$STUB_DIR/gh.who'"
+check "token file deleted: the token is not in the output, nor on disk in the fake HOME" bash -c "! printf '%s' \"\$1\" | grep -qF -- '$ORGTOK' && ! grep -rIlF -- '$ORGTOK' '$H' '$STUB_DIR/memsync.log'" _ "$OUT"
+newhome td3; mktok
+STUB_PUBLIC=1 tokrun --yes
+check "token file deleted: gone after a forced failure (public repo)" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'NOT private' && [ ! -e '$TF' ]" _ "$OUT"
+check "token file deleted: the token is not in the failing output" notoken
+newhome td4; mktok
+BOOT_PATH="$(minipath shred)" STUB_PUBLIC=1 tokrun --yes
+check "token file deleted: without shred the overwrite-and-remove fallback still removes it" bash -c "[ $RC -ne 0 ] && [ ! -e '$TF' ]"
+newhome td5; mktok; chmod 644 "$TF"
+tokrun --dry-run
+check "token file with a loose mode is refused, and left alone" bash -c "[ $RC -eq 1 ] && printf '%s' \"\$1\" | grep -q 'must be mode 0600 (is 644)' && [ -e '$TF' ]" _ "$OUT"
+check "bad mode: the token is not in the output, nothing was changed" bash -c "! printf '%s' \"\$1\" | grep -qF -- '$ORGTOK'" _ "$OUT"
+newhome td6; mktok; ln "$TF" "$TF.link"
+tokrun --dry-run
+check "token file with two hard links is refused, and left alone" bash -c "[ $RC -eq 1 ] && printf '%s' \"\$1\" | grep -q 'one hard link' && [ -e '$TF' ] && [ -e '$TF.link' ]" _ "$OUT"
+newhome td7; mktok; ln -s "$TF" "$TF.sym"
+ORGARGS=(--org-token-file "$TF.sym" --delete-org-token-file); runboot --host testhost --role homelab --dry-run; ORGARGS=(--org-token-file "$BASE/orgtoken")
+check "token file that is a symlink is refused, and left alone" bash -c "[ $RC -eq 1 ] && printf '%s' \"\$1\" | grep -q 'not a plain file' && [ -e '$TF' ]" _ "$OUT"
+newhome td8
+ORGARGS=(--org-token-cmd "secret-tool read x" --delete-org-token-file); runboot --host testhost --role homelab --dry-run; ORGARGS=(--org-token-file "$BASE/orgtoken")
+check "--delete-org-token-file without --org-token-file is a usage error (exit 2)" bash -c "[ $RC -eq 2 ] && printf '%s' \"\$1\" | grep -q 'only valid with --org-token-file'" _ "$OUT"
+check "usage error: the shared test token file was not touched" [ -e "$BASE/orgtoken" ]
+newhome td9; mktok
+SH_OUT="$BASE/sig.out"; rm -f "$SH_OUT"
+(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_HANG=1 STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" GIT_CONFIG_NOSYSTEM=1 \
+  BOOTSTRAP_APP_API_BASE="http://127.0.0.1:$APIPORT" CLAUDE_UTILS_URL="https://example.invalid/claude-utils.git" \
+  exec "$BASH" "$ROOT/scripts/bootstrap.sh" --sha "$SHA" "${REQ[@]}" --host testhost --role homelab --yes --org-token-file "$TF" --delete-org-token-file </dev/null >"$SH_OUT" 2>&1) &
+SIGPID=$!
+for _ in $(seq 1 120); do [ -e "$STUB_DIR/hung" ] && break; sleep 0.25; done
+kill -TERM "$SIGPID" 2>/dev/null || true
+pkill -TERM -P "$SIGPID" 2>/dev/null || true   # the stuck child; the trap runs once it is gone
+set +e; wait "$SIGPID"; SIGRC=$?; set -e
+check "token file deleted: gone after SIGTERM mid-run (exit 143)" bash -c "[ $SIGRC -eq 143 ] && [ ! -e '$TF' ]"
+check "token file deleted: the token is not in the signalled run's output" bash -c "! grep -qF -- '$ORGTOK' '$SH_OUT'"
+
+
+echo "--- XDG_CONFIG_HOME: a non-default config dir holds routes.json, apps.json and the denylists"
+newhome xdg
+export XDG_CONFIG_HOME="$H/elsewhere"
+mkdir -p "$XDG_CONFIG_HOME/claude-memsync"
+cp "$BASE/app.pem" "$XDG_CONFIG_HOME/claude-memsync/app.pem"; chmod 600 "$XDG_CONFIG_HOME/claude-memsync/app.pem"
+printf '[{"name":"testapp","appId":"12345","org":"example-org","keyFile":"%s","apiBase":"http://127.0.0.1:%s"}]\n' \
+  "$XDG_CONFIG_HOME/claude-memsync/app.pem" "$APIPORT" >"$XDG_CONFIG_HOME/claude-memsync/apps.json"
+chmod 600 "$XDG_CONFIG_HOME/claude-memsync/apps.json"
+ORGARGS=(--org-app testapp)
+runboot --host testhost --role homelab --yes
+ORGARGS=(--org-token-file "$BASE/orgtoken")
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -8
+check "XDG_CONFIG_HOME set: the run reads apps.json from there and exits 0" [ "$RC" -eq 0 ]
+check "XDG_CONFIG_HOME set: routes.json and the denylists are written there, 0600" bash -c "[ -f '$XDG_CONFIG_HOME/claude-memsync/routes.json' ] && [ -f '$XDG_CONFIG_HOME/claude-memsync/denylist-personal.txt' ]"
+check "XDG_CONFIG_HOME set: nothing was written to \$HOME/.config" bash -c "[ ! -e '$H/.config' ]"
+check "XDG_CONFIG_HOME set: the daemon-side configs are consistent with it (the binary found routes.json there)" bash -c "grep -q 'route home infra-homelab' '$STUB_DIR/memsync.log'"
+newhome xdg2
+export XDG_CONFIG_HOME="$H/elsewhere"
+mkdir -p "$XDG_CONFIG_HOME/memsync"; echo '{"repo":"git@x:y/z.git"}' >"$XDG_CONFIG_HOME/memsync/config.json"
+runboot --host testhost --role homelab --yes
+check "XDG_CONFIG_HOME set: the old memsync config is looked for there too, and refused" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'old memsync is configured'" _ "$OUT"
+newhome xdg3
+
+# ============================ Mac UX: move-aside, denylist merge, tally ========
+echo "--- an existing standalone binary in ~/.local/bin is moved aside, never overwritten or refused"
+newhome mv1
+mkdir -p "$H/.local/bin"
+printf '#!/bin/sh\necho standalone-sync\n' >"$H/.local/bin/claude-memsync"; chmod +x "$H/.local/bin/claude-memsync"
+printf '#!/bin/sh\necho standalone-merge\n' >"$H/.local/bin/claude-memmerge"; chmod +x "$H/.local/bin/claude-memmerge"
+runboot --host testhost --role homelab --dry-run
+check "dry run: the planned move-aside is listed, both files, with a UTC time" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -qE 'mv .*/claude-memsync .*/claude-memsync\.pre-bootstrap-[0-9]{8}T[0-9]{6}Z' && printf '%s\n' \"\$1\" | grep -qE 'claude-memmerge\.pre-bootstrap-'" _ "$OUT"
+check "dry run: the standalone binaries are untouched" bash -c "[ ! -L '$H/.local/bin/claude-memsync' ] && grep -q standalone-sync '$H/.local/bin/claude-memsync'"
+runboot --host testhost --role homelab --yes
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -8
+check "real run: exits 0 and says it moved them aside" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -q 'moving it aside'" _ "$OUT"
+check "real run: the originals are kept as <name>.pre-bootstrap-<UTC time>, content intact" bash -c "cat '$H'/.local/bin/claude-memsync.pre-bootstrap-* | grep -q standalone-sync && cat '$H'/.local/bin/claude-memmerge.pre-bootstrap-* | grep -q standalone-merge"
+check "real run: ~/.local/bin now has symlinks into the lib dir" bash -c "[ -L '$H/.local/bin/claude-memsync' ] && [ -L '$H/.local/bin/claude-memmerge' ]"
+runboot --host testhost --role homelab --yes
+check "a re-run (symlinks now) moves nothing" bash -c "[ $RC -eq 0 ] && [ \$(ls '$H'/.local/bin/claude-memsync.pre-bootstrap-* | wc -l) -eq 1 ]"
+newhome mv2
+mkdir -p "$H/.local/bin" "$H/elsewhere"; printf 'x\n' >"$H/elsewhere/old"; ln -s "$H/elsewhere/old" "$H/.local/bin/claude-memsync"
+runboot --host testhost --role homelab --yes
+check "a symlink is replaced as before: nothing moved aside, its target untouched" bash -c "[ $RC -eq 0 ] && ! ls '$H'/.local/bin/*.pre-bootstrap-* >/dev/null 2>&1 && [ \"\$(cat '$H/elsewhere/old')\" = x ] && [ \"\$(readlink '$H/.local/bin/claude-memsync')\" != '$H/elsewhere/old' ]"
+newhome mv3
+mkdir -p "$H/.local/bin/claude-memsync"
+runboot --host testhost --role homelab --yes
+check "anything else (a directory) is still refused" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'is not a regular file or a symlink'" _ "$OUT"
+
+echo "--- a re-run adds new keep-out terms to the existing denylists (never removes a line)"
+newhome dn
+runboot --host testhost --role homelab --yes --keep-out-term alpha
+DLF="$H/.config/claude-memsync/denylist-personal.txt"
+printf 'hand-added-line\n' >>"$DLF"
+runboot --host testhost --role homelab --yes --keep-out-term alpha --keep-out-term 'beta.x'
+check "rerun with A and B: the file holds both, A once, the hand-added line kept" bash -c "[ \$(grep -cx alpha '$DLF') -eq 1 ] && grep -qxF 'beta\\.x' '$DLF' && grep -qx hand-added-line '$DLF'"
+check "rerun: says how many terms it added" bash -c "printf '%s\n' \"\$1\" | grep -q 'added 1 keep-out term' " _ "$OUT"
+DLN="$(wc -l <"$DLF")"
+runboot --host testhost --role homelab --yes --keep-out-term alpha --keep-out-term 'beta.x'
+check "a second rerun adds nothing and says so" bash -c "[ \$(wc -l <'$DLF') -eq $DLN ] && printf '%s\n' \"\$1\" | grep -q 'denylist-personal.txt: no new keep-out terms'" _ "$OUT"
+check "the file stays 0600" mode "$DLF" 600
+
+echo "--- a reachable org with empty keep-out owners: the plan suggests KEEP_OUT_OWNERS"
+newhome sug
+set +e
+SUGOUT="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" GIT_CONFIG_NOSYSTEM=1 STUB_ORGS="$(printf 'example-org\nAcme-Client\nSomeOther')" \
+  "$BASH" "$ROOT/scripts/bootstrap.sh" --sha "$SHA" --org-token-file "$BASE/orgtoken" "${REQ[@]}" --host testhost --role homelab --dry-run </dev/null 2>&1)"
+set -e
+check "the dry-run plan suggests KEEP_OUT_OWNERS naming the reachable orgs" bash -c "printf '%s\n' \"\$1\" | sed -n '/== Plan/,\$p' | grep -qF 'KEEP_OUT_OWNERS=\"Acme-Client SomeOther\"'" _ "$SUGOUT"
+runboot --host testhost --role homelab --dry-run
+check "with a keep-out owner given there is no suggestion" bash -c "! printf '%s\n' \"\$1\" | grep -q 'KEEP_OUT_OWNERS='" _ "$OUT"
+
+echo "--- the plan's repo list is the list the real run creates"
+newhome tl
+runboot --host testhost --role homelab --dry-run
+PLANN="$(printf '%s\n' "$OUT" | sed -n '/repos (private, in/,/deploy keys/p' | grep -c '^    mem-')"
+runboot --host testhost --role homelab --yes
+REALPLAN="$(printf '%s\n' "$OUT" | sed -n '/repos (private, in/,/deploy keys/p' | grep -c '^    mem-')"
+REALN2="$(printf '%s\n' "$OUT" | grep -c '^  mem-.* is private$')"
+check "dry-run plan tally ($PLANN) = real-run plan tally ($REALPLAN) = repos checked private ($REALN2)" bash -c "[ $PLANN -ge 2 ] && [ $PLANN -eq $REALPLAN ] && [ $PLANN -eq $REALN2 ]"
+check "no stale 'host check-key' note when there is no registry; the summary names /reload-plugins" bash -c "! printf '%s\n' \"\$1\" | grep -q 'when a registry is configured' && printf '%s\n' \"\$1\" | grep -q '/reload-plugins'" _ "$OUT"
+check "the docs: step 0 asks to keep the password manager unlocked, in both app prompts" bash -c "[ \$(grep -ci 'keep your password manager unlocked and in view' '$ROOT/docs/bootstrap.md') -ge 2 ]"
+check "the docs: the app-registration build uses bootstrap's own layout" bash -c "sed -n '/## Register the GitHub Apps/,/## Usage/p' '$ROOT/docs/bootstrap.md' | grep -q '.local/lib/claude-memsync/'"
+
+# ============================ keep-out (was: client) ===========================
+echo "--- keep-out flags: new names, old names, wording"
+newhome ko0
+set +e; OUTNONE="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" "$BASH" "$ROOT/scripts/bootstrap.sh" --sha "$SHA" --org-token-file "$BASE/orgtoken" "${REQ[@]}" --host testhost --role homelab --dry-run </dev/null 2>&1)"; NRC=$?; set -e
+check "no keep-out flags: exit 0 and exactly the calm note" bash -c "[ $NRC -eq 0 ] && printf '%s\n' \"\$1\" | grep -qx 'keep-out lists: none (routing alone decides what syncs)'" _ "$OUTNONE"
+check "no keep-out flags: nothing reads as a warning or an error" bash -c "! printf '%s\n' \"\$1\" | grep -E 'keep-out|client owners' | grep -qE 'WARNING|ERROR|!!!'" _ "$OUTNONE"
+HELPOUT="$("$BASH" "$ROOT/scripts/bootstrap.sh" --help 2>&1 || true)"
+check "usage text names --keep-out-owner and --keep-out-term, not client owners" bash -c "printf '%s\n' \"\$1\" | grep -q -- '--keep-out-owner' && printf '%s\n' \"\$1\" | grep -q -- '--keep-out-term' && ! printf '%s\n' \"\$1\" | grep -qi 'client owner'" _ "$HELPOUT"
+check "the script says keep-out, not client, except for the mem-client-* repo kind" bash -c "! grep -i client '$ROOT/scripts/bootstrap.sh' | grep -viE 'mem-client|orchestrator'"
+for how in old new; do
+  newhome "ko-$how"
+  if [ "$how" = old ]; then KOF=(--deny-owner Some-Owner --deny-term 'a.b' --deny-term other); else KOF=(--keep-out-owner Some-Owner --keep-out-term 'a.b' --keep-out-term other); fi
+  runboot --host testhost --role homelab --yes "${KOF[@]}"
+  sed "s#$H#HOME#g; s#ko-$how#ko#g" "$XDG_CONFIG_HOME/claude-memsync/routes.json" >"$BASE/ko-$how.routes" 2>/dev/null || : >"$BASE/ko-$how.routes.missing"
+  for k in personal infra; do cp "$H/.config/claude-memsync/denylist-$k.txt" "$BASE/ko-$how.deny-$k" 2>/dev/null || :; done
+done
+check "--keep-out-owner/-term and --deny-owner/-term give an identical routes.json" bash -c "[ -s '$BASE/ko-old.routes' ] && cmp -s '$BASE/ko-old.routes' '$BASE/ko-new.routes'"
+check "... and identical denylist files (terms only, regex-escaped)" bash -c "cmp -s '$BASE/ko-old.deny-personal' '$BASE/ko-new.deny-personal' && cmp -s '$BASE/ko-old.deny-infra' '$BASE/ko-new.deny-infra' && grep -qxF 'a\\.b' '$BASE/ko-new.deny-personal' && grep -qx other '$BASE/ko-new.deny-personal' && ! grep -qi some-owner '$BASE/ko-new.deny-personal'"
+newhome ko-pd
+mkdir -p "$H/code"
+mkgit "$H/code/keepme" "git@github.com:example-org/keepme.git"
+mkgit "$H/code/byowner" "git@github.com:Some-Owner/byowner.git"
+mkgit "$H/code/byterm" "git@github.com:example-org/has-secretword-inside.git"
+runboot --host testmac --role personal-dev --workspace "$H/code" --dry-run --keep-out-owner some-owner --keep-out-term SecretWord
+check "keep-out owner (any case) and term (substring, any case) skip a checkout; others are kept" bash -c "printf '%s\n' \"\$1\" | grep -q 'byowner.*REFUSED (keep-out)' && printf '%s\n' \"\$1\" | grep -q 'byterm.*REFUSED (keep-out)' && printf '%s\n' \"\$1\" | grep -q 'mem-project-keepme'" _ "$OUT"
+
+
+# ============================ --prebuilt-dir ====================================
+echo "--- --prebuilt-dir: install given binaries, no clone, no build, no Go"
+PB="$BASE/prebuilt"; rm -rf "$PB"; mkdir -p "$PB/real" "$PB/wrap" "$PB/onlyone" "$PB/noexec" "$PB/dev"
+cp "$REAL/claude-memsync" "$REAL/claude-memmerge" "$PB/real/"
+cp "$STUBS/memsync-wrap" "$PB/wrap/claude-memsync"; cp "$REAL/claude-memmerge" "$PB/wrap/"
+cp "$REAL/claude-memsync" "$PB/onlyone/"
+cp "$REAL/claude-memsync" "$REAL/claude-memmerge" "$PB/noexec/"; chmod -x "$PB/noexec/claude-memmerge"
+printf '#!/bin/sh\necho "claude-memsync dev+0123456789ab"\n' >"$PB/dev/claude-memsync"; cp "$REAL/claude-memmerge" "$PB/dev/"; chmod +x "$PB/dev/claude-memsync"
+PBVER="$("$REAL/claude-memsync" version | sed 's/^claude-memsync //')"
+PBSHORT="$(printf '%s' "$PBVER" | sed -nE 's/.*[-+]([0-9a-f]{12})(\+dirty|-dirty)?$/\1/p')"
+BSHA=""; [ -z "$PBSHORT" ] || BSHA="$(git -C "$ROOT" rev-parse --verify -q "$PBSHORT^{commit}" || true)"
+if [ -z "$BSHA" ]; then
+  pending "prebuilt: the test binary's version ($PBVER) carries no commit of this tree"
+else
+  newhome pb1
+  BOOT_PATH="$(minipath go)" runboot --host testhost --role homelab --dry-run --sha "$BSHA" --prebuilt-dir "$PB/real"
+  check "prebuilt dry run without Go on PATH exits 0" [ "$RC" -eq 0 ]
+  check "prebuilt dry run says it installs from the dir, to the sha dir, and clones nothing" bash -c "printf '%s\n' \"\$1\" | grep -q 'Install prebuilt binaries from $PB/real' && printf '%s\n' \"\$1\" | grep -q '.local/lib/claude-memsync/$BSHA' && ! printf '%s\n' \"\$1\" | grep -q 'git clone'" _ "$OUT"
+  check "prebuilt dry run changes nothing" bash -c "[ -z \"\$(find '$H' -mindepth 1 -not -name .gitconfig | head -1)\" ] && ! grep -qE 'repo (create|deploy-key)' '$STUB_DIR/gh.log'"
+  newhome pb2
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  [ "$RC" -eq 0 ] || echo "$OUT" | tail -8
+  check "prebuilt full run exits 0" [ "$RC" -eq 0 ]
+  LIBD="$H/.local/lib/claude-memsync/$BSHA"
+  check "prebuilt: both binaries installed in the sha dir, executable" bash -c "[ -x '$LIBD/claude-memsync' ] && [ -x '$LIBD/claude-memmerge' ] && cmp -s '$PB/wrap/claude-memmerge' '$LIBD/claude-memmerge'"
+  check "prebuilt: ~/.local/bin links point into that dir" bash -c "[ \"\$(readlink '$H/.local/bin/claude-memsync')\" = '$LIBD/claude-memsync' ] && [ \"\$(readlink '$H/.local/bin/claude-memmerge')\" = '$LIBD/claude-memmerge' ]"
+  check "prebuilt: no clone, no go build" bash -c "[ ! -e '$H/.local/src' ] && [ ! -e '$STUB_DIR/go.log' ]"
+  check "prebuilt: no clone means no plugin step, and the next-step note says so" bash -c "! grep -qs 'plugin' '$STUB_DIR/claude.log' && printf '%s\n' \"\$1\" | grep -q 'plugin step skipped'" _ "$OUT"
+  newhome pb3
+  NO_SHA=1 BOOT_PATH="$(minipath go)" runboot --host testhost --role homelab --dry-run --prebuilt-dir "$PB/real"
+  check "prebuilt without --sha: a release-shaped version is the dir name; no git checkout needed" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -qF '.local/lib/claude-memsync/$PBVER'" _ "$OUT"
+  newhome pb4
+  runboot --host testhost --role homelab --yes --sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --prebuilt-dir "$PB/real"
+  check "prebuilt: a version that does not match --sha is refused, nothing installed" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'does not match --sha' && [ ! -e '$H/.local/lib' ] && [ ! -s '$STUB_DIR/gh.log' ]" _ "$OUT"
+fi
+newhome pb5
+runboot --host testhost --role homelab --yes --prebuilt-dir "$PB/onlyone"
+check "prebuilt: a missing claude-memmerge is refused" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'claude-memmerge is missing or not executable'" _ "$OUT"
+newhome pb6
+runboot --host testhost --role homelab --yes --prebuilt-dir "$PB/noexec"
+check "prebuilt: a non-executable binary is refused" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'claude-memmerge is missing or not executable'" _ "$OUT"
+newhome pb7
+NO_SHA=1 runboot --host testhost --role homelab --yes --prebuilt-dir "$PB/dev"
+check "prebuilt without --sha: a dev build is refused (not a release version)" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'not a release version'" _ "$OUT"
+newhome pb8
+runboot --host testhost --role homelab --yes --prebuilt-dir "$PB/does-not-exist"
+check "prebuilt: a directory that does not exist is refused" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'is not a directory'" _ "$OUT"
+
+# ============== the paste prompts in docs/bootstrap.md, as written =============
+# Each prompt is taken from the doc (<!-- prompt: id --> then its ```text
+# fence): the INPUTS names get test values, the ALREADY SET lines run as written,
+# and the boot() function plus its "boot --dry-run" / "boot --yes" lines run as a
+# real shell snippet with `set -u`, with the prompt's own step 1 (the clone) done
+# by hand. A flag the script does not know fails the run (exit 2); an input the
+# steps do not use, or a name the steps use but INPUTS does not list, fails a
+# check below. The doc and this test cannot drift apart.
+ssh-keygen -q -t rsa -b 2048 -m PEM -N '' -f "$BASE/check" && mv "$BASE/check" "$BASE/check.pem" && chmod 600 "$BASE/check.pem"
+ADMIN_MARK="$(sed -n 2p "$BASE/app.pem")"
+docprompt() { # id: the lines of that prompt's fenced block
+  awk -v id="$1" '$0 == "<!-- prompt: " id " -->" {f=1; next} f==1 && /^```text/ {f=2; next} f==2 && /^```/ {exit} f==2 {print}' "$ROOT/docs/bootstrap.md"
+}
+docsec() { # id start-regex end-regex: the "NAME = value" bullets of a section
+  docprompt "$1" | awk -v s="$2" -v e="$3" '$0 ~ s {f=1; next} $0 ~ e {f=0} f && /^- [A-Z_]+ = / {sub(/^- /, ""); print}'
+}
+docfunc() { docprompt "$1" | awk '/^boot\(\) \{/ {f=1} f {print} f && /^\}/ {exit}'; }
+docsteps() { docprompt "$1" | awk '/^STEPS/ {f=1} f'; }
+docvalue() { # input name -> test value (the keep-out and workspace lists come from DOC_OWNERS, DOC_TERMS, DOC_WS)
+  case "$1" in
+    COMMIT) printf '%s' "$SHA" ;; HOST_LABEL) printf testhost ;; ORG) printf '%s' "$ORG" ;; RECOVERY) printf '%s' "$PQREC" ;;
+    GITHUB_USER) printf example-user ;; WORKSPACES) printf '%s' "${DOC_WS:-}" ;;
+    KEEP_OUT_OWNERS) printf '%s' "${DOC_OWNERS:-}" ;; KEEP_OUT_TERMS) printf '%s' "${DOC_TERMS:-}" ;;
+    ADMIN_APP_ID) printf 12345 ;; ADMIN_KEY_CMD) printf 'cat %s' "$BASE/app.pem" ;;
+    CHECK_APP_ID) printf 54321 ;; CHECK_KEY_FILE) printf '%s' "$H/.config/claude-memsync/memsync-check.pem" ;;
+    TOKEN_FILE) printf '%s' "${TF:-/nonexistent-token}" ;; TAG) printf v0.0.0-doc ;; PLATFORM) printf linux-amd64 ;;
+    *) printf 'NO-TEST-VALUE-FOR-%s' "$1" ;;
+  esac
+}
+docsnippet() { # id mode(dry|real): the prompt as a shell snippet
+  local line n
+  printf 'set -u\n'
+  while IFS= read -r line; do
+    n="${line%% = *}"
+    if [ -n "${DOC_LITERAL:-}" ] && case "$n" in KEEP_OUT_*|WORKSPACES) true ;; *) false ;; esac; then printf '%s=%s\n' "$n" "${line#* = }"   # the doc's own default
+    else printf '%s=%q\n' "$n" "$(docvalue "$n")"; fi
+  done < <(docsec "$1" '^INPUTS' '^ALREADY SET')
+  while IFS= read -r line; do printf '%s=%s\n' "${line%% = *}" "${line#* = }"; done < <(docsec "$1" '^ALREADY SET' '^STEPS')
+  docfunc "$1"
+  if [ "$2" = dry ]; then docprompt "$1" | grep -x 'boot --dry-run'; else docprompt "$1" | grep -x 'boot --yes'; fi
+}
+doc_unused() { # id: every INPUTS name is used (as $NAME or ${NAME}) in the steps or in an ALREADY SET derivation
+  local n text
+  text="$( { docsec "$1" '^ALREADY SET' '^STEPS'; docsteps "$1"; } )"   # a variable, not a pipe: grep -q under pipefail can SIGPIPE its writer
+  for n in $(docsec "$1" '^INPUTS' '^ALREADY SET' | sed 's/ = .*//'); do
+    grep -qE "\\\$\{?$n([^A-Za-z0-9_]|\$)" <<<"$text" || { echo "unused input $n"; return 1; }
+  done
+}
+doc_undefined() { # id: every $NAME in the steps is defined by INPUTS or ALREADY SET
+  local def n used
+  def="$( { docsec "$1" '^INPUTS' '^ALREADY SET'; docsec "$1" '^ALREADY SET' '^STEPS'; } | sed 's/ = .*//')"
+  used="$(docsteps "$1" | grep -o '\$[A-Z][A-Z_]*' | tr -d '$' | sort -u)"
+  for n in $used; do
+    grep -qx "$n" <<<"$def" || { echo "undefined $n"; return 1; }
+  done
+}
+DOC_IDS=(homelab-app personal-dev-app homelab-tokenfile crewkit)
+docnum() { case "$1" in 1) echo "homelab-app dry" ;; 2) echo "homelab-app real" ;; 3) echo "personal-dev-app dry" ;; 4) echo "personal-dev-app real" ;; esac; }
+rundoc() { # n | "id mode": run that prompt in the fake HOME; sets RC and OUT
+  local spec snip
+  case "$1" in [0-9]) spec="$(docnum "$1")" ;; *) spec="$1" ;; esac
+  # shellcheck disable=SC2086
+  snip="$(docsnippet $spec || true)"
+  [ -n "$snip" ] && printf '%s\n' "$snip" | grep -q '^boot --' || { RC=99; OUT="prompt $spec not found in docs/bootstrap.md"; return; }
+  set +e
+  OUT="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" GIT_CONFIG_NOSYSTEM=1 \
+    BOOTSTRAP_APP_API_BASE="http://127.0.0.1:$APIPORT" CLAUDE_UTILS_URL="https://example.invalid/claude-utils.git" \
+    bash -c "$snip" </dev/null 2>&1)"
+  RC=$?
+  set -e
+}
+prompt_setup() { # step 1 of the prompt (the clone) and the host's own check key
+  mkdir -p "$H/.local/src" "$H/.config/claude-memsync"
+  git clone -q "$BASE/utils.git" "$H/.local/src/claude-utils-$SHA" && git -C "$H/.local/src/claude-utils-$SHA" checkout -q "$SHA"
+  cp "$BASE/check.pem" "$H/.config/claude-memsync/memsync-check.pem"; chmod 600 "$H/.config/claude-memsync/memsync-check.pem"
+}
+
+echo "--- paste prompts: structure, and the doc against the script's flags"
+for id in "${DOC_IDS[@]}"; do
+  check "$id: prompt found, with INPUTS, ALREADY SET, STEPS and a boot() function" bash -c "[ -n \"\$1\" ] && printf '%s\n' \"\$2\" | grep -q '^boot() {'" _ "$(docsec "$id" '^INPUTS' '^ALREADY SET')" "$(docfunc "$id")"
+  check "$id: the real run line is 'boot --yes' and the dry run line is 'boot --dry-run'" bash -c "printf '%s\n' \"\$1\" | grep -qx 'boot --dry-run' && printf '%s\n' \"\$1\" | grep -qx 'boot --yes'" _ "$(docprompt "$id")"
+  check "$id: every input is used by the steps" doc_unused "$id"
+  check "$id: the steps use only names that INPUTS or ALREADY SET define" doc_undefined "$id"
+  check "$id: every flag in boot() is one the script knows" bash -c "
+    for f in \$(printf '%s\n' \"\$1\" | grep -o -- '--[a-z][a-z-]*' | sort -u); do grep -qE -- \"(^|[ |])\$f[ |)]\" '$ROOT/scripts/bootstrap.sh' || { echo \"unknown flag \$f\"; exit 1; }; done" _ "$(docfunc "$id")"
+  check "$id: both keep-out lists default to empty and are marked optional" bash -c "printf '%s\n' \"\$1\" | grep -qx -- '- KEEP_OUT_OWNERS = \"\"' && printf '%s\n' \"\$1\" | grep -qx -- '- KEEP_OUT_TERMS = \"\"' && [ \$(printf '%s\n' \"\$1\" | grep -c '(optional; leave empty for none)') -ge 2 ]" _ "$(docprompt "$id")"
+  check "$id: the recovery or other long value is not written inline twice" bash -c "[ \$(printf '%s\n' \"\$1\" | grep -c 'age1pq1') -le 1 ]" _ "$(docprompt "$id")"
+done
+check "the doc tells the reader to use bash, not zsh" grep -q 'bash, not zsh' "$ROOT/docs/bootstrap.md"
+check "a flag the script does not know fails the run (the test would notice drift)" bash -c "
+  s=\$(printf 'set -u\nboot() { bash \"$ROOT/scripts/bootstrap.sh\" --no-such-flag; }\nboot\n'); out=\$(bash -c \"\$s\" 2>&1); [ \$? -eq 2 ] && printf '%s' \"\$out\" | grep -q 'unknown argument'"
+
+for P in "homelab-app:1:2:personal infra-homelab" "personal-dev-app:3:4:personal"; do
+  IFS=: read -r ROLEN DRYN REALN KEYSN <<<"$P"
+  echo "--- paste prompt: $ROLEN"
+  newhome "doc-$ROLEN"
+  prompt_setup
+  rundoc "$DRYN"
+  [ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+  check "$ROLEN prompt: dry run succeeds and shows the plan" bash -c "[ $RC -eq 0 ] && printf '%s' \"\$1\" | grep -q '== Plan' && printf '%s' \"\$1\" | grep -q 'would add the app entry memsync-admin' && printf '%s' \"\$1\" | grep -q 'githubApp=memsync-check'" _ "$OUT"
+  check "$ROLEN prompt: empty keep-out lists give the calm note" bash -c "printf '%s\n' \"\$1\" | grep -qx 'keep-out lists: none (routing alone decides what syncs)'" _ "$OUT"
+  check "$ROLEN prompt: dry run changes nothing" bash -c "[ ! -e '$H/.config/claude-memsync/apps.json' ] && [ ! -e '$H/.ssh' ] && ! grep -qE 'repo (create|deploy-key)' '$STUB_DIR/gh.log' && [ ! -e '$H/.local/bin/claude-memsync' ]"
+  rundoc "$REALN"
+  [ "$RC" -eq 0 ] || echo "$OUT" | tail -30
+  check "$ROLEN prompt: real run succeeds" [ "$RC" -eq 0 ]
+  check "$ROLEN prompt: admin entry gone, check entry kept (key file, fingerprint, no key command), apps.json 0600" jsonok '
+import json,sys
+a=json.load(open(sys.argv[1]))
+assert [x["name"] for x in a]==["memsync-check"], a
+e=a[0]
+assert e["appId"]=="54321" and e["org"]=="example-org" and e["keyFile"].endswith("/memsync-check.pem") and "keyCmd" not in e
+assert e["keyFingerprint"].startswith("SHA256:") and e["apiBase"].startswith("http://127.0.0.1:")' "$H/.config/claude-memsync/apps.json"
+  check "$ROLEN prompt: apps.json mode 0600" mode "$H/.config/claude-memsync/apps.json" 600
+  check "$ROLEN prompt: recorded fingerprint is the check key's" bash -c "[ \"\$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))[0][\"keyFingerprint\"])' '$H/.config/claude-memsync/apps.json')\" = \"\$('$REAL/claude-memsync' app key-fingerprint --key-file '$BASE/check.pem')\" ]"
+  for k in $KEYSN; do
+    check "$ROLEN prompt: $k config re-checks through the check app, no PAT file or token command" jsonok '
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d["githubApp"]=="memsync-check" and d["recheckTokenCmd"] is False
+assert not any(x in d for x in ("githubTokenFile","githubTokenCmd"))' "$H/.claudesync.d/$k/config.json"
+  done
+  check "$ROLEN prompt: the admin app minted the org token (key command, per call)" bash -c "[ \$(grep -c 'memsync app-token --app memsync-admin' '$STUB_DIR/memsync.log') -ge 4 ] && grep -qE 'doctor --org example-org --token-cmd .*app-token --app memsync-admin' '$STUB_DIR/memsync.log'"
+  check "$ROLEN prompt: every org call used the org token" bash -c "grep -qE '^(repo|api repos)' '$STUB_DIR/gh.who' && ! grep -E '^(repo|api repos)' '$STUB_DIR/gh.who' | grep -v '|org'"
+  check "$ROLEN prompt: admin key and org token nowhere on disk, in logs or output" bash -c "! grep -rIlF -- '$ADMIN_MARK' '$H' '$STUB_DIR/memsync.log' '$STUB_DIR/gh.log' && ! printf '%s' \"\$1\" | grep -qF -- '$ADMIN_MARK' && ! grep -rIl -- '$ORGTOK' '$H' '$STUB_DIR/memsync.log' && ! printf '%s' \"\$1\" | grep -qF -- '$ORGTOK' && ! printf '%s' \"\$1\" | grep -q 'BEGIN '" _ "$OUT"
+  check "$ROLEN prompt: no daemon-read config names the admin app" bash -c "! grep -rIl 'memsync-admin' '$H/.claudesync.d'"
+done
+
+echo "--- paste prompt: the two-item keep-out lists expand into repeated flags"
+newhome doc-ko
+prompt_setup
+DOC_OWNERS="Acme-Client other-owner" DOC_TERMS="acmeclient other.term" rundoc 4
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+check "two-item lists: the real run succeeds" [ "$RC" -eq 0 ]
+DL="$H/.config/claude-memsync/denylist-personal.txt"
+check "two-item lists: both terms are in the denylist (regex-escaped)" bash -c "grep -qx acmeclient '$DL' && grep -qxF 'other\\.term' '$DL'"
+check "two-item lists: no keep-out owner is in the denylist" bash -c "! grep -qiE 'acme-client|other-owner' '$DL'"
+check "two-item lists: no keep-out note about empty lists" bash -c "! printf '%s\n' \"\$1\" | grep -q 'keep-out lists: none'" _ "$OUT"
+newhome doc-ws
+prompt_setup
+mkdir -p "$H/code"
+DOC_WS="$H/code" DOC_LITERAL='' rundoc 3
+check "WORKSPACES expands into --workspace (dry run, personal-dev)" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -q 'workspace $H/code -> mem-project-code-workspace'" _ "$OUT"
+newhome doc-lit
+prompt_setup
+DOC_LITERAL=1 rundoc 2
+check "the doc's own empty defaults (KEEP_OUT_OWNERS=\"\", KEEP_OUT_TERMS=\"\") run as written" bash -c "[ $RC -eq 0 ] || exit 1; printf '%s\n' \"\$1\" | grep -qx 'keep-out lists: none (routing alone decides what syncs)'" _ "$OUT"
+
+echo "--- paste prompt: homelab with an org token file"
+newhome doc-tf
+prompt_setup
+mktok; rundoc homelab-tokenfile\ dry
+check "token-file prompt: dry run succeeds and keeps the token file for the real run" bash -c "[ $RC -eq 0 ] && [ -f '$TF' ]"
+rundoc homelab-tokenfile\ real
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+check "token-file prompt: real run succeeds, the file is gone" bash -c "[ $RC -eq 0 ] && [ ! -e '$TF' ]"
+check "token-file prompt: org calls used the token, and it is nowhere in the output or on disk" bash -c "grep -qE '^(repo|api repos)' '$STUB_DIR/gh.who' && ! grep -E '^(repo|api repos)' '$STUB_DIR/gh.who' | grep -v '|org' && ! printf '%s' \"\$1\" | grep -qF -- '$ORGTOK' && ! grep -rIlF -- '$ORGTOK' '$H'" _ "$OUT"
+check "token-file prompt: init and doctor were handed a token file (never the token)" has "$STUB_DIR/memsync.log" 'doctor --org example-org --token-file '
+newhome doc-tf2
+prompt_setup
+rm -f "$H/.config/claude-memsync/memsync-check.pem"
+mktok; rundoc homelab-tokenfile\ real
+check "token-file prompt: without the check key it pauses (exit 3) and the token file is still deleted" bash -c "[ $RC -eq 3 ] && [ ! -e '$TF' ]"
+
+echo "--- paste prompt: crewkit (release archive, --prebuilt-dir)"
+newhome doc-ck
+prompt_setup
+CKX="$(bash -c "set -u; HOME='$H'; TAG=v0.0.0-doc; PLATFORM=linux-amd64; $(docsec crewkit '^ALREADY SET' '^STEPS' | sed 's/ = /=/'); printf '%s' \"\$X\"")"
+mkdir -p "$CKX/scripts"; cp "$ROOT/scripts/bootstrap.sh" "$CKX/scripts/"; cp "$PB/wrap/claude-memsync" "$PB/wrap/claude-memmerge" "$CKX/"
+rm -rf "$H/.local/src/claude-utils-$SHA"
+mktok; rundoc crewkit\ dry
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+check "crewkit prompt: dry run succeeds with no Go, no clone" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -q 'Install prebuilt binaries from'" _ "$OUT"
+check "crewkit prompt: the dry run left the token file for the real run" [ -f "$TF" ]
+rundoc crewkit\ real
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+check "crewkit prompt: real run succeeds and installs the extracted binaries into the version dir" bash -c "[ $RC -eq 0 ] && [ -x '$H/.local/bin/claude-memsync' ] && readlink '$H/.local/bin/claude-memsync' | grep -q '/lib/claude-memsync/v' && [ ! -e '$H/.local/src/claude-utils-$SHA' ]"
+check "crewkit prompt: no go build, token file deleted" bash -c "[ ! -e '$STUB_DIR/go.log' ] && [ ! -e '$TF' ]"
+
+quick_exit
 
 # ============================ homelab ==========================================
 echo "--- homelab run"
@@ -333,7 +826,7 @@ echo "--- org scope"
 newhome orgs
 STUB_ORGS="$(printf 'example-org\nAcme-Client\nSomeOther')" runboot --host testhost --role homelab --yes
 check "extra orgs: warns and proceeds" [ "$RC" -eq 0 ]
-check "banner names every extra org and the client org" bash -c "printf '%s' \"\$1\" | grep -q \"WARNING: this host's gh login can reach Acme-Client, SomeOther. An agent host holds an owner-level token with client-org reach.\" && printf '%s' \"\$1\" | grep -q 'CLIENT ORG(S) reachable through the gh login: Acme-Client'" _ "$OUT"
+check "banner names every extra org and the client org" bash -c "printf '%s' \"\$1\" | grep -q \"WARNING: this host's gh login can reach Acme-Client, SomeOther. An agent host holds an owner-level token with reach beyond the memory repos.\" && printf '%s' \"\$1\" | grep -q 'KEEP-OUT ORG(S) reachable through the gh login: Acme-Client'" _ "$OUT"
 check "banner in plan and again in summary" bash -c "[ \$(printf '%s' \"\$1\" | grep -c \"WARNING: this host's gh login can reach\") -ge 3 ]" _ "$OUT"
 check "summary repeats the warning" bash -c "printf '%s' \"\$1\" | sed -n '/== j. Summary/,\$p' | grep -q 'WARNING: this host'" _ "$OUT"
 check "zero gh calls against any other org" bash -c "! grep -v 'user/orgs' '$STUB_DIR/gh.log' | grep -iE 'acme-client|someother'; [ \$(grep -E 'repo|api repos' '$STUB_DIR/gh.log' | grep -vc 'example-org') -eq 0 ]"
@@ -464,7 +957,7 @@ for bad in TestHost a_b -x "$(printf 'a%.0s' $(seq 1 33))"; do
   check "bad --host '$bad' refused before anything is created" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'bad --host label' && [ ! -s '$STUB_DIR/gh.log' ] && [ ! -e '$H/.ssh' ]" _ "$OUT"
 done
 runboot --host testhost --role homelab --yes --org acme-client
-check "--org equal to a --deny-owner (any case) is refused in preflight" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'also a --deny-owner' && [ ! -s '$STUB_DIR/gh.log' ]" _ "$OUT"
+check "--org equal to a keep-out owner (any case) is refused in preflight" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'also a keep-out owner' && [ ! -s '$STUB_DIR/gh.log' ]" _ "$OUT"
 
 newhome xt
 for how in "bash -x" "env SHELLOPTS=xtrace bash"; do
@@ -507,7 +1000,7 @@ set +e
 NODENY="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" GIT_CONFIG_NOSYSTEM=1 \
   bash "$ROOT/scripts/bootstrap.sh" --sha "$SHA" --repo-url "https://example.invalid/other.git" ${ORGARGS[@]+"${ORGARGS[@]}"} "${REQ[@]}" --host testhost --role homelab --dry-run </dev/null 2>&1)"
 set -e
-check "no deny flags: loud warning" bash -c "printf '%s' \"\$1\" | grep -q 'no client owners or terms configured: client repos are only protected by routing'" _ "$NODENY"
+check "no keep-out flags: a calm one-line note, no warning prefix" bash -c "printf '%s' \"\$1\" | grep -qx 'keep-out lists: none (routing alone decides what syncs)' && ! printf '%s' \"\$1\" | grep -q 'client owners'" _ "$NODENY"
 check "--repo-url is accepted" bash -c "! printf '%s' \"\$1\" | grep -q 'unknown argument'" _ "$NODENY"
 echo "--- refusals"
 newhome pub
@@ -548,9 +1041,6 @@ check "deploy keys disabled gives the org hint" bash -c "[ $RC -ne 0 ] && printf
 echo "--- personal-dev run"
 newhome pdev
 mkdir -p "$H/code/notes"
-mkgit() { # dir remote
-  mkdir -p "$1"; git -C "$1" init -q; git -C "$1" remote add origin "$2"
-}
 mkgit "$H/code/ownproj" "git@github.com:gitgat/ownproj.git"
 mkgit "$H/code/thirdlib" "https://github.com/someoneelse/thirdlib.git"
 mkgit "$H/code/clientapp" "https://github.com/Acme-Client/clientapp.git"
@@ -560,7 +1050,7 @@ runboot --host testmac --role personal-dev --workspace "$H/code" --own-owner git
 check "personal-dev run exits 0" [ "$RC" -eq 0 ]
 check "only the own repo gets a mem-project repo" bash -c "grep 'repo create' '$STUB_DIR/gh.log' | grep -c 'mem-project-' | grep -qx 2 && grep -q 'create example-org/mem-project-ownproj --private' '$STUB_DIR/gh.log' && grep -q 'create example-org/mem-project-code-workspace --private' '$STUB_DIR/gh.log' && ! grep -qE 'thirdlib|clientapp' '$STUB_DIR/gh.log'"
 check "third-party repo listed as not synced" bash -c "printf '%s' \"\$1\" | grep -q 'thirdlib.*not synced (third-party)'" _ "$OUT"
-check "client-owner repo refused" bash -c "printf '%s' \"\$1\" | grep -q 'clientapp.*REFUSED (client owner)'" _ "$OUT"
+check "client-owner repo refused" bash -c "printf '%s' \"\$1\" | grep -q 'clientapp.*REFUSED (keep-out)'" _ "$OUT"
 check "home pinned to personal and code pinned to the workspace repo" jsonok '
 import json,sys,re,os
 d=json.load(open(sys.argv[1]))
@@ -627,76 +1117,6 @@ set +e
 RTOUT="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" bash "$ROOT/scripts/bootstrap.sh" --sha "$SHA" --org-token-file "$BASE/orgtoken" "${REQ[@]}" --host testhost --role homelab --yes --dry-run </dev/null 2>&1)"
 set -e
 check "dry run with a differing routes.json says what it would do and leaves the file alone" bash -c "printf '%s' \"\$1\" | grep -q 'writing .*routes.json' && [ \$(cat '$H/.config/claude-memsync/routes.json' | tr -d ' \n') = '{\"repos\":{},\"routes\":[],\"default\":\"deny\"}' ] && [ ! -e '$H/.config/claude-memsync/routes.json.bak' ]" _ "$RTOUT"
-
-# ============== the paste prompts in docs/bootstrap.md, as written =============
-# The command lines are taken from the doc (the first two under (a), the next
-# two under (b): dry run, then real), the placeholders are substituted, and they
-# run with the prompt's own step 1 (the clone) done by hand. The doc and this
-# test cannot drift apart.
-ssh-keygen -q -t rsa -b 2048 -m PEM -N '' -f "$BASE/check" && mv "$BASE/check" "$BASE/check.pem" && chmod 600 "$BASE/check.pem"
-ADMIN_MARK="$(sed -n 2p "$BASE/app.pem")"
-docline() { # n: the nth command line of the doc
-  awk -v n="$1" '/^bash ~\/\.local\/src\/claude-utils-<commit>\/scripts\/bootstrap\.sh /{c++; if (c == n) print}' "$ROOT/docs/bootstrap.md"
-}
-fill() { # line: placeholders -> test values
-  local l="$1"
-  l="${l//<commit>/$SHA}"; l="${l//<host-label>/testhost}"; l="${l//<client-org>/Acme-Client}"; l="${l//<client-term>/acmeclient}"
-  l="${l//<admin-app-id>/12345}"; l="${l//<admin-key-cmd>/cat $BASE/app.pem}"
-  l="${l//<org>/$ORG}"; l="${l//<recovery-recipient>/$PQREC}"
-  l="${l//<check-app-id>/54321}"; l="${l//<check-key-file>/$H/.config/claude-memsync/memsync-check.pem}"
-  printf '%s' "$l"
-}
-rundoc() { # n: run the nth doc line in the fake HOME; sets RC and OUT
-  local cmd; cmd="$(fill "$(docline "$1")")"
-  [ -n "$cmd" ] || { RC=99; OUT="doc line $1 not found"; return; }
-  set +e
-  OUT="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" GIT_CONFIG_NOSYSTEM=1 \
-    BOOTSTRAP_APP_API_BASE="http://127.0.0.1:$APIPORT" CLAUDE_UTILS_URL="https://example.invalid/claude-utils.git" \
-    bash -c "$cmd" </dev/null 2>&1)"
-  RC=$?
-  set -e
-}
-prompt_setup() { # step 1 of the prompt (the clone) and the host's own check key
-  mkdir -p "$H/.local/src" "$H/.config/claude-memsync"
-  git clone -q "$BASE/utils.git" "$H/.local/src/claude-utils-$SHA" && git -C "$H/.local/src/claude-utils-$SHA" checkout -q "$SHA"
-  cp "$BASE/check.pem" "$H/.config/claude-memsync/memsync-check.pem"; chmod 600 "$H/.config/claude-memsync/memsync-check.pem"
-}
-check "doc has four command lines, two per prompt" bash -c "[ -n \"\$1\" ] && [ -n \"\$2\" ] && [ -n \"\$3\" ] && [ -n \"\$4\" ] && [ -z \"\$5\" ]" _ "$(docline 1)" "$(docline 2)" "$(docline 3)" "$(docline 4)" "$(docline 5)"
-check "each prompt's first line is the dry run, the second is not" bash -c "case \"\$1\" in *' --dry-run') ;; *) exit 1 ;; esac; case \"\$2\" in *' --dry-run') exit 1 ;; esac; case \"\$3\" in *' --dry-run') ;; *) exit 1 ;; esac; case \"\$4\" in *' --dry-run') exit 1 ;; esac" _ "$(docline 1)" "$(docline 2)" "$(docline 3)" "$(docline 4)"
-
-for P in "homelab:1:2:personal infra-homelab" "personal-dev:3:4:personal"; do
-  IFS=: read -r ROLEN DRYN REALN KEYSN <<<"$P"
-  echo "--- paste prompt: $ROLEN"
-  newhome "doc-$ROLEN"
-  prompt_setup
-  rundoc "$DRYN"
-  [ "$RC" -eq 0 ] || echo "$OUT" | tail -20
-  check "$ROLEN prompt: dry run succeeds and shows the plan" bash -c "[ $RC -eq 0 ] && printf '%s' \"\$1\" | grep -q '== Plan' && printf '%s' \"\$1\" | grep -q 'would add the app entry memsync-admin' && printf '%s' \"\$1\" | grep -q 'githubApp=memsync-check'" _ "$OUT"
-  check "$ROLEN prompt: dry run changes nothing" bash -c "[ ! -e '$H/.config/claude-memsync/apps.json' ] && [ ! -e '$H/.ssh' ] && ! grep -qE 'repo (create|deploy-key)' '$STUB_DIR/gh.log' && [ ! -e '$H/.local/bin/claude-memsync' ]"
-  rundoc "$REALN"
-  [ "$RC" -eq 0 ] || echo "$OUT" | tail -30
-  check "$ROLEN prompt: real run succeeds" [ "$RC" -eq 0 ]
-  check "$ROLEN prompt: admin entry gone, check entry kept (key file, fingerprint, no key command), apps.json 0600" jsonok '
-import json,sys
-a=json.load(open(sys.argv[1]))
-assert [x["name"] for x in a]==["memsync-check"], a
-e=a[0]
-assert e["appId"]=="54321" and e["org"]=="example-org" and e["keyFile"].endswith("/memsync-check.pem") and "keyCmd" not in e
-assert e["keyFingerprint"].startswith("SHA256:") and e["apiBase"].startswith("http://127.0.0.1:")' "$H/.config/claude-memsync/apps.json"
-  check "$ROLEN prompt: apps.json mode 0600" mode "$H/.config/claude-memsync/apps.json" 600
-  check "$ROLEN prompt: recorded fingerprint is the check key's" bash -c "[ \"\$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))[0][\"keyFingerprint\"])' '$H/.config/claude-memsync/apps.json')\" = \"\$('$REAL/claude-memsync' app key-fingerprint --key-file '$BASE/check.pem')\" ]"
-  for k in $KEYSN; do
-    check "$ROLEN prompt: $k config re-checks through the check app, no PAT file or token command" jsonok '
-import json,sys
-d=json.load(open(sys.argv[1]))
-assert d["githubApp"]=="memsync-check" and d["recheckTokenCmd"] is False
-assert not any(x in d for x in ("githubTokenFile","githubTokenCmd"))' "$H/.claudesync.d/$k/config.json"
-  done
-  check "$ROLEN prompt: the admin app minted the org token (key command, per call)" bash -c "[ \$(grep -c 'memsync app-token --app memsync-admin' '$STUB_DIR/memsync.log') -ge 4 ] && grep -qE 'doctor --org example-org --token-cmd .*app-token --app memsync-admin' '$STUB_DIR/memsync.log'"
-  check "$ROLEN prompt: every org call used the org token" bash -c "grep -qE '^(repo|api repos)' '$STUB_DIR/gh.who' && ! grep -E '^(repo|api repos)' '$STUB_DIR/gh.who' | grep -v '|org'"
-  check "$ROLEN prompt: admin key and org token nowhere on disk, in logs or output" bash -c "! grep -rIlF -- '$ADMIN_MARK' '$H' '$STUB_DIR/memsync.log' '$STUB_DIR/gh.log' && ! printf '%s' \"\$1\" | grep -qF -- '$ADMIN_MARK' && ! grep -rIl -- '$ORGTOK' '$H' '$STUB_DIR/memsync.log' && ! printf '%s' \"\$1\" | grep -qF -- '$ORGTOK' && ! printf '%s' \"\$1\" | grep -q 'BEGIN '" _ "$OUT"
-  check "$ROLEN prompt: no daemon-read config names the admin app" bash -c "! grep -rIl 'memsync-admin' '$H/.claudesync.d'"
-done
 
 echo "--- check app and admin entry: refusals and clean-up"
 newhome ck1
@@ -773,8 +1193,31 @@ check "rekey: two classic repos initialised with the real binary" [ "$RKOK" -eq 
 printf '{"repos":{"alpha":{"config":"%s","kind":"personal"},"beta":{"config":"%s","kind":"project"}},"routes":[],"default":"deny","personal":"alpha"}\n' \
   "$H/.claudesync.d/alpha/config.json" "$H/.claudesync.d/beta/config.json" >"$RKROUTES"
 chmod 600 "$RKROUTES"
+recipients_labelled() { # file-text host-label recovery-key: the labels are trailing comments on the key lines
+  printf '%s\n' "$1" | awk -v host="$2" -v key="$3" '
+    $1 ~ /^age1pq1/ && $0 ~ (" # host:" host "$") { h = 1 }
+    $1 == key && $0 ~ / # recovery$/ { r = 1 }
+    END { exit !(h && r) }'
+}
+RL_GOOD="$(printf '# Public age recipients of this memory repo. Public keys only.\n%s # host:rk\n%s # recovery\n' "age1pq1hostkey" "$PQREC")"
+RL_STRIPPED="$(printf '# Public age recipients of this memory repo. Public keys only.\n%s\n%s\n' "age1pq1hostkey" "$PQREC")"
+RL_WRONGKEY="$(printf '%s # host:rk\n%s # recovery\n' "age1pq1hostkey" "age1pq1someotherkey")"
+RL_OLDSTYLE="$(printf '# host:rk\n# recovery\n%s\n' "$PQREC")"
+check "label check: a file with the trailing labels passes" recipients_labelled "$RL_GOOD" rk "$PQREC"
+not_labelled() { ! recipients_labelled "$@"; }
+check "label check: the same file with the labels stripped fails" not_labelled "$RL_STRIPPED" rk "$PQREC"
+check "label check: a recovery label on some other key fails" not_labelled "$RL_WRONGKEY" rk "$PQREC"
+check "label check: comment-line labels (not on the key lines) fail" not_labelled "$RL_OLDSTYLE" rk "$PQREC"
+check "label check: the wrong host label fails" not_labelled "$RL_GOOD" other "$PQREC"
 rkhash() { # repo: hash of every note in the repo's work-tree
   (cd "$H/.claudesync.d/$1/projects" && find . -type f | LC_ALL=C sort | while read -r f; do printf '%s ' "$f"; cksum <"$f"; done)
+}
+rkhash_origin() { # repo: the same lines, from origin's ciphertext decrypted with the repo's new identity
+  local f t="$BASE/rk-origin.blob"
+  git -C "$BASE/remotes/rk-$1.git" ls-tree -r --name-only main | grep '^projects/' | LC_ALL=C sort | while read -r f; do
+    git -C "$BASE/remotes/rk-$1.git" cat-file blob "main:$f" >"$t"
+    printf './%s ' "${f#projects/}"; (cd "$H/.claudesync.d/$1" && HOME="$H" "$REAL/claude-memsync" age-textconv "$t") | cksum
+  done
 }
 RKB_A="$(rkhash alpha)"; RKB_B="$(rkhash beta)"
 check "rekey: the work-trees hold the notes" bash -c "[ -n \"\$1\" ] && [ -n \"\$2\" ]" _ "$RKB_A" "$RKB_B"
@@ -797,8 +1240,22 @@ for n in alpha beta; do
   rm -rf "$SY/projects"; git -C "$SY" checkout -q -- projects
   if [ "$n" = alpha ]; then WANT="$RKB_A"; else WANT="$RKB_B"; fi
   check "rekey $n: every note decrypts to exactly what it was" [ "$(rkhash "$n")" = "$WANT" ]
+  # The same comparison against what origin holds: its blobs decrypted
+  # (age-textconv), not the local index or work-tree.
+  check "rekey $n: origin's blobs, decrypted, equal the original plaintext" [ "$(rkhash_origin "$n")" = "$WANT" ]
+  check "rekey $n: origin's .age-recipients carry the host and recovery labels (trailing comments on the key lines)" recipients_labelled "$(git -C "$OR" show main:.age-recipients)" rk "$PQREC"
   check "rekey $n: the work-tree is clean" bash -c "[ -z \"\$(git -C '$SY' status --porcelain)\" ]"
 done
+# Restart the daemon (a foreground run, stopped by timeout, as in the upgrade
+# section) on the rekeyed repo, drop one new note in the Claude tree, and check
+# it lands on origin as hybrid ciphertext that decrypts back.
+echo "--- rekey-pq --all: the restarted daemon syncs a new note as hybrid ciphertext"
+printf 'written after the rekey\n' >"$RKC/-p1/memory/after-rekey.md"
+HOME="$H" GIT_CONFIG_NOSYSTEM=1 timeout 25 "$REAL/claude-memsync" run -config "$H/.claudesync.d/alpha/config.json" -skip-quiet-window >"$BASE/rk-run.log" 2>&1 || true
+RKN="projects/-p1/memory/after-rekey.md"
+check "rekey: the new note reached origin" bash -c "git -C '$BASE/remotes/rk-alpha.git' cat-file -e main:$RKN"
+check "rekey: ... as hybrid-only ciphertext" bash -c "b=\$(git -C '$BASE/remotes/rk-alpha.git' cat-file blob main:$RKN | head -c 600); printf '%s' \"\$b\" | grep -aq -- '-> mlkem768x25519' && ! printf '%s' \"\$b\" | grep -aq -- '-> X25519'"
+check "rekey: ... which decrypts to the note" bash -c "git -C '$BASE/remotes/rk-alpha.git' cat-file blob main:$RKN >'$BASE/rk-new.blob' && [ \"\$(cd '$H/.claudesync.d/alpha' && HOME='$H' '$REAL/claude-memsync' age-textconv '$BASE/rk-new.blob')\" = 'written after the rekey' ]"
 check "rekey: the notes read back byte for byte" bash -c "diff <(cat '$RKC/-p1/memory/two.md') '$H/.claudesync.d/alpha/projects/-p1/memory/two.md'"
 
 # An upgrade: a second build is bootstrapped over the first and the daemon

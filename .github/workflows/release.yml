@@ -1,3 +1,8 @@
+# FORK-ONLY CHANGE. Upstream's release.yml built and archived inline. This fork
+# moves that loop into scripts/package-release.sh so every archive also carries
+# scripts/bootstrap.sh (claude-utils-<tag>-<os>-<arch>/scripts/bootstrap.sh) and
+# SHA256SUMS covers it; fork-ci.yml's release-layout job tests the same script.
+# Do not propose this file's change upstream as is.
 name: Release
 
 on:
@@ -52,45 +57,8 @@ jobs:
         env:
           VERSION: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
-          set -euo pipefail
-          LDFLAGS="-s -w -X github.com/MarimerLLC/claude-utils/internal/version.Override=${VERSION}"
-          mkdir -p dist
-
-          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
-            GOOS=${target%/*}
-            GOARCH=${target#*/}
-            name="claude-utils-${VERSION}-${GOOS}-${GOARCH}"
-            outdir="dist/${name}"
-            mkdir -p "${outdir}"
-            ext=""
-            if [ "${GOOS}" = "windows" ]; then ext=".exe"; fi
-
-            echo "::group::build ${target}"
-            GOOS="${GOOS}" GOARCH="${GOARCH}" go build -trimpath -ldflags "${LDFLAGS}" \
-              -o "${outdir}/claude-memsync${ext}" ./cmd/claude-memsync
-            GOOS="${GOOS}" GOARCH="${GOARCH}" go build -trimpath -ldflags "${LDFLAGS}" \
-              -o "${outdir}/claude-memmerge${ext}" ./cmd/claude-memmerge
-            if [ "${GOOS}" = "windows" ]; then
-              # GUI subsystem so launching it from a hotkey never flashes a console.
-              GOOS="${GOOS}" GOARCH="${GOARCH}" go build -trimpath -ldflags "${LDFLAGS} -H windowsgui" \
-                -o "${outdir}/claude-focus${ext}" ./cmd/claude-focus
-            fi
-            echo "::endgroup::"
-
-            cp LICENSE README.md "${outdir}/"
-
-            (
-              cd dist
-              if [ "${GOOS}" = "windows" ]; then
-                zip -qr "${name}.zip" "${name}"
-              else
-                tar -czf "${name}.tar.gz" "${name}"
-              fi
-            )
-          done
-
-          (cd dist && sha256sum -- *.zip *.tar.gz > SHA256SUMS)
-          ls -lh dist/
+          bash scripts/package-release.sh "${VERSION}" dist
+          # Fork-only: every archive also carries scripts/bootstrap.sh.
 
       - name: Upload archives to release
         env:

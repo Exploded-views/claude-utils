@@ -2,13 +2,17 @@
 # claude-memsync host bootstrap.
 #
 #   bootstrap.sh --host <label> --role <role> --org <org> --recovery-recipient <age1pq1...>
-#                [--sha <commit>]
-#                [--workspace <dir>]... [--own-owner <owner>]... [--deny-owner <owner>]...
-#                [--deny-term <term>]... [--repo-url <url>]
-#                --org-token-file <path> | --org-token-cmd "<argv>" | --org-app <name>
+#                [--sha <commit>] [--prebuilt-dir <dir>]
+#                [--workspace <dir>]... [--own-owner <owner>]...
+#                [--keep-out-owner <owner>]... [--keep-out-term <term>]...   (optional)
+#                [--repo-url <url>]
+#                --org-token-file <path> [--delete-org-token-file]
+#                  | --org-token-cmd "<argv>" | --org-app <name>
 #                [--org-app-id <id> --org-app-key-cmd "<argv>"]
 #                [--check-app <name> --check-app-id <id> --check-key-file <path>]
 #                [--allow-org <org>]... [--dry-run] [--yes]
+#
+# Exit codes: 0 ok, 1 error, 2 usage, 3 paused (needs a human; run it again).
 #
 # Read this script before running it. --dry-run prints every step without doing
 # it. Everything lives under $HOME; the script never uses sudo, never prints a
@@ -42,8 +46,8 @@ WORKSPACE_REPO="mem-project-code-workspace"
 GITHUB_FP="SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU"
 UTILS_URL="${CLAUDE_UTILS_URL:-https://github.com/Exploded-views/claude-utils}"
 
-HOST="" ROLE="" SHA="" ORG="" AGE_RECOVERY="" DRY_RUN=0 YES=0
-WORKSPACES=() OWN_OWNERS=() DENY_OWNERS=() DENY_TERMS=() ALLOW_ORGS=() ORG_TOKEN_FILE="" ORG_TOKEN_CMD="" ORG_APP=""
+HOST="" ROLE="" SHA="" SHA_GIVEN=0 PREBUILT_DIR="" PB_VER="" ORG="" AGE_RECOVERY="" DRY_RUN=0 YES=0
+WORKSPACES=() OWN_OWNERS=() KEEP_OUT_OWNERS=() KEEP_OUT_TERMS=() ALLOW_ORGS=() ORG_TOKEN_FILE="" ORG_TOKEN_CMD="" ORG_APP=""
 ORG_APP_ID="" ORG_APP_KEY_CMD="" CHECK_APP="" CHECK_APP_ID="" CHECK_KEY_FILE="" APP_API_BASE="${BOOTSTRAP_APP_API_BASE:-}" ADMIN_WRITTEN=0
 
 R_KEYS=() R_NAMES=() R_KINDS=()   # planned repos (parallel arrays)
@@ -52,7 +56,8 @@ NOT_SYNCED=""                     # human-readable list
 KEYS_CREATED=() PENDING_JOINS=() NEXT_STEPS=()
 
 BIN="$HOME/.local/bin"
-CFG="$HOME/.config/claude-memsync"
+XDG_CFG="${XDG_CONFIG_HOME:-$HOME/.config}"   # where claude-memsync (os.UserConfigDir) keeps its config
+CFG="$XDG_CFG/claude-memsync"
 SYNC_ROOT="$HOME/.claudesync.d"
 STATE="$HOME/.local/state/claude-memsync-bootstrap"
 ROUTES="$CFG/routes.json"
@@ -61,6 +66,7 @@ say()  { printf '%s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+udie() { printf 'ERROR: %s\n' "$*" >&2; exit 2; }   # usage error: exit 2
 
 # run <cmd...>: print the command, then run it unless --dry-run.
 run() {
@@ -69,12 +75,68 @@ run() {
   "$@"
 }
 
-usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { awk 'NR >= 2 { if ($0 == "#" && NR > 3 && seen++ >= 1) exit; print }' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 done_p() { [ -e "$STATE/$HOST.$1" ]; }
 mark()   { [ "$DRY_RUN" -eq 1 ] && return 0; mkdir -p "$STATE"; : >"$STATE/$HOST.$1"; }
 
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+version_ge() { # have want (dotted, major.minor)
+  [ "$(printf '%s\n%s\n' "$2" "$1" | sort -t. -k1,1n -k2,2n | head -n1)" = "$2" ]
+}
+
+# ---------------------------------------------------------------------------
+# Prerequisites. Checked first, before any change and in --dry-run too: one
+# "missing prerequisite:" line per missing tool, then exit 1.
+# ---------------------------------------------------------------------------
+BUILD_FROM_SOURCE=1     # --prebuilt-dir turns this off: Go is then not needed
+GO_MODE=""
+check_prereqs() {
+  local missing=0 t gv gmin=1.25 gomod v
+  miss() { printf 'missing prerequisite: %s\n' "$*" >&2; missing=$((missing + 1)); }
+  if [ "${BASH_VERSINFO[0]}" -lt 3 ] || { [ "${BASH_VERSINFO[0]}" -eq 3 ] && [ "${BASH_VERSINFO[1]}" -lt 2 ]; }; then
+    miss "bash ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]} is too old (need >= 3.2; macOS /bin/bash 3.2 is enough)"
+  fi
+  for t in sed awk grep tr cut sort head find stat mktemp id uname dirname chmod ln $([ "$BUILD_FROM_SOURCE" -eq 1 ] || echo 'cp cmp'); do
+    command -v "$t" >/dev/null 2>&1 || miss "$t (a basic tool the script uses)"
+  done
+  if command -v git >/dev/null 2>&1; then
+    gv="$(git --version | sed -E 's/[^0-9]*([0-9]+\.[0-9]+).*/\1/')"
+    version_ge "$gv" 2.26 || miss "git $gv is too old (need >= 2.26)"
+  else
+    miss "git (to clone and verify the pinned commit and reach the memory repos)"
+  fi
+  command -v python3 >/dev/null 2>&1 || miss "python3 (JSON edits and argument splitting)"
+  command -v ssh-keygen >/dev/null 2>&1 || miss "ssh-keygen (per-repo deploy keys and host-key checks)"
+  command -v ssh-keyscan >/dev/null 2>&1 || miss "ssh-keyscan (GitHub host keys)"
+  command -v gh >/dev/null 2>&1 || miss "gh (the GitHub CLI; org operations)"
+  case "$(uname -s 2>/dev/null)" in
+    Linux)  command -v systemctl >/dev/null 2>&1 || miss "systemctl (claude-memsync install registers a systemd user service)" ;;
+    Darwin) command -v launchctl >/dev/null 2>&1 || miss "launchctl (claude-memsync install registers a launchd agent)" ;;
+  esac
+  if [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
+    # The Go floor is the go.mod of the tree this script sits in, when there is one.
+    gomod="$(dirname "$0")/../go.mod"
+    if [ -r "$gomod" ]; then
+      v="$(sed -n 's/^go \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' "$gomod" 2>/dev/null | head -n1 || true)"
+      [ -z "$v" ] || gmin="$v"
+    fi
+    if command -v go >/dev/null 2>&1 && version_ge "$(go version | sed -E 's/.*go([0-9]+\.[0-9]+).*/\1/')" "$gmin"; then
+      GO_MODE=go
+    elif command -v docker >/dev/null 2>&1 && [ "$(uname -s 2>/dev/null)" = Linux ]; then
+      GO_MODE=docker
+    elif command -v go >/dev/null 2>&1; then
+      miss "go $(go version | sed -E 's/.*go([0-9]+\.[0-9]+).*/\1/') is too old (need >= $gmin, the go.mod version; or docker on Linux; or --prebuilt-dir)"
+    else
+      miss "go (need >= $gmin to build from source; or docker on Linux; or --prebuilt-dir; on macOS: brew install go)"
+    fi
+  fi
+  if [ "$missing" -gt 0 ]; then
+    printf 'ERROR: %s prerequisite(s) missing; nothing was changed\n' "$missing" >&2
+    exit 1
+  fi
+}
 
 # valid_name <repo>: only mem-* names, never client or orchestrator repos.
 valid_name() {
@@ -84,11 +146,11 @@ valid_name() {
   printf '%s' "$1" | grep -Eq '^mem-[a-z0-9][a-z0-9._-]*$'
 }
 
-# is_denied <owner> <repo> (both lowercase): client owner or deny term match.
-is_denied() {
+# is_kept_out <owner> <repo> (both lowercase): keep-out owner or term match.
+is_kept_out() {
   local t
-  [ ${#DENY_OWNERS[@]} -eq 0 ] || ! in_list "$1" "${DENY_OWNERS[@]}" || return 0
-  for t in ${DENY_TERMS[@]+"${DENY_TERMS[@]}"}; do
+  [ ${#KEEP_OUT_OWNERS[@]} -eq 0 ] || ! in_list "$1" "${KEEP_OUT_OWNERS[@]}" || return 0
+  for t in ${KEEP_OUT_TERMS[@]+"${KEEP_OUT_TERMS[@]}"}; do
     case "$1/$2" in *"$t"*) return 0 ;; esac
   done
   return 1
@@ -145,6 +207,108 @@ else:
 ' "$1" "$2"
 }
 
+# check_key_pause: the per-host check key has to be minted by a human in the
+# GitHub UI. When the file is not there, say exactly how and exit 3 (paused,
+# needs a human) before anything is changed; the same command resumes.
+check_key_pause() {
+  local f="$CHECK_KEY_FILE"
+  case "$f" in /*) ;; *) die "--check-key-file must be an absolute path" ;; esac
+  if [ ! -e "$f" ] && [ ! -L "$f" ]; then
+    {
+      printf 'PAUSED: the check key %s does not exist yet. Nothing has been changed.\n' "$f"
+      printf 'A human has to create it:\n'
+      printf '  1. In a browser, as an owner of %s: GitHub > Settings > Developer settings > GitHub Apps > %s\n' "$ORG" "$CHECK_APP"
+      printf '  2. Under "Private keys" click "Generate a private key"; the browser downloads a .pem.\n'
+      printf '  3. On this host: copy the downloaded .pem to %s\n' "$f"
+      printf '  4. chmod 600 %s\n' "$f"
+      printf '  5. Delete the download from wherever the browser put it.\n'
+      printf '  6. Rerun the same command.\n'
+    } >&2
+    exit 3
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# One exit trap for everything that must happen on every exit path (success,
+# error, signal): remove the temporary admin app entry, and, with
+# --delete-org-token-file, securely delete the org token file (a real run only:
+# a dry run leaves it, so the same token serves the dry run and the real run).
+# ---------------------------------------------------------------------------
+DELETE_TOKEN_FILE=0 TOKEN_FILE_ARMED=0
+secure_delete() { # file: shred -u if there, else overwrite with zeros and remove
+  local f="$1" n
+  [ -e "$f" ] || [ -L "$f" ] || return 0
+  if command -v shred >/dev/null 2>&1; then
+    shred -u -- "$f" 2>/dev/null && return 0
+  fi
+  if [ -f "$f" ] && [ ! -L "$f" ]; then
+    n="$(wc -c <"$f" 2>/dev/null | tr -d ' ')"
+    if command -v dd >/dev/null 2>&1; then dd if=/dev/zero of="$f" bs=1 count="${n:-0}" conv=notrunc 2>/dev/null || true; fi
+  fi
+  rm -f -- "$f"
+}
+token_file_remove() {
+  [ "$TOKEN_FILE_ARMED" -eq 1 ] || return 0
+  TOKEN_FILE_ARMED=0
+  secure_delete "$ORG_TOKEN_FILE"
+  if [ -e "$ORG_TOKEN_FILE" ]; then
+    printf 'WARNING: could not delete the org token file %s; delete it by hand\n' "$ORG_TOKEN_FILE" >&2
+  fi
+}
+on_exit() {
+  local rc=$?
+  trap - EXIT
+  if declare -F admin_entry_remove >/dev/null; then admin_entry_remove; fi
+  token_file_remove
+  exit "$rc"
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+# check_token_file: a token file to be deleted must be a plain file of ours,
+# 0600, one link. Anything else is refused and left alone (it may not be ours).
+check_token_file() {
+  local f="$ORG_TOKEN_FILE" m u n
+  case "$f" in /*) ;; *) die "--org-token-file must be an absolute path with --delete-org-token-file" ;; esac
+  { [ -f "$f" ] && [ ! -L "$f" ]; } || die "org token file $f is missing or not a plain file"
+  m="$(stat -c %a "$f" 2>/dev/null || stat -f %Lp "$f")"
+  u="$(stat -c %u "$f" 2>/dev/null || stat -f %u "$f")"
+  n="$(stat -c %h "$f" 2>/dev/null || stat -f %l "$f")"
+  [ "$m" = 600 ] || die "org token file $f must be mode 0600 (is $m)"
+  [ "$u" = "$(id -u)" ] || die "org token file $f must be owned by you"
+  [ "$n" = 1 ] || die "org token file $f must have one hard link (has $n)"
+}
+
+# check_prebuilt: --prebuilt-dir must hold both binaries, executable, and
+# claude-memsync must report the version we expect. Sets PREBUILT_DIR (absolute)
+# and PB_VER. Runs the given claude-memsync once, with `version`, which is the
+# point: the binary says what it is.
+check_prebuilt() {
+  local b got
+  [ -d "$PREBUILT_DIR" ] || die "--prebuilt-dir $PREBUILT_DIR is not a directory"
+  PREBUILT_DIR="$(cd "$PREBUILT_DIR" && pwd -P)"
+  for b in claude-memsync claude-memmerge; do
+    { [ -f "$PREBUILT_DIR/$b" ] && [ -x "$PREBUILT_DIR/$b" ]; } || die "--prebuilt-dir: $PREBUILT_DIR/$b is missing or not executable"
+  done
+  got="$("$PREBUILT_DIR/claude-memsync" version 2>&1)" || die "--prebuilt-dir: '$PREBUILT_DIR/claude-memsync version' failed"
+  PB_VER="${got#claude-memsync }"
+  printf '%s' "$PB_VER" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._+-]*$' || die "--prebuilt-dir: unexpected version output from $PREBUILT_DIR/claude-memsync"
+}
+
+# valid_pq_recipient <key>: a hybrid post-quantum age public key, age1pq1 plus
+# at least 1000 more bech32 characters (real ones are about 1,960). No regex
+# repeat count anywhere: macOS's grep and bash [[ =~ ]] stop at 255. Parameter
+# expansion only, so it works in bash 3.2.
+valid_pq_recipient() {
+  local k="$1" rest
+  case "$k" in age1pq1?*) ;; *) return 1 ;; esac
+  [ "${#k}" -ge 1000 ] || return 1
+  rest="${k#age1pq1}"
+  [ -z "${rest//[023456789acdefghjklmnpqrstuvwxyz]/}" ]
+}
+
 # ---------------------------------------------------------------------------
 # Arguments
 # ---------------------------------------------------------------------------
@@ -152,13 +316,14 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --host)       [ $# -ge 2 ] || usage; HOST="$2"; shift 2 ;;
     --role)       [ $# -ge 2 ] || usage; ROLE="$2"; shift 2 ;;
-    --sha)        [ $# -ge 2 ] || usage; SHA="$2"; shift 2 ;;
+    --sha)        [ $# -ge 2 ] || usage; SHA="$2"; SHA_GIVEN=1; shift 2 ;;
+    --prebuilt-dir) [ $# -ge 2 ] || usage; PREBUILT_DIR="$2"; shift 2 ;;
     --org)        [ $# -ge 2 ] || usage; ORG="$2"; shift 2 ;;
     --recovery-recipient) [ $# -ge 2 ] || usage; AGE_RECOVERY="$2"; shift 2 ;;
     --workspace)  [ $# -ge 2 ] || usage; WORKSPACES+=("$2"); shift 2 ;;
     --own-owner)  [ $# -ge 2 ] || usage; OWN_OWNERS+=("$(lower "$2")"); shift 2 ;;
-    --deny-owner) [ $# -ge 2 ] || usage; DENY_OWNERS+=("$(lower "$2")"); shift 2 ;;
-    --deny-term)  [ $# -ge 2 ] || usage; DENY_TERMS+=("$(lower "$2")"); shift 2 ;;
+    --keep-out-owner | --deny-owner) [ $# -ge 2 ] || usage; KEEP_OUT_OWNERS+=("$(lower "$2")"); shift 2 ;;
+    --keep-out-term | --deny-term) [ $# -ge 2 ] || usage; KEEP_OUT_TERMS+=("$(lower "$2")"); shift 2 ;;
     --repo-url)   [ $# -ge 2 ] || usage; UTILS_URL="$2"; shift 2 ;;
     --org-token-file) [ $# -ge 2 ] || usage; ORG_TOKEN_FILE="$2"; shift 2 ;;
     --org-token-cmd)  [ $# -ge 2 ] || usage; ORG_TOKEN_CMD="$2"; shift 2 ;;
@@ -171,20 +336,32 @@ while [ $# -gt 0 ]; do
     --app-api-base)    [ $# -ge 2 ] || usage; APP_API_BASE="$2"; shift 2 ;;   # GitHub Enterprise, and the test fake
     --allow-org)  [ $# -ge 2 ] || usage; ALLOW_ORGS+=("$(lower "$2")"); shift 2 ;;
     --split-args-json) [ $# -ge 2 ] || usage; split_args json "$2"; exit $? ;;   # test hook
+    --delete-org-token-file) DELETE_TOKEN_FILE=1; shift ;;
     --dry-run)    DRY_RUN=1; shift ;;
     --yes)        YES=1; shift ;;
     -h | --help)  usage ;;
-    *)            die "unknown argument: $1" ;;
+    *)            udie "unknown argument: $1" ;;
   esac
 done
+[ -z "$PREBUILT_DIR" ] || BUILD_FROM_SOURCE=0   # installing given binaries: no clone, no build, no Go
+check_prereqs
 [ -n "$HOST" ] || die "--host is required"
 [ -n "$ORG" ] || die "--org <org> is required: the GitHub organisation that holds the memory repos (there is no default)"
 [ -n "$AGE_RECOVERY" ] || die "--recovery-recipient <age1pq1...> is required: your own offline post-quantum recovery PUBLIC key (generate one as docs/bootstrap.md describes; there is no default)"
-printf '%s' "$AGE_RECOVERY" | grep -Eq '^age1pq1[023456789acdefghjklmnpqrstuvwxyz]{1000,}$' || die "--recovery-recipient must be a post-quantum age1pq1... public key (a classic age1... or ssh key is refused: repos are post-quantum by default)"
+valid_pq_recipient "$AGE_RECOVERY" || die "--recovery-recipient must be a post-quantum age1pq1... public key (a classic age1... or ssh key is refused: repos are post-quantum by default)"
 n_tok=0
 for v in "$ORG_TOKEN_FILE" "$ORG_TOKEN_CMD" "$ORG_APP"; do [ -z "$v" ] || n_tok=$((n_tok + 1)); done
-[ "$n_tok" -le 1 ] || die "give only one of --org-token-file, --org-token-cmd or --org-app"
-[ "$n_tok" -eq 1 ] || die "--org-token-file <path>, --org-token-cmd \"<argv>\" or --org-app <name> is required: every org operation uses that token, never the ambient gh login"
+[ "$n_tok" -le 1 ] || udie "give only one of --org-token-file, --org-token-cmd or --org-app"
+[ "$n_tok" -eq 1 ] || udie "--org-token-file <path>, --org-token-cmd \"<argv>\" or --org-app <name> is required: every org operation uses that token, never the ambient gh login"
+if [ "$DELETE_TOKEN_FILE" -eq 1 ]; then
+  [ -n "$ORG_TOKEN_FILE" ] || udie "--delete-org-token-file is only valid with --org-token-file <path>"
+  check_token_file
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "dry run: the org token file would be deleted on a real run"   # a dry run changes nothing
+  else
+    TOKEN_FILE_ARMED=1   # from here on every exit path deletes the file
+  fi
+fi
 if [ -n "$ORG_APP" ]; then
   printf '%s' "$ORG_APP" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' || die "bad --org-app '$ORG_APP'"
   case "$HOME" in *[[:space:]\'\"\\]*) die "--org-app needs a HOME without spaces or quotes (the token command is passed as one string)" ;; esac
@@ -201,6 +378,7 @@ if [ -n "$CHECK_APP$CHECK_APP_ID$CHECK_KEY_FILE" ]; then
   printf '%s' "$CHECK_APP" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' || die "bad --check-app '$CHECK_APP'"
   printf '%s' "$CHECK_APP_ID" | grep -Eq '^[0-9]{1,20}$' || die "bad --check-app-id (numeric)"
   [ "$CHECK_APP" != "$ORG_APP" ] || die "--check-app must differ from --org-app: the admin app never serves the daemon"
+  check_key_pause
 fi
 ORG_TOKEN_ARGV=()
 if [ -n "$ORG_TOKEN_CMD" ]; then
@@ -214,19 +392,35 @@ if [ -n "$ORG_TOKEN_FILE" ]; then ORG_TOKEN_ARGS=(--token-file "$ORG_TOKEN_FILE"
 [ -n "$ROLE" ] || die "--role is required"
 printf '%s' "$HOST" | grep -Eq '^[a-z0-9][a-z0-9-]{0,31}$' || die "bad --host label '$HOST' (it is the host's label in recipients, deploy keys and join requests: 1-32 characters of a-z, 0-9 and '-', starting with a letter or digit)"
 printf '%s' "$ORG" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9-]*$' || die "bad --org '$ORG'"
-for o in ${DENY_OWNERS[@]+"${DENY_OWNERS[@]}"}; do
-  [ "$o" != "$(lower "$ORG")" ] || die "--org '$ORG' is also a --deny-owner; refusing"
+for o in ${KEEP_OUT_OWNERS[@]+"${KEEP_OUT_OWNERS[@]}"}; do
+  [ "$o" != "$(lower "$ORG")" ] || die "--org '$ORG' is also a keep-out owner; refusing"
 done
-if [ -z "$SHA" ]; then
-  SHA="$(git -C "$(dirname "$0")" rev-parse HEAD 2>/dev/null || true)"
-  [ -n "$SHA" ] || die "--sha is required when the script is not run from a git checkout"
+if [ -n "$PREBUILT_DIR" ]; then
+  check_prebuilt
+  if [ "$SHA_GIVEN" -eq 1 ]; then
+    printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || die "--sha must be a full 40-hex commit"
+    SHORT="$(printf '%s' "$SHA" | cut -c1-12)"
+    LIB_ID="$SHA"
+    SRC="$HOME/.local/src/claude-utils-$SHA"
+    case "$PB_VER" in *"$SHORT"*) ;; *) die "--prebuilt-dir: $PREBUILT_DIR/claude-memsync reports version '$PB_VER', which does not match --sha $SHORT; refusing" ;; esac
+  else
+    printf '%s' "$PB_VER" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9._+-]*$' \
+      || die "--prebuilt-dir: $PREBUILT_DIR/claude-memsync reports version '$PB_VER', which is not a release version (a tagged release stamps vX.Y.Z); pass --sha <commit> for a build of that commit"
+    SHORT="$PB_VER"; LIB_ID="$PB_VER"; SRC=""
+  fi
+else
+  if [ -z "$SHA" ]; then
+    SHA="$(git -C "$(dirname "$0")" rev-parse HEAD 2>/dev/null || true)"
+    [ -n "$SHA" ] || die "--sha is required when the script is not run from a git checkout"
+  fi
+  printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || die "--sha must be a full 40-hex commit"
+  SHORT="$(printf '%s' "$SHA" | cut -c1-12)"
+  LIB_ID="$SHA"
+  SRC="$HOME/.local/src/claude-utils-$SHA"
 fi
-printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || die "--sha must be a full 40-hex commit"
-SHORT="$(printf '%s' "$SHA" | cut -c1-12)"
-SRC="$HOME/.local/src/claude-utils-$SHA"
-LIB="$HOME/.local/lib/claude-memsync/$SHA"
-if [ ${#DENY_OWNERS[@]} -eq 0 ] && [ ${#DENY_TERMS[@]} -eq 0 ]; then
-  warn "no client owners or terms configured: client repos are only protected by routing"
+LIB="$HOME/.local/lib/claude-memsync/$LIB_ID"
+if [ ${#KEEP_OUT_OWNERS[@]} -eq 0 ] && [ ${#KEEP_OUT_TERMS[@]} -eq 0 ]; then
+  say "keep-out lists: none (routing alone decides what syncs)"
 fi
 ALLOW_ORGS+=("$(lower "$ORG")")
 OWN_OWNERS+=("$(lower "$ORG")")
@@ -234,7 +428,7 @@ OWN_OWNERS+=("$(lower "$ORG")")
 case "$ROLE" in
   homelab)      ROLE_REPOS="$ROLE_homelab_REPOS"; HOME_KEY="$ROLE_homelab_HOME" ;;
   personal-dev) ROLE_REPOS="$ROLE_personal_dev_REPOS"; HOME_KEY="$ROLE_personal_dev_HOME" ;;
-  *)            die "unknown role '$ROLE' (known: homelab, personal-dev). Client and orchestrator roles do not exist here." ;;
+  *)            die "unknown role '$ROLE' (known: homelab, personal-dev). There is no role for client or orchestrator repos." ;;
 esac
 for spec in $ROLE_REPOS; do
   IFS=: read -r k kind name <<<"$spec"
@@ -246,10 +440,6 @@ say "claude-memsync bootstrap: host=$HOST role=$ROLE org=$ORG commit=$SHORT$([ "
 # ---------------------------------------------------------------------------
 # a. Preflight
 # ---------------------------------------------------------------------------
-version_ge() { # have want (dotted, major.minor)
-  [ "$(printf '%s\n%s\n' "$2" "$1" | sort -t. -k1,1n -k2,2n | head -n1)" = "$2" ]
-}
-
 # org_token prints the org token. It is only called inside the command
 # substitution of org_gh (or the preflight check), so it never outlives a call.
 org_token() {
@@ -277,7 +467,7 @@ org_gh() {
 # Org reach, checked twice and reported separately: (a) what the ambient gh
 # login can see, (b) what the org token can see. Both warn and proceed (the
 # owner accepted this). The script only ever touches repos in --org.
-BANNER_AMBIENT="" BANNER_TOKEN=""
+BANNER_AMBIENT="" BANNER_TOKEN="" REACH_ORGS=()
 org_banner() {
   [ -z "$BANNER_AMBIENT" ] || printf '\n%s\n' "$BANNER_AMBIENT" >&2
   [ -z "$BANNER_TOKEN" ] || printf '\n%s\n' "$BANNER_TOKEN" >&2
@@ -289,13 +479,23 @@ reach_banner() { # label orgs-output
     lo="$(lower "$o")"
     in_list "$lo" "${ALLOW_ORGS[@]}" && continue
     extra="${extra:+$extra, }$o"
-    if in_list "$lo" ${DENY_OWNERS[@]+"${DENY_OWNERS[@]}"}; then denied="${denied:+$denied, }$o"; fi
+    if in_list "$lo" ${KEEP_OUT_OWNERS[@]+"${KEEP_OUT_OWNERS[@]}"}; then denied="${denied:+$denied, }$o"; fi
   done <<<"$orgs"
   [ -n "$extra" ] || return 0
-  local b="!!! WARNING: this host's $label can reach $extra. An agent host holds an owner-level token with client-org reach."
+  local b="!!! WARNING: this host's $label can reach $extra. An agent host holds an owner-level token with reach beyond the memory repos."
   [ -z "$denied" ] || b="$b
-!!! CLIENT ORG(S) reachable through the $label: $denied. This script never creates, touches or keys any repo outside $ORG."
+!!! KEEP-OUT ORG(S) reachable through the $label: $denied. This script never creates, touches or keys any repo outside $ORG."
   printf '%s' "$b"
+}
+# note_reach <orgs-output>: remember the orgs outside the allow list (not in a
+# subshell, unlike reach_banner), for the plan's KEEP_OUT_OWNERS suggestion.
+note_reach() {
+  local o
+  while IFS= read -r o; do
+    [ -n "$o" ] || continue
+    in_list "$(lower "$o")" "${ALLOW_ORGS[@]}" && continue
+    in_list "$o" ${REACH_ORGS[@]+"${REACH_ORGS[@]}"} || REACH_ORGS+=("$o")
+  done <<<"$1"
 }
 check_token_readable() {
   local t
@@ -306,7 +506,7 @@ check_token_readable() {
 check_ambient_scope() {
   local orgs
   if orgs="$(gh api user/orgs --paginate --jq '.[].login' 2>/dev/null)"; then
-    BANNER_AMBIENT="$(reach_banner "gh login" "$orgs")"
+    BANNER_AMBIENT="$(reach_banner "gh login" "$orgs")"; note_reach "$orgs"
   else
     warn "cannot list the orgs the ambient gh login can see"
   fi
@@ -317,12 +517,12 @@ check_token_scope() {
     # An installation token cannot list /user/orgs; the owners of the repos the
     # installation reaches are the orgs it can touch.
     if orgs="$(org_gh api installation/repositories --paginate --jq '.repositories[].owner.login' 2>/dev/null | sort -u)"; then
-      BANNER_TOKEN="$(reach_banner "org token" "$orgs")"
+      BANNER_TOKEN="$(reach_banner "org token" "$orgs")"; note_reach "$orgs"
     else
       warn "cannot list the repositories the app installation reaches"
     fi
   elif orgs="$(org_gh api user/orgs --paginate --jq '.[].login' 2>/dev/null)"; then
-    BANNER_TOKEN="$(reach_banner "org token" "$orgs")"
+    BANNER_TOKEN="$(reach_banner "org token" "$orgs")"; note_reach "$orgs"
   else
     warn "cannot list the orgs the org token can see"
   fi
@@ -419,7 +619,6 @@ admin_entry_add() {
     die "$APPS already has an entry named $ORG_APP; refusing to replace it (and delete it at the end). Drop --org-app-id/--org-app-key-cmd to use that entry, or remove it first."
   fi
   ADMIN_WRITTEN=1
-  trap admin_entry_remove EXIT
   apps_edit upsert "$ORG_APP" "$(app_entry "$ORG_APP" "$ORG_APP_ID" "" "$(split_args json "$ORG_APP_KEY_CMD")")"
 }
 admin_entry_remove() {
@@ -441,31 +640,16 @@ check_key_file() {
   [ "$n" = 1 ] || die "check key file $f must have one hard link (has $n)"
 }
 
-GO_MODE=""
 preflight() {
   step "a. Preflight"
-  local gv
-  command -v git >/dev/null || die "git not found"
-  gv="$(git --version | sed -E 's/[^0-9]*([0-9]+\.[0-9]+).*/\1/')"
-  version_ge "$gv" 2.26 || die "git $gv is too old (need >= 2.26)"
-  for c in gh ssh-keygen ssh-keyscan python3; do
-    command -v "$c" >/dev/null || die "$c not found"
-  done
   gh auth status >/dev/null 2>&1 || die "gh is not logged in (run: gh auth login)"
   [ -z "$CHECK_APP" ] || check_key_file
   admin_entry_add
   check_org_scope
-  if command -v go >/dev/null && version_ge "$(go version | sed -E 's/.*go([0-9]+\.[0-9]+).*/\1/')" 1.25; then
-    GO_MODE=go
-  elif command -v docker >/dev/null && [ "$(uname -s)" = Linux ]; then
-    GO_MODE=docker
-  else
-    die "need Go >= 1.25 (or docker on Linux). On macOS: brew install go"
-  fi
   command -v claude >/dev/null || warn "claude not found on PATH; the plugin step will be skipped"
 
   # Predecessor writers: refuse while any is active.
-  local old="$HOME/.config/memsync/config.json"
+  local old="$XDG_CFG/memsync/config.json"
   if [ -f "$old" ] && python3 -I - "$old" <<'PY'
 import json, sys
 try:
@@ -484,7 +668,7 @@ PY
       fi
     done
   fi
-  say "  ok (git $gv, gh logged in, build via $GO_MODE)"
+  say "  ok (gh logged in${GO_MODE:+, build via $GO_MODE})"
 }
 
 check_sync_dirs() { # run after the plan is final
@@ -547,8 +731,8 @@ $ws" seen="" checkouts
 "; continue ;;
     esac
     owner="$(lower "${rest%%/*}")"; repo="$(lower "${rest#*/}")"
-    if is_denied "$owner" "$repo"; then
-      NOT_SYNCED="${NOT_SYNCED}  $p ($owner/$repo): REFUSED (client owner)
+    if is_kept_out "$owner" "$repo"; then
+      NOT_SYNCED="${NOT_SYNCED}  $p ($owner/$repo): REFUSED (keep-out)
 "; continue
     fi
     if ! in_list "$owner" "${OWN_OWNERS[@]}"; then
@@ -585,6 +769,9 @@ confirm_plan() {
     if [ "$t" = pin ]; then say "    folder $a -> $b"; else say "    remote $a -> $b"; fi
   done
   say "  encryption: age on every repo, recovery recipient $AGE_RECOVERY"
+  if [ ${#REACH_ORGS[@]} -gt 0 ] && [ ${#KEEP_OUT_OWNERS[@]} -eq 0 ]; then
+    say "  suggestion: these orgs are reachable and none is kept out; to keep any out, set KEEP_OUT_OWNERS=\"${REACH_ORGS[*]}\" (or pass --keep-out-owner <org>)"
+  fi
   if [ "$DRY_RUN" -eq 1 ] || [ "$YES" -eq 1 ]; then return 0; fi
   [ -t 0 ] || die "not a terminal: pass --yes to accept this plan"
   printf 'Type yes to create these repos and keys: '
@@ -595,7 +782,43 @@ confirm_plan() {
 # ---------------------------------------------------------------------------
 # b. Source and build
 # ---------------------------------------------------------------------------
+step_install_prebuilt() {
+  step "b. Install prebuilt binaries from $PREBUILT_DIR ($SHORT)"
+  local b
+  for b in claude-memsync claude-memmerge; do
+    if [ -e "$LIB/$b" ]; then
+      cmp -s "$PREBUILT_DIR/$b" "$LIB/$b" || die "$LIB/$b exists and differs from $PREBUILT_DIR/$b; refusing to overwrite it"
+    fi
+  done
+  if [ -x "$LIB/claude-memsync" ] && [ -x "$LIB/claude-memmerge" ]; then
+    say "  binaries present in $LIB"
+  else
+    run mkdir -p "$LIB"
+    for b in claude-memsync claude-memmerge; do
+      run cp "$PREBUILT_DIR/$b" "$LIB/$b.tmp"
+      run chmod 755 "$LIB/$b.tmp"
+      run mv -f "$LIB/$b.tmp" "$LIB/$b"
+    done
+  fi
+  link_binaries
+}
+
+link_binaries() {
+  run mkdir -p "$BIN"
+  local b aside
+  for b in claude-memsync claude-memmerge; do
+    if [ -e "$BIN/$b" ] && [ ! -L "$BIN/$b" ]; then
+      [ -f "$BIN/$b" ] || die "$BIN/$b exists and is not a regular file or a symlink; refusing to touch it"
+      aside="$BIN/$b.pre-bootstrap-$(date -u +%Y%m%dT%H%M%SZ)"
+      say "  $BIN/$b is a standalone binary, not a symlink: moving it aside to $aside"
+      run mv "$BIN/$b" "$aside"
+    fi
+    run ln -sfn "$LIB/$b" "$BIN/$b"
+  done
+}
+
 step_build() {
+  if [ -n "$PREBUILT_DIR" ]; then step_install_prebuilt; return 0; fi
   step "b. Clone claude-utils at $SHORT and build"
   if [ -d "$SRC/.git" ] && [ "$(git -C "$SRC" rev-parse HEAD)" = "$SHA" ]; then
     say "  clone present at $SRC"
@@ -620,12 +843,7 @@ step_build() {
         sh -c 'go build -o /out/claude-memsync ./cmd/claude-memsync && go build -o /out/claude-memmerge ./cmd/claude-memmerge'
     fi
   fi
-  run mkdir -p "$BIN"
-  local b
-  for b in claude-memsync claude-memmerge; do
-    [ ! -e "$BIN/$b" ] || [ -L "$BIN/$b" ] || die "$BIN/$b exists and is not a symlink"
-    run ln -sfn "$LIB/$b" "$BIN/$b"
-  done
+  link_binaries
 }
 
 # ---------------------------------------------------------------------------
@@ -753,7 +971,7 @@ plan_routes_json() {
   for i in "${!R_KEYS[@]}"; do spec="${spec}repo|${R_KEYS[$i]}|${R_NAMES[$i]}|${R_KINDS[$i]}
 "; done
   spec="$spec$RULE_LINES"
-  BS_SPEC="$spec" BS_SYNC_ROOT="$SYNC_ROOT" BS_HOME="$HOME" BS_OLD="$ROUTES" python3 -I - <<'PY'
+  BS_SPEC="$spec" BS_SYNC_ROOT="$SYNC_ROOT" BS_HOME="$HOME" BS_XDG="$XDG_CFG" BS_OLD="$ROUTES" python3 -I - <<'PY'
 import json, os
 repos, routes, pins = {}, [], []
 personal = None
@@ -769,13 +987,14 @@ for line in os.environ["BS_SPEC"].splitlines():
     elif p[0] == "remote":
         routes.append({"remote": p[1], "repo": p[2]})
 home = os.environ["BS_HOME"]
+xdg = os.environ["BS_XDG"]
 out = {"repos": repos, "routes": pins + routes, "default": "deny",
        "foreignWriters": [
-           {"file": home + "/.config/memsync/config.json", "jsonKeyNonEmpty": "repo"},
+           {"file": xdg + "/memsync/config.json", "jsonKeyNonEmpty": "repo"},
            {"systemdUnit": "memsync.timer"},
            {"systemdUnit": "memsync.service"},
            {"process": "memsync/bin/memsync"},
-           {"claudePlugin": "memsync@memsync", "onlyIfFile": home + "/.config/memsync/config.json"}]}
+           {"claudePlugin": "memsync@memsync", "onlyIfFile": xdg + "/memsync/config.json"}]}
 if personal:
     out["personal"] = personal
 try:   # a registry the owner configured survives a regeneration
@@ -813,13 +1032,24 @@ step_routes() {
   local k t new regen=0
   for k in $(printf '%s\n' ${R_KINDS[@]+"${R_KINDS[@]}"} | sort -u); do
     if [ -e "$CFG/denylist-$k.txt" ]; then
-      say "  denylist-$k.txt exists (kept)"
+      # A re-run adds new keep-out terms (escaped, de-duplicated) and never removes a line.
+      local f="$CFG/denylist-$k.txt" esc added=0
+      for t in ${KEEP_OUT_TERMS[@]+"${KEEP_OUT_TERMS[@]}"}; do
+        esc="$(re_escape "$t")"
+        grep -qxF -- "$esc" "$f" && continue
+        added=$((added + 1))
+        [ "$DRY_RUN" -eq 1 ] && continue
+        if [ -s "$f" ] && [ -n "$(tail -c1 "$f")" ]; then printf '\n' >>"$f"; fi
+        printf '%s\n' "$esc" >>"$f"
+      done
+      if [ "$added" -gt 0 ]; then say "  denylist-$k.txt: $([ "$DRY_RUN" -eq 1 ] && echo "would add" || echo added) $added keep-out term(s); existing lines kept"
+      else say "  denylist-$k.txt: no new keep-out terms (existing lines kept)"; fi
     else
       run mkdir -p "$CFG"
-      say "  writing $CFG/denylist-$k.txt (${#DENY_TERMS[@]} deny terms)"
+      say "  writing $CFG/denylist-$k.txt (${#KEEP_OUT_TERMS[@]} keep-out terms)"
       if [ "$DRY_RUN" -eq 0 ]; then
         : >"$CFG/denylist-$k.txt"; chmod 600 "$CFG/denylist-$k.txt"
-        for t in ${DENY_TERMS[@]+"${DENY_TERMS[@]}"}; do re_escape "$t" >>"$CFG/denylist-$k.txt"; printf '\n' >>"$CFG/denylist-$k.txt"; done
+        for t in ${KEEP_OUT_TERMS[@]+"${KEEP_OUT_TERMS[@]}"}; do re_escape "$t" >>"$CFG/denylist-$k.txt"; printf '\n' >>"$CFG/denylist-$k.txt"; done
       fi
     fi
   done
@@ -905,7 +1135,6 @@ step_token_split() {
         fi
       else
         say "  no registry in routes.json: the check key is not recorded there"
-        NEXT_STEPS+=("when a registry is configured: claude-memsync host check-key --fingerprint $fp --app $slug")
       fi
     fi
   elif [ -f "$tf" ] && [ "$(stat -c %a "$tf" 2>/dev/null || stat -f %Lp "$tf")" = 600 ]; then
@@ -949,6 +1178,11 @@ step_home() {
 step_plugin() {
   step "h. Plugin memory-notices"
   if done_p plugin; then say "  already installed"; return 0; fi
+  if [ "$BUILD_FROM_SOURCE" -eq 0 ] && { [ -z "$SRC" ] || [ ! -d "$SRC/.git" ]; }; then
+    say "  plugin step skipped: a prebuilt install has no source checkout"
+    NEXT_STEPS+=("install the plugin from a clone of the matching commit: claude plugin marketplace add <clone> && claude plugin install memory-notices@claude-utils")
+    return 0
+  fi
   if [ "$DRY_RUN" -eq 0 ] && ! command -v claude >/dev/null; then
     warn "claude not found; skipping the plugin"
     NEXT_STEPS+=("install Claude Code, then: claude plugin marketplace add $SRC && claude plugin install memory-notices@claude-utils")
@@ -997,7 +1231,7 @@ step_summary() {
     for i in "${!PENDING_JOINS[@]}"; do say "    ${PENDING_JOINS[$i]}"; done
   fi
   say "  next:"
-  say "    - restart Claude sessions so the memory-notices hooks load"
+  say "    - run /reload-plugins in each open Claude session, or restart the sessions, so the memory-notices hooks load"
   for i in ${NEXT_STEPS[@]+"${!NEXT_STEPS[@]}"}; do say "    - ${NEXT_STEPS[$i]}"; done
   [ ${#PENDING_JOINS[@]} -eq 0 ] || say "    - after the join is accepted: claude-memsync status"
 }
