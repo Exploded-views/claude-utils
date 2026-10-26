@@ -148,6 +148,7 @@ guard_run() {
       printf 'GUARD_RC:%s\n' "$crc"
     ) &
     cp=$!
+    disown "$cp" 2>/dev/null || true   # a leader killed on purpose (a timeout, a signal) leaves no "Killed ( ... )" job notice (bash 3.2)
     if [ "$shielded" -eq 0 ]; then
       trap 'kill -KILL -- "-$cp" 2>/dev/null; kill -KILL "$cp" 2>/dev/null; exit 1' INT TERM HUP
     fi
@@ -350,7 +351,7 @@ g_kind() {
   local k
   k="$(stat -c %F "$1" 2>/dev/null || stat -f %HT "$1")" || return 1
   case "$k" in
-    "regular file" | "Regular File") printf file ;;
+    "regular file" | "regular empty file" | "Regular File") printf file ;;
     directory | Directory) printf dir ;;
     "symbolic link" | "Symbolic Link") printf symlink ;;
     *) return 1 ;;
@@ -709,9 +710,14 @@ else:
 # GitHub UI. When the file is not there, say exactly how and exit 3 (paused,
 # needs a human) before anything is changed; the same command resumes.
 check_key_pause() {
-  local f="$CHECK_KEY_FILE"
+  local f="$CHECK_KEY_FILE" st
   case "$f" in /*) ;; *) udie "--check-key-file must be an absolute path" ;; esac
-  if [ ! -e "$f" ] && [ ! -L "$f" ]; then   # fs-ok: pauses when the check key is not there; a stat error pauses too (the stricter way), the key checks follow
+  st="$(path_state "$f")" || st="ERR path_state failed"
+  case "$st" in
+    ABSENT | PRESENT | DANGLING) ;;   # a dangling link is the key checks' to refuse
+    *) die "cannot check the key file $f (${st#ERR }); nothing has been changed. Fix the access to it (permissions of its folder?), then rerun" ;;
+  esac
+  if [ "$st" = ABSENT ]; then
     {
       printf 'PAUSED: the check key %s does not exist yet. Nothing has been changed.\n' "$f"
       printf 'A human has to create it:\n'
@@ -838,14 +844,16 @@ jr_kill_all() { # stop every job still running, with its children; wait for them
 # ---------------------------------------------------------------------------
 DELETE_TOKEN_FILE=0 TOKEN_FILE_ARMED=0
 secure_delete() { # file: remove it; where shred exists, overwrite it first as an extra (SSDs and APFS give no guarantee)
-  local f="$1"
-  [ -e "$f" ] || [ -L "$f" ] || return 0   # fs-ok: only decides whether there is something to delete
+  local f="$1" st
   if [ -f "$f" ] && [ ! -L "$f" ] && command -v shred >/dev/null 2>&1; then   # fs-ok: an extra overwrite of a plain file; the rm -f follows either way
     shred -u -- "$f" 2>/dev/null || true
   fi
-  rm -f -- "$f"
+  rm -f -- "$f" 2>/dev/null || true   # whatever it is (a dangling link too), and whether or not it could be stat'ed first
+  st="$(g_state "$f")" || st="UNKNOWN"
+  [ "$st" = ABSENT ] || warn "could not remove $f (state: $st); delete it by hand"
 }
 token_file_remove() {
+  local st
   [ "$TOKEN_FILE_ARMED" -eq 1 ] || return 0
   TOKEN_FILE_ARMED=0
   if ! guard_ok token_file_ok "$ORG_TOKEN_FILE"; then   # it may have been swapped for something that is not ours
@@ -853,17 +861,22 @@ token_file_remove() {
     return 0
   fi
   secure_delete "$ORG_TOKEN_FILE"
-  if [ -e "$ORG_TOKEN_FILE" ]; then   # fs-ok: only decides whether to print the could-not-delete warning
-    printf 'WARNING: could not delete the org token file %s; delete it by hand\n' "$ORG_TOKEN_FILE" >&2
+  st="$(g_state "$ORG_TOKEN_FILE")" || st="UNKNOWN"
+  if [ "$st" != ABSENT ]; then   # anything but a clear "gone" (still there, a dangling link, no answer) is a warning
+    printf 'WARNING: could not delete the org token file %s (state: %s); delete it by hand\n' "$ORG_TOKEN_FILE" "$st" >&2
   fi
 }
 # run_dir_remove: the run's private temp dir (job output, the minted org token), removed on every exit path.
 RUN_DIR=""
 run_dir_remove() {
-  local f
+  local n st
   [ -n "$RUN_DIR" ] || return 0
-  for f in "$RUN_DIR"/*; do [ -e "$f" ] || continue; secure_delete "$f"; done   # fs-ok: removes the files that are there
-  rmdir "$RUN_DIR" 2>/dev/null || true
+  # every name in the directory listing (hidden ones, dangling links and entries that cannot be stat'ed too)
+  while IFS= read -r n; do secure_delete "$RUN_DIR/$n"; done < <(ls -A "$RUN_DIR" 2>/dev/null)
+  if ! rmdir "$RUN_DIR" 2>/dev/null; then
+    st="$(g_state "$RUN_DIR")" || st="UNKNOWN"
+    [ "$st" = ABSENT ] || warn "could not remove the run's temp dir $RUN_DIR (state: $st); delete it by hand"
+  fi
   RUN_DIR=""
 }
 on_exit() {
@@ -1542,6 +1555,22 @@ link_binaries() {
 step_build() {
   if [ -n "$PREBUILT_DIR" ]; then step_install_prebuilt; return 0; fi
   step "b. Clone claude-utils at $SHORT and build"
+  # A build never overwrites what is already in the lib dir (there is nothing to compare a fresh build with, and a
+  # tampered or half-written file is not ours to replace): a present binary has to be an executable regular file,
+  # and is kept; only a missing one is built. Anything else is refused before anything is changed.
+  local b bs bk todo=""
+  for b in claude-memsync claude-memmerge; do
+    bs="$(g_state "$LIB/$b")" || die "cannot tell whether $LIB/$b exists; refusing to overwrite it"
+    case "$bs" in
+      ABSENT) todo="$todo $b" ;;
+      PRESENT)
+        bk="$(g_kind "$LIB/$b")" || die "cannot tell what $LIB/$b is; refusing to overwrite it"
+        [ "$bk" = file ] || die "$LIB/$b exists but is not an executable regular file; refusing to overwrite it (move it aside, then run again)"
+        [ -x "$LIB/$b" ] || die "$LIB/$b exists but is not an executable regular file; refusing to overwrite it (move it aside, then run again)"   # fs-ok: false refuses, and g_kind just said it is a regular file
+        ;;
+      *) die "$LIB/$b is a dangling symlink; refusing to overwrite it" ;;
+    esac
+  done
   if [ -d "$SRC/.git" ] && [ "$(git -C "$SRC" rev-parse HEAD)" = "$SHA" ]; then   # fs-ok: false takes the clone branch, where git clone refuses a non-empty target
     say "  clone present at $SRC"
   else
@@ -1553,17 +1582,19 @@ step_build() {
   if [ "$DRY_RUN" -eq 0 ]; then
     [ "$(git -C "$SRC" rev-parse HEAD)" = "$SHA" ] || die "HEAD of $SRC is not $SHA"
   fi
-  if [ -x "$LIB/claude-memsync" ] && [ -x "$LIB/claude-memmerge" ]; then   # fs-ok: false (re)installs or rebuilds at the pinned commit; the cmp check above refuses a differing file
+  if [ -z "$todo" ]; then
     say "  binaries present in $LIB"
   else
     run mkdir -p "$LIB"
-    if [ "$GO_MODE" = go ]; then
-      run sh -c "cd '$SRC' && go build -o '$LIB/claude-memsync' ./cmd/claude-memsync && go build -o '$LIB/claude-memmerge' ./cmd/claude-memmerge"
-    else
-      run docker run --rm --user "$(id -u):$(id -g)" -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -e GOFLAGS=-buildvcs=false \
-        -v "$SRC:/src" -v "$LIB:/out" -w /src golang:1.25 \
-        sh -c 'go build -o /out/claude-memsync ./cmd/claude-memsync && go build -o /out/claude-memmerge ./cmd/claude-memmerge'
-    fi
+    for b in $todo; do
+      if [ "$GO_MODE" = go ]; then
+        run sh -c "cd '$SRC' && go build -o '$LIB/$b' ./cmd/$b"
+      else
+        run docker run --rm --user "$(id -u):$(id -g)" -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -e GOFLAGS=-buildvcs=false \
+          -v "$SRC:/src" -v "$LIB:/out" -w /src golang:1.25 \
+          sh -c "go build -o /out/$b ./cmd/$b"
+      fi
+    done
   fi
   link_binaries
 }
@@ -1647,7 +1678,7 @@ plan_routes_json() {
 "; done
   spec="$spec$RULE_LINES"
   BS_SPEC="$spec" BS_SYNC_ROOT="$SYNC_ROOT" BS_HOME="$HOME" BS_XDG="$XDG_CFG" BS_OLD="$ROUTES" python3 -I - <<'PY'
-import json, os
+import json, os, sys
 repos, routes, pins = {}, [], []
 personal = None
 for line in os.environ["BS_SPEC"].splitlines():
@@ -1706,7 +1737,27 @@ raise SystemExit(0 if old == new else 1)'
 # here, or the run stops, rather than creating repos nothing routes to.
 step_routes() {
   step "e. routes.json and denylists"
-  local k t new regen=0 dls rs bak
+  local k t new regen=0 dls rs bak write=1 tmp
+  # The checks and the routes.json decision come first; nothing is written (no denylist either)
+  # until routes.json has been decided, so a refusal leaves the config dir as it was.
+  for k in $(printf '%s\n' ${R_KINDS[@]+"${R_KINDS[@]}"} | sort -u); do
+    dls="$(g_state "$CFG/denylist-$k.txt")" || die "cannot tell whether $CFG/denylist-$k.txt exists; refusing"
+    case "$dls" in ABSENT | PRESENT) ;; *) die "$CFG/denylist-$k.txt is a dangling symlink; refusing to write through it" ;; esac
+  done
+  new="$(plan_routes_json)" || die "cannot plan routes.json: the existing $ROUTES cannot be read; it is left as it is"
+  rs="$(g_state "$ROUTES")" || die "cannot tell whether $ROUTES exists; refusing to replace it"
+  case "$rs" in ABSENT | PRESENT) ;; *) die "$ROUTES is a dangling symlink; refusing to replace it (it is left as it is)" ;; esac
+  if [ "$rs" = "PRESENT" ]; then
+    if routes_same "$new"; then
+      say "  routes.json already matches the plan"; write=0
+    elif done_p routes; then
+      regen=1
+      say "  the plan differs from the routes.json written by an earlier run (a new project or workspace): regenerating it; the old one is kept as $ROUTES.bak.<time>"
+    elif [ "$YES" -eq 0 ]; then
+      die "$ROUTES already exists and differs from this plan; refusing to overwrite it (pass --yes to replace it, a timestamped .bak.<time> is kept)"
+    fi
+  fi
+  # the denylists
   for k in $(printf '%s\n' ${R_KINDS[@]+"${R_KINDS[@]}"} | sort -u); do
     dls="$(g_state "$CFG/denylist-$k.txt")" || die "cannot tell whether $CFG/denylist-$k.txt exists; refusing"
     case "$dls" in ABSENT | PRESENT) ;; *) die "$CFG/denylist-$k.txt is a dangling symlink; refusing to write through it" ;; esac
@@ -1732,18 +1783,7 @@ step_routes() {
       fi
     fi
   done
-  new="$(plan_routes_json)" || die "cannot plan routes.json: the existing $ROUTES cannot be read; it is left as it is"
-  rs="$(g_state "$ROUTES")" || die "cannot tell whether $ROUTES exists; refusing to replace it"
-  case "$rs" in ABSENT | PRESENT) ;; *) die "$ROUTES is a dangling symlink; refusing to replace it (it is left as it is)" ;; esac
-  if [ "$rs" = "PRESENT" ]; then
-    if routes_same "$new"; then say "  routes.json already matches the plan"; return 0; fi
-    if done_p routes; then
-      regen=1
-      say "  the plan differs from the routes.json written by an earlier run (a new project or workspace): regenerating it; the old one is kept as $ROUTES.bak.<time>"
-    elif [ "$YES" -eq 0 ]; then
-      die "$ROUTES already exists and differs from this plan; refusing to overwrite it (pass --yes to replace it, a timestamped .bak.<time> is kept)"
-    fi
-  fi
+  [ "$write" -eq 1 ] || return 0
   say "  writing $ROUTES (0600, default deny, foreignWriters for the old memsync)"
   [ "$DRY_RUN" -eq 1 ] && return 0
   mkdir -p "$CFG"
@@ -1751,8 +1791,11 @@ step_routes() {
     bak="$(unique_path "$ROUTES.bak.${BOOTSTRAP_ASIDE_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}")" || die "cannot find a free name for the backup of $ROUTES"
     cp -p "$ROUTES" "$bak"
   fi
-  printf '%s\n' "$new" >"$ROUTES.tmp"
-  chmod 600 "$ROUTES.tmp"; mv "$ROUTES.tmp" "$ROUTES"
+  # a private temp file in the same directory (a fixed name could be a link someone planted), then an atomic rename
+  tmp="$(mktemp "$ROUTES.XXXXXX")" || die "cannot create a temp file next to $ROUTES"
+  printf '%s\n' "$new" >"$tmp" || { rm -f -- "$tmp"; die "cannot write $tmp"; }
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$ROUTES" || { rm -f -- "$tmp"; die "cannot move $tmp into place as $ROUTES"; }
   mark routes
   # The rewritten file has lost the home pin; step_home puts it back.
   [ "$regen" -eq 0 ] || rm -f "$STATE/$HOST.home"
@@ -1828,10 +1871,15 @@ repo_keys_init() { # index
     printf '  $ gh repo deploy-key add %s -R %s/%s -w -t %s\n' "$pub" "$ORG" "$name" "$HOST"
     if [ "$DRY_RUN" -eq 0 ]; then
       if ! out="$(org_gh repo deploy-key add "$pub" -R "$ORG/$name" -w -t "$HOST" 2>&1)"; then
-        if printf '%s' "$out" | grep -qiE '422|forbidden|disabled|not allowed'; then
-          die "deploy keys look disabled for $ORG. One-time org setting: Organization settings > Repository > (Member privileges / Deploy keys) allow deploy keys on repositories (API field deploy_keys_enabled_for_repositories). Then re-run; this script resumes."
+        if printf '%s' "$out" | grep -qi 'key is already in use'; then
+          # a re-add of a key GitHub already has (an earlier run got this far): the ls-remote below proves it is accepted here
+          say "  deploy key for $name already present on GitHub (it said: key is already in use)"
+        else
+          if printf '%s' "$out" | grep -qiE '422|forbidden|disabled|not allowed'; then
+            die "deploy keys look disabled for $ORG. One-time org setting: Organization settings > Repository > (Member privileges / Deploy keys) allow deploy keys on repositories (API field deploy_keys_enabled_for_repositories). Then re-run; this script resumes."
+          fi
+          die "gh repo deploy-key add failed for $name: $out $(token_hint "$out")"
         fi
-        die "gh repo deploy-key add failed for $name: $out $(token_hint "$out")"
       fi
       mark "deploykey.$name"
     fi
@@ -1886,13 +1934,26 @@ repo_keys_init() { # index
 # jr_emit <index> <rc>: print a finished job's block (header, then its stdout,
 # then its stderr) and take over what it reported.
 jr_emit() {
-  local i="$1" rc="$2" l f
+  local i="$1" rc="$2" l f ks js
   printf -- '-- %s\n' "${R_NAMES[$i]}"
   cat "$RUN_DIR/$i.out"
   cat "$RUN_DIR/$i.err" >&2
   if [ "$rc" -ne 0 ]; then FAILED_REPOS="${FAILED_REPOS:+$FAILED_REPOS }${R_NAMES[$i]}"; fi
-  if [ -s "$RUN_DIR/$i.key" ]; then while IFS= read -r l; do KEYS_CREATED+=("$l"); done <"$RUN_DIR/$i.key"; fi   # fs-ok: the job's own report for the summary
-  if [ -s "$RUN_DIR/$i.join" ]; then while IFS= read -r l; do PENDING_JOINS+=("$l"); done <"$RUN_DIR/$i.join"; fi   # fs-ok: the job's own report for the summary
+  # What the job reported for the summary. A report that cannot be stat'ed or read is not "nothing to report":
+  # a pending join instruction in particular is never dropped (the next step says how to look it up).
+  ks="$(g_state "$RUN_DIR/$i.key")" || ks="UNKNOWN"
+  case "$ks" in
+    ABSENT) ;;
+    PRESENT) while IFS= read -r l; do KEYS_CREATED+=("$l"); done <"$RUN_DIR/$i.key" || warn "cannot read the list of keys job ${R_NAMES[$i]} made ($RUN_DIR/$i.key)" ;;
+    *) warn "cannot read the list of keys job ${R_NAMES[$i]} made ($RUN_DIR/$i.key is $ks)" ;;
+  esac
+  js="$(g_state "$RUN_DIR/$i.join")" || js="UNKNOWN"
+  case "$js" in
+    ABSENT) ;;
+    PRESENT) while IFS= read -r l; do PENDING_JOINS+=("$l"); done <"$RUN_DIR/$i.join" || PENDING_JOINS+=("${R_NAMES[$i]}: its join instruction could not be read; look it up with: claude-memsync join status --repo ${R_KEYS[$i]}") ;;
+    *) warn "cannot read the join instruction of job ${R_NAMES[$i]} ($RUN_DIR/$i.join is $js)"
+       PENDING_JOINS+=("${R_NAMES[$i]}: its join instruction could not be read; look it up with: claude-memsync join status --repo ${R_KEYS[$i]}") ;;
+  esac
   for f in out err key join; do rm -f "$RUN_DIR/$i.$f"; done
 }
 

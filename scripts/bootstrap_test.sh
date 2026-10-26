@@ -528,7 +528,7 @@ mkdir -p "$H/.config/claude-memsync"; printf 'keep\n' >"$H/victim"
 ln -s "$H/victim" "$H/.config/claude-memsync/routes.json.tmp"
 runboot --host testhost --role homelab --yes
 check "a routes.json.tmp symlink is not written through (the temp file is made with mktemp)" bash -c "[ $RC -eq 0 ] && [ \"\$(cat '$H/victim')\" = keep ] && [ -f '$H/.config/claude-memsync/routes.json' ] && [ ! -L '$H/.config/claude-memsync/routes.json' ] && grep -q '\"repos\"' '$H/.config/claude-memsync/routes.json'" _ "$OUT"
-check "... and no temp file is left behind" bash -c "[ -z \"\$(find '$H/.config/claude-memsync' -name 'routes.json.*' -not -name 'routes.json.tmp' | head -1)\" ]"
+check "... and no temp file is left behind" bash -c "[ -z \"\$(find '$H/.config/claude-memsync' -name 'routes.json.*' -not -name 'routes.json.tmp' -not -name 'routes.json.lock' | head -1)\" ]"
 newhome rt2
 mkdir -p "$H/.config/claude-memsync"; printf '{"registry": "git@example.invalid:me/registry.git", \n garbage' >"$H/.config/claude-memsync/routes.json"
 runboot --host testhost --role homelab --yes
