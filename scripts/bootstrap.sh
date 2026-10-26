@@ -61,6 +61,7 @@ say()  { printf '%s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+udie() { printf 'ERROR: %s\n' "$*" >&2; exit 2; }   # usage error: exit 2
 
 # run <cmd...>: print the command, then run it unless --dry-run.
 run() {
@@ -223,6 +224,58 @@ check_key_pause() {
 }
 
 # ---------------------------------------------------------------------------
+# One exit trap for everything that must happen on every exit path (success,
+# error, signal): remove the temporary admin app entry, and, with
+# --delete-org-token-file, securely delete the org token file.
+# ---------------------------------------------------------------------------
+DELETE_TOKEN_FILE=0 TOKEN_FILE_ARMED=0
+secure_delete() { # file: shred -u if there, else overwrite with zeros and remove
+  local f="$1" n
+  [ -e "$f" ] || [ -L "$f" ] || return 0
+  if command -v shred >/dev/null 2>&1; then
+    shred -u -- "$f" 2>/dev/null && return 0
+  fi
+  if [ -f "$f" ] && [ ! -L "$f" ]; then
+    n="$(wc -c <"$f" 2>/dev/null | tr -d ' ')"
+    if command -v dd >/dev/null 2>&1; then dd if=/dev/zero of="$f" bs=1 count="${n:-0}" conv=notrunc 2>/dev/null || true; fi
+  fi
+  rm -f -- "$f"
+}
+token_file_remove() {
+  [ "$TOKEN_FILE_ARMED" -eq 1 ] || return 0
+  TOKEN_FILE_ARMED=0
+  secure_delete "$ORG_TOKEN_FILE"
+  if [ -e "$ORG_TOKEN_FILE" ]; then
+    printf 'WARNING: could not delete the org token file %s; delete it by hand\n' "$ORG_TOKEN_FILE" >&2
+  fi
+}
+on_exit() {
+  local rc=$?
+  trap - EXIT
+  if declare -F admin_entry_remove >/dev/null; then admin_entry_remove; fi
+  token_file_remove
+  exit "$rc"
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+# check_token_file: a token file to be deleted must be a plain file of ours,
+# 0600, one link. Anything else is refused and left alone (it may not be ours).
+check_token_file() {
+  local f="$ORG_TOKEN_FILE" m u n
+  case "$f" in /*) ;; *) die "--org-token-file must be an absolute path with --delete-org-token-file" ;; esac
+  { [ -f "$f" ] && [ ! -L "$f" ]; } || die "org token file $f is missing or not a plain file"
+  m="$(stat -c %a "$f" 2>/dev/null || stat -f %Lp "$f")"
+  u="$(stat -c %u "$f" 2>/dev/null || stat -f %u "$f")"
+  n="$(stat -c %h "$f" 2>/dev/null || stat -f %l "$f")"
+  [ "$m" = 600 ] || die "org token file $f must be mode 0600 (is $m)"
+  [ "$u" = "$(id -u)" ] || die "org token file $f must be owned by you"
+  [ "$n" = 1 ] || die "org token file $f must have one hard link (has $n)"
+}
+
+# ---------------------------------------------------------------------------
 # Arguments
 # ---------------------------------------------------------------------------
 while [ $# -gt 0 ]; do
@@ -248,10 +301,11 @@ while [ $# -gt 0 ]; do
     --app-api-base)    [ $# -ge 2 ] || usage; APP_API_BASE="$2"; shift 2 ;;   # GitHub Enterprise, and the test fake
     --allow-org)  [ $# -ge 2 ] || usage; ALLOW_ORGS+=("$(lower "$2")"); shift 2 ;;
     --split-args-json) [ $# -ge 2 ] || usage; split_args json "$2"; exit $? ;;   # test hook
+    --delete-org-token-file) DELETE_TOKEN_FILE=1; shift ;;
     --dry-run)    DRY_RUN=1; shift ;;
     --yes)        YES=1; shift ;;
     -h | --help)  usage ;;
-    *)            die "unknown argument: $1" ;;
+    *)            udie "unknown argument: $1" ;;
   esac
 done
 check_prereqs
@@ -261,8 +315,13 @@ check_prereqs
 printf '%s' "$AGE_RECOVERY" | grep -Eq '^age1pq1[023456789acdefghjklmnpqrstuvwxyz]{1000,}$' || die "--recovery-recipient must be a post-quantum age1pq1... public key (a classic age1... or ssh key is refused: repos are post-quantum by default)"
 n_tok=0
 for v in "$ORG_TOKEN_FILE" "$ORG_TOKEN_CMD" "$ORG_APP"; do [ -z "$v" ] || n_tok=$((n_tok + 1)); done
-[ "$n_tok" -le 1 ] || die "give only one of --org-token-file, --org-token-cmd or --org-app"
-[ "$n_tok" -eq 1 ] || die "--org-token-file <path>, --org-token-cmd \"<argv>\" or --org-app <name> is required: every org operation uses that token, never the ambient gh login"
+[ "$n_tok" -le 1 ] || udie "give only one of --org-token-file, --org-token-cmd or --org-app"
+[ "$n_tok" -eq 1 ] || udie "--org-token-file <path>, --org-token-cmd \"<argv>\" or --org-app <name> is required: every org operation uses that token, never the ambient gh login"
+if [ "$DELETE_TOKEN_FILE" -eq 1 ]; then
+  [ -n "$ORG_TOKEN_FILE" ] || udie "--delete-org-token-file is only valid with --org-token-file <path>"
+  check_token_file
+  TOKEN_FILE_ARMED=1   # from here on every exit path deletes the file
+fi
 if [ -n "$ORG_APP" ]; then
   printf '%s' "$ORG_APP" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' || die "bad --org-app '$ORG_APP'"
   case "$HOME" in *[[:space:]\'\"\\]*) die "--org-app needs a HOME without spaces or quotes (the token command is passed as one string)" ;; esac
@@ -494,7 +553,6 @@ admin_entry_add() {
     die "$APPS already has an entry named $ORG_APP; refusing to replace it (and delete it at the end). Drop --org-app-id/--org-app-key-cmd to use that entry, or remove it first."
   fi
   ADMIN_WRITTEN=1
-  trap admin_entry_remove EXIT
   apps_edit upsert "$ORG_APP" "$(app_entry "$ORG_APP" "$ORG_APP_ID" "" "$(split_args json "$ORG_APP_KEY_CMD")")"
 }
 admin_entry_remove() {
