@@ -138,7 +138,28 @@ and SSH keys. None require root.
 | `claude-memsync run` | Run in the foreground (for debugging). |
 | `claude-memsync changes --since <rev>` or `--marker <file>` | List memory files changed in the sync repo since a point (`--project`, `--json`, `--limit`, `--update-marker`, `--hook`). See [Telling a running session what changed](#telling-a-running-session-what-changed). |
 | `claude-memsync distill` | Rebuild the distilled-memory catalog index (`--prune`, `--dry-run`, and with several repos `--repo <name>` or `--config <path>`, `--routes <path>`). See [distilling-memories.md](distilling-memories.md). |
-| `claude-memsync version` | Print version. |
+| `claude-memsync version [--json]` | Print the version. See [version output](#version-output). |
+
+## Version output
+
+`claude-memsync version` prints one line, `claude-memsync <version>`, for
+example `claude-memsync v0.3.0-ev.1`. `claude-memsync version --json` prints
+exactly one JSON object on one line, with these keys in this order:
+
+```json
+{"name":"claude-memsync","version":"v0.3.0-ev.1","commit":"<40 hex characters, or empty>","go":"go1.27.2","os":"linux","arch":"amd64"}
+```
+
+`version` is the same string the text line shows. `commit` is the VCS revision
+Go embedded in the build, and is `""` when the build has none (a build from a
+source archive, or with `-buildvcs=false`). `go`, `os` and `arch` come from the
+Go runtime. `claude-memmerge version --json` prints the same object with
+`"name":"claude-memmerge"`. `version` takes no other argument (anything else
+exits 2 without acting).
+
+Both forms are a stable interface for scripts: the text line's format and the
+JSON keys will not change without a "breaking" note in the
+[CHANGELOG](../CHANGELOG.md).
 
 ## How it works
 
@@ -1056,6 +1077,40 @@ saying so. The identity stays where it is and keeps working: each clone's git
 config holds the identity's absolute path (`memage.identity`), so moving the
 file would leave every repo keyless. Do not move or copy it by hand; a safe
 `identity move` that rewrites every clone is planned.
+
+### identity backup
+
+```sh
+claude-memsync identity backup --store-cmd "<argv>" [--verify-cmd "<argv>"] \
+    [--identity <path> | --all | --repo <name> | --config <path>] [--routes <path>] [--dry-run]
+```
+
+Stores this host's age identity file or files in your password manager and,
+with `--verify-cmd`, proves the stored copy is the same bytes. See
+[setup.md](setup.md#back-up-the-host-identity) for the usage and examples.
+
+What it does, in order, for each file:
+
+1. Resolves the files: `--identity`, else the distinct `memage.identity` of
+   `--repo`'s or `--config`'s clone, else of every clone this host routes
+   (a shared identity once).
+2. Checks the file: a regular file, not a symlink (also checked on the opened
+   file), no permission bits beyond 0600, owned by the current user, one hard
+   link, and an age classic (`AGE-SECRET-KEY-1…`) or hybrid
+   (`AGE-SECRET-KEY-PQ-1…`) identity. The contents are never part of a message.
+3. Runs `--store-cmd` with the file's bytes on stdin (the argument line is
+   split without a shell; interactive timeout 120 s, with the "waiting for your
+   password manager" line). Its stdout and stderr are discarded, and an error
+   names only the exit status or the timeout.
+4. With `--verify-cmd`, runs it (output at most 64 KiB) and compares the
+   SHA-256 of its stdout with the file's. Only the verdict is printed. The
+   buffers holding the key are zeroed after use, best effort.
+5. Prints `<path>`, the public-key fingerprint (the grouped form `join`
+   shows) and the result.
+
+Exit codes: 0 when every file was stored (and verified, when asked), 1 on any
+failure (an unsafe file, a failed or timed-out command, a mismatch), 2 for a
+usage error. `--dry-run` runs no command; it still checks the files.
 
 ### apps.json
 

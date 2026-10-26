@@ -196,6 +196,33 @@ the scrypt work factor. The design therefore:
 
 This feature is not built yet; see [setup.md](setup.md#break-glass-join-self-planned).
 
+## Backing up the host identity
+
+`identity backup` hands the host identity to a command you choose, normally
+your password manager's CLI. What it protects, and what it does not:
+
+- **The key is passed only on that command's standard input.** It is not in an
+  argument (visible in the process list), not in the environment, and never
+  printed or logged by the tool. Errors name an exit status or a timeout, not
+  the command's output.
+- **It refuses a weak source.** A file readable by group or others, owned by
+  someone else, with another hard link, a symlink, or not an age identity is
+  not read into the store command.
+- **Verification compares digests.** The read-back is checked by SHA-256 and
+  only the verdict is shown. Without `--verify-cmd` the backup is unverified,
+  and the command says so.
+- **It does not protect the key from the command you give it.** The store
+  command receives the plaintext key and can do anything with it; a wrapper
+  script that logs its stdin defeats the point. Use the manager's own CLI.
+- **It does not protect the key in memory.** Buffers are zeroed after use, but
+  Go may have copied them and the OS may have paged them out; the key is also
+  already on disk in the identity file.
+- **A backup is as strong as its store.** Anyone who gets into the password
+  manager item can decrypt every repo this host is a recipient of, so treat it
+  like the recovery key: strong manager protection, no shared vaults.
+- **It does not rotate or revoke.** A copied key stays valid until the host is
+  retired (`host retire`) and the repos re-encrypted.
+
 ## Other guards
 
 - **Private repos only.** Repos are created with `private: true` and read back;
