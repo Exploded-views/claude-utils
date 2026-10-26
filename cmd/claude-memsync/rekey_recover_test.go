@@ -315,3 +315,79 @@ func TestRekeyPQ_ResumeResetsAnIndexLeftOnClassicBlobs(t *testing.T) {
 		})
 	}
 }
+
+// N4: messages that matched the wrong situation.
+func TestRekeyPQ_DryRunOnAHalfMigratedRepoSaysHowToFinishOrUndo(t *testing.T) {
+	for _, stage := range []string{"migrated, not pushed", "scheme not yet repointed"} {
+		t.Run(stage, func(t *testing.T) {
+			c, newRec, _ := unpublishedRekey(t)
+			if stage == "scheme not yet repointed" {
+				if _, err := c.repo.Run("config", "--unset", agecrypt.SchemeConfigKey); err != nil {
+					t.Fatal(err)
+				}
+			}
+			code, out, errb := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root")
+			all := out + errb
+			if code != 0 {
+				t.Errorf("exit %d, want 0:\n%s", code, all)
+			}
+			if strings.Contains(all, "--drop-backup") {
+				t.Errorf("a half-migrated repo must not be told to drop its backup:\n%s", all)
+			}
+			for _, want := range []string{"interrupted", "--apply", "--rollback"} {
+				if !strings.Contains(all, want) {
+					t.Errorf("dry run lacks %q:\n%s", want, all)
+				}
+			}
+		})
+	}
+}
+
+func TestRekeyPQ_DryRunOnACompletedRepoSaysAlreadyDone(t *testing.T) {
+	c := newClassicRepo(t)
+	_, newRec := newPQKey(t, "newrec")
+	if code, o, e := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root", "--apply"); code != 0 {
+		t.Fatalf("%s%s", o, e)
+	}
+	code, out, errb := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root")
+	if code != 0 || !strings.Contains(out+errb, "already done") {
+		t.Errorf("exit %d, want 0 and \"already done\":\n%s%s", code, out, errb)
+	}
+}
+
+func TestRekeyPQ_CompletedRerunWithOtherFlagsIsNotCalledInterrupted(t *testing.T) {
+	c := newClassicRepo(t)
+	_, newRec := newPQKey(t, "newrec")
+	_, other := newPQKey(t, "other")
+	if code, o, e := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root", "--apply"); code != 0 {
+		t.Fatalf("%s%s", o, e)
+	}
+	code, out, errb := rekey(t, c, "--recovery-recipient", other, "--host", "vm-1", "--apply")
+	all := out + errb
+	if strings.Contains(all, "interrupted") || strings.Contains(all, "public recipient") {
+		t.Errorf("a finished rekey is neither interrupted nor migrated again:\n%s", all)
+	}
+	if code != 0 || !strings.Contains(all, "already done") {
+		t.Errorf("exit %d, want 0 and \"already done\":\n%s", code, all)
+	}
+}
+
+func TestRekeyPQ_AllRollbackSkipsPublishedRepos(t *testing.T) {
+	cfgs := rekeyHost(t, "a", "b")
+	_, rec := newPQKey(t, "rec")
+	if code, o, e := runRcpt("rekey-pq", "--all", "--recovery-recipient", rec, "--host", "vm-1", "--fresh-root", "--apply"); code != 0 {
+		t.Fatalf("%s%s", o, e)
+	}
+	code, out, errb := runRcpt("rekey-pq", "--all", "--rollback")
+	if code != 0 {
+		t.Fatalf("--all --rollback on published repos: exit %d\n%s%s", code, out, errb)
+	}
+	if strings.Count(out, "published; nothing to roll back") != 2 {
+		t.Errorf("each published repo must say so:\n%s%s", out, errb)
+	}
+	for n, c := range cfgs {
+		if agecrypt.SchemeOf(gitwt.New(c.SyncDir)) != agecrypt.SchemePQ {
+			t.Errorf("%s: a published repo was touched", n)
+		}
+	}
+}
