@@ -811,3 +811,77 @@ func TestRekeyPQ_LegacyRollbackWithoutExtraCommitsNeedsNoFlag(t *testing.T) {
 		t.Error("HEAD not back at the old tip")
 	}
 }
+
+// S6: the scan covers the default sync dir and compares resolved paths.
+func TestRetireClassic_KeepsTheFileForTheDefaultSyncDirClone(t *testing.T) {
+	c := newClassicRepo(t)
+	_, newRec := newPQKey(t, "newrec")
+	def := gitwt.New(config.Defaults().SyncDir) // under the test's HOME
+	if err := def.Init("main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := def.ConfigSet(agecrypt.IdentityConfigKey, filepath.ToSlash(c.idPath)); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errb := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root", "--apply")
+	if code != 0 {
+		t.Fatalf("%d %s%s", code, out, errb)
+	}
+	if _, err := os.Stat(c.idPath); err != nil {
+		t.Errorf("retired although the default sync dir clone uses it: %v\n%s", err, out)
+	}
+}
+
+func TestRetireClassic_ComparesResolvedIdentityPaths(t *testing.T) {
+	c := newClassicRepo(t)
+	_, newRec := newPQKey(t, "newrec")
+	link := filepath.Join(t.TempDir(), "keys-link")
+	if err := os.Symlink(filepath.Dir(c.idPath), link); err != nil {
+		t.Skip("no symlinks: ", err)
+	}
+	sr := gitwt.New(c.cfg.SyncDir + ".incident-2")
+	if err := sr.Init("main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sr.ConfigSet(agecrypt.IdentityConfigKey, filepath.ToSlash(filepath.Join(link, filepath.Base(c.idPath)))); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, errb := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root", "--apply"); code != 0 {
+		t.Fatalf("%d %s%s", code, out, errb)
+	}
+	if _, err := os.Stat(c.idPath); err != nil {
+		t.Error("retired although a clone names it through a symlink")
+	}
+}
+
+func TestIdentityInGitConfig_HandlesCommentsAndTilde(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := filepath.Join(t.TempDir(), "config")
+	body := "[core]\n\tbare = false\n[memage]\n\tidentity = ~/keys/id.txt # my key\n\tscheme = pq ; trailing\n"
+	if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := identityInGitConfig(cfg); got != "~/keys/id.txt" && got != filepath.Join(home, "keys", "id.txt") {
+		t.Errorf("identity %q", got)
+	}
+	if got := gitConfigValue(cfg, "memage", "scheme"); got != "pq" {
+		t.Errorf("scheme %q", got)
+	}
+}
+
+// N4
+func TestRetireClassic_DryRunSaysAlreadyRetired(t *testing.T) {
+	c := newClassicRepo(t)
+	_, newRec := newPQKey(t, "newrec")
+	if code, o, e := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root", "--apply"); code != 0 {
+		t.Fatalf("%s%s", o, e)
+	}
+	if _, err := os.Stat(c.idPath + ".classic-retired"); err != nil {
+		t.Fatal("setup: not retired")
+	}
+	code, out, errb := runRcpt("retire-classic", "--config", c.cfg.Path())
+	if code != 0 || !strings.Contains(out, "already retired") {
+		t.Errorf("exit %d, want \"already retired\":\n%s%s", code, out, errb)
+	}
+}

@@ -415,3 +415,25 @@ func TestRekeyState_LegacyHalfMigratedRepoIsBlockedUntilPushed(t *testing.T) {
 		t.Errorf("published legacy repo blocked: %s", why)
 	}
 }
+
+// N3: a linked work-tree has a .git file; the record lives in the common git
+// dir, and reading it must not fail (and so must not block the daemon).
+func TestRekeyState_ReadAtResolvesAGitFile(t *testing.T) {
+	f := newRekeyFx(t)
+	repo := f.h.repo
+	f.apply(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	if _, err := repo.Run("worktree", "add", "-q", "--detach", wt); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(filepath.Join(wt, ".git")); err != nil || fi.IsDir() {
+		t.Fatalf("setup: .git must be a file: %v", err)
+	}
+	st, err := ReadRekeyStateAt(wt)
+	if err != nil || st.Tip == "" {
+		t.Fatalf("read through the gitfile: %+v %v", st, err)
+	}
+	if _, err := ReadRekeyStateAt(t.TempDir()); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a dir without a repo has no record: %v", err)
+	}
+}
