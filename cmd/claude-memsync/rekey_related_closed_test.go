@@ -40,9 +40,10 @@ func TestRelatedCloneDirs_ASymlinkedCloneCountsAndKeepsTheIdentity(t *testing.T)
 	if !found {
 		t.Error("the symlinked clone was skipped by the scan")
 	}
-	code, out, errs := runRcpt("retire-classic", "--config", c.cfg.Path(), "--apply")
+	_, newRec := newPQKey(t, "newrec")
+	code, out, errs := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root", "--apply")
 	if code != 0 || !strings.Contains(out, "mem-linked") || !strings.Contains(out, "kept") {
-		t.Errorf("retire-classic must keep the identity and name the linked clone: %d\n%s%s", code, out, errs)
+		t.Errorf("the rekey must keep the identity and name the linked clone: %d\n%s%s", code, out, errs)
 	}
 	if _, err := os.Stat(c.idPath); err != nil {
 		t.Error("the identity was retired although a symlinked clone lists it")
