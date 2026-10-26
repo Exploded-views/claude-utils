@@ -238,3 +238,33 @@ func TestRekeyPQ_RefusalsComeBeforeAnyLocalChange(t *testing.T) {
 		t.Error("a refused rekey changed the repo")
 	}
 }
+
+func TestRekeyPQ_AllDryRunSummarisesAndFailsIfAnyWouldFail(t *testing.T) {
+	cfgs := rekeyHost(t, "a", "b", "c")
+	_, rec := newPQKey(t, "rec")
+	args := []string{"rekey-pq", "--all", "--recovery-recipient", rec, "--host", "vm-1", "--fresh-root"}
+
+	code, out, errb := runRcpt(args...)
+	if code != 0 || !strings.Contains(out+errb, "dry run: 3 ok, 0 would fail") {
+		t.Fatalf("clean dry run: exit %d\n%s%s", code, out, errb)
+	}
+
+	// Break b: the dry run goes on past it, then says so and exits nonzero.
+	if err := os.RemoveAll(filepath.Join(cfgs["b"].SyncDir, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errb = runRcpt(args...)
+	if code == 0 {
+		t.Fatalf("a dry run with a failing repo must exit nonzero\n%s%s", out, errb)
+	}
+	all := out + errb
+	if !strings.Contains(all, "dry run: 2 ok, 1 would fail") {
+		t.Errorf("summary lacks the dry run line:\n%s", all)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(errb), "dry run: 2 ok, 1 would fail") {
+		t.Errorf("the dry run line must end the summary:\n%s", errb)
+	}
+	if !strings.Contains(out, cfgs["c"].SyncDir) {
+		t.Errorf("c was not planned after b failed:\n%s", out)
+	}
+}
