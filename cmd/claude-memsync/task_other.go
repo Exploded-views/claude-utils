@@ -9,12 +9,17 @@ package main
 // keys — and can be installed/started without root.
 
 import (
+	"fmt"
+	"os"
+
 	"github.com/kardianos/service"
 )
 
 // userOptions are the kardianos options of the user service.
 func userOptions() service.KeyValue {
-	return service.KeyValue{"UserService": true}
+	// kardianos defaults RunAtLoad to false, which leaves a launchd agent not
+	// started at login. KeepAlive defaults to true; it stays.
+	return service.KeyValue{"UserService": true, "RunAtLoad": true, "KeepAlive": true}
 }
 
 func userSvc(configPath string) (service.Service, error) {
@@ -43,7 +48,15 @@ func installTask(configPath string) error {
 	if err != nil {
 		return err
 	}
-	return kardianosInstall(svc)
+	// A unit written by an earlier version is fixed in place: kardianos
+	// refuses to install over an existing unit.
+	if _, _, wrong := userUnitWrong(); wrong {
+		return ensureUserUnitTarget(os.Stderr)
+	}
+	if err := kardianosInstall(svc); err != nil {
+		return err
+	}
+	return ensureUserUnitTarget(os.Stderr)
 }
 
 func uninstallTask() error {
@@ -59,6 +72,9 @@ func startTask() error {
 	svc, err := userSvc("")
 	if err != nil {
 		return err
+	}
+	if err := ensureUserUnitTarget(os.Stderr); err != nil {
+		fmt.Fprintln(os.Stderr, "start: could not fix the unit's autostart target:", err)
 	}
 	return kardianosStart(svc)
 }
