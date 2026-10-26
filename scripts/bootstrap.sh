@@ -56,7 +56,8 @@ NOT_SYNCED=""                     # human-readable list
 KEYS_CREATED=() PENDING_JOINS=() NEXT_STEPS=()
 
 BIN="$HOME/.local/bin"
-CFG="$HOME/.config/claude-memsync"
+XDG_CFG="${XDG_CONFIG_HOME:-$HOME/.config}"   # where claude-memsync (os.UserConfigDir) keeps its config
+CFG="$XDG_CFG/claude-memsync"
 SYNC_ROOT="$HOME/.claudesync.d"
 STATE="$HOME/.local/state/claude-memsync-bootstrap"
 ROUTES="$CFG/routes.json"
@@ -621,7 +622,7 @@ preflight() {
   command -v claude >/dev/null || warn "claude not found on PATH; the plugin step will be skipped"
 
   # Predecessor writers: refuse while any is active.
-  local old="$HOME/.config/memsync/config.json"
+  local old="$XDG_CFG/memsync/config.json"
   if [ -f "$old" ] && python3 -I - "$old" <<'PY'
 import json, sys
 try:
@@ -935,7 +936,7 @@ plan_routes_json() {
   for i in "${!R_KEYS[@]}"; do spec="${spec}repo|${R_KEYS[$i]}|${R_NAMES[$i]}|${R_KINDS[$i]}
 "; done
   spec="$spec$RULE_LINES"
-  BS_SPEC="$spec" BS_SYNC_ROOT="$SYNC_ROOT" BS_HOME="$HOME" BS_OLD="$ROUTES" python3 -I - <<'PY'
+  BS_SPEC="$spec" BS_SYNC_ROOT="$SYNC_ROOT" BS_HOME="$HOME" BS_XDG="$XDG_CFG" BS_OLD="$ROUTES" python3 -I - <<'PY'
 import json, os
 repos, routes, pins = {}, [], []
 personal = None
@@ -951,13 +952,14 @@ for line in os.environ["BS_SPEC"].splitlines():
     elif p[0] == "remote":
         routes.append({"remote": p[1], "repo": p[2]})
 home = os.environ["BS_HOME"]
+xdg = os.environ["BS_XDG"]
 out = {"repos": repos, "routes": pins + routes, "default": "deny",
        "foreignWriters": [
-           {"file": home + "/.config/memsync/config.json", "jsonKeyNonEmpty": "repo"},
+           {"file": xdg + "/memsync/config.json", "jsonKeyNonEmpty": "repo"},
            {"systemdUnit": "memsync.timer"},
            {"systemdUnit": "memsync.service"},
            {"process": "memsync/bin/memsync"},
-           {"claudePlugin": "memsync@memsync", "onlyIfFile": home + "/.config/memsync/config.json"}]}
+           {"claudePlugin": "memsync@memsync", "onlyIfFile": xdg + "/memsync/config.json"}]}
 if personal:
     out["personal"] = personal
 try:   # a registry the owner configured survives a regeneration
