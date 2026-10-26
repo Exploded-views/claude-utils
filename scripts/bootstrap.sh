@@ -805,11 +805,18 @@ step_install_prebuilt() {
 
 link_binaries() {
   run mkdir -p "$BIN"
-  local b aside
+  local b aside i
   for b in claude-memsync claude-memmerge; do
     if [ -e "$BIN/$b" ] && [ ! -L "$BIN/$b" ]; then
       [ -f "$BIN/$b" ] || die "$BIN/$b exists and is not a regular file or a symlink; refusing to touch it"
-      aside="$BIN/$b.pre-bootstrap-$(date -u +%Y%m%dT%H%M%SZ)"
+      # BOOTSTRAP_ASIDE_STAMP: test hook for the timestamp. Never overwrite an
+      # earlier backup: a taken name gets .1, .2, ...
+      aside="$BIN/$b.pre-bootstrap-${BOOTSTRAP_ASIDE_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
+      if [ -e "$aside" ] || [ -L "$aside" ]; then
+        i=1
+        while [ -e "$aside.$i" ] || [ -L "$aside.$i" ]; do i=$((i + 1)); done
+        aside="$aside.$i"
+      fi
       say "  $BIN/$b is a standalone binary, not a symlink: moving it aside to $aside"
       run mv "$BIN/$b" "$aside"
     fi
