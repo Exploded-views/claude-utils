@@ -583,3 +583,96 @@ func TestIdentityBackup_SummaryLine(t *testing.T) {
 		t.Errorf("dry run printed a summary:\n%s", out)
 	}
 }
+
+// overwriteStores are a manager that keeps ONE item whatever is asked: the
+// store replaces it, the verify prints it. Extra arguments are ignored.
+func overwriteStores(t *testing.T) (store, verify, rec string) {
+	t.Helper()
+	d := t.TempDir()
+	rec = filepath.Join(d, "rec")
+	if err := os.Mkdir(rec, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s, v := filepath.Join(d, "ow-store.sh"), filepath.Join(d, "ow-verify.sh")
+	os.WriteFile(s, []byte("#!/bin/sh\ncat > \"$1/only\"\necho run >> \"$1/runs\"\n"), 0o700)
+	os.WriteFile(v, []byte("#!/bin/sh\ncat \"$1/only\"\n"), 0o700)
+	return s + " " + rec, v + " " + rec, rec
+}
+
+func twoIdentityClones(t *testing.T) (a, b string) {
+	t.Helper()
+	cfgs := routedHost(t, []string{"personal", "client"}, "personal", nil)
+	dir := t.TempDir()
+	a, _, _ = idFile(t, dir, "a.txt", false)
+	b, _, _ = idFile(t, dir, "b.txt", true)
+	setCloneIdentity(t, cfgs["personal"].SyncDir, a)
+	setCloneIdentity(t, cfgs["client"].SyncDir, b)
+	return a, b
+}
+
+// A placeholder in an argument that does not name the item, with a fixed
+// verify command: each verify ran right after its own store and never saw the
+// overwrite. It must never end in exit 0.
+func TestIdentityBackup_PlaceholderOutsideTheItemNameNeverExits0(t *testing.T) {
+	twoIdentityClones(t)
+	store, verify, rec := overwriteStores(t)
+	code, out, errs := runIDBackup("--all", "--store-cmd", store+" --tags {fingerprint}", "--verify-cmd", verify)
+	if code == 0 {
+		t.Fatalf("exit 0 with a fixed verify command and one overwritten item:\n%s%s", out, errs)
+	}
+	if code != 2 || !strings.Contains(errs, "--verify-cmd") {
+		t.Errorf("exit %d, stderr %q: want 2 and a --verify-cmd message", code, errs)
+	}
+	if _, err := os.Stat(filepath.Join(rec, "runs")); err == nil {
+		t.Error("the store ran before the refusal")
+	}
+}
+
+// Whatever the argument layout, a final read-back of every item catches a
+// later store that replaced an earlier one.
+func TestIdentityBackup_FinalVerifyCatchesAnOverwrite(t *testing.T) {
+	twoIdentityClones(t)
+	store, verify, _ := overwriteStores(t)
+	code, out, errs := runIDBackup("--all", "--store-cmd", store+" --tags {fingerprint}", "--verify-cmd", verify+" --tags {fingerprint}")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1\n%s%s", code, out, errs)
+	}
+	if n := strings.Count(out+errs, "OVERWRITTEN by a later store:"); n != 1 {
+		t.Errorf("OVERWRITTEN reported %d times, want 1 (the earlier item):\n%s%s", n, out, errs)
+	}
+	if strings.Contains(out, "2 stored (2 verified") {
+		t.Errorf("the summary still claims two verified:\n%s", out)
+	}
+}
+
+// The same key at two paths is one item, not a collision.
+func TestIdentityBackup_SameKeyAtTwoPathsIsStoredOnce(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "client"}, "personal", nil)
+	a, _, _ := idFile(t, t.TempDir(), "identity.txt", false)
+	b := filepath.Join(t.TempDir(), "identity.txt")
+	data, _ := os.ReadFile(a)
+	if err := os.WriteFile(b, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setCloneIdentity(t, cfgs["personal"].SyncDir, a)
+	setCloneIdentity(t, cfgs["client"].SyncDir, b)
+	store, verify, rec := fakeStores(t)
+	for _, extra := range []string{" {name}", " {fingerprint}", ""} {
+		for _, f := range []string{"stdin.*", "argv.*"} {
+			m, _ := filepath.Glob(filepath.Join(rec, f))
+			for _, x := range m {
+				os.Remove(x)
+			}
+		}
+		code, out, errs := runIDBackup("--all", "--store-cmd", store+extra, "--verify-cmd", verify+extra)
+		if code != 0 {
+			t.Fatalf("%q: exit %d: %s%s", extra, code, out, errs)
+		}
+		if n := len(recorded(t, rec, "stdin")); n != 1 {
+			t.Errorf("%q: stored %d times, want once", extra, n)
+		}
+		if !strings.Contains(out, a) || !strings.Contains(out, b) {
+			t.Errorf("%q: both paths must be listed:\n%s", extra, out)
+		}
+	}
+}
