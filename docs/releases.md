@@ -37,8 +37,10 @@ The release workflow builds with
 `-X github.com/MarimerLLC/claude-utils/internal/version.Override=<tag>`, so
 `claude-memsync version` and `claude-memmerge version` print exactly the tag,
 for example `claude-memsync v0.3.0` for a tag `v0.3.0`. The tag must look like
-`vX.Y.Z` (the workflow and `scripts/package-release.sh` refuse anything else,
-and any character outside letters, digits, `.`, `_`, `+` and `-`).
+`vX.Y.Z`, optionally with a suffix after `.` or `-` (`v0.3.0-ev.1`): the regex
+`^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$`, the same one
+`scripts/package-release.sh`, the workflow's tag check and `bootstrap.sh
+--prebuilt-dir` use, so no tag can be built that bootstrap would then refuse.
 
 A build from source without that flag reports a Go-derived version (a
 pseudo-version such as `v0.2.1-0.<time>-<commit>`, or `dev+<commit>`), never a

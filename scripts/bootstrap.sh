@@ -56,7 +56,7 @@ NOT_SYNCED=""                     # human-readable list
 KEYS_CREATED=() PENDING_JOINS=() NEXT_STEPS=()
 
 BIN="$HOME/.local/bin"
-XDG_CFG="${XDG_CONFIG_HOME:-$HOME/.config}"   # where claude-memsync (os.UserConfigDir) keeps its config
+XDG_CFG="${XDG_CONFIG_HOME:-$HOME/.config}"   # where claude-memsync keeps its config: $XDG_CONFIG_HOME, else ~/.config, on every OS
 CFG="$XDG_CFG/claude-memsync"
 SYNC_ROOT="$HOME/.claudesync.d"
 STATE="$HOME/.local/state/claude-memsync-bootstrap"
@@ -404,7 +404,7 @@ if [ -n "$PREBUILT_DIR" ]; then
     SRC="$HOME/.local/src/claude-utils-$SHA"
     case "$PB_VER" in *"$SHORT"*) ;; *) die "--prebuilt-dir: $PREBUILT_DIR/claude-memsync reports version '$PB_VER', which does not match --sha $SHORT; refusing" ;; esac
   else
-    printf '%s' "$PB_VER" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9._+-]*$' \
+    printf '%s' "$PB_VER" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' \
       || die "--prebuilt-dir: $PREBUILT_DIR/claude-memsync reports version '$PB_VER', which is not a release version (a tagged release stamps vX.Y.Z); pass --sha <commit> for a build of that commit"
     SHORT="$PB_VER"; LIB_ID="$PB_VER"; SRC=""
   fi
