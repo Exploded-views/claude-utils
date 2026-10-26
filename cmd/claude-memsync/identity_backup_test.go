@@ -58,8 +58,9 @@ printf '%s\n' "$0" "$@" > "$rec/argv.$$"
 env > "$rec/env.$$"
 cat > "$rec/stdin.$$"
 cp "$rec/stdin.$$" "$rec/stored"
+if [ -n "$1" ]; then cp "$rec/stdin.$$" "$rec/item.$1"; fi
 `), 0o700)
-	os.WriteFile(verify, []byte("#!/bin/sh\ncat \"$1/stored\"\n"), 0o700)
+	os.WriteFile(verify, []byte("#!/bin/sh\nif [ -n \"$2\" ]; then cat \"$1/item.$2\"; else cat \"$1/stored\"; fi\n"), 0o700)
 	return store + " " + rec, verify + " " + rec, rec
 }
 
@@ -285,17 +286,28 @@ func TestIdentityBackup_DryRunRunsNothing(t *testing.T) {
 	}
 }
 
+func safeFP(rcpt string) string {
+	return strings.ReplaceAll(agecrypt.GroupFingerprint(agecrypt.JoinFingerprint(rcpt)), " ", "-")
+}
+
+func setCloneIdentity(t *testing.T, syncDir, id string) {
+	t.Helper()
+	if out, err := exec.Command("git", "-C", syncDir, "config", "memage.identity", id).CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+}
+
 func TestIdentityBackup_AllDeduplicatesSharedIdentities(t *testing.T) {
 	cfgs := routedHost(t, []string{"personal", "projects", "client"}, "personal", nil)
 	dir := t.TempDir()
 	a, _, _ := idFile(t, dir, "a.txt", false)
 	b, _, _ := idFile(t, dir, "b.txt", true)
 	for name, id := range map[string]string{"personal": a, "projects": a, "client": b} {
-		if out, err := exec.Command("git", "-C", cfgs[name].SyncDir, "config", "memage.identity", id).CombinedOutput(); err != nil {
-			t.Fatalf("%v %s", err, out)
-		}
+		setCloneIdentity(t, cfgs[name].SyncDir, id)
 	}
 	store, verify, rec := fakeStores(t)
+	store += " {fingerprint}"
+	verify += " {fingerprint}"
 	code, out, errs := runIDBackup("--all", "--store-cmd", store, "--verify-cmd", verify)
 	if code != 0 {
 		t.Fatalf("exit %d: %s %s", code, out, errs)
@@ -319,6 +331,84 @@ func TestIdentityBackup_AllDeduplicatesSharedIdentities(t *testing.T) {
 	}
 	if n := len(recorded(t, rec, "stdin")); n != 5 {
 		t.Fatalf("--repo run stored %d in total, want 5", n)
+	}
+}
+
+// Several identities through one fixed store command would overwrite each
+// other in a manager that replaces by name, and every one would still verify.
+func TestIdentityBackup_SeveralIdentitiesNeedAPerFilePlaceholder(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "client"}, "personal", nil)
+	dir := t.TempDir()
+	a, _, _ := idFile(t, dir, "a.txt", false)
+	b, _, _ := idFile(t, dir, "b.txt", true)
+	setCloneIdentity(t, cfgs["personal"].SyncDir, a)
+	setCloneIdentity(t, cfgs["client"].SyncDir, b)
+	store, verify, rec := fakeStores(t)
+	code, out, errs := runIDBackup("--all", "--store-cmd", store, "--verify-cmd", verify)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2 (a fixed store command for two identities)\nstdout: %s\nstderr: %s", code, out, errs)
+	}
+	for _, s := range []string{"{fingerprint}", "--identity", a, b} {
+		if !strings.Contains(errs, s) {
+			t.Errorf("the refusal does not mention %q:\n%s", s, errs)
+		}
+	}
+	if len(recorded(t, rec, "stdin")) != 0 {
+		t.Fatal("something was stored before the refusal")
+	}
+}
+
+func TestIdentityBackup_PlaceholdersAreSubstitutedPerFile(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "client"}, "personal", nil)
+	dir := t.TempDir()
+	a, secA, rcptA := idFile(t, dir, "a.txt", false)
+	b, secB, rcptB := idFile(t, dir, "b.txt", true)
+	setCloneIdentity(t, cfgs["personal"].SyncDir, a)
+	setCloneIdentity(t, cfgs["client"].SyncDir, b)
+	store, verify, rec := fakeStores(t)
+	code, out, errs := runIDBackup("--all", "--store-cmd", store+" {fingerprint} {name}", "--verify-cmd", verify+" {fingerprint}")
+	if code != 0 {
+		t.Fatalf("exit %d: %s %s", code, out, errs)
+	}
+	argv := strings.Join(recorded(t, rec, "argv"), "\n")
+	for _, s := range []string{safeFP(rcptA), safeFP(rcptB), "a.txt", "b.txt"} {
+		if !strings.Contains(argv, s) {
+			t.Errorf("argv lacks %q:\n%s", s, argv)
+		}
+	}
+	if strings.Contains(argv, "{") {
+		t.Errorf("a placeholder was left in argv:\n%s", argv)
+	}
+	// two distinct items, each the right key
+	for fp, sec := range map[string]string{safeFP(rcptA): secA, safeFP(rcptB): secB} {
+		got, err := os.ReadFile(filepath.Join(rec, "item."+fp))
+		if err != nil || !strings.Contains(string(got), sec) {
+			t.Errorf("item %s missing or wrong: %v", fp, err)
+		}
+	}
+	if strings.Count(out, "verified (sha256 matches)") != 2 {
+		t.Errorf("both must be verified:\n%s", out)
+	}
+	if strings.Contains(out+errs, secA) || strings.Contains(out+errs, secB) {
+		t.Fatal("secret printed")
+	}
+}
+
+// {name} alone can collide (two files called identity.txt): refuse before
+// storing anything rather than overwrite.
+func TestIdentityBackup_CollidingItemNamesAreRefused(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "client"}, "personal", nil)
+	a, _, _ := idFile(t, t.TempDir(), "identity.txt", false)
+	b, _, _ := idFile(t, t.TempDir(), "identity.txt", false)
+	setCloneIdentity(t, cfgs["personal"].SyncDir, a)
+	setCloneIdentity(t, cfgs["client"].SyncDir, b)
+	store, _, rec := fakeStores(t)
+	code, _, errs := runIDBackup("--all", "--store-cmd", store+" {name}")
+	if code != 2 || !strings.Contains(errs, "same") {
+		t.Fatalf("exit %d, stderr %q: want 2 and a collision message", code, errs)
+	}
+	if len(recorded(t, rec, "stdin")) != 0 {
+		t.Fatal("something was stored before the refusal")
 	}
 }
 
