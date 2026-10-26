@@ -780,3 +780,34 @@ func TestRekeyPQ_FailedBackupRefLeavesNoRecord(t *testing.T) {
 		t.Error("a failed apply left a restore record")
 	}
 }
+
+// S5: with a legacy record the migrated commit is inferred, so the commits
+// made since are still listed, and --discard-local-commits still lists first.
+func TestRekeyPQ_LegacyRollbackListsTheCommitsItWouldDrop(t *testing.T) {
+	c, _, oldTip := unpublishedRekey(t)
+	makeLegacyRecord(t, c.cfg.SyncDir)
+	// the migrated commit alone: nothing to discard
+	commitEmpty(t, c.repo, "late legacy note")
+	code, out, errb := rollbackCmd(t, c)
+	all := out + errb
+	if code == 0 || !strings.Contains(all, "late legacy note") || !strings.Contains(all, "1 commit") || strings.Contains(all, "older build") {
+		t.Fatalf("exit %d, want a refusal listing the late commit:\n%s", code, all)
+	}
+	if code, o, e := rollbackCmd(t, c, "--discard-local-commits"); code != 0 {
+		t.Fatalf("discard: %d\n%s%s", code, o, e)
+	}
+	if h, _ := c.repo.Run("rev-parse", "HEAD"); strings.TrimSpace(h) != oldTip {
+		t.Error("HEAD not back at the old tip")
+	}
+}
+
+func TestRekeyPQ_LegacyRollbackWithoutExtraCommitsNeedsNoFlag(t *testing.T) {
+	c, _, oldTip := unpublishedRekey(t)
+	makeLegacyRecord(t, c.cfg.SyncDir)
+	if code, o, e := rollbackCmd(t, c); code != 0 {
+		t.Fatalf("rollback: %d\n%s%s", code, o, e)
+	}
+	if h, _ := c.repo.Run("rev-parse", "HEAD"); strings.TrimSpace(h) != oldTip {
+		t.Error("HEAD not back at the old tip")
+	}
+}
