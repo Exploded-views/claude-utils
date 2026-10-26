@@ -65,6 +65,7 @@ if [ "$GH_TOKEN" = "$STUB_ORG_TOKEN" ]; then m=org; else m=ambient; fi
 echo "$* |$m" >>"$STUB_DIR/gh.who"
 need_org() { [ "$m" = org ] || { echo "HTTP 401: bad credentials for org call" >&2; exit 1; }; }
 S="$STUB_DIR/ghstate"; mkdir -p "$S"
+if [ "${STUB_HANG:-0}" = 1 ] && [ "$1" = repo ] && [ "$2" = create ]; then : >"$STUB_DIR/hung"; sleep 20; fi
 case "$1 $2" in
   "auth status") exit 0 ;;
   "auth token") echo "$STUB_TOKEN"; exit 0 ;;
@@ -337,6 +338,64 @@ runboot --host testhost --role homelab --yes --org-app memsync-admin --org-app-i
   --check-app memsync-check --check-app-id 54321 --check-key-file "relative/key.pem"
 ORGARGS=(--org-token-file "$BASE/orgtoken")
 check "a relative --check-key-file is an error (exit 1), not a pause" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'must be an absolute path'" _ "$OUT"
+
+
+# ============================ --delete-org-token-file ==========================
+echo "--- --delete-org-token-file: read, then shredded on every exit path"
+TFN=0
+mktok() { # sets TF: a fresh 0600 token file holding the dummy org token
+  TFN=$((TFN + 1)); TF="$BASE/tokfile.$TFN"; printf '%s\n' "$ORGTOK" >"$TF"; chmod 600 "$TF"
+}
+tokrun() { # extra args: runboot with TF as the org token file, DEL flag on
+  ORGARGS=(--org-token-file "$TF" --delete-org-token-file)
+  runboot --host testhost --role homelab "$@"
+  ORGARGS=(--org-token-file "$BASE/orgtoken")
+}
+notoken() { ! printf '%s' "$OUT" | grep -qF -- "$ORGTOK"; }
+newhome td1; mktok
+tokrun --dry-run
+check "token file deleted: a successful dry run exits 0" [ "$RC" -eq 0 ]
+check "token file deleted: the file is gone after the dry run" [ ! -e "$TF" ]
+check "token file deleted: the token is not in the output" notoken
+newhome td2; mktok
+tokrun --yes
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -8
+check "token file deleted: a full run exits 0 and the file is gone" bash -c "[ $RC -eq 0 ] && [ ! -e '$TF' ]"
+check "token file deleted: the full run used it (gh calls were made with the org token)" bash -c "grep -q '|org' '$STUB_DIR/gh.who'"
+check "token file deleted: the token is not in the output, nor on disk in the fake HOME" bash -c "! printf '%s' \"\$1\" | grep -qF -- '$ORGTOK' && ! grep -rIlF -- '$ORGTOK' '$H' '$STUB_DIR/memsync.log'" _ "$OUT"
+newhome td3; mktok
+STUB_PUBLIC=1 tokrun --yes
+check "token file deleted: gone after a forced failure (public repo)" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'NOT private' && [ ! -e '$TF' ]" _ "$OUT"
+check "token file deleted: the token is not in the failing output" notoken
+newhome td4; mktok
+BOOT_PATH="$(minipath shred)" tokrun --dry-run
+check "token file deleted: without shred the overwrite-and-remove fallback still removes it" bash -c "[ $RC -eq 0 ] && [ ! -e '$TF' ]"
+newhome td5; mktok; chmod 644 "$TF"
+tokrun --dry-run
+check "token file with a loose mode is refused, and left alone" bash -c "[ $RC -eq 1 ] && printf '%s' \"\$1\" | grep -q 'must be mode 0600 (is 644)' && [ -e '$TF' ]" _ "$OUT"
+check "bad mode: the token is not in the output, nothing was changed" bash -c "! printf '%s' \"\$1\" | grep -qF -- '$ORGTOK'" _ "$OUT"
+newhome td6; mktok; ln "$TF" "$TF.link"
+tokrun --dry-run
+check "token file with two hard links is refused, and left alone" bash -c "[ $RC -eq 1 ] && printf '%s' \"\$1\" | grep -q 'one hard link' && [ -e '$TF' ] && [ -e '$TF.link' ]" _ "$OUT"
+newhome td7; mktok; ln -s "$TF" "$TF.sym"
+ORGARGS=(--org-token-file "$TF.sym" --delete-org-token-file); runboot --host testhost --role homelab --dry-run; ORGARGS=(--org-token-file "$BASE/orgtoken")
+check "token file that is a symlink is refused, and left alone" bash -c "[ $RC -eq 1 ] && printf '%s' \"\$1\" | grep -q 'not a plain file' && [ -e '$TF' ]" _ "$OUT"
+newhome td8
+ORGARGS=(--org-token-cmd "secret-tool read x" --delete-org-token-file); runboot --host testhost --role homelab --dry-run; ORGARGS=(--org-token-file "$BASE/orgtoken")
+check "--delete-org-token-file without --org-token-file is a usage error (exit 2)" bash -c "[ $RC -eq 2 ] && printf '%s' \"\$1\" | grep -q 'only valid with --org-token-file'" _ "$OUT"
+check "usage error: the shared test token file was not touched" [ -e "$BASE/orgtoken" ]
+newhome td9; mktok
+SH_OUT="$BASE/sig.out"; rm -f "$SH_OUT"
+(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_HANG=1 STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" GIT_CONFIG_NOSYSTEM=1 \
+  BOOTSTRAP_APP_API_BASE="http://127.0.0.1:$APIPORT" CLAUDE_UTILS_URL="https://example.invalid/claude-utils.git" \
+  exec "$BASH" "$ROOT/scripts/bootstrap.sh" --sha "$SHA" "${REQ[@]}" --host testhost --role homelab --yes --org-token-file "$TF" --delete-org-token-file </dev/null >"$SH_OUT" 2>&1) &
+SIGPID=$!
+for _ in $(seq 1 120); do [ -e "$STUB_DIR/hung" ] && break; sleep 0.25; done
+kill -TERM "$SIGPID" 2>/dev/null || true
+pkill -TERM -P "$SIGPID" 2>/dev/null || true   # the stuck child; the trap runs once it is gone
+set +e; wait "$SIGPID"; SIGRC=$?; set -e
+check "token file deleted: gone after SIGTERM mid-run (exit 143)" bash -c "[ $SIGRC -eq 143 ] && [ ! -e '$TF' ]"
+check "token file deleted: the token is not in the signalled run's output" bash -c "! grep -qF -- '$ORGTOK' '$SH_OUT'"
 
 quick_exit
 
