@@ -28,7 +28,7 @@ func TestFlush_RefusesToSyncAnUnfinishedRekey(t *testing.T) {
 		{"published but scheme not pq", `{"stage":"published"}`, "", true},
 		{"record unreadable", `{"stage`, "pq", true},
 		{"published, scheme pq", `{"stage":"published"}`, "pq", false},
-		{"done, scheme pq", `{"stage":"done"}`, "pq", false},
+		{"unknown stage, scheme pq", `{"stage":"done"}`, "pq", true},
 		{"record from an older build, scheme pq", `{"tip":"abc"}`, "pq", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
