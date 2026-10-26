@@ -6,10 +6,13 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
+	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/lock"
 	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
@@ -43,6 +46,16 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 	return l.w.Write(p)
 }
 
+// rekeyBlockedError refuses an interactive change to a half-migrated repo.
+func rekeyBlockedError(syncDir, why string) error {
+	name := filepath.Base(syncDir)
+	repoFlag := " --repo " + name
+	if name == ".claudesync" || name == "." || name == string(filepath.Separator) {
+		repoFlag = "" // the single default repo needs no --repo
+	}
+	return fmt.Errorf("repo %s has an unfinished post-quantum rekey (%s): finish or roll back the rekey first (`claude-memsync recipients rekey-pq%s --apply` or `claude-memsync recipients rekey-pq%s --rollback`)", name, why, repoFlag, repoFlag)
+}
+
 // errInterrupted means a SIGINT or SIGTERM arrived while the service was stopped.
 var errInterrupted = errors.New("interrupted")
 
@@ -54,6 +67,12 @@ var errInterrupted = errors.New("interrupted")
 // ordinary refusal (lock.ErrHeld) is returned. A service that was not running
 // is never started.
 func withSyncLockStopping(stderr io.Writer, syncDir string, fn func() error) error {
+	// Before the service is stopped or the lock taken: a repo in the middle of
+	// a post-quantum migration must not be changed or pushed by anything but
+	// the rekey itself (the daemon is blocked on it for the same reason).
+	if why, blocked := agecrypt.RekeyBlocksSync(gitwt.New(syncDir)); blocked {
+		return rekeyBlockedError(syncDir, why)
+	}
 	stderr = &lockedWriter{w: stderr} // the signal goroutine and the caller both print
 	l, err := lock.Acquire(syncDir)
 	if err == nil {

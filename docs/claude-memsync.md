@@ -1569,7 +1569,7 @@ place and reused by a later `rekey-pq`.
 While a repo's record is not `published`, or the repo is not post-quantum
 yet, the daemon does not sync it: each cycle logs
 `rekey-pq: not syncing this repo this cycle` and `status` prints a
-`rekey-pq: not syncing` line. A record written by an older build (no stage, no
+`rekey-pq: not syncing` line. The interactive changes (`join accept|reject|request`, `recipients add|remove|accept|label`, `distill --prune`) refuse such a repo before they stop the service or take the lock, name it, and say to finish or roll back the rekey first. `join accept` and `join reject` also stop when the clone cannot be brought up to date with origin (a divergence, an unreachable remote) rather than deciding on a stale view. A record written by an older build (no stage, no
 `newCommit`) blocks while the repo is not pq, while the cached
 `origin/main` is still the backup tip (the push never happened), and while the
 migrated commit cannot be established as below. For such a
