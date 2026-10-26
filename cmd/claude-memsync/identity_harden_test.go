@@ -35,23 +35,36 @@ func TestHardenProcess_DisablesCoreDumps(t *testing.T) {
 	}
 }
 
-func TestIdentityBackup_HardensTheProcessBeforeReadingKeys(t *testing.T) {
-	calls := 0
-	old := hardenFn
-	hardenFn = func() { calls++ }
-	t.Cleanup(func() { hardenFn = old })
+func TestIdentityBackup_HardensTheProcessBeforeAnyKeyIsReadOrStored(t *testing.T) {
+	read := false
+	oldRead := readIdentityFn
+	readIdentityFn = func(p string) (*idFileInfo, error) { read = true; return oldRead(p) }
+	t.Cleanup(func() { readIdentityFn = oldRead })
 	path, _, _ := idFile(t, t.TempDir(), "identity.txt", false)
-	store, _, _ := fakeStores(t)
-	if code, _, errs := runIDBackup("--identity", path, "--store-cmd", store); code != 0 {
+	store, _, rec := fakeStores(t)
+	calls := 0
+	harden := func() {
+		calls++
+		if read {
+			t.Error("an identity file was read before the process was hardened")
+		}
+		if got := recorded(t, rec, "stdin"); len(got) != 0 {
+			t.Error("a store command ran before the process was hardened")
+		}
+	}
+	if code, _, errs := runIDBackupHarden(harden, "--identity", path, "--store-cmd", store); code != 0 {
 		t.Fatalf("exit %d: %s", code, errs)
 	}
 	if calls != 1 {
 		t.Fatalf("hardenFn called %d times, want 1", calls)
 	}
+	if !read {
+		t.Fatal("the read seam was never used, so the order was not checked")
+	}
 	// a usage error or -h never gets as far as a key
 	calls = 0
-	runIDBackup("--identity", path)
-	runIDBackup("-h")
+	runIDBackupHarden(harden, "--identity", path)
+	runIDBackupHarden(harden, "-h")
 	if calls != 0 {
 		t.Fatalf("hardenFn called %d times for a usage error or -h, want 0", calls)
 	}

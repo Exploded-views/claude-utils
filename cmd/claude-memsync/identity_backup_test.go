@@ -78,7 +78,16 @@ func recorded(t *testing.T, rec, prefix string) []string {
 	return out
 }
 
+// runIDBackup runs the command with the process hardening stubbed out, so the
+// test binary is not left undumpable. runIDBackupHarden names the stub.
 func runIDBackup(args ...string) (int, string, string) {
+	return runIDBackupHarden(func() {}, args...)
+}
+
+func runIDBackupHarden(harden func(), args ...string) (int, string, string) {
+	old := hardenFn
+	hardenFn = harden
+	defer func() { hardenFn = old }()
 	var o, e bytes.Buffer
 	code := identityBackupCmd(&o, &e, args)
 	return code, o.String(), e.String()
