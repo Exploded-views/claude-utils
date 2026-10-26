@@ -76,7 +76,11 @@ func main() {
 
 func runVersion(stdout, stderr io.Writer, args []string) int {
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help" || args[0] == "-help") {
-		fmt.Fprintln(stdout, "usage: claude-memsync version\n\nPrint the version; takes no flags")
+		fmt.Fprintln(stdout, "usage: claude-memsync version [--json]\n\nPrint the version (--json: one JSON line with name, version, commit, go, os, arch)")
+		return 0
+	}
+	if len(args) == 1 && args[0] == "--json" {
+		fmt.Fprintln(stdout, version.JSON("claude-memsync"))
 		return 0
 	}
 	if len(args) > 0 {

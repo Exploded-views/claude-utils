@@ -11,7 +11,9 @@
 package version
 
 import (
+	"encoding/json"
 	"fmt"
+	"runtime"
 	"runtime/debug"
 	"strings"
 )
@@ -58,4 +60,33 @@ func String() string {
 // "claude-memsync v0.1.7".
 func Strings(binary string) string {
 	return strings.TrimSpace(binary + " " + String())
+}
+
+// JSON returns the build's identity as one JSON object on one line, with these
+// keys in this order: name, version, commit (the VCS revision, or "" when the
+// build has none), go, os, arch. It is a stable interface.
+func JSON(binary string) string {
+	commit := ""
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range info.Settings {
+			if s.Key == "vcs.revision" {
+				commit = s.Value
+			}
+		}
+	}
+	// Built by hand: a map would sort the keys.
+	var sb strings.Builder
+	sb.WriteByte('{')
+	for i, kv := range [][2]string{{"name", binary}, {"version", String()}, {"commit", commit}, {"go", runtime.Version()}, {"os", runtime.GOOS}, {"arch", runtime.GOARCH}} {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		k, _ := json.Marshal(kv[0])
+		v, _ := json.Marshal(kv[1])
+		sb.Write(k)
+		sb.WriteByte(':')
+		sb.Write(v)
+	}
+	sb.WriteByte('}')
+	return sb.String()
 }

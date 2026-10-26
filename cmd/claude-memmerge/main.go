@@ -28,6 +28,10 @@ func main() {
 	if len(os.Args) >= 2 {
 		switch os.Args[1] {
 		case "version", "--version", "-v":
+			if len(os.Args) == 3 && os.Args[2] == "--json" {
+				fmt.Println(version.JSON("claude-memmerge"))
+				return
+			}
 			fmt.Println(version.Strings("claude-memmerge"))
 			return
 		case "help", "--help", "-h":
