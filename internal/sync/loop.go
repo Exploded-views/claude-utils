@@ -57,9 +57,22 @@ type Loop struct {
 	expiryOnce sync.Once
 }
 
+// errRekeyUnfinished ends a cycle on a repo whose rekey-pq is unfinished.
+var errRekeyUnfinished = errors.New("syncing is stopped: rekey-pq is unfinished")
+
+// rekeyHold reports (and logs, every cycle) that this repo's rekey-pq is
+// unfinished: the daemon must not commit, pull or push it meanwhile.
+func (l *Loop) rekeyHold(repo *gitwt.Repo) bool {
+	why, blocked := agecrypt.RekeyBlocksSync(repo)
+	if blocked {
+		l.logln("rekey-pq: not syncing this repo this cycle: " + why)
+	}
+	return blocked
+}
+
 // alreadyLogged is an error a cycle has already logged itself.
 func alreadyLogged(err error) bool {
-	return errors.Is(err, errHandResolving) || errors.Is(err, ErrLocalOnlyTracked)
+	return errors.Is(err, errHandResolving) || errors.Is(err, ErrLocalOnlyTracked) || errors.Is(err, errRekeyUnfinished)
 }
 
 func (l *Loop) logRefusal(err error) {
@@ -297,6 +310,10 @@ func (l *Loop) takeRecovery(repo *gitwt.Repo, roots Roots) error {
 // Reconcile would merge them into the Claude tree), nor while a rebase or
 // merge is still stopped.
 func (l *Loop) startCycle(repo *gitwt.Repo, roots Roots) bool {
+	// flush says why when it ends the cycle; nothing may run before that.
+	if _, blocked := agecrypt.RekeyBlocksSync(repo); blocked {
+		return false
+	}
 	// A keyless clone holds ciphertext: Reconcile would copy it into the
 	// Claude tree.
 	if l.keyless(repo) {
@@ -411,6 +428,9 @@ func (l *Loop) handleEvent(watcher *fsnotify.Watcher, roots Roots, ev fsnotify.E
 func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err error) {
 	if l.held() {
 		return nil
+	}
+	if l.rekeyHold(repo) {
+		return errRekeyUnfinished
 	}
 	// Registered first, so it runs last: whatever the cycle returns (including
 	// the restore error below) is stripped of denylisted names.

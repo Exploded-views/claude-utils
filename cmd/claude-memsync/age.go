@@ -212,6 +212,9 @@ func encryptionLines(cfg config.Config) []string {
 	default:
 		out = append(out, "encryption: age, this host can decrypt the repo")
 	}
+	if why, blocked := agecrypt.RekeyBlocksSync(repo); blocked {
+		out = append(out, "rekey-pq: not syncing: "+why)
+	}
 	if u, _ := agecrypt.Unreviewed(repo); u {
 		out = append(out, "recipients UNREVIEWED: .age-recipients differs from the set pinned on this host; nothing is committed or pushed. Review with `claude-memsync recipients list`, then `recipients accept --yes`")
 	}

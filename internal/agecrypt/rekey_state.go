@@ -151,6 +151,35 @@ func removeRekeyState(repo *gitwt.Repo) {
 	}
 }
 
+// RekeyBlocksSync says whether the daemon must not sync repo now, and why: a
+// rekey-pq restore record that is not finished (its stage is not published or
+// done), one whose repo is not post-quantum yet, or one that cannot be read.
+// A record from an older build (no stage) blocks only while the repo is not pq.
+func RekeyBlocksSync(repo *gitwt.Repo) (string, bool) {
+	st, err := ReadRekeyStateAt(repo.Dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false
+	}
+	if err != nil {
+		return "the rekey-pq restore record is unreadable; inspect it (the pre-migration history is at " + BackupRef + ")", true
+	}
+	scheme, _ := rawScheme(repo)
+	switch {
+	case scheme != SchemePQ:
+		return "an unfinished rekey-pq left this repo before the post-quantum scheme (stage " + stageName(st) + "); finish it with `recipients rekey-pq --apply` or undo it with `--rollback`", true
+	case st.Stage != "" && !st.Finished():
+		return "an unfinished rekey-pq (stage " + stageName(st) + "); finish it with `recipients rekey-pq --apply` or undo it with `--rollback`", true
+	}
+	return "", false
+}
+
+func stageName(st PreRekeyState) string {
+	if st.Stage == "" {
+		return "unknown"
+	}
+	return st.Stage
+}
+
 // RekeyStage says how far an earlier rekey-pq --apply got.
 type RekeyStage int
 
