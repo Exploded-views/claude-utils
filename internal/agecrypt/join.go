@@ -295,6 +295,47 @@ type PendingRecipient struct {
 	Label       string // host label on the line, if any
 	New         bool   // not in the pinned set
 	Own         bool   // this host's key
+	Desc        string // "host:<label>", "recovery" or "unlabelled", as the work-tree's line says
+}
+
+// DescribeLabel says what a recipients line is: "host:<label>", "recovery" or
+// "unlabelled".
+func DescribeLabel(line string) string {
+	if l := LabelOf(line); l != "" {
+		return "host:" + l
+	}
+	if strings.HasSuffix(strings.TrimSpace(line), "# recovery") {
+		return "recovery"
+	}
+	return "unlabelled"
+}
+
+// descByKey maps each key of the work-tree's recipients file to DescribeLabel.
+func descByKey(dir string) map[string]string {
+	m := map[string]string{}
+	lines, err := ListRecipients(dir)
+	if err != nil {
+		return m
+	}
+	for _, l := range lines {
+		m[canonLine(l)] = DescribeLabel(l)
+	}
+	return m
+}
+
+// OwnKeyInfo is this host's own recipient key as `join accept` reports it: the
+// grouped fingerprint and the label of its line. ok is false when the host's
+// key is not a recipient (or its identity cannot be read).
+func OwnKeyInfo(repo *gitwt.Repo) (fingerprint, desc string, ok bool) {
+	own, err := IdentityRecipient(IdentityPath(repo))
+	if err != nil {
+		return "", "", false
+	}
+	d, found := descByKey(repo.Dir)[own]
+	if !found {
+		return "", "", false
+	}
+	return GroupFingerprint(JoinFingerprint(own)), d, true
 }
 
 // PendingRecipients lists the work-tree's recipient set against the pin, so a
@@ -314,6 +355,7 @@ func PendingRecipients(repo *gitwt.Repo) (list []PendingRecipient, removed int, 
 		return nil, 0, err
 	}
 	own, _ := IdentityRecipient(IdentityPath(repo))
+	descs := descByKey(repo.Dir)
 	pinned := map[string]bool{}
 	for _, c := range pin.canon {
 		pinned[c] = true
@@ -322,7 +364,7 @@ func PendingRecipients(repo *gitwt.Repo) (list []PendingRecipient, removed int, 
 	for _, c := range cur.canon {
 		in[c] = true
 		k, l := splitCanon(c)
-		list = append(list, PendingRecipient{Key: k, Label: l, Fingerprint: JoinFingerprint(k), New: !pinned[c], Own: k == own})
+		list = append(list, PendingRecipient{Key: k, Label: l, Fingerprint: JoinFingerprint(k), New: !pinned[c], Own: k == own, Desc: descs[k]})
 	}
 	for c := range pinned {
 		if !in[c] {
