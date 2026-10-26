@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -188,5 +189,68 @@ func TestRekeyPQ_DiscardFlagGoesOnlyWithRollback(t *testing.T) {
 	_, newRec := newPQKey(t, "newrec")
 	if code, _, _ := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--discard-local-commits"); code != 2 {
 		t.Errorf("exit %d, want 2", code)
+	}
+}
+
+// S3: a rollback needs the classic identity; it is renamed back if retired.
+func TestRekeyPQ_RollbackRestoresARetiredClassicIdentity(t *testing.T) {
+	c, _, oldTip := unpublishedRekey(t)
+	if err := os.Rename(c.idPath, c.idPath+".classic-retired"); err != nil {
+		t.Fatal(err)
+	}
+	if code, o, e := rollbackCmd(t, c); code != 0 {
+		t.Fatalf("rollback: %d\n%s%s", code, o, e)
+	}
+	if _, err := os.Stat(c.idPath); err != nil {
+		t.Errorf("the classic identity was not put back: %v", err)
+	}
+	if h, _ := c.repo.Run("rev-parse", "HEAD"); strings.TrimSpace(h) != oldTip {
+		t.Error("HEAD not back at the old tip")
+	}
+	if err := agecrypt.CheckKeyed(c.repo); err != nil {
+		t.Errorf("classic repo does not decrypt: %v", err)
+	}
+}
+
+func TestRekeyPQ_RollbackRefusesWithoutAClassicIdentity(t *testing.T) {
+	c, _, _ := unpublishedRekey(t)
+	if err := os.Remove(c.idPath); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errb := rollbackCmd(t, c)
+	if code == 0 {
+		t.Fatalf("rollback reported success without the classic identity\n%s%s", out, errb)
+	}
+	if !strings.Contains(errb, "classic identity") || !strings.Contains(errb, filepath.Base(c.idPath)) {
+		t.Errorf("the refusal must name the missing classic identity:\n%s", errb)
+	}
+	if agecrypt.SchemeOf(c.repo) != agecrypt.SchemePQ {
+		t.Error("a refused rollback changed the repo")
+	}
+}
+
+// S3: a clone whose restore record names the classic identity still needs it
+// for its rollback, so retirement keeps the file.
+func TestRekeyPQ_KeepsTheClassicIdentityNamedByAnotherClonesRecord(t *testing.T) {
+	c := newClassicRepo(t)
+	_, newRec := newPQKey(t, "newrec")
+	sib := c.cfg.SyncDir + ".other"
+	sr := gitwt.New(sib)
+	if err := sr.Init("main"); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := json.Marshal(agecrypt.PreRekeyState{ClassicIdentity: c.idPath, Stage: "migrated"})
+	if err := os.WriteFile(filepath.Join(sib, ".git", agecrypt.RekeyStateFile), rec, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errb := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root", "--apply")
+	if code != 0 {
+		t.Fatalf("%d %s%s", code, out, errb)
+	}
+	if _, err := os.Stat(c.idPath); err != nil {
+		t.Error("the classic identity was retired although another clone's restore record names it")
+	}
+	if !strings.Contains(out, ".other") {
+		t.Errorf("the hint must name the clone:\n%s", out)
 	}
 }
