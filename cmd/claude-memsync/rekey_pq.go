@@ -27,7 +27,9 @@ type rekeyTarget struct {
 // whose only member is this host to the post-quantum scheme. It is a dry run
 // unless --apply is given. With --all an --apply run stops at the first repo
 // that fails and says which repos are done, which failed and which were not
-// started; the same command, rerun, resumes. --rollback undoes a migration
+// started; the same command, rerun, resumes. A dry run with --all goes past a
+// failing repo, ends with "dry run: N ok, M would fail" and exits nonzero if any
+// would fail. --rollback undoes a migration
 // that was not pushed.
 func rekeyPQCmd(stdout, stderr io.Writer, sel repoSel, args []string, hostLabel string) int {
 	args, recovery := extractFlag(args, "--recovery-recipient")
