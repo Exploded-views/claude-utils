@@ -81,4 +81,3 @@ func Resolve(name string, alts ...string) (path string, legacy bool) {
 	}
 	return filepath.Join(dir, name), false
 }
-
