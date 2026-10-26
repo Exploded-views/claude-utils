@@ -32,6 +32,17 @@ var (
 	exitFn = os.Exit
 )
 
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
 // errInterrupted means a SIGINT or SIGTERM arrived while the service was stopped.
 var errInterrupted = errors.New("interrupted")
 
@@ -43,6 +54,7 @@ var errInterrupted = errors.New("interrupted")
 // ordinary refusal (lock.ErrHeld) is returned. A service that was not running
 // is never started.
 func withSyncLockStopping(stderr io.Writer, syncDir string, fn func() error) error {
+	stderr = &lockedWriter{w: stderr} // the signal goroutine and the caller both print
 	l, err := lock.Acquire(syncDir)
 	if err == nil {
 		defer l.Release()
