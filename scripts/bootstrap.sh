@@ -2,13 +2,17 @@
 # claude-memsync host bootstrap.
 #
 #   bootstrap.sh --host <label> --role <role> --org <org> --recovery-recipient <age1pq1...>
-#                [--sha <commit>]
-#                [--workspace <dir>]... [--own-owner <owner>]... [--deny-owner <owner>]...
-#                [--deny-term <term>]... [--repo-url <url>]
-#                --org-token-file <path> | --org-token-cmd "<argv>" | --org-app <name>
+#                [--sha <commit>] [--prebuilt-dir <dir>]
+#                [--workspace <dir>]... [--own-owner <owner>]...
+#                [--keep-out-owner <owner>]... [--keep-out-term <term>]...   (optional)
+#                [--repo-url <url>]
+#                --org-token-file <path> [--delete-org-token-file]
+#                  | --org-token-cmd "<argv>" | --org-app <name>
 #                [--org-app-id <id> --org-app-key-cmd "<argv>"]
 #                [--check-app <name> --check-app-id <id> --check-key-file <path>]
 #                [--allow-org <org>]... [--dry-run] [--yes]
+#
+# Exit codes: 0 ok, 1 error, 2 usage, 3 paused (needs a human; run it again).
 #
 # Read this script before running it. --dry-run prints every step without doing
 # it. Everything lives under $HOME; the script never uses sudo, never prints a
@@ -43,7 +47,7 @@ GITHUB_FP="SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU"
 UTILS_URL="${CLAUDE_UTILS_URL:-https://github.com/Exploded-views/claude-utils}"
 
 HOST="" ROLE="" SHA="" ORG="" AGE_RECOVERY="" DRY_RUN=0 YES=0
-WORKSPACES=() OWN_OWNERS=() DENY_OWNERS=() DENY_TERMS=() ALLOW_ORGS=() ORG_TOKEN_FILE="" ORG_TOKEN_CMD="" ORG_APP=""
+WORKSPACES=() OWN_OWNERS=() KEEP_OUT_OWNERS=() KEEP_OUT_TERMS=() ALLOW_ORGS=() ORG_TOKEN_FILE="" ORG_TOKEN_CMD="" ORG_APP=""
 ORG_APP_ID="" ORG_APP_KEY_CMD="" CHECK_APP="" CHECK_APP_ID="" CHECK_KEY_FILE="" APP_API_BASE="${BOOTSTRAP_APP_API_BASE:-}" ADMIN_WRITTEN=0
 
 R_KEYS=() R_NAMES=() R_KINDS=()   # planned repos (parallel arrays)
@@ -70,7 +74,7 @@ run() {
   "$@"
 }
 
-usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { awk 'NR >= 2 { if ($0 == "#" && NR > 3 && seen++ >= 1) exit; print }' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 done_p() { [ -e "$STATE/$HOST.$1" ]; }
 mark()   { [ "$DRY_RUN" -eq 1 ] && return 0; mkdir -p "$STATE"; : >"$STATE/$HOST.$1"; }
@@ -141,11 +145,11 @@ valid_name() {
   printf '%s' "$1" | grep -Eq '^mem-[a-z0-9][a-z0-9._-]*$'
 }
 
-# is_denied <owner> <repo> (both lowercase): client owner or deny term match.
-is_denied() {
+# is_kept_out <owner> <repo> (both lowercase): keep-out owner or term match.
+is_kept_out() {
   local t
-  [ ${#DENY_OWNERS[@]} -eq 0 ] || ! in_list "$1" "${DENY_OWNERS[@]}" || return 0
-  for t in ${DENY_TERMS[@]+"${DENY_TERMS[@]}"}; do
+  [ ${#KEEP_OUT_OWNERS[@]} -eq 0 ] || ! in_list "$1" "${KEEP_OUT_OWNERS[@]}" || return 0
+  for t in ${KEEP_OUT_TERMS[@]+"${KEEP_OUT_TERMS[@]}"}; do
     case "$1/$2" in *"$t"*) return 0 ;; esac
   done
   return 1
@@ -287,8 +291,8 @@ while [ $# -gt 0 ]; do
     --recovery-recipient) [ $# -ge 2 ] || usage; AGE_RECOVERY="$2"; shift 2 ;;
     --workspace)  [ $# -ge 2 ] || usage; WORKSPACES+=("$2"); shift 2 ;;
     --own-owner)  [ $# -ge 2 ] || usage; OWN_OWNERS+=("$(lower "$2")"); shift 2 ;;
-    --deny-owner) [ $# -ge 2 ] || usage; DENY_OWNERS+=("$(lower "$2")"); shift 2 ;;
-    --deny-term)  [ $# -ge 2 ] || usage; DENY_TERMS+=("$(lower "$2")"); shift 2 ;;
+    --keep-out-owner | --deny-owner) [ $# -ge 2 ] || usage; KEEP_OUT_OWNERS+=("$(lower "$2")"); shift 2 ;;
+    --keep-out-term | --deny-term) [ $# -ge 2 ] || usage; KEEP_OUT_TERMS+=("$(lower "$2")"); shift 2 ;;
     --repo-url)   [ $# -ge 2 ] || usage; UTILS_URL="$2"; shift 2 ;;
     --org-token-file) [ $# -ge 2 ] || usage; ORG_TOKEN_FILE="$2"; shift 2 ;;
     --org-token-cmd)  [ $# -ge 2 ] || usage; ORG_TOKEN_CMD="$2"; shift 2 ;;
@@ -352,8 +356,8 @@ if [ -n "$ORG_TOKEN_FILE" ]; then ORG_TOKEN_ARGS=(--token-file "$ORG_TOKEN_FILE"
 [ -n "$ROLE" ] || die "--role is required"
 printf '%s' "$HOST" | grep -Eq '^[a-z0-9][a-z0-9-]{0,31}$' || die "bad --host label '$HOST' (it is the host's label in recipients, deploy keys and join requests: 1-32 characters of a-z, 0-9 and '-', starting with a letter or digit)"
 printf '%s' "$ORG" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9-]*$' || die "bad --org '$ORG'"
-for o in ${DENY_OWNERS[@]+"${DENY_OWNERS[@]}"}; do
-  [ "$o" != "$(lower "$ORG")" ] || die "--org '$ORG' is also a --deny-owner; refusing"
+for o in ${KEEP_OUT_OWNERS[@]+"${KEEP_OUT_OWNERS[@]}"}; do
+  [ "$o" != "$(lower "$ORG")" ] || die "--org '$ORG' is also a keep-out owner; refusing"
 done
 if [ -z "$SHA" ]; then
   SHA="$(git -C "$(dirname "$0")" rev-parse HEAD 2>/dev/null || true)"
@@ -363,8 +367,8 @@ printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || die "--sha must be a full 40-h
 SHORT="$(printf '%s' "$SHA" | cut -c1-12)"
 SRC="$HOME/.local/src/claude-utils-$SHA"
 LIB="$HOME/.local/lib/claude-memsync/$SHA"
-if [ ${#DENY_OWNERS[@]} -eq 0 ] && [ ${#DENY_TERMS[@]} -eq 0 ]; then
-  warn "no client owners or terms configured: client repos are only protected by routing"
+if [ ${#KEEP_OUT_OWNERS[@]} -eq 0 ] && [ ${#KEEP_OUT_TERMS[@]} -eq 0 ]; then
+  say "keep-out lists: none (routing alone decides what syncs)"
 fi
 ALLOW_ORGS+=("$(lower "$ORG")")
 OWN_OWNERS+=("$(lower "$ORG")")
@@ -372,7 +376,7 @@ OWN_OWNERS+=("$(lower "$ORG")")
 case "$ROLE" in
   homelab)      ROLE_REPOS="$ROLE_homelab_REPOS"; HOME_KEY="$ROLE_homelab_HOME" ;;
   personal-dev) ROLE_REPOS="$ROLE_personal_dev_REPOS"; HOME_KEY="$ROLE_personal_dev_HOME" ;;
-  *)            die "unknown role '$ROLE' (known: homelab, personal-dev). Client and orchestrator roles do not exist here." ;;
+  *)            die "unknown role '$ROLE' (known: homelab, personal-dev). There is no role for client or orchestrator repos." ;;
 esac
 for spec in $ROLE_REPOS; do
   IFS=: read -r k kind name <<<"$spec"
@@ -423,12 +427,12 @@ reach_banner() { # label orgs-output
     lo="$(lower "$o")"
     in_list "$lo" "${ALLOW_ORGS[@]}" && continue
     extra="${extra:+$extra, }$o"
-    if in_list "$lo" ${DENY_OWNERS[@]+"${DENY_OWNERS[@]}"}; then denied="${denied:+$denied, }$o"; fi
+    if in_list "$lo" ${KEEP_OUT_OWNERS[@]+"${KEEP_OUT_OWNERS[@]}"}; then denied="${denied:+$denied, }$o"; fi
   done <<<"$orgs"
   [ -n "$extra" ] || return 0
-  local b="!!! WARNING: this host's $label can reach $extra. An agent host holds an owner-level token with client-org reach."
+  local b="!!! WARNING: this host's $label can reach $extra. An agent host holds an owner-level token with reach beyond the memory repos."
   [ -z "$denied" ] || b="$b
-!!! CLIENT ORG(S) reachable through the $label: $denied. This script never creates, touches or keys any repo outside $ORG."
+!!! KEEP-OUT ORG(S) reachable through the $label: $denied. This script never creates, touches or keys any repo outside $ORG."
   printf '%s' "$b"
 }
 check_token_readable() {
@@ -665,8 +669,8 @@ $ws" seen="" checkouts
 "; continue ;;
     esac
     owner="$(lower "${rest%%/*}")"; repo="$(lower "${rest#*/}")"
-    if is_denied "$owner" "$repo"; then
-      NOT_SYNCED="${NOT_SYNCED}  $p ($owner/$repo): REFUSED (client owner)
+    if is_kept_out "$owner" "$repo"; then
+      NOT_SYNCED="${NOT_SYNCED}  $p ($owner/$repo): REFUSED (keep-out)
 "; continue
     fi
     if ! in_list "$owner" "${OWN_OWNERS[@]}"; then
@@ -934,10 +938,10 @@ step_routes() {
       say "  denylist-$k.txt exists (kept)"
     else
       run mkdir -p "$CFG"
-      say "  writing $CFG/denylist-$k.txt (${#DENY_TERMS[@]} deny terms)"
+      say "  writing $CFG/denylist-$k.txt (${#KEEP_OUT_TERMS[@]} keep-out terms)"
       if [ "$DRY_RUN" -eq 0 ]; then
         : >"$CFG/denylist-$k.txt"; chmod 600 "$CFG/denylist-$k.txt"
-        for t in ${DENY_TERMS[@]+"${DENY_TERMS[@]}"}; do re_escape "$t" >>"$CFG/denylist-$k.txt"; printf '\n' >>"$CFG/denylist-$k.txt"; done
+        for t in ${KEEP_OUT_TERMS[@]+"${KEEP_OUT_TERMS[@]}"}; do re_escape "$t" >>"$CFG/denylist-$k.txt"; printf '\n' >>"$CFG/denylist-$k.txt"; done
       fi
     fi
   done

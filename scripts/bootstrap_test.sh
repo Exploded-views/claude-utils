@@ -625,7 +625,7 @@ for bad in TestHost a_b -x "$(printf 'a%.0s' $(seq 1 33))"; do
   check "bad --host '$bad' refused before anything is created" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'bad --host label' && [ ! -s '$STUB_DIR/gh.log' ] && [ ! -e '$H/.ssh' ]" _ "$OUT"
 done
 runboot --host testhost --role homelab --yes --org acme-client
-check "--org equal to a --deny-owner (any case) is refused in preflight" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'also a --deny-owner' && [ ! -s '$STUB_DIR/gh.log' ]" _ "$OUT"
+check "--org equal to a keep-out owner (any case) is refused in preflight" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'also a keep-out owner' && [ ! -s '$STUB_DIR/gh.log' ]" _ "$OUT"
 
 newhome xt
 for how in "bash -x" "env SHELLOPTS=xtrace bash"; do
