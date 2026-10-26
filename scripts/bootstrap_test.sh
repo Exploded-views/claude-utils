@@ -110,6 +110,12 @@ cat >"$STUBS/systemctl" <<'EOF'
 echo "systemctl $*" >>"$STUB_DIR/systemctl.log"
 # record whether the org token leaked into this process env (count only, never the value)
 echo "$(basename "$0"):$(env | grep -v '^STUB_' | grep -cF -- "$STUB_ORG_TOKEN")" >>"$STUB_DIR/env.log"
+# `show -p LoadState -p ActiveState -p UnitFileState <unit>`: what the bootstrap asks (an absent unit says not-found)
+case "$*" in
+  *" show "*)
+    if [ "${STUB_OLD_TIMER:-0}" = 1 ]; then printf 'LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n'; else echo "LoadState=not-found"; fi
+    exit 0 ;;
+esac
 # like the real one: the answer is on stdout, the exit status says enabled/active or not
 if [ "${STUB_OLD_TIMER:-0}" = 1 ]; then echo enabled; exit 0; fi
 case "$*" in *is-active*) echo inactive ;; *) echo disabled ;; esac
