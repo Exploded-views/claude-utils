@@ -512,7 +512,7 @@ repo_name_ok_check() { # repo name: only mem-* names, never client or orchestrat
 host_key_fp_check() { # label scan-file
   local fps
   fps="$(ssh-keygen -lf "$2" | awk '{print $2}')" || { g_refuse "cannot read the host key of $1"; return 1; }
-  [ -n "$fps" ] && [ "$fps" = "$GITHUB_FP" ] || { g_refuse "host key fingerprint for $1 is '$fps', expected exactly one key with $GITHUB_FP; refusing"; return 1; }
+  [ -n "$fps" ] && [ "$fps" = "$GITHUB_FP" ] || { g_refuse "host key fingerprint for $1 is '$fps', expected $GITHUB_FP (and exactly one key line); refusing"; return 1; }
   echo "SAFE:host_key_fp"
 }
 
