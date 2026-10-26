@@ -243,6 +243,23 @@ func DetectRekey(repo *gitwt.Repo, o RekeyOpts) (RekeyStage, PreRekeyState, erro
 	if scheme == SchemePQ && st.Finished() {
 		return StageSynced, st, nil
 	}
+	if scheme == SchemePQ && st.Stage == "" && st.NewCommit == "" {
+		// A record from an older build: it never said which commit was the
+		// migrated one. If origin/main has moved off the backup, work it out;
+		// that commit being on origin/main means the migration was published.
+		if _, err := repo.Run("fetch", "-q", "origin", "main"); err != nil {
+			return StageFresh, st, fmt.Errorf("cannot fetch origin: %w", err)
+		}
+		if remote, _ := revOf(repo, "refs/remotes/origin/main"); remote != "" && remote != tip {
+			if mc, ok := InferMigrated(repo, st, "refs/remotes/origin/main"); ok {
+				st.NewCommit, st.Stage = mc, RekeyRecPublished
+				if err := writeRekeyState(repo, st); err != nil {
+					return StageFresh, st, err
+				}
+				return StageSynced, st, nil
+			}
+		}
+	}
 	head, _ := revOf(repo, "HEAD")
 	if scheme != SchemePQ && head == tip {
 		// An attempt that died before it committed: put the recipients file
@@ -295,6 +312,47 @@ func DetectRekey(repo *gitwt.Repo, o RekeyOpts) (RekeyStage, PreRekeyState, erro
 		return StagePublished, st, nil
 	}
 	return StageFresh, st, errors.New("origin/main is neither the backup tip nor the migrated tip (someone pushed since?); not touching it. Inspect it, or drop the backup if the migration is complete")
+}
+
+// InferMigrated names the migrated commit of a record that does not say (one
+// from an older build), as found in the history of target (origin/main or
+// HEAD). With a fresh root it is the single root of target when that differs
+// from the roots of the backup tip; otherwise the first commit after the tip on
+// target's ancestry path, which must be a child of the tip.
+func InferMigrated(repo *gitwt.Repo, st PreRekeyState, target string) (string, bool) {
+	if st.NewCommit != "" {
+		return st.NewCommit, true
+	}
+	if st.Tip == "" {
+		return "", false
+	}
+	lines := func(args ...string) []string {
+		out, err := repo.Run(args...)
+		if err != nil {
+			return nil
+		}
+		return strings.Fields(out)
+	}
+	if st.FreshRoot {
+		roots := lines("rev-list", "--max-parents=0", target)
+		if len(roots) != 1 {
+			return "", false
+		}
+		for _, r := range lines("rev-list", "--max-parents=0", st.Tip) {
+			if r == roots[0] {
+				return "", false
+			}
+		}
+		return roots[0], true
+	}
+	l := lines("rev-list", "--reverse", "--ancestry-path", st.Tip+".."+target)
+	if len(l) == 0 {
+		return "", false
+	}
+	if parent, ok := revOf(repo, l[0]+"^"); !ok || parent != st.Tip {
+		return "", false
+	}
+	return l[0], true
 }
 
 // checkMigratedRecipients says whether .age-recipients is the migrated set
