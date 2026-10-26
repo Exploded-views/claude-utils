@@ -213,10 +213,17 @@ your password manager's CLI. What it protects, and what it does not:
   store command. **On Windows the mode, owner and hard-link checks are not
   made** (there are no such bits; the ACL is not inspected): only the
   regular-file, symlink and parse checks apply.
-- **It will not silently lose a key.** With several identities, a fixed item
-  title would be overwritten by each in turn, and each would still verify. The
-  command refuses to run unless the title carries `{fingerprint}` or `{name}`,
-  and refuses two files that expand to the same item.
+- **It guards against losing a key to an overwrite, as far as it can see.**
+  With several different keys, a fixed item title would be overwritten by
+  each in turn, and each would still verify right after its own store. The
+  command refuses to run unless `--store-cmd` carries `{fingerprint}` or
+  `{name}`, refuses two different keys that expand to the same item, and
+  refuses a `--verify-cmd` that is identical for every file. After the last
+  store it reads every item back once more and reports any that a later store
+  replaced (`OVERWRITTEN by a later store`, exit 1). It cannot know how your
+  manager names things: an item that is shared in a way the arguments do not
+  show is only caught by that final read-back, and only if `--verify-cmd` is
+  given.
 - **Verification compares digests.** The read-back is checked by SHA-256 and
   only the verdict is shown. Without `--verify-cmd` the backup is
   UNVERIFIED: the command says so up front and in its summary line, but still

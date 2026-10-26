@@ -326,11 +326,17 @@ that would be stored, why it is on the list, and with which command, and runs
 nothing.
 
 A host usually has more than one identity file, and a manager that replaces an
-item by name would keep only the last. So when more than one file is found,
-the item's title must differ per file: put `{fingerprint}` (the identity's
-public-key fingerprint, with dashes for spaces) or `{name}` (the file's base
-name) in the title, in both the store and the verify command. Without one of
-them, the command refuses to run (exit 2) and stores nothing.
+item by name would keep only the last. So when more than one distinct key is
+found, the item's title must differ per file: put `{fingerprint}` (the
+identity's public-key fingerprint, with dashes for spaces) or `{name}` (the
+file's base name) in the title in `--store-cmd`, and in `--verify-cmd` wherever
+it names the item, so each verify reads back its own item. The command refuses
+to run (exit 2, nothing stored) without a placeholder in `--store-cmd`, if two
+different keys would get the same item, or if `--verify-cmd` would be the same
+for every file. As a last check, after the final store it reads every item
+back again and reports `OVERWRITTEN by a later store: <path>` (exit 1) for one
+that no longer matches, whatever the arguments looked like. The same key at
+two paths is stored once and both paths are listed.
 
 For 1Password (`op`), with placeholders for your own vault:
 
@@ -360,9 +366,11 @@ the backup is **UNVERIFIED**: the store command only reported success, nothing
 read the copy back. Each file prints its path, its public-key fingerprint
 (grouped as in `join`), the result, and why it is on the list. The last line
 of a run is a summary such as
-`3 stored (3 verified, 0 UNVERIFIED), 0 failed`. The exit status is 0 only if
-every file was stored (and verified, when asked); a stored but UNVERIFIED file
-still exits 0, so read the summary. Your manager may prompt you to approve; the
+`3 stored (3 verified, 0 UNVERIFIED, 0 verify-failed), 0 store-failed`:
+`verify-failed` is stored but not proven (a read-back error, `MISMATCH` or an
+overwrite), `store-failed` is not stored (a failed store command or a refused
+file). The exit status is 0 only if every file was stored (and verified, when
+asked); a stored but UNVERIFIED file still exits 0, so read the summary. Your manager may prompt you to approve; the
 command waits up to 120 seconds (`CLAUDE_MEMSYNC_SECRET_TIMEOUT` changes that).
 
 Which files:
@@ -370,10 +378,14 @@ Which files:
 - By default, every distinct `memage.identity` named by this host's clones,
   plus the host's default identities that related read clones decrypt with
   (`identity-pq.*` and `identity.*` in the config directory, if present), plus
-  any classic identity or `*.classic-retired` file that `rekey-pq` keeps. The
+  the classic `identity.*` beside an `identity-pq.*` and any
+  `<name>.classic-retired` file that `rekey-pq` keeps (no other neighbour is
+  guessed at). A default file that is not an age identity is refused, exit 1;
+  it is not skipped. The
   classic file is the key to the pre-migration history and the rollback point,
   so keep it until you have dropped that backup (`rekey-pq --drop-backup`).
-  Each is labelled: `used by: <repos>`, `related clones`, or
+  Each is labelled: `used by: <repos>`, `host default` (`host default (related
+  clones)` when the routes file has a registry), or
   `classic history and rollback`.
 - A clone that is not a git repo, or has no `memage.identity` (it is not
   encrypted), prints `skipped: <dir> (<reason>)`; nothing is skipped silently.

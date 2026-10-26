@@ -1098,16 +1098,22 @@ What it does, in order:
    `--repo`'s or `--config`'s clone, else of every clone this host routes.
    For the whole host it adds the default identities related read clones use,
    and any classic identity or `*.classic-retired` that `rekey-pq` keeps beside
-   a listed one. Each file is labelled (`used by: <repos>`, `related clones`,
+   a listed one (exactly `identity-pq.<ext>` to `identity.<ext>`, and
+   `<name>.classic-retired`; no other neighbour is guessed). A default file
+   that is not an age identity is refused (exit 1), not skipped. Each file is
+   labelled (`used by: <repos>`, `host default`, which reads `host default
+   (related clones)` when the routes file has a registry, and
    `classic history and rollback`); clones that give nothing print
    `skipped: <dir> (<reason>)`. The configured path is not symlink-resolved.
-3. With more than one file, `--store-cmd` must contain `{fingerprint}` (the
-   grouped fingerprint with dashes) or `{name}` (the file's base name), else it
-   exits 2 before running anything: one fixed item name would be overwritten by
-   each file in turn while every one still verified. Both placeholders are
-   replaced in every argument of `--store-cmd` and `--verify-cmd` for each
-   file; they never contain key material. Two files that would expand to the
-   same store arguments are refused too.
+3. With more than one distinct key (the same bytes at two paths count once and
+   are stored once), `--store-cmd` must contain `{fingerprint}` (the grouped
+   fingerprint with dashes) or `{name}` (the file's base name), else it exits 2
+   before running anything: one fixed item name would be overwritten by each
+   file in turn while every one still verified. Both placeholders are replaced
+   in every argument of `--store-cmd` and `--verify-cmd` for each file; they
+   never contain key material. Two different keys that would expand to the
+   same store arguments are refused, and so is a `--verify-cmd` that expands
+   identically for every file (each verify would read the same item back).
 4. Checks every file: a regular file, not a symlink (also checked on the opened
    file), no permission bits beyond 0600, owned by the current user, one hard
    link, and an age classic (`AGE-SECRET-KEY-1…`) or hybrid
@@ -1124,8 +1130,13 @@ What it does, in order:
    SHA-256 of its stdout with the file's. Only the verdict is printed. The
    buffers holding the key are zeroed after use, best effort.
 7. Prints `<path>`, the public-key fingerprint (the grouped form `join`
-   shows), the result and the reason, then a summary:
-   `N stored (M verified, K UNVERIFIED), F failed`.
+   shows), the result and the reason. After the last store, with a
+   `--verify-cmd` and more than one item, every item is read back once more;
+   one that no longer matches is reported `OVERWRITTEN by a later store:
+   <path>`. Then a summary:
+   `N stored (M verified, K UNVERIFIED, V verify-failed), F store-failed`
+   (`V`: a read-back error, a `MISMATCH` or an overwrite; `F`: a failed store
+   command or a refused file).
 
 Exit codes: 0 when every file was stored (and verified, when asked; a stored
 but UNVERIFIED file still exits 0), 1 on any failure (an unsafe file, a failed
