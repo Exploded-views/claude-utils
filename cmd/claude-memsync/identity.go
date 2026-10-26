@@ -132,58 +132,169 @@ func wipe(b []byte) {
 	}
 }
 
-// identityPaths resolves the files to back up: the one named by --identity, or
-// the distinct memage.identity of the clones --repo, --config or (otherwise)
-// every routed clone of this host name.
-func identityPaths(sel repoSel, all bool, explicit string) ([]string, error) {
-	if explicit != "" {
-		return []string{explicit}, nil
+// idTarget is one identity file to back up and why it is included.
+type idTarget struct {
+	Path  string
+	users []string // clones whose memage.identity names it
+	extra []string // other reasons
+	fi    os.FileInfo
+}
+
+func (t *idTarget) why() string {
+	var parts []string
+	if len(t.users) > 0 {
+		parts = append(parts, "used by: "+strings.Join(t.users, ", "))
 	}
-	var syncDirs []string
-	if sel.Repo != "" || sel.Config != "" {
-		cfg, _, err := resolveRepo(sel, true)
-		if err != nil {
-			return nil, err
+	parts = append(parts, t.extra...)
+	return strings.Join(parts, "; ")
+}
+
+type idTargets []*idTarget
+
+// add records path with a reason, merging into an earlier entry for the same
+// file (the same spelling, or the same file under another name).
+func (ts *idTargets) add(path, user, extra string) {
+	fi, _ := os.Lstat(path)
+	var t *idTarget
+	for _, o := range *ts {
+		if o.Path == path || (fi != nil && o.fi != nil && os.SameFile(fi, o.fi)) {
+			t = o
+			break
 		}
-		syncDirs = []string{cfg.SyncDir}
+	}
+	if t == nil {
+		t = &idTarget{Path: path, fi: fi}
+		*ts = append(*ts, t)
+	}
+	if user != "" {
+		for _, u := range t.users {
+			if u == user {
+				return
+			}
+		}
+		t.users = append(t.users, user)
+	}
+	if extra != "" {
+		for _, e := range t.extra {
+			if e == extra {
+				return
+			}
+		}
+		t.extra = append(t.extra, extra)
+	}
+}
+
+const (
+	whyRelated = "related clones"
+	whyClassic = "classic history and rollback"
+)
+
+// expandIdentityPath makes a configured path absolute (~ expanded) without
+// resolving symlinks: a symlinked identity must stay visible to the checks.
+func expandIdentityPath(p string) string {
+	p = filepath.FromSlash(strings.TrimSpace(p))
+	if p == "~" || strings.HasPrefix(p, "~"+string(filepath.Separator)) {
+		if home, err := os.UserHomeDir(); err == nil {
+			p = filepath.Join(home, strings.TrimPrefix(p, "~"))
+		}
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	return filepath.Clean(p)
+}
+
+func lexists(p string) bool {
+	_, err := os.Lstat(p)
+	return err == nil
+}
+
+// classicOf is the classic file beside a hybrid identity (identity-pq.txt ->
+// identity.txt); any other path is its own classic.
+func classicOf(p string) string {
+	ext := filepath.Ext(p)
+	if base := strings.TrimSuffix(p, ext); strings.HasSuffix(base, "-pq") {
+		return strings.TrimSuffix(base, "-pq") + ext
+	}
+	return p
+}
+
+// identityPaths resolves the files to back up. --identity names one. Otherwise
+// the memage.identity of the clone --repo or --config names, or of every clone
+// on this host; for the whole host also the identities related read clones use
+// (the default ones). A classic identity and its *.classic-retired that
+// rekey-pq keeps beside any of them come too. Clones that contribute nothing
+// are returned in skipped, with the reason.
+func identityPaths(sel repoSel, all bool, explicit string) (targets idTargets, skipped []string, err error) {
+	if explicit != "" {
+		targets.add(explicit, "", "named with --identity")
+		return targets, nil, nil
+	}
+	type clone struct{ label, dir string }
+	var clones []clone
+	wholeHost := sel.Repo == "" && sel.Config == ""
+	if !wholeHost {
+		cfg, name, err := resolveRepo(sel, true)
+		if err != nil {
+			return nil, nil, err
+		}
+		if name == "" {
+			name = cfg.SyncDir
+		}
+		clones = []clone{{name, cfg.SyncDir}}
 	} else if path, ok, err := resolveRoutesPath(sel.Routes); err != nil {
-		return nil, err
+		return nil, nil, err
 	} else if ok {
 		set, err := loadRouted(path)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for _, n := range set.names() {
-			syncDirs = append(syncDirs, set.Cfgs[n].SyncDir)
+			clones = append(clones, clone{n, set.Cfgs[n].SyncDir})
 		}
 	} else {
 		cfg, err := loadDistillConfig("")
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		syncDirs = []string{cfg.SyncDir}
+		clones = []clone{{cfg.SyncDir, cfg.SyncDir}}
 	}
-	var out []string
-	seen := map[string]bool{}
-	for _, d := range syncDirs {
-		repo := gitwt.New(d)
+	for _, c := range clones {
+		repo := gitwt.New(c.dir)
 		if !repo.IsRepo() {
+			skipped = append(skipped, "skipped: "+c.dir+" (not a git repo)")
 			continue
 		}
 		p := agecrypt.IdentityPath(repo)
 		if p == "" {
+			skipped = append(skipped, "skipped: "+c.dir+" (no memage.identity: the repo is not encrypted)")
 			continue
 		}
-		p = normIdentityPath(p)
-		if !seen[p] {
-			seen[p] = true
-			out = append(out, p)
+		targets.add(expandIdentityPath(p), c.label, "")
+	}
+	if wholeHost {
+		// What related read clones decrypt with (related_age.go).
+		pq := defaultIdentityFor(agecrypt.SchemePQ)
+		for _, p := range []string{pq, defaultIdentityPath()} {
+			if p != "" && lexists(p) {
+				targets.add(expandIdentityPath(p), "", whyRelated)
+			}
 		}
 	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("no clone on this host names an identity (memage.identity); name the file with --identity <path> (the default location is %s)", defaultIdentityFor(agecrypt.SchemePQ))
+	// The classic identity and its retired copy that rekey-pq keeps.
+	for _, t := range append(idTargets(nil), targets...) {
+		c := classicOf(t.Path)
+		if c != t.Path && lexists(c) {
+			targets.add(c, "", whyClassic)
+		}
+		if lexists(c + ".classic-retired") {
+			targets.add(c+".classic-retired", "", whyClassic)
+		}
 	}
-	return out, nil
+	if len(targets) == 0 {
+		return nil, skipped, fmt.Errorf("no clone on this host names an identity (memage.identity); name the file with --identity <path> (the default location is %s)", defaultIdentityFor(agecrypt.SchemePQ))
+	}
+	return targets, skipped, nil
 }
 
 // identityBackupCmd is `identity backup`: it stores each identity file through
@@ -234,7 +345,10 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 	if *all && (sel.Repo != "" || sel.Config != "") {
 		return usage("--all does not go with --repo or --config")
 	}
-	paths, err := identityPaths(sel, *all, *explicit)
+	paths, skipped, err := identityPaths(sel, *all, *explicit)
+	for _, l := range skipped {
+		fmt.Fprintln(stdout, l)
+	}
 	if err != nil {
 		fmt.Fprintln(stderr, "identity backup:", err)
 		return 1
@@ -242,8 +356,8 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 
 	if len(paths) > 1 && !hasPlaceholder(storeArgv) {
 		fmt.Fprintf(stderr, "identity backup: %d identities would go through one fixed --store-cmd, and a manager that replaces an item by name would keep only the last key while every one still verified. Nothing was run.\n  files:\n", len(paths))
-		for _, p := range paths {
-			fmt.Fprintf(stderr, "    %s\n", p)
+		for _, t := range paths {
+			fmt.Fprintf(stderr, "    %s\n", t.Path)
 		}
 		fmt.Fprintln(stderr, "  Add {fingerprint} (or {name}) to the item's title in --store-cmd and --verify-cmd, or back the files up one at a time with --identity <path>.")
 		return 2
@@ -253,6 +367,7 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 	// found before anything is stored.
 	type loaded struct {
 		path string
+		why  string
 		info *idFileInfo
 		err  error
 	}
@@ -265,9 +380,10 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 		}
 	}()
 	items := map[string]string{} // substituted store argv -> path
-	for _, p := range paths {
+	for _, t := range paths {
+		p := t.Path
 		info, err := readIdentityFile(p)
-		files = append(files, loaded{p, info, err})
+		files = append(files, loaded{p, t.why(), info, err})
 		if err != nil {
 			continue
 		}
@@ -287,8 +403,9 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 	}
 	for _, f := range files {
 		p, info := f.path, f.info
+		why := "\t(" + f.why + ")"
 		if f.err != nil {
-			fmt.Fprintf(stdout, "%s\tREFUSED\n", p)
+			fmt.Fprintf(stdout, "%s\tREFUSED%s\n", p, why)
 			fmt.Fprintf(stderr, "identity backup: %s: %v\n", p, f.err)
 			failed++
 			continue
@@ -303,12 +420,12 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 			if len(vArgv) > 0 {
 				v = ", then read back with " + vArgv[0]
 			}
-			fmt.Fprintf(stdout, "%s\tfingerprint %s\twould be stored with %s%s\n", p, info.Fingerprint, sArgv[0], v)
+			fmt.Fprintf(stdout, "%s\tfingerprint %s\twould be stored with %s%s%s\n", p, info.Fingerprint, sArgv[0], v, why)
 			continue
 		}
 		res, err := storeAndVerify(stderr, info, sArgv, vArgv)
 		wipe(info.data)
-		fmt.Fprintf(stdout, "%s\tfingerprint %s\t%s\n", p, info.Fingerprint, res)
+		fmt.Fprintf(stdout, "%s\tfingerprint %s\t%s%s\n", p, info.Fingerprint, res, why)
 		if err != nil {
 			fmt.Fprintf(stderr, "identity backup: %s: %v\n", p, err)
 			failed++
