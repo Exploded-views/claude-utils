@@ -555,3 +555,31 @@ func TestIdentityBackup_RefusesASymlinkedConfiguredIdentity(t *testing.T) {
 		t.Fatal("a symlinked identity was stored")
 	}
 }
+
+func TestIdentityBackup_SummaryLine(t *testing.T) {
+	path, _, _ := idFile(t, t.TempDir(), "identity.txt", false)
+	store, verify, _ := fakeStores(t)
+	fail := filepath.Join(t.TempDir(), "fail.sh")
+	os.WriteFile(fail, []byte("#!/bin/sh\nexit 1\n"), 0o700)
+	wrong := filepath.Join(t.TempDir(), "wrong.sh")
+	os.WriteFile(wrong, []byte("#!/bin/sh\necho x\n"), 0o700)
+	for name, c := range map[string]struct {
+		args []string
+		want string
+		code int
+	}{
+		"verified":   {[]string{"--store-cmd", store, "--verify-cmd", verify}, "1 stored (1 verified, 0 UNVERIFIED), 0 failed", 0},
+		"unverified": {[]string{"--store-cmd", store}, "1 stored (0 verified, 1 UNVERIFIED), 0 failed", 0},
+		"store fail": {[]string{"--store-cmd", fail}, "0 stored (0 verified, 0 UNVERIFIED), 1 failed", 1},
+		"mismatch":   {[]string{"--store-cmd", store, "--verify-cmd", wrong}, "0 stored (0 verified, 0 UNVERIFIED), 1 failed", 1},
+	} {
+		code, out, errs := runIDBackup(append([]string{"--identity", path}, c.args...)...)
+		if code != c.code || !strings.Contains(out, c.want+"\n") {
+			t.Errorf("%s: exit %d, want %d with %q:\n%s%s", name, code, c.code, c.want, out, errs)
+		}
+	}
+	// a dry run stores nothing and has no such line
+	if _, out, _ := runIDBackup("--identity", path, "--store-cmd", store, "--dry-run"); strings.Contains(out, " stored (") {
+		t.Errorf("dry run printed a summary:\n%s", out)
+	}
+}
