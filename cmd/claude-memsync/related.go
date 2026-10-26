@@ -15,8 +15,8 @@ import (
 
 	"github.com/MarimerLLC/claude-utils/internal/related"
 	"github.com/MarimerLLC/claude-utils/internal/route"
-	"github.com/MarimerLLC/claude-utils/internal/secretcmd"
 	"github.com/MarimerLLC/claude-utils/internal/scrub"
+	"github.com/MarimerLLC/claude-utils/internal/secretcmd"
 )
 
 // relatedOpener reads the related clones: plaintext as it is, an age-encrypted
