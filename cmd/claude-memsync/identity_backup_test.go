@@ -905,3 +905,102 @@ func TestIdentityBackup_DifferentKeysAreNeverGrouped(t *testing.T) {
 		}
 	}
 }
+
+// threeClonesTwoSharing: two clones name files holding the same key (different
+// comment lines); a third names another key. It returns the three paths.
+func threeClonesTwoSharing(t *testing.T) (a, b, c string) {
+	t.Helper()
+	cfgs := routedHost(t, []string{"personal", "client", "work"}, "personal", nil)
+	dir := t.TempDir()
+	a, secret, _ := idFile(t, dir, "a.txt", false)
+	b = filepath.Join(dir, "b.txt")
+	if err := os.WriteFile(b, []byte("# another comment, same key\n"+secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, _, _ = idFile(t, dir, "c.txt", true)
+	setCloneIdentity(t, cfgs["personal"].SyncDir, a)
+	setCloneIdentity(t, cfgs["client"].SyncDir, b)
+	setCloneIdentity(t, cfgs["work"].SyncDir, c)
+	return a, b, c
+}
+
+// sameKeyLine finds the one "same key as" line of out: the duplicate's path,
+// the first copy's path, and the whole line.
+func sameKeyLine(t *testing.T, out string) (dup, first, line string) {
+	t.Helper()
+	line = idLineWith(out, "same key as")
+	if line == "" {
+		t.Fatalf("no same-key line:\n%s", out)
+	}
+	dup, rest, _ := strings.Cut(line, "\t")
+	_, after, _ := strings.Cut(rest, "same key as ")
+	first, _, _ = strings.Cut(after, " (")
+	return dup, first, line
+}
+
+// A same-key line says what became of the first copy, which is only known
+// after the last store and the final read-back.
+func TestIdentityBackup_SameKeyLineFollowsTheFirstCopysFinalStatus(t *testing.T) {
+	t.Run("mismatch", func(t *testing.T) {
+		cfgs := routedHost(t, []string{"personal", "client"}, "personal", nil)
+		dir := t.TempDir()
+		a, secret, _ := idFile(t, dir, "a.txt", false)
+		b := filepath.Join(dir, "b.txt")
+		os.WriteFile(b, []byte("# other comment\n"+secret+"\n"), 0o600)
+		setCloneIdentity(t, cfgs["personal"].SyncDir, a)
+		setCloneIdentity(t, cfgs["client"].SyncDir, b)
+		store, _, _ := fakeStores(t)
+		junk := filepath.Join(t.TempDir(), "junk.sh")
+		os.WriteFile(junk, []byte("#!/bin/sh\necho junk\n"), 0o700)
+		code, out, errs := runIDBackup("--all", "--store-cmd", store+" {fingerprint}", "--verify-cmd", junk)
+		if code != 1 {
+			t.Fatalf("exit %d, want 1\n%s%s", code, out, errs)
+		}
+		_, first, l := sameKeyLine(t, out)
+		if !strings.Contains(l, "stored once, but "+first+" ended as MISMATCH") {
+			t.Errorf("the same-key line must say the first copy MISMATCHed, got %q\n%s", l, out)
+		}
+	})
+	t.Run("overwritten", func(t *testing.T) {
+		threeClonesTwoSharing(t)
+		store, verify, _ := laterStoreStores(t, "exit1")
+		code, out, errs := runIDBackup("--all", "--store-cmd", store+" {fingerprint}", "--verify-cmd", verify+" {fingerprint}")
+		if code != 1 {
+			t.Fatalf("exit %d, want 1\n%s%s", code, out, errs)
+		}
+		_, first, l := sameKeyLine(t, out)
+		if !strings.Contains(l, "stored once, but "+first+" ended as OVERWRITTEN by a later store") || strings.Contains(l, "(stored once)") {
+			t.Errorf("the same-key line must say the first copy was OVERWRITTEN later, got %q", l)
+		}
+		// printed after the final pass: the OVERWRITTEN line of the first copy comes first
+		if strings.Index(out, first+"\tfingerprint") > strings.Index(out, "same key as") || strings.LastIndex(out, "OVERWRITTEN") > strings.Index(out, "same key as") {
+			t.Errorf("the same-key line must follow the final pass:\n%s", out)
+		}
+	})
+	t.Run("clean", func(t *testing.T) {
+		a, b, _ := threeClonesTwoSharing(t)
+		store, verify, _ := fakeStores(t)
+		code, out, errs := runIDBackup("--all", "--store-cmd", store+" {fingerprint}", "--verify-cmd", verify+" {fingerprint}")
+		if code != 0 {
+			t.Fatalf("exit %d\n%s%s", code, out, errs)
+		}
+		dup, first, l := sameKeyLine(t, out)
+		if !((dup == a && first == b) || (dup == b && first == a)) || !strings.Contains(l, "same key as "+first+" (stored once)") {
+			t.Errorf("a clean first copy keeps the plain note, got %q\n%s", l, out)
+		}
+		if !strings.Contains(out, "2 stored (2 verified") {
+			t.Errorf("totals changed:\n%s", out)
+		}
+	})
+	t.Run("dry run", func(t *testing.T) {
+		threeClonesTwoSharing(t)
+		store, _, _ := fakeStores(t)
+		code, out, errs := runIDBackup("--all", "--dry-run", "--store-cmd", store+" {fingerprint}")
+		if code != 0 {
+			t.Fatalf("exit %d\n%s%s", code, out, errs)
+		}
+		if _, first, l := sameKeyLine(t, out); !strings.Contains(l, "same key as "+first+" (would be stored once)") {
+			t.Errorf("dry run note, got %q", l)
+		}
+	})
+}
