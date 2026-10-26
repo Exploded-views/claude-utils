@@ -1338,6 +1338,7 @@ check "a clean clone with nothing unpushed is moved aside (not deleted) and the 
 for form in tilde symlink; do
   hmprep "hr$form"; mkdir -p "$D/half"
   mkdir -p "$H/.config/claude-memsync"
+  # shellcheck disable=SC2088  # the literal ~ is the point: the script must expand it
   if [ "$form" = tilde ]; then ref='~/.claudesync.d/project-alpha/config.json'; else ln -s "$H/.claudesync.d" "$H/linkd"; ref="$H/linkd/project-alpha/config.json"; fi
   printf '{"repos":{"project-alpha":{"config":"%s","kind":"project","remote":"mem-project-alpha"}},"routes":[],"default":"deny"}\n' "$ref" >"$H/.config/claude-memsync/routes.json"
   pjrun --jobs 2

@@ -856,14 +856,63 @@ PY
 # began it (the initing mark) and it holds nothing that exists only there: then
 # it is moved aside, after the plan is confirmed, just before its init (see
 # half_made_aside). Never deleted.
-half_made_check() { # key: die unless the half-made dir is safe to move aside
-  local d="$SYNC_ROOT/$1" unpushed
-  if [ -e "$d/.git" ]; then
-    unpushed="$(git -C "$d" log --branches --not --remotes --format=%h 2>/dev/null | head -n1 || true)"
-    [ -z "$unpushed" ] || die "$d began as an init of this bootstrap but holds a commit that is not on any remote ($unpushed); refusing to move it. Look at it with: git -C $d log --branches --not --remotes"
+half_made_check() { # key: die unless the half-made dir is safe to move aside. Fails closed: any doubt refuses.
+  local d="$SYNC_ROOT/$1" out rc
+  [ ! -L "$d" ] || die "$d is a symlink; refusing to move it"
+  if [ -e "$d/.git" ] || [ -L "$d/.git" ]; then
+    # git may not climb above the sync root into some enclosing repo, and a git error refuses the dir
+    # (it is never taken for "nothing to lose")
+    GIT_CEILING_DIRECTORIES="$SYNC_ROOT" git -C "$d" rev-parse --git-dir >/dev/null 2>&1 \
+      || die "$d: cannot read its git state (a corrupt .git?); refusing to move it"
+    if GIT_CEILING_DIRECTORIES="$SYNC_ROOT" git -C "$d" rev-parse -q --verify refs/stash >/dev/null 2>&1; then
+      die "$d has a stash (work that exists only there); refusing to move it"
+    fi
+    rc=0; out="$(GIT_CEILING_DIRECTORIES="$SYNC_ROOT" git -C "$d" log --branches --not --remotes --format=%h 2>&1)" || rc=$?
+    [ "$rc" -eq 0 ] || die "$d: git log failed ($out); refusing to move it"
+    [ -z "$out" ] || die "$d began as an init of this bootstrap but holds a commit that is not on any remote ($(printf '%s' "$out" | head -n1)); refusing to move it. Look at it with: git -C $d log --branches --not --remotes"
+    rc=0; out="$(GIT_CEILING_DIRECTORIES="$SYNC_ROOT" git -C "$d" status --porcelain 2>&1)" || rc=$?
+    [ "$rc" -eq 0 ] || die "$d: git status failed ($out); refusing to move it"
+    [ -z "$out" ] || die "$d has uncommitted changes; refusing to move it. Look at it with: git -C $d status"
   fi
-  if [ -e "$ROUTES" ] && ! done_p routes && grep -qF -- "$d" "$ROUTES" 2>/dev/null; then
-    die "$d is named in $ROUTES, which this bootstrap did not write; refusing to move it"
+  # claude-memsync's daemon holds an exclusive flock on <sync dir>/.state/daemon.lock while it serves the dir
+  if [ -e "$d/.state/daemon.lock" ]; then
+    python3 -I -c '
+import fcntl, sys
+try:
+    f = open(sys.argv[1], "a")
+    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError:
+    sys.exit(1)' "$d/.state/daemon.lock" || die "$d: its daemon lock is held (claude-memsync is serving it); refusing to move it"
+  fi
+  # a routes.json this script did not write that names the dir (any path form: ~, symlinks)
+  if [ -e "$ROUTES" ] && ! done_p routes; then
+    if python3 -I - "$ROUTES" "$d" <<'PY'
+import json, os, sys
+p, d = sys.argv[1], os.path.realpath(sys.argv[2])
+try:
+    data = json.load(open(p))
+except Exception:
+    sys.exit(0)   # cannot be read: not trusted, counts as naming it
+def strings(o):
+    if isinstance(o, str):
+        yield o
+    elif isinstance(o, dict):
+        for v in o.values():
+            yield from strings(v)
+    elif isinstance(o, list):
+        for v in o:
+            yield from strings(v)
+for v in strings(data):
+    if not v.startswith(("/", "~")):
+        continue
+    q = os.path.realpath(os.path.expanduser(v))
+    if q == d or q.startswith(d + os.sep):
+        sys.exit(0)
+sys.exit(1)
+PY
+    then
+      die "$d is named in (or cannot be told from) $ROUTES, which this bootstrap did not write; refusing to move it"
+    fi
   fi
 }
 check_sync_dirs() { # run after the plan is final
@@ -880,18 +929,27 @@ check_sync_dirs() { # run after the plan is final
     fi
   done
 }
+# unique_path <path>: <path>, or <path>.1, .2 ... the first that does not exist.
+unique_path() {
+  local b="$1" i=1
+  if [ ! -e "$b" ] && [ ! -L "$b" ]; then printf '%s' "$b"; return 0; fi
+  while [ -e "$b.$i" ] || [ -L "$b.$i" ]; do i=$((i + 1)); done
+  printf '%s' "$b.$i"
+}
 # half_made_aside <key>: after confirmation, in the repo's job, just before its init.
+# The guards run again here: the dir may have changed since the first check.
 half_made_aside() {
-  local d="$SYNC_ROOT/$1" to i
+  local d="$SYNC_ROOT/$1" to
   [ "$DRY_RUN" -eq 0 ] && [ -e "$d" ] || return 0
-  to="$d.half-made.${BOOTSTRAP_ASIDE_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
-  if [ -e "$to" ] || [ -L "$to" ]; then
-    i=1
-    while [ -e "$to.$i" ] || [ -L "$to.$i" ]; do i=$((i + 1)); done
-    to="$to.$i"
-  fi
+  { [ -e "$STATE/$HOST.initing.$1" ] && ! done_p "init.$1"; } || die "$d is there but was not begun by this bootstrap; refusing to touch it"
+  half_made_check "$1"
+  to="$(unique_path "$d.half-made.${BOOTSTRAP_ASIDE_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}")"
   say "  $d is half-made by an interrupted run: moving it aside to $to"
-  mv "$d" "$to"
+  mv -n "$d" "$to"
+  # mv -n never overwrites; if the target appeared meanwhile the dir would land inside it or stay: check
+  if [ -e "$d" ] || [ ! -e "$to" ] || [ -e "$to/$1" ]; then
+    die "could not move $d aside to $to cleanly; look at both before running again"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1260,15 +1318,15 @@ step_routes() {
     if routes_same "$new"; then say "  routes.json already matches the plan"; return 0; fi
     if done_p routes; then
       regen=1
-      say "  the plan differs from the routes.json written by an earlier run (a new project or workspace): regenerating it; the old one is kept as $ROUTES.bak"
+      say "  the plan differs from the routes.json written by an earlier run (a new project or workspace): regenerating it; the old one is kept as $ROUTES.bak.<time>"
     elif [ "$YES" -eq 0 ]; then
-      die "$ROUTES already exists and differs from this plan; refusing to overwrite it (pass --yes to replace it, a .bak is kept)"
+      die "$ROUTES already exists and differs from this plan; refusing to overwrite it (pass --yes to replace it, a timestamped .bak.<time> is kept)"
     fi
   fi
   say "  writing $ROUTES (0600, default deny, foreignWriters for the old memsync)"
   [ "$DRY_RUN" -eq 1 ] && return 0
   mkdir -p "$CFG"
-  [ ! -e "$ROUTES" ] || cp -p "$ROUTES" "$ROUTES.bak"
+  [ ! -e "$ROUTES" ] || cp -p "$ROUTES" "$(unique_path "$ROUTES.bak.${BOOTSTRAP_ASIDE_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}")"
   printf '%s\n' "$new" >"$ROUTES.tmp"
   chmod 600 "$ROUTES.tmp"; mv "$ROUTES.tmp" "$ROUTES"
   mark routes
@@ -1297,7 +1355,7 @@ job_note() { # key|join text: tell the parent
 # token_hint <gh output>: after a 401, say so when the minted token is old (they last about an hour).
 token_hint() {
   local t=0
-  printf '%s' "$1" | grep -qE '401|Bad credentials' || return 0
+  printf '%s' "$1" | grep -qE 'HTTP 401|Bad credentials' || return 0
   [ -n "$RUN_DIR" ] && [ -s "$RUN_DIR/org-token.at" ] || return 0
   t="$(cat "$RUN_DIR/org-token.at")"
   if [ $(($(date +%s) - t + ${BOOTSTRAP_TOKEN_AGE_BONUS:-0})) -gt 3000 ]; then
@@ -1384,7 +1442,7 @@ repo_keys_init() { # index
     fi
     out="$("$BIN/claude-memsync" join request --repo "$k" --label "$HOST" 2>&1)" || die "join request failed: $out"
     printf '%s\n' "$out"
-    if printf '%s' "$out" | grep -q 'already a recipient'; then   # an earlier run got as far as the push
+    if printf '%s' "$out" | grep -q '^this host is already a recipient of this repo'; then   # an earlier run got as far as the push
       say "  $name: this host is already a recipient; no join to accept"
       mark "join.$k"
       return 0
