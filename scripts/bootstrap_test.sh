@@ -16,6 +16,9 @@
 # log line keeps the original arguments, which the checks assert on). The token
 # flags go through, so init saves them in config.json like the real thing.
 # app-token is real too: it talks to a loopback fake of the GitHub App API.
+#
+# BT_QUICK=1 stops after the new-flag sections (prerequisites, pause, token file,
+# prebuilt dir), for a fast loop while editing; CI runs everything.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -115,7 +118,8 @@ echo "$(basename "$0"):$(env | grep -v '^STUB_' | grep -cF -- "$STUB_ORG_TOKEN")
 EOF
 cat >"$STUBS/go" <<'EOF'
 #!/bin/sh
-if [ "$1" = version ]; then echo "go version go1.25.1 linux/amd64"; exit 0; fi
+if [ "$1" = version ]; then echo "go version go${STUB_GOVER:-1.25.1} linux/amd64"; exit 0; fi
+echo "go $*" >>"$STUB_DIR/go.log"
 # go build -o <out> <pkg>: write a stub binary
 out="$3"
 # record whether the org token leaked into this process env (count only, never the value)
@@ -256,9 +260,9 @@ newhome() {
 # runboot <args...>: run the script in the fake HOME; sets RC and OUT.
 runboot() {
   set +e
-  OUT="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="${REAL_RUN:-$REAL}" GIT_CONFIG_NOSYSTEM=1 \
+  OUT="$(HOME="$H" PATH="${BOOT_PATH:-$STUBS:$PATH}" STUB_DIR="$STUB_DIR" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="${REAL_RUN:-$REAL}" GIT_CONFIG_NOSYSTEM=1 \
     BOOTSTRAP_APP_API_BASE="http://127.0.0.1:$APIPORT" CLAUDE_UTILS_URL="https://example.invalid/claude-utils.git" \
-    bash "$ROOT/scripts/bootstrap.sh" --sha "$SHA" --deny-owner Acme-Client --deny-term acmeclient ${ORGARGS[@]+"${ORGARGS[@]}"} "${REQ[@]}" "$@" </dev/null 2>&1)"
+    "$BASH" "$ROOT/scripts/bootstrap.sh" --sha "$SHA" --deny-owner Acme-Client --deny-term acmeclient ${ORGARGS[@]+"${ORGARGS[@]}"} "${REQ[@]}" "$@" </dev/null 2>&1)"
   RC=$?
   set -e
 }
@@ -328,6 +332,53 @@ runboot --host testhost --role homelab --dry-run
 check "dry run exits 0" [ "$RC" -eq 0 ]
 check "dry run creates nothing" bash -c "[ -z \"\$(find '$H' -mindepth 1 -not -name .gitconfig | head -1)\" ]"
 check "dry run makes no repo or key calls" hasnt "$STUB_DIR/gh.log" 'repo (create|deploy-key)'
+
+# --- helpers for the new-flag sections ----------------------------------------------
+# minipath <omit...>: a bin dir holding only the tools the script needs (the
+# stubs for gh, go and friends, the real rest), minus the ones named, so a
+# missing tool is really missing.
+MININ=0
+MINI_TOOLS="git python3 ssh-keygen ssh-keyscan gh systemctl launchctl claude go sed awk grep tr cut sort head tail find dirname basename cat id uname stat mktemp chmod mkdir ln rm cp mv touch date env wc tee readlink sleep sh bash shred dd tar sha256sum"
+minipath() {
+  local d="$BASE/mini.$MININ" t p; MININ=$((MININ + 1))
+  rm -rf "$d"; mkdir -p "$d"
+  for t in $MINI_TOOLS; do
+    case " $* " in *" $t "*) continue ;; esac
+    if [ -x "$STUBS/$t" ]; then ln -s "$STUBS/$t" "$d/$t"
+    elif p="$(type -P "$t")" && [ -n "$p" ]; then ln -s "$p" "$d/$t"; fi
+  done
+  printf '%s' "$d"
+}
+untouched() { [ -z "$(find "$H" -mindepth 1 -not -name .gitconfig | head -1)" ] && [ ! -s "$STUB_DIR/gh.log" ]; }
+quick_exit() { # after the new-flag sections, when BT_QUICK is set
+  [ -n "${BT_QUICK:-}" ] || return 0
+  echo; echo "passed=$PASS failed=$FAIL pending=$PENDING (BT_QUICK: stopped early)"; [ "$FAIL" -eq 0 ]; exit $?
+}
+
+# ============================ prerequisites ====================================
+echo "--- prerequisites: one line per missing tool, exit 1, nothing changed (also in --dry-run)"
+newhome pq0
+BOOT_PATH="$(minipath)" runboot --host testhost --role homelab --dry-run
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -8
+check "control: a minimal PATH with every tool passes a dry run" [ "$RC" -eq 0 ]
+case "$(uname -s)" in Darwin) SVC=launchctl ;; *) SVC=systemctl ;; esac
+for mode in --dry-run --yes; do
+  for t in git python3 ssh-keygen ssh-keyscan gh $SVC go; do
+    newhome pq
+    BOOT_PATH="$(minipath "$t")" runboot --host testhost --role homelab "$mode"
+    check "without $t ($mode): exit 1 and a 'missing prerequisite: $t' line" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -qE '^missing prerequisite: $t( |\$)'" _ "$OUT"
+    check "without $t ($mode): nothing was changed" untouched
+  done
+done
+newhome pq
+BOOT_PATH="$(minipath git python3 ssh-keygen gh)" runboot --host testhost --role homelab --yes
+check "four tools missing: four lines, one each, then exit 1" bash -c "[ $RC -eq 1 ] && [ \$(printf '%s\n' \"\$1\" | grep -c '^missing prerequisite: ') -eq 4 ]" _ "$OUT"
+newhome pq
+BOOT_PATH="$(minipath)" STUB_GOVER=1.24.0 runboot --host testhost --role homelab --yes
+check "go older than go.mod: its own line, exit 1, nothing changed" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -qE '^missing prerequisite: go 1\.24 is too old \(need >= 1\.25' " _ "$OUT"
+check "go too old: nothing was changed" untouched
+
+quick_exit
 
 echo "--- org scope"
 newhome orgs
@@ -642,6 +693,7 @@ fill() { # line: placeholders -> test values
   local l="$1"
   l="${l//<commit>/$SHA}"; l="${l//<host-label>/testhost}"; l="${l//<client-org>/Acme-Client}"; l="${l//<client-term>/acmeclient}"
   l="${l//<admin-app-id>/12345}"; l="${l//<admin-key-cmd>/cat $BASE/app.pem}"
+  l="${l//<github-user>/example-user}"
   l="${l//<org>/$ORG}"; l="${l//<recovery-recipient>/$PQREC}"
   l="${l//<check-app-id>/54321}"; l="${l//<check-key-file>/$H/.config/claude-memsync/memsync-check.pem}"
   printf '%s' "$l"
