@@ -860,3 +860,48 @@ func TestIdentityBackup_SameKeyLineDoesNotClaimAFailedStore(t *testing.T) {
 		t.Errorf("claims a copy was stored although the store failed:\n%s", out)
 	}
 }
+
+// An identity type that cannot be told apart from others must never be
+// grouped with them: the file is refused instead.
+type opaqueIdentity struct{}
+
+func (opaqueIdentity) Unwrap([]*age.Stanza) ([]byte, error) { return nil, age.ErrIncorrectIdentity }
+
+func TestKeyDigest_RefusesAnIdentityItCannotTellApart(t *testing.T) {
+	x, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := keyDigest([]age.Identity{x, opaqueIdentity{}}); err == nil || !strings.Contains(err.Error(), "not backed up") {
+		t.Fatalf("keyDigest accepted a non-Stringer identity: %v", err)
+	}
+	if _, err := keyDigest([]age.Identity{opaqueIdentity{}}); err == nil {
+		t.Fatal("keyDigest accepted a lone non-Stringer identity")
+	}
+	a, err1 := keyDigest([]age.Identity{x})
+	y, _ := age.GenerateX25519Identity()
+	b, err2 := keyDigest([]age.Identity{y})
+	if err1 != nil || err2 != nil || a == b {
+		t.Fatalf("two different keys must have different digests: %v %v", err1, err2)
+	}
+}
+
+// Guard: different keys of either kind are never grouped.
+func TestIdentityBackup_DifferentKeysAreNeverGrouped(t *testing.T) {
+	for _, pq := range []bool{false, true} {
+		cfgs := routedHost(t, []string{"personal", "client"}, "personal", nil)
+		dir := t.TempDir()
+		a, _, _ := idFile(t, dir, "a.txt", pq)
+		b, _, _ := idFile(t, dir, "b.txt", pq)
+		setCloneIdentity(t, cfgs["personal"].SyncDir, a)
+		setCloneIdentity(t, cfgs["client"].SyncDir, b)
+		store, verify, rec := fakeStores(t)
+		code, out, errs := runIDBackup("--all", "--store-cmd", store+" {fingerprint}", "--verify-cmd", verify+" {fingerprint}")
+		if code != 0 || strings.Contains(out, "same key") {
+			t.Fatalf("pq=%v: exit %d:\n%s%s", pq, code, out, errs)
+		}
+		if n := len(recorded(t, rec, "stdin")); n != 2 || strings.Count(out, "verified (sha256 matches)") != 2 {
+			t.Errorf("pq=%v: stored %d, want 2 verified:\n%s", pq, n, out)
+		}
+	}
+}
