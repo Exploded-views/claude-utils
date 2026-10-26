@@ -462,6 +462,13 @@ check "real run: the originals are kept as <name>.pre-bootstrap-<UTC time>, cont
 check "real run: ~/.local/bin now has symlinks into the lib dir" bash -c "[ -L '$H/.local/bin/claude-memsync' ] && [ -L '$H/.local/bin/claude-memmerge' ]"
 runboot --host testhost --role homelab --yes
 check "a re-run (symlinks now) moves nothing" bash -c "[ $RC -eq 0 ] && [ \$(ls '$H'/.local/bin/claude-memsync.pre-bootstrap-* | wc -l) -eq 1 ]"
+echo "--- a second move-aside within the same second never overwrites the first"
+newhome mv1b
+mkdir -p "$H/.local/bin"
+printf '#!/bin/sh\necho newer\n' >"$H/.local/bin/claude-memsync"; chmod +x "$H/.local/bin/claude-memsync"
+printf 'earlier\n' >"$H/.local/bin/claude-memsync.pre-bootstrap-20261026T000000Z"
+export BOOTSTRAP_ASIDE_STAMP=20261026T000000Z; runboot --host testhost --role homelab --yes; unset BOOTSTRAP_ASIDE_STAMP
+check "same-second move-aside: the earlier backup is kept and the new one gets a numbered name" bash -c "[ $RC -eq 0 ] && [ \"\$(cat '$H/.local/bin/claude-memsync.pre-bootstrap-20261026T000000Z')\" = earlier ] && grep -q newer '$H/.local/bin/claude-memsync.pre-bootstrap-20261026T000000Z.1'"
 newhome mv2
 mkdir -p "$H/.local/bin" "$H/elsewhere"; printf 'x\n' >"$H/elsewhere/old"; ln -s "$H/elsewhere/old" "$H/.local/bin/claude-memsync"
 runboot --host testhost --role homelab --yes
