@@ -397,6 +397,36 @@ set +e; wait "$SIGPID"; SIGRC=$?; set -e
 check "token file deleted: gone after SIGTERM mid-run (exit 143)" bash -c "[ $SIGRC -eq 143 ] && [ ! -e '$TF' ]"
 check "token file deleted: the token is not in the signalled run's output" bash -c "! grep -qF -- '$ORGTOK' '$SH_OUT'"
 
+
+# ============================ keep-out (was: client) ===========================
+echo "--- keep-out flags: new names, old names, wording"
+newhome ko0
+BOOT_PATH="$(minipath)" runboot --host testhost --role homelab --dry-run
+OUT0="$OUT"
+set +e; OUTNONE="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" "$BASH" "$ROOT/scripts/bootstrap.sh" --sha "$SHA" --org-token-file "$BASE/orgtoken" "${REQ[@]}" --host testhost --role homelab --dry-run </dev/null 2>&1)"; NRC=$?; set -e
+check "no keep-out flags: exit 0 and exactly the calm note" bash -c "[ $NRC -eq 0 ] && printf '%s\n' \"\$1\" | grep -qx 'keep-out lists: none (routing alone decides what syncs)'" _ "$OUTNONE"
+check "no keep-out flags: nothing reads as a warning or an error" bash -c "! printf '%s\n' \"\$1\" | grep -E 'keep-out|client owners' | grep -qE 'WARNING|ERROR|!!!'" _ "$OUTNONE"
+HELPOUT="$("$BASH" "$ROOT/scripts/bootstrap.sh" --help 2>&1 || true)"
+check "usage text names --keep-out-owner and --keep-out-term, not client owners" bash -c "printf '%s\n' \"\$1\" | grep -q -- '--keep-out-owner' && printf '%s\n' \"\$1\" | grep -q -- '--keep-out-term' && ! printf '%s\n' \"\$1\" | grep -qi 'client owner'" _ "$HELPOUT"
+check "the script says keep-out, not client, except for the mem-client-* repo kind" bash -c "! grep -i client '$ROOT/scripts/bootstrap.sh' | grep -viE 'mem-client|orchestrator'"
+for how in old new; do
+  newhome "ko-$how"
+  if [ "$how" = old ]; then KOF=(--deny-owner Some-Owner --deny-term 'a.b' --deny-term other); else KOF=(--keep-out-owner Some-Owner --keep-out-term 'a.b' --keep-out-term other); fi
+  runboot --host testhost --role homelab --yes "${KOF[@]}"
+  cp "$H/.config/claude-memsync/routes.json" "$BASE/ko-$how.routes" 2>/dev/null && sed -i "s#$H#HOME#g" "$BASE/ko-$how.routes" || : >"$BASE/ko-$how.routes.missing"
+  for k in personal infra; do cp "$H/.config/claude-memsync/denylist-$k.txt" "$BASE/ko-$how.deny-$k" 2>/dev/null || :; done
+done
+check "--keep-out-owner/-term and --deny-owner/-term give an identical routes.json" bash -c "[ -s '$BASE/ko-old.routes' ] && cmp -s '$BASE/ko-old.routes' '$BASE/ko-new.routes'"
+check "... and identical denylist files (terms only, regex-escaped)" bash -c "cmp -s '$BASE/ko-old.deny-personal' '$BASE/ko-new.deny-personal' && cmp -s '$BASE/ko-old.deny-infra' '$BASE/ko-new.deny-infra' && grep -qxF 'a\\.b' '$BASE/ko-new.deny-personal' && grep -qx other '$BASE/ko-new.deny-personal' && ! grep -qi some-owner '$BASE/ko-new.deny-personal'"
+newhome ko-pd
+mkdir -p "$H/code"
+mkgit() { mkdir -p "$1"; git -C "$1" init -q; git -C "$1" remote add origin "$2"; }
+mkgit "$H/code/keepme" "git@github.com:example-org/keepme.git"
+mkgit "$H/code/byowner" "git@github.com:Some-Owner/byowner.git"
+mkgit "$H/code/byterm" "git@github.com:example-org/has-secretword-inside.git"
+runboot --host testmac --role personal-dev --workspace "$H/code" --dry-run --keep-out-owner some-owner --keep-out-term SecretWord
+check "keep-out owner (any case) and term (substring, any case) skip a checkout; others are kept" bash -c "printf '%s\n' \"\$1\" | grep -q 'byowner.*REFUSED (keep-out)' && printf '%s\n' \"\$1\" | grep -q 'byterm.*REFUSED (keep-out)' && printf '%s\n' \"\$1\" | grep -q 'mem-project-keepme'" _ "$OUT"
+
 quick_exit
 
 # ============================ homelab ==========================================
@@ -464,7 +494,7 @@ echo "--- org scope"
 newhome orgs
 STUB_ORGS="$(printf 'example-org\nAcme-Client\nSomeOther')" runboot --host testhost --role homelab --yes
 check "extra orgs: warns and proceeds" [ "$RC" -eq 0 ]
-check "banner names every extra org and the client org" bash -c "printf '%s' \"\$1\" | grep -q \"WARNING: this host's gh login can reach Acme-Client, SomeOther. An agent host holds an owner-level token with client-org reach.\" && printf '%s' \"\$1\" | grep -q 'CLIENT ORG(S) reachable through the gh login: Acme-Client'" _ "$OUT"
+check "banner names every extra org and the client org" bash -c "printf '%s' \"\$1\" | grep -q \"WARNING: this host's gh login can reach Acme-Client, SomeOther. An agent host holds an owner-level token with reach beyond the memory repos.\" && printf '%s' \"\$1\" | grep -q 'KEEP-OUT ORG(S) reachable through the gh login: Acme-Client'" _ "$OUT"
 check "banner in plan and again in summary" bash -c "[ \$(printf '%s' \"\$1\" | grep -c \"WARNING: this host's gh login can reach\") -ge 3 ]" _ "$OUT"
 check "summary repeats the warning" bash -c "printf '%s' \"\$1\" | sed -n '/== j. Summary/,\$p' | grep -q 'WARNING: this host'" _ "$OUT"
 check "zero gh calls against any other org" bash -c "! grep -v 'user/orgs' '$STUB_DIR/gh.log' | grep -iE 'acme-client|someother'; [ \$(grep -E 'repo|api repos' '$STUB_DIR/gh.log' | grep -vc 'example-org') -eq 0 ]"
@@ -638,7 +668,7 @@ set +e
 NODENY="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" GIT_CONFIG_NOSYSTEM=1 \
   bash "$ROOT/scripts/bootstrap.sh" --sha "$SHA" --repo-url "https://example.invalid/other.git" ${ORGARGS[@]+"${ORGARGS[@]}"} "${REQ[@]}" --host testhost --role homelab --dry-run </dev/null 2>&1)"
 set -e
-check "no deny flags: loud warning" bash -c "printf '%s' \"\$1\" | grep -q 'no client owners or terms configured: client repos are only protected by routing'" _ "$NODENY"
+check "no keep-out flags: a calm one-line note, no warning prefix" bash -c "printf '%s' \"\$1\" | grep -qx 'keep-out lists: none (routing alone decides what syncs)' && ! printf '%s' \"\$1\" | grep -qE 'WARNING|!!!|client owners'" _ "$NODENY"
 check "--repo-url is accepted" bash -c "! printf '%s' \"\$1\" | grep -q 'unknown argument'" _ "$NODENY"
 echo "--- refusals"
 newhome pub
@@ -691,7 +721,7 @@ runboot --host testmac --role personal-dev --workspace "$H/code" --own-owner git
 check "personal-dev run exits 0" [ "$RC" -eq 0 ]
 check "only the own repo gets a mem-project repo" bash -c "grep 'repo create' '$STUB_DIR/gh.log' | grep -c 'mem-project-' | grep -qx 2 && grep -q 'create example-org/mem-project-ownproj --private' '$STUB_DIR/gh.log' && grep -q 'create example-org/mem-project-code-workspace --private' '$STUB_DIR/gh.log' && ! grep -qE 'thirdlib|clientapp' '$STUB_DIR/gh.log'"
 check "third-party repo listed as not synced" bash -c "printf '%s' \"\$1\" | grep -q 'thirdlib.*not synced (third-party)'" _ "$OUT"
-check "client-owner repo refused" bash -c "printf '%s' \"\$1\" | grep -q 'clientapp.*REFUSED (client owner)'" _ "$OUT"
+check "client-owner repo refused" bash -c "printf '%s' \"\$1\" | grep -q 'clientapp.*REFUSED (keep-out)'" _ "$OUT"
 check "home pinned to personal and code pinned to the workspace repo" jsonok '
 import json,sys,re,os
 d=json.load(open(sys.argv[1]))
