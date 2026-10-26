@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"github.com/MarimerLLC/claude-utils/internal/config"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -511,5 +514,117 @@ func TestRekeyPQ_ApplyRefusesWhileAParkOrPullIsUnfinished(t *testing.T) {
 				t.Error("a refused apply changed the repo")
 			}
 		})
+	}
+}
+
+// legacyKeys are exactly the keys the restore records of the 9c26984 build have.
+var legacyKeys = []string{"classicIdentity", "config", "freshRoot", "label", "newIdentity", "newRecipient", "priorScheme", "priorSchemeSet", "recovery", "tip"}
+
+// makeLegacyRecord rewrites the restore record of the repo at syncDir into the
+// shape an older build wrote: no stage and no newCommit.
+func makeLegacyRecord(t *testing.T, syncDir string) {
+	t.Helper()
+	p := filepath.Join(syncDir, ".git", "memsync-pre-pq.json")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	delete(m, "stage")
+	delete(m, "newCommit")
+	var keys []string
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if strings.Join(keys, ",") != strings.Join(legacyKeys, ",") {
+		t.Fatalf("legacy record keys %v, want %v", keys, legacyKeys)
+	}
+	out, _ := json.MarshalIndent(m, "", "  ")
+	if err := os.WriteFile(p, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func recordMap(t *testing.T, syncDir string) map[string]any {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(syncDir, ".git", "memsync-pre-pq.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// B1: the live records are legacy ones. A rerun must finish them as done.
+func TestLegacyRecord_RerunIsAlreadyDone(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		fresh bool
+		push  bool // the extra commit is also on origin
+	}{
+		{"fresh root, origin moved on", true, true},
+		{"fresh root, HEAD ahead of origin", true, false},
+		{"on top of history, origin moved on", false, true},
+		{"on top of history, HEAD ahead of origin", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newClassicRepo(t)
+			_, newRec := newPQKey(t, "newrec")
+			args := []string{"--recovery-recipient", newRec, "--host", "vm-1", "--apply"}
+			if tc.fresh {
+				args = append(args, "--fresh-root")
+			}
+			if code, o, e := rekey(t, c, args...); code != 0 {
+				t.Fatalf("%s%s", o, e)
+			}
+			commitEmpty(t, c.repo, "auto: daemon sync")
+			if tc.push {
+				if err := c.repo.Push("main"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			makeLegacyRecord(t, c.cfg.SyncDir)
+			cfgBefore, _ := os.ReadFile(c.cfg.Path())
+			code, out, errb := rekey(t, c, args...)
+			if code != 0 || !strings.Contains(out, "already done") {
+				t.Fatalf("exit %d, want 0 and \"already done\":\n%s%s", code, out, errb)
+			}
+			if cfgAfter, _ := os.ReadFile(c.cfg.Path()); !bytes.Equal(cfgAfter, cfgBefore) {
+				t.Errorf("config.json was rewritten:\n%s\nvs\n%s", cfgAfter, cfgBefore)
+			}
+			m := recordMap(t, c.cfg.SyncDir)
+			if m["stage"] != "published" || m["newCommit"] == nil || m["newCommit"] == "" {
+				t.Errorf("record not completed: stage %v newCommit %v", m["stage"], m["newCommit"])
+			}
+		})
+	}
+}
+
+func TestLegacyRecord_RerunWithOtherFlagsIsNotInterrupted(t *testing.T) {
+	c := newClassicRepo(t)
+	_, newRec := newPQKey(t, "newrec")
+	_, other := newPQKey(t, "other")
+	if code, o, e := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root", "--apply"); code != 0 {
+		t.Fatalf("%s%s", o, e)
+	}
+	commitEmpty(t, c.repo, "auto: daemon sync")
+	if err := c.repo.Push("main"); err != nil {
+		t.Fatal(err)
+	}
+	makeLegacyRecord(t, c.cfg.SyncDir)
+	code, out, errb := rekey(t, c, "--recovery-recipient", other, "--host", "vm-1", "--apply")
+	all := out + errb
+	if code != 0 || !strings.Contains(all, "already done") || strings.Contains(all, "interrupted") {
+		t.Fatalf("exit %d:\n%s", code, all)
+	}
+	if cc, _ := config.Load(c.cfg.Path()); len(cc.RecoveryRecipients) != 1 || cc.RecoveryRecipients[0] != newRec {
+		t.Errorf("recoveryRecipients rewritten: %v", cc.RecoveryRecipients)
 	}
 }
