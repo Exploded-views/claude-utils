@@ -4,13 +4,53 @@
 package testenv
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 )
+
+// startEnv is the environment this test process started with, before any test
+// pointed HOME at a temp dir.
+var startEnv = os.Environ()
+
+var (
+	cachesOnce sync.Once
+	caches     []string
+)
+
+// buildEnv is the environment for a go build run by a test: the process's own,
+// plus the module, build and GOPATH directories resolved as at start-up. Tests
+// set HOME to a temp dir, and go would otherwise fill <HOME>/go/pkg/mod with
+// read-only files that t.TempDir cannot clean up. -modcacherw makes anything
+// still downloaded there removable.
+func buildEnv(t testing.TB) []string {
+	t.Helper()
+	cachesOnce.Do(func() {
+		cmd := exec.Command("go", "env", "-json", "GOMODCACHE", "GOCACHE", "GOPATH")
+		cmd.Env = startEnv
+		out, err := cmd.Output()
+		if err != nil {
+			return
+		}
+		var m map[string]string
+		if json.Unmarshal(out, &m) != nil {
+			return
+		}
+		for _, k := range []string{"GOMODCACHE", "GOCACHE", "GOPATH"} {
+			if m[k] != "" {
+				caches = append(caches, k+"="+m[k])
+			}
+		}
+	})
+	env := append(os.Environ(), caches...)
+	flags := strings.TrimSpace(os.Getenv("GOFLAGS") + " -modcacherw")
+	return append(env, "GOFLAGS="+flags)
+}
 
 var (
 	once         sync.Once
@@ -35,6 +75,7 @@ func Binaries(t testing.TB) (memsync, memmerge string) {
 		for out, pkg := range map[string]string{memsyncPath: "./cmd/claude-memsync", memmergePath: "./cmd/claude-memmerge"} {
 			cmd := exec.Command("go", "build", "-o", out, pkg)
 			cmd.Dir = root
+			cmd.Env = buildEnv(t)
 			if b, err := cmd.CombinedOutput(); err != nil {
 				buildErr = &buildError{pkg, string(b), err}
 				return
@@ -78,6 +119,7 @@ func BinariesVersion(t testing.TB, ver string) (memsync, memmerge string) {
 		for out, pkg := range map[string]string{"claude-memsync": "./cmd/claude-memsync", "claude-memmerge": "./cmd/claude-memmerge"} {
 			cmd := exec.Command("go", "build", "-ldflags", ld, "-o", filepath.Join(d, out), pkg)
 			cmd.Dir = root
+			cmd.Env = buildEnv(t)
 			if b, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("%v", &buildError{pkg, string(b), err})
 			}
