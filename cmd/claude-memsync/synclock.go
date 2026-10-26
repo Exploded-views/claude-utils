@@ -112,6 +112,7 @@ func withSyncLocksStopping(stderr io.Writer, syncDirs []string, fn func() error)
 		}
 	}
 	stderr = &lockedWriter{w: stderr} // the signal goroutine and the caller both print
+	syncInterrupted.Store(false)
 	release, err := acquireAll(syncDirs)
 	if err == nil {
 		defer release()
@@ -172,6 +173,7 @@ func withSyncLocksStopping(stderr io.Writer, syncDirs []string, fn func() error)
 				mu.Lock()
 				interrupted = true
 				mu.Unlock()
+				syncInterrupted.Store(true)
 				if n == 1 {
 					fmt.Fprintln(stderr, "interrupted: finishing this change, then restarting the service (press again to restart now)")
 					continue

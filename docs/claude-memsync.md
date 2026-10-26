@@ -1736,7 +1736,7 @@ skipped and not touched. One line per repo reports `accepted and pushed`, `no re
 `fingerprint mismatch`, `refused (<reason>)` or `skipped (...)`. Exit 0 only if every repo with a
 request was accepted; 1 on a mismatch, a refusal, a skip of a repo that had a request, or when no repo has a request
 from the label; 2 for a usage error. `reject --all` removes the label's request in each such repo
-the same way (no mismatch check). `list --all` with nothing pending exits 0.
+the same way (no mismatch check). `--fingerprint` with `reject` or `list` is refused (exit 2). The mismatch check compares HEAD and the remote tip of every repo, treats a request that does not parse as a mismatch, and is repeated under the lock after each candidate is synced with origin; an interrupt stops between repos and reports what was accepted. After the report, `accept --all` prints the accepting host's own key fingerprint per accepted repo, as the single-repo form does. `list --all` with nothing pending exits 0.
 
 **Back on the new host:** its next pull brings the new `.age-recipients`. Its
 own key is then a change to the pinned set, so the existing gate applies: run

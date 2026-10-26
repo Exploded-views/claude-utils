@@ -504,6 +504,34 @@ func ListJoins(repo *gitwt.Repo) ([]JoinEntry, error) {
 	return res, nil
 }
 
+// RequestsForLabel returns every distinct version of joins/<label>.txt that the
+// clone can see: the one in HEAD and the one at the remote-tracking tip (a
+// request that differs between them is two requests). A version that does not
+// parse is returned with Valid false. Nothing is fetched.
+func RequestsForLabel(repo *gitwt.Repo, label string) []JoinEntry {
+	if !ValidJoinLabel(label) || !repo.IsRepo() {
+		return nil
+	}
+	path := JoinPath(label)
+	seen := map[string]bool{}
+	var res []JoinEntry
+	for _, r := range joinRefs(repo) {
+		b, ok := blobAtRev(repo, r, path)
+		if !ok || seen[string(b)] {
+			continue
+		}
+		seen[string(b)] = true
+		e := JoinEntry{Path: path}
+		if j, err := ParseJoin(b); err == nil && JoinPath(j.Label) == path {
+			e.Join, e.Valid = j, true
+		} else {
+			e.Join.Label = label
+		}
+		res = append(res, e)
+	}
+	return res
+}
+
 // PendingJoins counts the valid requests whose key is not yet a recipient.
 func PendingJoins(repo *gitwt.Repo) int {
 	es, err := ListJoins(repo)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -10,6 +11,7 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
+	"github.com/MarimerLLC/claude-utils/internal/lock"
 )
 
 // joinAll is `join accept|reject|list --all`: the command for every routed
@@ -23,6 +25,10 @@ func joinAll(stdout, stderr io.Writer, action string, sel repoSel, label, fp str
 	case "accept", "reject", "list":
 	default:
 		fmt.Fprintf(stderr, "join: --all applies to accept, reject and list\n%s\n", joinUsage)
+		return 2
+	}
+	if action != "accept" && fp != "" {
+		fmt.Fprintf(stderr, "join %s: --fingerprint goes with accept only; --all %s needs none\n", action, action)
 		return 2
 	}
 	if action == "accept" && agecrypt.NormalizeFingerprint(fp) == "" {
@@ -81,15 +87,34 @@ func joinListAll(stdout, stderr io.Writer, set *routedSet) int {
 	return code
 }
 
-// joinRepoPlan is what --all found in one repo before anything is changed.
+// joinRepoPlan is what --all found in one repo.
 type joinRepoPlan struct {
-	name   string
-	cfg    config.Config
-	entry  agecrypt.JoinEntry
-	found  bool
-	status string // set when the repo is settled without being changed
-	fail   bool   // that status leaves the label's request unanswered
-	do     bool   // to be accepted or rejected
+	name     string
+	cfg      config.Config
+	status   string // the repo's line; "" until it is settled
+	fail     bool   // the label's request is left unanswered here
+	do       bool   // to be accepted or rejected
+	ran      bool   // the change was attempted
+	accepted bool
+}
+
+// classifyRequests says whether any version of the request exists and, for an
+// accept, whether any version is unusable or carries another fingerprint. A
+// version that does not parse counts as a mismatch: it may be a second key.
+func classifyRequests(es []agecrypt.JoinEntry, accept bool, fp string) (found bool, mismatch string) {
+	for _, e := range es {
+		found = true
+		switch {
+		case !accept:
+		case !e.Valid:
+			mismatch = "malformed request (not a valid join request; reject it)"
+		case agecrypt.NormalizeFingerprint(fp) != e.Join.Fingerprint:
+			if mismatch == "" {
+				mismatch = "fingerprint mismatch (a request here is " + agecrypt.GroupFingerprint(e.Join.Fingerprint) + "); not accepted"
+			}
+		}
+	}
+	return found, mismatch
 }
 
 func joinChangeAll(stdout, stderr io.Writer, set *routedSet, action, label, fp string, allowUnlabelled bool) int {
@@ -97,58 +122,55 @@ func joinChangeAll(stdout, stderr io.Writer, set *routedSet, action, label, fp s
 	var plans []*joinRepoPlan
 	var mismatched []string
 	found := 0
+
+	// First look, before the service is touched: both HEAD and the remote tip
+	// count, so a request origin holds under another key is seen even in a
+	// repo this command will not change.
 	for _, n := range set.names() {
 		p := &joinRepoPlan{name: n, cfg: set.Cfgs[n]}
 		plans = append(plans, p)
 		repo := gitwt.New(p.cfg.SyncDir)
-		if !repo.IsRepo() || !agecrypt.Enabled(repo) {
+		if !repo.IsRepo() {
+			p.status = "skipped (missing: not a git clone)"
+			continue
+		}
+		if !agecrypt.Enabled(repo) {
 			p.status = "skipped (unencrypted)"
 			continue
 		}
 		joinFetch(repo)
-		es, err := agecrypt.ListJoins(repo)
-		if err != nil {
-			p.status, p.fail = "refused ("+err.Error()+")", true
-			continue
-		}
-		for _, e := range es {
-			if e.Join.Label == label {
-				p.entry, p.found = e, true
-			}
-		}
-		if !p.found {
+		ok, mm := classifyRequests(agecrypt.RequestsForLabel(repo, label), accept, fp)
+		if !ok {
 			p.status = "no request"
 			continue
 		}
 		found++
 		switch {
-		case accept && p.entry.Valid && agecrypt.NormalizeFingerprint(fp) != p.entry.Join.Fingerprint:
+		case mm != "":
 			mismatched = append(mismatched, n)
-			p.status = "fingerprint mismatch (the request here is " + agecrypt.GroupFingerprint(p.entry.Join.Fingerprint) + "); not accepted"
-			p.fail = true
+			p.status, p.fail = mm, true
 		case p.cfg.ReadOnly:
 			p.status, p.fail = "skipped (read-only: this host never commits)", true
 		default:
 			if why, blocked := agecrypt.RekeyBlocksSync(repo); blocked {
 				p.status, p.fail = "skipped (rekey-blocked: "+why+")", true
-			} else if accept && !p.entry.Valid {
-				p.status, p.fail = "refused (the request is malformed; reject it)", true
 			} else {
 				p.do = true
 			}
 		}
 	}
 
-	// A request under the same label with a different key, in any repo, may be
-	// a second key: nothing is accepted anywhere.
-	if len(mismatched) > 0 {
+	refuseAll := func(where []string) {
 		for _, p := range plans {
 			if p.do {
 				p.do, p.fail = false, true
-				p.status = "not accepted (the request from " + label + " in " + strings.Join(mismatched, ", ") + " has a different fingerprint)"
+				p.status = "not accepted (the request from " + label + " in " + strings.Join(where, ", ") + " does not match --fingerprint)"
 			}
 		}
-		fmt.Fprintf(stderr, "join accept --all: refusing every repo: the request from %q in %s has a different fingerprint than --fingerprint, which may mean a second key under one label. Check with the person who runs the new host, or `join list --all`; reject the stray request, then run this again.\n", label, strings.Join(mismatched, ", "))
+		fmt.Fprintf(stderr, "join accept --all: refusing every repo: the request from %q in %s does not match --fingerprint (a different key or an unreadable request), which may mean a second key under one label. Check with the person who runs the new host, or `join list --all`; reject the stray request, then run this again.\n", label, strings.Join(where, ", "))
+	}
+	if len(mismatched) > 0 {
+		refuseAll(mismatched)
 	}
 
 	var dirs []string
@@ -161,38 +183,92 @@ func joinChangeAll(stdout, stderr io.Writer, set *routedSet, action, label, fp s
 	if len(dirs) > 0 {
 		// One stop and one start of the service for the whole set.
 		err := withSyncLocksStopping(stderr, dirs, func() error {
+			// Phase 1: bring every candidate up to date and look again; the
+			// view that decides is the one under the lock.
+			var late []string
 			for _, p := range plans {
 				if !p.do {
 					continue
 				}
+				repo := gitwt.New(p.cfg.SyncDir)
+				if err := agecrypt.SyncFromOrigin(repo); err != nil {
+					p.do, p.fail = false, true
+					p.status = fmt.Sprintf("refused (could not bring this clone up to date with origin; nothing was changed: %v)", err)
+					continue
+				}
+				ok, mm := classifyRequests(agecrypt.RequestsForLabel(repo, label), accept, fp)
+				switch {
+				case !ok:
+					p.do, p.fail = false, true
+					p.status = "refused (the request is gone after syncing with origin)"
+				case mm != "":
+					late = append(late, p.name)
+					p.do, p.fail = false, true
+					p.status = mm
+				}
+			}
+			if len(late) > 0 {
+				refuseAll(late)
+				return nil
+			}
+			// Phase 2: the change itself, repo by repo, until interrupted.
+			for _, p := range plans {
+				if !p.do {
+					continue
+				}
+				if syncInterrupted.Load() {
+					break
+				}
+				p.ran = true
 				if err := joinChangeOne(p, label, fp, allowUnlabelled, accept); err != nil {
 					p.status, p.fail = err.Error(), true
+				} else if accept {
+					p.status, p.accepted = "accepted and pushed", true
+				} else {
+					p.status, p.accepted = "rejected and pushed", true
 				}
 			}
 			return nil
 		})
 		if err != nil {
+			why := "not run (" + err.Error() + ")"
+			if errors.Is(err, errInterrupted) {
+				why = "not run (interrupted)"
+			}
 			for _, p := range plans {
-				if p.do && p.status == "" {
-					p.status, p.fail = "refused ("+err.Error()+")", true
+				if p.do && !p.ran {
+					p.status, p.fail = why, true
 				}
 			}
-			code = recipientsFail(stderr, fmt.Errorf("join: %w", err))
+			fmt.Fprintf(stderr, "join %s --all: %v\n", action, err)
+			if errors.Is(err, lock.ErrHeld) {
+				fmt.Fprintln(stderr, "the daemon is running on a sync dir; run `claude-memsync stop`, then this command, then `claude-memsync start`")
+			}
+			code = 1
 		}
 	}
 	done := 0
 	for _, p := range plans {
-		if p.status == "" {
-			if accept {
-				p.status = "accepted and pushed"
-			} else {
-				p.status = "rejected and pushed"
-			}
-			done++
-		}
 		fmt.Fprintf(stdout, "%s: %s\n", p.name, p.status)
 		if p.fail {
 			code = max(code, 1)
+		}
+		if p.accepted {
+			done++
+		}
+	}
+	if accept {
+		for _, p := range plans {
+			if !p.accepted {
+				continue
+			}
+			if kfp, desc, ok := agecrypt.OwnKeyInfo(gitwt.New(p.cfg.SyncDir)); ok {
+				who := desc
+				if !strings.HasPrefix(desc, "host:") {
+					who = "this host (" + desc + ")"
+				}
+				fmt.Fprintf(stdout, "%s: accepted by %s, key fingerprint %s; on the new host, `join status` must show this key\n", p.name, who, kfp)
+			}
 		}
 	}
 	if found == 0 {
@@ -205,13 +281,10 @@ func joinChangeAll(stdout, stderr io.Writer, set *routedSet, action, label, fp s
 	return code
 }
 
-// joinChangeOne accepts or rejects in one repo whose lock is held. A non-nil
-// error is the repo's status line; "" status means it went through.
+// joinChangeOne accepts or rejects in one repo whose lock is held and which
+// has just been synced with origin. A non-nil error is the repo's status line.
 func joinChangeOne(p *joinRepoPlan, label, fp string, allowUnlabelled, accept bool) error {
 	repo := gitwt.New(p.cfg.SyncDir)
-	if err := agecrypt.SyncFromOrigin(repo); err != nil {
-		return fmt.Errorf("refused (could not bring this clone up to date with origin; nothing was changed: %v)", err)
-	}
 	if err := agecrypt.WriteInfoAttributes(repo); err != nil {
 		return fmt.Errorf("refused (%v)", err)
 	}

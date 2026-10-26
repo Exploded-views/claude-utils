@@ -354,9 +354,14 @@ func TestJoinAcceptAll_AMismatchThatAppearsAfterTheFirstLookRefusesEveryRepo(t *
 	if code != 1 || !strings.Contains(out, "projects: fingerprint mismatch") {
 		t.Fatalf("exit %d, want 1 naming projects\n%s%s", code, out, errs)
 	}
+	// personal is untouched; projects only fast-forwarded to origin's tip, and
+	// neither repo gained the key.
+	if headRev(t, cfgs["personal"].SyncDir) != before["personal"] {
+		t.Error("personal was committed to")
+	}
 	for n, c := range cfgs {
-		if headRev(t, c.SyncDir) != before[n] {
-			t.Errorf("%s was committed to", n)
+		if ls, _ := agecrypt.ListRecipients(c.SyncDir); strings.Contains(strings.Join(ls, "\n"), rec) {
+			t.Errorf("%s: the key was added", n)
 		}
 	}
 	if f.did() != "stop,start" {

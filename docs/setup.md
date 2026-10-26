@@ -397,23 +397,28 @@ left untouched. `--all` does not go with `--repo` or `--config`, and `accept`
 still needs `--fingerprint`.
 
 - **A mismatch refuses everything.** If any repo holds a request under that
-  label with a different fingerprint, nothing is accepted in any repo (that
-  can mean a second key under one label), the repo is named, and the command
-  exits 1. Look at `join list --all`, `join reject` the stray one, and run it
+  label with a different fingerprint, or one that is not a valid request,
+  nothing is accepted in any repo (that can mean a second key under one
+  label), the repo is named, and the command exits 1. Both this clone's copy
+  and origin's are compared, and the check is made again under the lock after
+  every repo has been brought up to date with origin, before anything is
+  changed. Look at `join list --all`, `join reject` the stray one, and run it
   again.
 - **Exit codes.** 0 when every repo that had a request was accepted. 1 when a
   request was refused or skipped, on a mismatch, and when no repo has a request
   from that label (nothing was done, which a script should notice). 2 for a
-  usage error.
+  usage error. If the command is interrupted, it stops between repos, says
+  which were accepted (and pushed) and which did not run, restarts the
+  service, and exits 1.
 - `join reject <host-label> --all` removes the label's request in every repo
-  the same way (no fingerprint needed). `join list --all` with nothing pending
+  the same way (no fingerprint; `--fingerprint` with `reject` or `list` is refused). `join list --all` with nothing pending
   prints `no join requests pending` and exits 0.
 
 #### Naming a repo across hosts
 
 Local route keys can differ between hosts: an older host may use a short key
-such as `bitc`, while bootstrap derives `project-bitc`. Every `--repo` flag
-therefore also takes the GitHub repo name (`mem-project-bitc`) or
+such as `<name>`, while bootstrap derives `project-<name>`. Every `--repo` flag
+therefore also takes the GitHub repo name (`mem-project-<name>`) or
 `owner/name`, so a command printed on one host works on any other:
 
 ```sh

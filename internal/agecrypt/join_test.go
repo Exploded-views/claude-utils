@@ -436,21 +436,67 @@ func TestInfoAttributesExemptJoins(t *testing.T) {
 	}
 }
 
+// acceptRefs lists what file base (in dir) may not contain. Only join.go and
+// join_all.go, the interactive `join accept`, may call AcceptJoin; in
+// cmd/claude-memsync nothing but main.go and join*.go may call the join
+// command's entry points (a daemon path must not reach them).
+func acceptRefs(dir, base string, src []byte) []string {
+	if strings.HasSuffix(base, "_test.go") {
+		return nil
+	}
+	var bad []string
+	text := string(src)
+	if base != "join.go" && base != "join_all.go" && strings.Contains(text, "AcceptJoin(") {
+		bad = append(bad, "AcceptJoin(")
+	}
+	if filepath.Base(dir) == "claude-memsync" && base != "main.go" && !strings.HasPrefix(base, "join") {
+		for _, call := range []string{"joinAll(", "joinChangeAll(", "joinChangeOne(", "joinCmd("} {
+			if strings.Contains(text, call) {
+				bad = append(bad, call)
+			}
+		}
+	}
+	return bad
+}
+
 // Nothing in the sync loop may be able to accept a request.
 func TestNoDaemonPathAccepts(t *testing.T) {
 	dirs := []string{"../sync", "../../cmd/claude-memsync"}
 	for _, d := range dirs {
 		files, _ := filepath.Glob(filepath.Join(d, "*.go"))
 		for _, f := range files {
-			// join.go and join_all.go are the interactive `join accept` (one
-			// repo, and --all); neither is reachable from the daemon.
-			if strings.HasSuffix(f, "_test.go") || strings.HasSuffix(f, "join.go") || strings.HasSuffix(f, "join_all.go") {
-				continue
-			}
 			b, _ := os.ReadFile(f)
-			if strings.Contains(string(b), "AcceptJoin(") {
-				t.Errorf("%s references AcceptJoin", f)
+			for _, call := range acceptRefs(d, filepath.Base(f), b) {
+				t.Errorf("%s references %s", f, call)
 			}
+		}
+	}
+}
+
+// The guard itself: a probe file with each forbidden call, under a name that
+// merely ends like an allowed one, is caught; the allowed files are not.
+func TestNoDaemonPathAccepts_GuardCatchesProbes(t *testing.T) {
+	cmdDir := "../../cmd/claude-memsync"
+	for _, tc := range []struct {
+		dir, base, src string
+		want           bool
+	}{
+		{cmdDir, "daemon_join_all.go", "AcceptJoin(r)", true},
+		{cmdDir, "xjoin.go", "AcceptJoin(r)", true},
+		{cmdDir, "join.go", "AcceptJoin(r)", false},
+		{cmdDir, "join_all.go", "AcceptJoin(r)", false},
+		{"../sync", "loop.go", "AcceptJoin(r)", true},
+		{cmdDir, "service.go", "joinAll(w)", true},
+		{cmdDir, "service.go", "joinChangeAll(w)", true},
+		{cmdDir, "service.go", "joinChangeOne(w)", true},
+		{cmdDir, "service.go", "joinCmd(w)", true},
+		{cmdDir, "main.go", "joinCmd(w)", false},
+		{cmdDir, "join_labels.go", "joinCmd(w)", false},
+		{cmdDir, "service_test.go", "AcceptJoin( joinCmd(", false},
+	} {
+		got := len(acceptRefs(tc.dir, tc.base, []byte(tc.src))) > 0
+		if got != tc.want {
+			t.Errorf("%s/%s %q: flagged=%v, want %v", filepath.Base(tc.dir), tc.base, tc.src, got, tc.want)
 		}
 	}
 }
@@ -740,5 +786,53 @@ func TestAcceptRefusesLabelBoundToAnotherKey(t *testing.T) {
 	}
 	if a.revHead(t) != head {
 		t.Error("a refused accept must not commit")
+	}
+}
+
+func TestRequestsForLabel_SeesHeadAndTheRemoteTipSeparately(t *testing.T) {
+	a, b := pair(t)
+	if got := RequestsForLabel(a.repo, "host-b"); len(got) != 0 {
+		t.Fatalf("no request yet: %v", got)
+	}
+	if got := RequestsForLabel(a.repo, "Bad Label"); got != nil {
+		t.Fatalf("an invalid label has no requests: %v", got)
+	}
+	j, _, err := RequestJoin(b.repo, "host-b", joinNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.repo.Run("push", "origin", "main")
+	a.repo.Run("fetch", "-q", "origin", "main") // the tip has it, HEAD does not
+	got := RequestsForLabel(a.repo, "host-b")
+	if len(got) != 1 || !got[0].Valid || got[0].Join.Fingerprint != j.Fingerprint {
+		t.Fatalf("the tip's request must be seen: %+v", got)
+	}
+	a.repo.Run("merge", "-q", "--ff-only", "origin/main")
+	if got := RequestsForLabel(a.repo, "host-b"); len(got) != 1 {
+		t.Fatalf("the same request in HEAD and at the tip is one: %+v", got)
+	}
+	// Origin moves on with something else under the label: HEAD (behind) keeps
+	// the honest request, the tip holds an unusable one: two versions.
+	b.write(t, "joins/host-b.txt", "garbage\n")
+	if _, err := b.repo.Run("add", "-f", "joins/host-b.txt"); err != nil {
+		t.Fatal(err)
+	}
+	b.commit(t, "tamper")
+	if _, err := b.repo.Run("push", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	a.repo.Run("fetch", "-q", "origin", "main")
+	got = RequestsForLabel(a.repo, "host-b")
+	if len(got) != 2 {
+		t.Fatalf("want HEAD's and the tip's versions: %+v", got)
+	}
+	valid := 0
+	for _, e := range got {
+		if e.Valid {
+			valid++
+		}
+	}
+	if valid != 1 {
+		t.Errorf("want exactly one valid version: %+v", got)
 	}
 }
