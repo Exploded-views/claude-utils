@@ -167,7 +167,13 @@ func RekeyBlocksSync(repo *gitwt.Repo) (string, bool) {
 	switch {
 	case scheme != SchemePQ:
 		return "an unfinished rekey-pq left this repo before the post-quantum scheme (stage " + stageName(st) + "); finish it with `recipients rekey-pq --apply` or undo it with `--rollback`", true
-	case st.Stage != "" && !st.Finished():
+	case st.Stage == "":
+		// A record from an older build: unpublished while the cached
+		// origin/main (no fetch here) is still the backup tip.
+		if remote, _ := revOf(repo, "refs/remotes/origin/main"); remote != "" && remote == st.Tip {
+			return "an unfinished rekey-pq (stage unknown, not pushed); finish it with `recipients rekey-pq --apply` or undo it with `--rollback`", true
+		}
+	case !st.Finished():
 		return "an unfinished rekey-pq (stage " + stageName(st) + "); finish it with `recipients rekey-pq --apply` or undo it with `--rollback`", true
 	}
 	return "", false
