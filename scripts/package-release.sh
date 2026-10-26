@@ -32,7 +32,7 @@ trap stage_cleanup EXIT
 for target in "${TARGETS[@]}"; do
   GOOS="${target%/*}"; GOARCH="${target#*/}"
   name="claude-utils-${VERSION}-${GOOS}-${GOARCH}"
-  STAGE_ROOT="$(mktemp -d)"   # staged in a fresh temp dir, which is the only tree this script removes
+  STAGE_ROOT="$(mktemp -d "$OUT/.stage.XXXXXX")"   # staged in a fresh temp dir under OUT (a wrapped Go can reach it), the only tree this script removes
   stage="$STAGE_ROOT/$name"
   mkdir -p "$stage/scripts"
   ext=""; [ "$GOOS" != windows ] || ext=".exe"
