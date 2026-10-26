@@ -131,3 +131,6 @@ func unitTargetWarning() string {
 		"Fix: re-run `claude-memsync install` (or `claude-memsync start`), or by hand: " +
 		"`systemctl --user disable " + userUnitName + "`, change WantedBy to default.target in the unit, `systemctl --user daemon-reload`, `systemctl --user enable " + userUnitName + "`"
 }
+
+// STUB (RED commit)
+func execStartLine(exe string, args []string) string { return "" }

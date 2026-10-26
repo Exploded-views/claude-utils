@@ -29,16 +29,17 @@ func TestGeneratedUserUnit_InstallSectionNamesDefaultTarget(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bin, "rpm-ostree"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// Registered before t.Setenv so it runs after the PATH is restored.
+	all := service.AvailableSystems()
+	t.Cleanup(func() { service.ChooseSystem(all...) })
 	home := t.TempDir()
 	t.Setenv("PATH", bin)
 	t.Setenv("HOME", home)
 	// kardianos decided its system at start-up; choose systemd again now that
 	// the PATH says so.
-	all := service.AvailableSystems()
 	for _, sys := range all {
 		if strings.Contains(sys.String(), "systemd") {
 			service.ChooseSystem(sys)
-			t.Cleanup(func() { service.ChooseSystem(all...) })
 		}
 	}
 	svc, err := userSvc("/x/config.json")
