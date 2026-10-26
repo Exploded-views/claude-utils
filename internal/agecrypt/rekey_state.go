@@ -36,6 +36,27 @@ type PreRekeyState struct {
 	PriorScheme     string      `json:"priorScheme"`
 	PriorSchemeSet  bool        `json:"priorSchemeSet"`
 	Config          PriorConfig `json:"config"`
+	// NewCommit is the migrated commit, recorded before HEAD moves to it. A
+	// rerun that finds it an ancestor of origin/main knows the migration was
+	// published and has since been synced on top of.
+	NewCommit string `json:"newCommit,omitempty"`
+	// Stage is how far the apply got (the RekeyRec* values). A record from an
+	// older build has none.
+	Stage string `json:"stage,omitempty"`
+}
+
+// The Stage values of the restore record, in the order an apply passes them.
+const (
+	RekeyRecStarted   = "started"   // the record is written; nothing is committed yet
+	RekeyRecCommitted = "committed" // the migrated commit exists (HEAD moves to it next)
+	RekeyRecMigrated  = "migrated"  // identity, scheme and pin are repointed; not pushed
+	RekeyRecPublished = "published" // the remote holds it and config.json follows
+	RekeyRecDone      = "done"
+)
+
+// Finished reports whether the record says the migration was published.
+func (st PreRekeyState) Finished() bool {
+	return st.Stage == RekeyRecPublished || st.Stage == RekeyRecDone
 }
 
 func rekeyStatePath(repo *gitwt.Repo) (string, error) {
@@ -79,6 +100,16 @@ func ReadRekeyState(repo *gitwt.Repo) (PreRekeyState, error) {
 	return st, nil
 }
 
+// UpdateRekeyState rewrites the restore record with fn applied.
+func UpdateRekeyState(repo *gitwt.Repo, fn func(*PreRekeyState)) error {
+	st, err := ReadRekeyState(repo)
+	if err != nil {
+		return err
+	}
+	fn(&st)
+	return writeRekeyState(repo, st)
+}
+
 func removeRekeyState(repo *gitwt.Repo) {
 	if p, err := rekeyStatePath(repo); err == nil {
 		_ = os.Remove(p)
@@ -99,6 +130,9 @@ const (
 	StagePublished
 	// StageDone: already post-quantum and no backup: nothing to do.
 	StageDone
+	// StageSynced: published, and the repo has moved on since (the daemon
+	// synced on top of it): only the identity retirement is left.
+	StageSynced
 )
 
 // rawScheme is memage.scheme as recorded, without SchemeOf's fallback.
@@ -139,6 +173,9 @@ func DetectRekey(repo *gitwt.Repo, o RekeyOpts) (RekeyStage, PreRekeyState, erro
 	if st.Tip != tip {
 		return StageFresh, st, fmt.Errorf("%s does not match the restore record; inspect the repo by hand", BackupRef)
 	}
+	if scheme == SchemePQ && st.Finished() {
+		return StageSynced, st, nil
+	}
 	head, _ := revOf(repo, "HEAD")
 	if scheme != SchemePQ && head == tip {
 		// An attempt that died before it committed: put the recipients file
@@ -174,10 +211,20 @@ func DetectRekey(repo *gitwt.Repo, o RekeyOpts) (RekeyStage, PreRekeyState, erro
 		return StageFresh, st, fmt.Errorf("cannot fetch origin: %w", err)
 	}
 	remote, _ := revOf(repo, "refs/remotes/origin/main")
-	switch remote {
-	case tip:
+	if remote == tip {
 		return StageRetryPush, st, nil
-	case head:
+	}
+	if remote == head && (st.NewCommit == "" || head == st.NewCommit) {
+		return StagePublished, st, nil
+	}
+	// The migrated commit is on the remote, which has moved on since (the
+	// daemon synced): the migration is done.
+	if st.NewCommit != "" {
+		if _, err := repo.Run("merge-base", "--is-ancestor", st.NewCommit, "refs/remotes/origin/main"); err == nil {
+			return StageSynced, st, nil
+		}
+	}
+	if remote == head {
 		return StagePublished, st, nil
 	}
 	return StageFresh, st, errors.New("origin/main is neither the backup tip nor the migrated tip (someone pushed since?); not touching it. Inspect it, or drop the backup if the migration is complete")

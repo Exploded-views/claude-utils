@@ -238,7 +238,7 @@ func ApplyRekeyPQ(repo *gitwt.Repo, o RekeyOpts) (RekeyPlan, error) {
 	st := PreRekeyState{
 		Tip: p.Tip, ClassicIdentity: p.IdentityPath, NewIdentity: filepath.ToSlash(o.NewIdentityPath),
 		NewRecipient: p.NewRecipient, Label: o.Label, Recovery: strings.TrimSpace(o.Recovery), FreshRoot: o.FreshRoot,
-		Config: o.Prior,
+		Config: o.Prior, Stage: RekeyRecStarted,
 	}
 	st.PriorScheme, st.PriorSchemeSet = rawScheme(repo)
 	if err := writeRekeyState(repo, st); err != nil {
@@ -260,11 +260,20 @@ func ApplyRekeyPQ(repo *gitwt.Repo, o RekeyOpts) (RekeyPlan, error) {
 		return p, err
 	}
 	if err := commitInfoMode(repo, p.Tip, "memsync: recipients updated", info, headOID, drop, o.FreshRoot,
-		func(commit string) error { return PushGuardCommit(repo, "main", commit) }); err != nil {
+		func(commit string) error {
+			if err := PushGuardCommit(repo, "main", commit); err != nil {
+				return err
+			}
+			// Recorded before HEAD moves, so a crash cannot lose it.
+			return UpdateRekeyState(repo, func(s *PreRekeyState) { s.NewCommit, s.Stage = commit, RekeyRecCommitted })
+		}); err != nil {
 		undo()
 		return p, err
 	}
 	if err := repointLocal(repo, o.NewIdentityPath); err != nil {
+		return p, err
+	}
+	if err := UpdateRekeyState(repo, func(s *PreRekeyState) { s.Stage = RekeyRecMigrated }); err != nil {
 		return p, err
 	}
 	head, err := repo.Run("rev-parse", "HEAD")
