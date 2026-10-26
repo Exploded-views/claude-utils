@@ -281,3 +281,37 @@ func TestRekeyPQ_ResumeRepinsAfterACrashBetweenSchemeAndPin(t *testing.T) {
 		t.Errorf("origin has %s commits", n)
 	}
 }
+
+// N2: a crash between `update-ref HEAD` and the index update leaves the old
+// classic blob ids in the index. The resume resets the index to HEAD.
+func TestRekeyPQ_ResumeResetsAnIndexLeftOnClassicBlobs(t *testing.T) {
+	for _, stage := range []string{"migrated, not pushed", "scheme not yet repointed"} {
+		t.Run(stage, func(t *testing.T) {
+			c, newRec, _ := unpublishedRekey(t)
+			if stage == "scheme not yet repointed" {
+				if err := c.repo.ConfigSet(agecrypt.IdentityConfigKey, filepath.ToSlash(c.idPath)); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := c.repo.Run("config", "--unset", agecrypt.SchemeConfigKey); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := c.repo.Run("read-tree", agecrypt.BackupRef); err != nil {
+				t.Fatal(err)
+			}
+			if d, _ := c.repo.Run("diff-index", "--cached", "--name-only", "HEAD"); strings.TrimSpace(d) == "" {
+				t.Fatal("setup: the index must differ from HEAD")
+			}
+			unblockPush(t, c.origin)
+			if code, o, e := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root", "--apply"); code != 0 {
+				t.Fatalf("resume: exit %d\n%s%s", code, o, e)
+			}
+			if d, _ := c.repo.Run("diff-index", "--cached", "--name-only", "HEAD"); strings.TrimSpace(d) != "" {
+				t.Errorf("the index still differs from HEAD after the resume:\n%s", d)
+			}
+			if d, _ := c.repo.Run("status", "--porcelain"); strings.TrimSpace(d) != "" {
+				t.Errorf("the work-tree is dirty after the resume:\n%s", d)
+			}
+		})
+	}
+}
