@@ -45,7 +45,8 @@ clone), see [releases.md](releases.md).
   approve), the command prints `waiting for your password manager (approve the
   prompt if one appears)…` and waits up to 120 s at a terminal; set
   `CLAUDE_MEMSYNC_SECRET_TIMEOUT` (a Go duration such as `3m`) to change that.
-  The daemon, which nobody can answer, keeps 10 s.
+  The daemon, which nobody can answer, keeps 10 s; hooks and the doctor timer
+  never wait either (they use cached verdicts and the short limit).
 - The same project paths on every machine: Claude names a project's memory
   folder after its absolute path.
 

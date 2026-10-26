@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,11 +47,22 @@ type verdict struct {
 // mode (hooks, session context) the API gets quickTimeout and an expired
 // verdict is still used when the API cannot be reached; a repo with no verdict
 // at all is "unverified".
+//
+// The API client is built lazily, only when a verdict is really needed: building
+// it can run the token command or mint an app token over the network. In
+// offline mode (the hook paths) it is never built: only cached verdicts count,
+// and a stale or missing one hides the related repo for this run.
 type ghVisibility struct {
 	names     related.NameOnly
-	client    *ghguard.Client
 	cfg       config.Config
+	hasCfg    bool // a primary repo's config is in cfg
+	client    *ghguard.Client
 	loadErr   error
+	built     bool
+	build     func() (*ghguard.Client, error)
+	offline   bool
+	warn      func(string) // offline: told once that a verdict is missing or stale
+	warned    bool
 	remote    func(repo string) string // the configured remote URL of a repo this host has, or ""
 	cachePath string
 	quick     bool
@@ -65,8 +77,8 @@ func newGHVisibility(set *routedSet) *ghVisibility {
 	if !ok {
 		return v
 	}
-	v.cfg = cfg
-	v.client, v.loadErr = guardClient(cfg)
+	v.cfg, v.hasCfg = cfg, true
+	v.build = func() (*ghguard.Client, error) { return guardClient(cfg) }
 	v.remote = func(repo string) string {
 		if k, ok := set.localKey(repo); ok {
 			return set.Cfgs[k].RemoteURL
@@ -74,6 +86,32 @@ func newGHVisibility(set *routedSet) *ghVisibility {
 		return ""
 	}
 	return v
+}
+
+// getClient builds the API client on first use. A nil client with a nil error
+// means no usable token: the check is names only.
+func (v *ghVisibility) getClient() (*ghguard.Client, error) {
+	if !v.built {
+		v.built = true
+		if v.build != nil {
+			v.client, v.loadErr = v.build()
+		}
+	}
+	return v.client, v.loadErr
+}
+
+// tokenConfigured says whether the primary repo's config names a token source,
+// without running or reading any of them but the environment.
+func (v *ghVisibility) tokenConfigured() bool {
+	if !v.hasCfg {
+		return false
+	}
+	c := v.cfg
+	if c.GitHubApp != "" || c.GitHubTokenFile != "" || len(c.GitHubTokenCmd) > 0 {
+		return true
+	}
+	tok, err := ghguard.EnvSource{Name: c.GitHubTokenEnv}.Token(context.Background())
+	return err != nil || tok != ""
 }
 
 func (v *ghVisibility) load() map[string]verdict {
@@ -101,11 +139,11 @@ func (v *ghVisibility) save(m map[string]verdict) {
 }
 
 // api returns a client for this call: the quick one has a short timeout.
-func (v *ghVisibility) api() *ghguard.Client {
+func (v *ghVisibility) api(client *ghguard.Client) *ghguard.Client {
 	if !v.quick {
-		return v.client
+		return client
 	}
-	c := *v.client
+	c := *client
 	c.HTTP = &http.Client{Timeout: quickTimeout}
 	return &c
 }
@@ -129,12 +167,29 @@ func (v *ghVisibility) verify(repo, owner, name string) error {
 	if have && v.now().Sub(cached.At) < visTTL {
 		return privateErr(repo, cached.Private)
 	}
-	r, err := v.api().GetRepo(owner, name)
-	if err != nil {
-		limit := v.maxStale
-		if limit <= 0 {
-			limit = visMaxStale
+	limit := v.maxStale
+	if limit <= 0 {
+		limit = visMaxStale
+	}
+	if v.offline {
+		if have && v.now().Sub(cached.At) < limit {
+			return privateErr(repo, cached.Private)
 		}
+		if v.warn != nil && !v.warned {
+			v.warned = true
+			v.warn(fmt.Sprintf("%s: no recent visibility verdict cached; not shown this time (a command run by hand refreshes it)", repo))
+		}
+		return fmt.Errorf("%w: no recent cached verdict that %s is private", errUnverified, repo)
+	}
+	client, cerr := v.getClient()
+	if cerr != nil {
+		return fmt.Errorf("cannot check visibility: %w", cerr)
+	}
+	if client == nil {
+		return nil // no usable token: names only
+	}
+	r, err := v.api(client).GetRepo(owner, name)
+	if err != nil {
 		if have && v.quick && v.now().Sub(cached.At) < limit {
 			return privateErr(repo, cached.Private)
 		}
@@ -150,10 +205,7 @@ func (v *ghVisibility) CheckPrivate(repo string) error {
 	if err := v.names.CheckPrivate(repo); err != nil {
 		return err
 	}
-	if v.loadErr != nil {
-		return fmt.Errorf("cannot check visibility: %w", v.loadErr)
-	}
-	if v.client == nil {
+	if !v.tokenConfigured() {
 		return nil // no token: names only
 	}
 	if v.remote != nil {
@@ -208,10 +260,7 @@ func (v *ghVisibility) CheckCloneURL(repo, url string, owners []string) error {
 	if !ok {
 		return fmt.Errorf("the URL for %s is owned by %q, which is not this host's org; list it in relatedOwners to allow it", repo, owner)
 	}
-	if v.loadErr != nil {
-		return fmt.Errorf("cannot check visibility: %w", v.loadErr)
-	}
-	if v.client == nil {
+	if !v.tokenConfigured() {
 		return nil
 	}
 	return v.verify(repo, owner, name)

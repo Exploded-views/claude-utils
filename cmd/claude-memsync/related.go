@@ -15,6 +15,7 @@ import (
 
 	"github.com/MarimerLLC/claude-utils/internal/related"
 	"github.com/MarimerLLC/claude-utils/internal/route"
+	"github.com/MarimerLLC/claude-utils/internal/secretcmd"
 	"github.com/MarimerLLC/claude-utils/internal/scrub"
 )
 
@@ -129,6 +130,20 @@ func loadRelCtx(routesFlag string) (*relCtx, error) {
 		vis.maxStale = time.Duration(h) * time.Hour
 	}
 	vis.cachePath = filepath.Join(rc.root, ".state", "visibility.json")
+	return rc, nil
+}
+
+// loadRelCtxHook is loadRelCtx for the hook paths: the visibility check is
+// offline (cached verdicts only, no token command, no network), and a missing
+// or stale verdict is reported once on warn.
+func loadRelCtxHook(routesFlag string, warn func(string)) (*relCtx, error) {
+	rc, err := loadRelCtx(routesFlag)
+	if err != nil {
+		return nil, err
+	}
+	rc.vis.offline = true
+	rc.vis.quick = true
+	rc.vis.warn = warn
 	return rc, nil
 }
 
@@ -595,12 +610,13 @@ func relatedContextCmd(stdout, stderr io.Writer, args []string) int {
 	if *project == "" {
 		return quiet(fmt.Errorf("--project is required"))
 	}
-	rc, err := loadRelCtx(*routesFlag)
+	// A session hook: never a token command, never the network, never a wait.
+	secretcmd.SetDaemon(true)
+	rc, err := loadRelCtxHook(*routesFlag, func(s string) { fmt.Fprintln(stderr, "related context:", s) })
 	if err != nil {
 		return quiet(err)
 	}
 	rc.stderr = stderr
-	rc.vis.quick = true
 	owner, ok := rc.owningRepoRemote(*project)
 	if !ok {
 		return 0
@@ -615,12 +631,11 @@ func relatedContextCmd(stdout, stderr io.Writer, args []string) int {
 // relatedHookLines reports the files that changed in the read clones of the
 // project's relations since this session last looked: paths only. It also moves
 // the session's markers, which the caller commits to only after output went out.
-func relatedHookLines(routesFlag, project, session string, limit int) (lines []string, commit func(), err error) {
-	rc, err := loadRelCtx(routesFlag)
+func relatedHookLines(routesFlag, project, session string, limit int, stderr io.Writer) (lines []string, commit func(), err error) {
+	rc, err := loadRelCtxHook(routesFlag, func(s string) { fmt.Fprintln(stderr, "changes: related:", s) })
 	if err != nil || rc.set.File.Registry == "" {
 		return nil, nil, err
 	}
-	rc.vis.quick = true
 	owner, ok := rc.owningRepoRemote(project)
 	if !ok {
 		return nil, nil, nil

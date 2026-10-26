@@ -106,6 +106,8 @@ Usage of doctor:
     	command (shell-style quotes, no shell) printing a GitHub token, e.g. "gh auth token"; run at call time, never saved
   -token-file string
     	file holding a GitHub token for this run (as for init; or set MEMSYNC_GITHUB_TOKEN); not saved
+  -unattended
+    	run without a person at the keyboard (the timer sets this): token commands keep the short timeout and print no prompt text
   -unit-dir string
     	with --install-timer: directory to write units into
 ```

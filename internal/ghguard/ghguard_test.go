@@ -321,7 +321,7 @@ func TestTimerUnitText(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc, tim := u["claude-memsync-doctor.service"], u["claude-memsync-doctor.timer"]
-	want := `ExecStart="/opt/my bin/claude-memsync" "doctor" "--org" "example-org" "--config" "/home/u/.claudesync/config.json"`
+	want := `ExecStart="/opt/my bin/claude-memsync" "doctor" "--unattended" "--org" "example-org" "--config" "/home/u/.claudesync/config.json"`
 	if !strings.Contains(svc, want) {
 		t.Errorf("service:\n%s", svc)
 	}

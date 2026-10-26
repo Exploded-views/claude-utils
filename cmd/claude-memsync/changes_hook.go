@@ -226,7 +226,7 @@ func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project st
 	var relCommit func()
 	if hookHasRelated(routesFlag) {
 		var rerr error
-		relLines, relCommit, rerr = relatedHookLines(routesFlag, project, in.SessionID, limit)
+		relLines, relCommit, rerr = relatedHookLines(routesFlag, project, in.SessionID, limit, stderr)
 		if rerr != nil {
 			fmt.Fprintln(stderr, "changes: related:", rerr)
 		}

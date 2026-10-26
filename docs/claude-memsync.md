@@ -932,7 +932,7 @@ expansion of `$VAR`, backticks, globs or `;`), and its stderr is discarded. Run 
 a terminal it may take 120 seconds (a password manager can wait for you to approve a
 prompt; it prints `waiting for your password manager (approve the prompt if one appears)…`
 on stderr first); `CLAUDE_MEMSYNC_SECRET_TIMEOUT` (a Go duration such as `45s` or
-`3m`) changes that. The daemon, which nobody can ask, keeps 10 seconds and prints nothing. When several sources are set the first configured one is
+`3m`) changes that. The daemon, which nobody can ask, keeps 10 seconds and prints nothing; so do hooks (`changes --hook`, `related context`) and the doctor timer (`doctor --unattended`): 120 s is for a terminal only, and hooks and timers never wait on a password manager. A hook never runs a token or key command and never reaches the network: it uses only cached related-repo visibility verdicts, and a stale or missing one hides that related repo for the run (one stderr line says so) until a command run by hand refreshes it. When several sources are set the first configured one is
 used, in the order file, command, env var; a configured source that fails is an
 error, never a silent fall-through to the next. The token is never written to
 `config.json`, logs or error messages.
@@ -1004,7 +1004,7 @@ the remote. `--token-file` names a file holding the GitHub token for this run, a
 `claude-memsync doctor --install-timer` writes a daily systemd user timer
 (Linux) or launchd agent (macOS) into `~/.config/systemd/user` or
 `~/Library/LaunchAgents` (override with `--unit-dir`). It does not enable it;
-it prints the command. The timer needs `githubTokenFile`.
+it prints the command. The timer needs `githubTokenFile`, and runs `doctor --unattended`, so it never waits for a password manager (10 s limit, no prompt text).
 
 Remotes must also be on the allowed git host: `github.com`, or `githubHost`
 (or the host of `githubApiUrl`) for GitHub Enterprise. https must name it
