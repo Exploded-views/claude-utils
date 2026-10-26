@@ -191,19 +191,8 @@ func DetectRekey(repo *gitwt.Repo, o RekeyOpts) (RekeyStage, PreRekeyState, erro
 		return StageFresh, st, errors.New("an earlier rekey-pq --apply was interrupted; rerun it with the same --host, --recovery-recipient and --fresh-root (or undo it with --rollback)")
 	}
 	if scheme != SchemePQ {
-		cur, err := ListRecipients(repo.Dir)
-		if err != nil {
+		if err := checkMigratedRecipients(repo, st); err != nil {
 			return StageFresh, st, err
-		}
-		want := canonSet([]string{st.NewRecipient, st.Recovery})
-		have := canonSet(cur)
-		if len(have) != len(want) {
-			return StageFresh, st, errors.New("an earlier rekey-pq left the repo half-migrated and .age-recipients is not the migrated set; inspect it by hand")
-		}
-		for k := range want {
-			if !have[k] {
-				return StageFresh, st, errors.New("an earlier rekey-pq left the repo half-migrated and .age-recipients is not the migrated set; inspect it by hand")
-			}
 		}
 		return StageFinishLocal, st, nil
 	}
@@ -212,9 +201,17 @@ func DetectRekey(repo *gitwt.Repo, o RekeyOpts) (RekeyStage, PreRekeyState, erro
 	}
 	remote, _ := revOf(repo, "refs/remotes/origin/main")
 	if remote == tip {
+		// Every stage that goes on to push repoints first (FinishRekeyLocal),
+		// which re-pins the work-tree's recipients: they must be the migrated set.
+		if err := checkMigratedRecipients(repo, st); err != nil {
+			return StageFresh, st, err
+		}
 		return StageRetryPush, st, nil
 	}
 	if remote == head && (st.NewCommit == "" || head == st.NewCommit) {
+		if err := checkMigratedRecipients(repo, st); err != nil {
+			return StageFresh, st, err
+		}
 		return StagePublished, st, nil
 	}
 	// The migrated commit is on the remote, which has moved on since (the
@@ -225,13 +222,38 @@ func DetectRekey(repo *gitwt.Repo, o RekeyOpts) (RekeyStage, PreRekeyState, erro
 		}
 	}
 	if remote == head {
+		if err := checkMigratedRecipients(repo, st); err != nil {
+			return StageFresh, st, err
+		}
 		return StagePublished, st, nil
 	}
 	return StageFresh, st, errors.New("origin/main is neither the backup tip nor the migrated tip (someone pushed since?); not touching it. Inspect it, or drop the backup if the migration is complete")
 }
 
+// checkMigratedRecipients says whether .age-recipients is the migrated set
+// (this host's new key and the recovery key, nothing else).
+func checkMigratedRecipients(repo *gitwt.Repo, st PreRekeyState) error {
+	cur, err := ListRecipients(repo.Dir)
+	if err != nil {
+		return err
+	}
+	want := canonSet([]string{st.NewRecipient, st.Recovery})
+	have := canonSet(cur)
+	bad := errors.New("an earlier rekey-pq left the repo half-migrated and .age-recipients is not the migrated set; inspect it by hand")
+	if len(have) != len(want) {
+		return bad
+	}
+	for k := range want {
+		if !have[k] {
+			return bad
+		}
+	}
+	return nil
+}
+
 // FinishRekeyLocal completes a migration whose HEAD moved but whose identity,
-// scheme and pin were not repointed (a crash in between).
+// scheme and pin were not repointed (a crash in between). It is idempotent and
+// runs on every resume that goes on to push.
 func FinishRekeyLocal(repo *gitwt.Repo, st PreRekeyState) (RekeyPlan, error) {
 	if err := repointLocal(repo, st.NewIdentity); err != nil {
 		return RekeyPlan{}, err

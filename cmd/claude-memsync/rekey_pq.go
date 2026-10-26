@@ -309,14 +309,12 @@ func rekeyOne(stdout, stderr io.Writer, cfg config.Config, hostCfgs []config.Con
 				return aerr
 			}
 			plan = p
-		case agecrypt.StageFinishLocal:
+		case agecrypt.StageFinishLocal, agecrypt.StageRetryPush, agecrypt.StagePublished:
 			p, ferr := agecrypt.FinishRekeyLocal(repo, st)
 			if ferr != nil {
 				return ferr
 			}
 			plan = p
-		default:
-			plan = agecrypt.PlanFromState(repo, st)
 		}
 		if stage != agecrypt.StagePublished {
 			if err := syncpkg.MoveSyncedHead(repo, plan.Tip, plan.NewCommit); err != nil {
