@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/MarimerLLC/claude-utils/internal/version"
 )
 
 // The commands that act without parsing flags once treated `stop -h` as
@@ -86,4 +88,26 @@ func captureBoth(t *testing.T, f func()) (stdout, stderr string) {
 	bo, _ := io.ReadAll(ro)
 	be, _ := io.ReadAll(re)
 	return string(bo), string(be)
+}
+
+func TestVersion_JSONFlag(t *testing.T) {
+	var out, errb bytes.Buffer
+	if code := runVersion(&out, &errb, []string{"--json"}); code != 0 || errb.Len() != 0 {
+		t.Fatalf("version --json: %d %q", code, errb.String())
+	}
+	if out.String() != version.JSON("claude-memsync")+"\n" {
+		t.Errorf("version --json = %q", out.String())
+	}
+	out.Reset()
+	runVersion(&out, &errb, nil)
+	if out.String() != version.Strings("claude-memsync")+"\n" {
+		t.Errorf("the text form changed: %q", out.String())
+	}
+	for _, bad := range [][]string{{"--json", "x"}, {"--json=1"}, {"-json"}} {
+		out.Reset()
+		errb.Reset()
+		if code := runVersion(&out, &errb, bad); code != 2 || out.Len() != 0 || !strings.Contains(errb.String(), "unexpected argument") {
+			t.Errorf("version %v: %d %q %q", bad, code, out.String(), errb.String())
+		}
+	}
 }
