@@ -192,6 +192,26 @@ if [ "$(uname -s)" = Linux ]; then
   if PATH="$fk:$PATH" BOOTSTRAP_GUARD_TEST='' BOOTSTRAP_TEST_OS=Darwin guard_ok no_predecessor_units; then bad "no_predecessor_units: BOOTSTRAP_TEST_OS skipped the guard without the test flag"; else ok; fi
 fi
 
+# --- a check killed on purpose (its whole group, or a timeout) leaves no "Killed ( ... )" job notice on stderr
+#     (bash 3.2 prints one for a background job that dies by SIGKILL, to the shell's own stderr, so it is only
+#     seen when the whole run is a process with its stderr captured) ---
+cat >"$W/notice.sh" <<'EOF'
+set -euo pipefail
+die() { echo "ERROR: $*" >&2; exit 1; }
+. "$W/guards.sh"
+export BOOTSTRAP_GUARD_TIMEOUT=1
+GUARD_TIMEOUT=1
+kill_group_check() { kill -KILL 0; echo SAFE:nonotice; }
+hang_check() { sleep 30 & wait; echo SAFE:nonotice; }
+guard_run nonotice "${1}_check" >/dev/null || :
+EOF
+export W
+for fn in kill_group hang; do
+  CASES=$((CASES + 1))
+  nerr="$(bash "$W/notice.sh" "$fn" 2>&1 >/dev/null)" || :
+  if [ -n "$nerr" ]; then bad "a $fn check killed by the runner printed a job notice on stderr: $(printf '%s' "$nerr" | head -n1)"; else ok; fi
+done
+
 # --- the runner protocol cannot be forged, and guard_abort never signals everything ---
 CASES=$((CASES + 1))
 if [ "$(path_state "")" = "ABSENT" ]; then bad "path_state of an empty path said ABSENT (it must give no answer)"; else ok; fi

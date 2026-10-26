@@ -102,7 +102,9 @@ case "$1" in
           echo '{"private": true, "visibility": "private"}' >"$S/$name.json"
         fi ;;
       deploy-key)
-        if [ "${STUB_DEPLOYKEY_DISABLED:-0}" = 1 ]; then echo "HTTP 422: deploy keys disabled" >&2; exit 1; fi ;;
+        if [ "${STUB_DEPLOYKEY_DISABLED:-0}" = 1 ]; then echo "HTTP 422: deploy keys disabled" >&2; exit 1; fi
+        # STUB_DEPLOYKEY_INUSE=1: GitHub already has this key (a re-add after an interrupted run)
+        if [ "${STUB_DEPLOYKEY_INUSE:-0}" = 1 ]; then echo "HTTP 422: Validation Failed: key is already in use" >&2; exit 1; fi ;;
     esac ;;
 esac
 exit 0
@@ -422,6 +424,133 @@ runboot --host testhost --role homelab --yes --org-app memsync-admin --org-app-i
 ORGARGS=(--org-token-file "$BASE/orgtoken")
 check "a relative --check-key-file is an error (exit 2), not a pause" bash -c "[ $RC -eq 2 ] && printf '%s\n' \"\$1\" | grep -q 'must be an absolute path'" _ "$OUT"
 
+
+# ============================ release nits =====================================
+# Pieces of bootstrap.sh run on their own (no network, nothing outside $BASE), and
+# end-to-end cases for the build refusal, the routes.json write and the deploy key.
+echo "--- release nits: token clean-up, g_kind, jr_emit, step_build, routes.json, deploy key, check key"
+bs_funcs() { # name...: the source of those functions of bootstrap.sh
+  local n
+  for n in "$@"; do
+    awk -v n="$n" '
+      $0 ~ "^" n "\\(\\) \\{" { p = 1; print; if ($0 ~ /\}[ \t]*$/) exit; next }
+      p { print; if ($0 ~ /^\}/) exit }' "$ROOT/scripts/bootstrap.sh"
+  done
+}
+UT="$BASE/unit.sh"
+{
+  echo 'set +e'
+  echo "warn() { printf 'WARNING: %s\n' \"\$*\" >&2; }"
+  awk '/^G_PY_STATE=/ { p = 1 } p { print } p && /^'"'"'$/ { exit }' "$ROOT/scripts/bootstrap.sh"
+  echo 'RUN_DIR=""'
+  bs_funcs path_state g_state g_kind secure_delete token_file_remove run_dir_remove jr_emit
+} >"$UT"
+UD="$BASE/unit"; rm -rf "$UD"; mkdir -p "$UD"
+ut() { local s="$1"; shift; bash -c '. "$1"; s="$2"; shift 2; eval "$s"' _ "$UT" "$s" "$@" || :; }   # ut '<snippet>' args...: run a snippet with those functions ($1.. are the args)
+
+# --- secure_delete: always rm -f, warn unless the path is ABSENT afterwards
+: >"$UD/plain"; ln -s "$UD/nowhere" "$UD/dang"
+out="$(ut 'secure_delete "$1"; echo rc=$?' "$UD/plain" 2>&1)"
+check "secure_delete removes a plain file, silently" bash -c "[ \"\$1\" = rc=0 ] && [ ! -e '$UD/plain' ]" _ "$out"
+out="$(ut 'secure_delete "$1"; echo rc=$?' "$UD/dang" 2>&1)"
+check "secure_delete removes a dangling symlink, silently" bash -c "[ \"\$1\" = rc=0 ] && [ ! -L '$UD/dang' ]" _ "$out"
+if [ "$(id -u)" -ne 0 ]; then
+  mkdir -p "$UD/locked" "$UD/ro"; : >"$UD/locked/f"; : >"$UD/ro/f"
+  chmod 000 "$UD/locked"; chmod 555 "$UD/ro"
+  out="$(ut 'secure_delete "$1"' "$UD/locked/f" 2>&1)"
+  chmod 755 "$UD/locked"
+  check "secure_delete warns for a file it cannot even stat (an unsearchable directory)" bash -c "printf '%s\n' \"\$1\" | grep -q 'WARNING' && [ -e '$UD/locked/f' ]" _ "$out"
+  out="$(ut 'secure_delete "$1"' "$UD/ro/f" 2>&1)"
+  chmod 755 "$UD/ro"
+  check "secure_delete warns for a file it cannot remove (a read-only directory)" bash -c "printf '%s\n' \"\$1\" | grep -q 'WARNING' && [ -e '$UD/ro/f' ]" _ "$out"
+fi
+# --- token_file_remove: warn on anything but ABSENT
+for st in "ABSENT 0 quiet" "DANGLING 0 warn" "PRESENT 0 warn" "- 1 warn"; do
+  set -- $st
+  out="$(FAKE="$1" FAKE_RC="$2" ut 'guard_ok() { return 0; }; secure_delete() { :; }; g_state() { printf %s "$FAKE"; return "$FAKE_RC"; }; TOKEN_FILE_ARMED=1; ORG_TOKEN_FILE="$1"; token_file_remove' "$UD/never-there" 2>&1)"
+  if [ "$3" = quiet ]; then
+    check "token_file_remove: state ABSENT after the delete says nothing" bash -c "[ -z \"\$1\" ]" _ "$out"
+  else
+    check "token_file_remove: state '$1' (rc $2) after the delete warns" bash -c "printf '%s\n' \"\$1\" | grep -q 'could not delete the org token file'" _ "$out"
+  fi
+done
+# --- run_dir_remove: dangling and hidden entries go too; a failed rmdir warns
+RD="$UD/run"; rm -rf "$RD"; mkdir -p "$RD"; : >"$RD/a"; : >"$RD/.hidden"; ln -s "$UD/nowhere" "$RD/dang"
+out="$(ut 'RUN_DIR="$1"; run_dir_remove; echo "rc=$? run_dir=[$RUN_DIR]"' "$RD" 2>&1)"
+check "run_dir_remove removes plain, hidden and dangling entries and the directory, silently" bash -c "[ \"\$1\" = 'rc=0 run_dir=[]' ] && [ ! -e '$RD' ] && [ ! -L '$RD/dang' ]" _ "$out"
+mkdir -p "$RD/sub"; : >"$RD/sub/inner"
+out="$(ut 'RUN_DIR="$1"; run_dir_remove' "$RD" 2>&1)"
+check "run_dir_remove warns when it cannot remove the directory" bash -c "printf '%s\n' \"\$1\" | grep -q 'WARNING.*$RD' && [ -d '$RD' ]" _ "$out"
+rm -f "$RD/sub/inner" "$RD/a" "$RD/.hidden" "$RD/dang"; rmdir "$RD/sub" "$RD" 2>/dev/null || :
+# --- g_kind: GNU stat calls an empty file "regular empty file"
+: >"$UD/empty"
+out="$(ut 'g_kind "$1"' "$UD/empty" 2>&1)"
+check "g_kind: an empty regular file is a file" bash -c "[ \"\$1\" = file ]" _ "$out"
+mkdir -p "$UD/fakestat"
+printf '#!/bin/sh\nif [ "$1" = -c ]; then echo "regular empty file"; exit 0; fi\nexit 1\n' >"$UD/fakestat/stat"; chmod +x "$UD/fakestat/stat"
+out="$(PATH="$UD/fakestat:$PATH" ut 'g_kind "$1"' "$UD/empty" 2>&1)"
+check "g_kind: 'regular empty file' from stat -c %F maps to file" bash -c "[ \"\$1\" = file ]" _ "$out"
+# --- jr_emit: a job's key and join reports are never dropped because a stat failed
+JD="$UD/jr"; rm -rf "$JD"; mkdir -p "$JD"; : >"$JD/0.out"; : >"$JD/0.err"
+printf 'on a member host: accept it\n' >"$JD/0.join"; printf 'alpha_ed25519\n' >"$JD/0.key"
+out="$(ut 'RUN_DIR="$1"; R_NAMES=(alpha); R_KEYS=(k1); KEYS_CREATED=(); PENDING_JOINS=(); FAILED_REPOS=""; jr_emit 0 0 >/dev/null 2>&1; printf "keys=%s joins=%s|%s\n" "${#KEYS_CREATED[@]}" "${#PENDING_JOINS[@]}" "${PENDING_JOINS[0]}"' "$JD" 2>&1)"
+check "jr_emit takes over a job's key and join lines" bash -c "[ \"\$1\" = 'keys=1 joins=1|on a member host: accept it' ]" _ "$out"
+if [ "$(id -u)" -ne 0 ]; then
+  : >"$JD/0.out"; : >"$JD/0.err"; mkdir -p "$JD/locked"; : >"$JD/locked/x"
+  ln -s "$JD/locked/x" "$JD/0.join"; chmod 000 "$JD/locked"
+  out="$(ut 'RUN_DIR="$1"; R_NAMES=(alpha); R_KEYS=(k1); KEYS_CREATED=(); PENDING_JOINS=(); FAILED_REPOS=""; jr_emit 0 0 >/dev/null 2>"$RUN_DIR/err"; printf "joins=%s|%s\n" "${#PENDING_JOINS[@]}" "${PENDING_JOINS[0]}"' "$JD" 2>&1)"
+  chmod 755 "$JD/locked"
+  check "jr_emit keeps a pending join instruction when its report cannot be read (it says so instead of dropping it)" bash -c "printf '%s\n' \"\$1\" | grep -q '^joins=1|.*join status --repo k1'" _ "$out"
+  rm -f "$JD/0.join" "$JD/0.key"
+fi
+
+# --- step_build never overwrites a binary it did not build
+echo "--- step_build: an existing, non-executable or dangling binary in the lib dir is refused, a present one is kept"
+newhome sb1
+LIBB="$H/.local/lib/claude-memsync/$SHA"; mkdir -p "$LIBB"
+printf 'precious\n' >"$LIBB/claude-memsync"; chmod 644 "$LIBB/claude-memsync"
+runboot --host testhost --role homelab --yes
+check "step_build: a non-executable claude-memsync in the lib dir is refused, not overwritten" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'not an executable regular file' && [ \"\$(cat '$LIBB/claude-memsync')\" = precious ] && [ ! -e '$STUB_DIR/go.log' ] && ! grep -q 'repo create' '$STUB_DIR/gh.log'" _ "$OUT"
+newhome sb2
+LIBB="$H/.local/lib/claude-memsync/$SHA"; mkdir -p "$LIBB"; ln -s "$H/nowhere" "$LIBB/claude-memmerge"
+runboot --host testhost --role homelab --yes
+check "step_build: a dangling claude-memmerge in the lib dir is refused, not written through" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'dangling' && [ ! -e '$H/nowhere' ] && [ ! -e '$STUB_DIR/go.log' ]" _ "$OUT"
+newhome sb3
+LIBB="$H/.local/lib/claude-memsync/$SHA"; mkdir -p "$LIBB"
+printf '#!/bin/sh\necho mine\n' >"$LIBB/claude-memsync"; chmod 755 "$LIBB/claude-memsync"
+runboot --host testhost --role homelab --dry-run
+check "step_build: with one binary present the other is built and the present one is not rebuilt over" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -q 'go build -o .*$SHA/claude-memmerge' && ! printf '%s\n' \"\$1\" | grep -q 'go build -o .*$SHA/claude-memsync'" _ "$OUT"
+
+# --- routes.json is written through a private temp file, and the denylists wait for the decision
+echo "--- routes.json: the temp file is not a fixed name; the denylists are written after the routes.json decision"
+newhome rt1
+mkdir -p "$H/.config/claude-memsync"; printf 'keep\n' >"$H/victim"
+ln -s "$H/victim" "$H/.config/claude-memsync/routes.json.tmp"
+runboot --host testhost --role homelab --yes
+check "a routes.json.tmp symlink is not written through (the temp file is made with mktemp)" bash -c "[ $RC -eq 0 ] && [ \"\$(cat '$H/victim')\" = keep ] && [ -f '$H/.config/claude-memsync/routes.json' ] && [ ! -L '$H/.config/claude-memsync/routes.json' ] && grep -q '\"repos\"' '$H/.config/claude-memsync/routes.json'" _ "$OUT"
+check "... and no temp file is left behind" bash -c "[ -z \"\$(find '$H/.config/claude-memsync' -name 'routes.json.*' -not -name 'routes.json.tmp' | head -1)\" ]"
+newhome rt2
+mkdir -p "$H/.config/claude-memsync"; printf '{"registry": "git@example.invalid:me/registry.git", \n garbage' >"$H/.config/claude-memsync/routes.json"
+runboot --host testhost --role homelab --yes
+check "a routes.json that cannot be read refuses before any denylist is written" bash -c "[ $RC -ne 0 ] && [ -z \"\$(find '$H/.config/claude-memsync' -name 'denylist-*' | head -1)\" ]" _ "$OUT"
+check "... and the refusal says what is wrong with routes.json, from plan_routes_json" bash -c "printf '%s\n' \"\$1\" | grep -q 'cannot read the existing routes.json'" _ "$OUT"
+
+# --- a deploy key GitHub already has is not "deploy keys disabled"
+newhome dk2
+STUB_DEPLOYKEY_INUSE=1 runboot --host testhost --role homelab --yes
+check "a deploy key GitHub says is already in use is reported as already present, and the run goes on" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -q 'already present' && ! printf '%s\n' \"\$1\" | grep -q 'deploy keys look disabled'" _ "$OUT"
+
+# --- a check key file whose stat fails is not "does not exist"
+if [ "$(id -u)" -ne 0 ]; then
+  newhome pause3
+  mkdir -p "$H/locked"; : >"$H/locked/key.pem"; chmod 000 "$H/locked"
+  ORGARGS=()
+  runboot --host testhost --role homelab --yes --org-app memsync-admin --org-app-id 12345 --org-app-key-cmd "cat $BASE/app.pem" \
+    --check-app memsync-check --check-app-id 54321 --check-key-file "$H/locked/key.pem"
+  ORGARGS=(--org-token-file "$BASE/orgtoken")
+  chmod 755 "$H/locked"
+  check "a check key that cannot be stat'ed says so (not 'does not exist', not the pause exit 3), and changes nothing" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'cannot check the key file' && ! printf '%s\n' \"\$1\" | grep -q 'does not exist' && ! grep -q 'repo create' '$STUB_DIR/gh.log'" _ "$OUT"
+fi
 
 # ============================ --delete-org-token-file ==========================
 echo "--- --delete-org-token-file: read, then shredded on every exit path"
@@ -1644,7 +1773,7 @@ newhome rj3
 mkdir -p "$H/.config/claude-memsync"; printf '{"registry": "git@example.invalid:me/registry.git", \n garbage' >"$H/.config/claude-memsync/routes.json"
 cp "$H/.config/claude-memsync/routes.json" "$BASE/rj3.orig"
 runboot --host testhost --role homelab --yes
-check "an unparseable routes.json (with a registry in it) is refused, not replaced without its registry, and no backup is made" bash -c "[ $RC -ne 0 ] && cmp -s '$BASE/rj3.orig' '$H/.config/claude-memsync/routes.json' && ! ls '$H/.config/claude-memsync'/routes.json.bak* >/dev/null 2>&1 && ! grep -q 'repo create' '$STUB_DIR/gh.log'" _ "$OUT"
+check "an unparseable routes.json (with a registry in it) is refused, not replaced without its registry, and no backup is made" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'cannot read the existing routes.json' && cmp -s '$BASE/rj3.orig' '$H/.config/claude-memsync/routes.json' && ! ls '$H/.config/claude-memsync'/routes.json.bak* >/dev/null 2>&1 && ! grep -q 'repo create' '$STUB_DIR/gh.log'" _ "$OUT"
 
 echo "--- marks, workspaces and known_hosts: an unreadable one is not an absent one"
 if [ "$(id -u)" -ne 0 ]; then
