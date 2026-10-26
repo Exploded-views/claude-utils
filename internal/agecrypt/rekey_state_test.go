@@ -437,3 +437,118 @@ func TestRekeyState_ReadAtResolvesAGitFile(t *testing.T) {
 		t.Errorf("a dir without a repo has no record: %v", err)
 	}
 }
+
+// legacy turns the fixture's record into the shape the 9c26984 build wrote.
+func (f *rekeyFx) legacy(t *testing.T) PreRekeyState {
+	t.Helper()
+	if err := UpdateRekeyState(f.h.repo, func(s *PreRekeyState) { s.Stage, s.NewCommit = "", "" }); err != nil {
+		t.Fatal(err)
+	}
+	st, err := ReadRekeyState(f.h.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+func TestRekeyState_InferMigratedAndLegacyDetect(t *testing.T) {
+	for _, fresh := range []bool{true, false} {
+		f := newRekeyFx(t)
+		f.opts.FreshRoot = fresh
+		repo := f.h.repo
+		p := f.apply(t)
+		st := f.legacy(t)
+		if _, ok := InferMigrated(repo, st, "HEAD"); !ok {
+			t.Fatalf("fresh=%v: not inferred", fresh)
+		}
+		if mc, _ := InferMigrated(repo, st, "HEAD"); mc != p.NewCommit {
+			t.Errorf("fresh=%v: inferred %s, want %s", fresh, mc, p.NewCommit)
+		}
+		if _, ok := InferMigrated(repo, PreRekeyState{FreshRoot: fresh}, "HEAD"); ok {
+			t.Error("a record without a tip cannot infer")
+		}
+		if mc, ok := InferMigrated(repo, PreRekeyState{NewCommit: "abc"}, "HEAD"); !ok || mc != "abc" {
+			t.Error("a recorded commit wins")
+		}
+		if _, ok := InferMigrated(repo, st, "refs/remotes/origin/main"); ok {
+			t.Error("origin/main is still the tip: nothing to infer")
+		}
+		// not pushed: stays a retry-push; pushed and synced: done, record completed
+		if stage, _, err := DetectRekey(repo, f.opts); err != nil || stage != StageRetryPush {
+			t.Fatalf("fresh=%v unpushed legacy: %v %v", fresh, stage, err)
+		}
+		if why, blocked := RekeyBlocksSync(repo); !blocked || !strings.Contains(why, "not pushed") {
+			t.Errorf("unpushed legacy must block: %v %q", blocked, why)
+		}
+		if err := checkDropAllowed(repo); err == nil {
+			t.Error("drop-backup must refuse an unpublished legacy rekey")
+		}
+		if _, err := repo.Run("push", "-f", "origin", "main"); err != nil {
+			t.Fatal(err)
+		}
+		f.emptyCommit(t, "auto: sync")
+		if _, err := repo.Run("push", "origin", "main"); err != nil {
+			t.Fatal(err)
+		}
+		if err := checkDropAllowed(repo); err != nil {
+			t.Errorf("fresh=%v: drop-backup of a published legacy rekey: %v", fresh, err)
+		}
+		stage, got, err := DetectRekey(repo, f.opts)
+		if err != nil || stage != StageSynced || got.NewCommit != p.NewCommit || got.Stage != RekeyRecPublished {
+			t.Fatalf("fresh=%v published legacy: %v %+v %v", fresh, stage, got, err)
+		}
+		if on, _ := ReadRekeyState(repo); on.NewCommit != p.NewCommit {
+			t.Error("record not completed on disk")
+		}
+	}
+}
+
+func TestRekeyState_OrphanRecordWithoutBackupRef(t *testing.T) {
+	f := newRekeyFx(t)
+	repo := f.h.repo
+	p := f.apply(t)
+	if _, err := repo.Run("reset", "--hard", "-q", p.Tip); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Run("update-ref", "-d", BackupRef); err != nil {
+		t.Fatal(err)
+	}
+	f.stage(t, RekeyRecMigrated)
+	st, _ := ReadRekeyState(repo)
+	if recordIsOrphan(repo, st) {
+		t.Error("only a started record is an orphan")
+	}
+	f.stage(t, RekeyRecStarted)
+	st, _ = ReadRekeyState(repo)
+	if !recordIsOrphan(repo, st) {
+		t.Error("started, no backup, HEAD at the tip: orphan")
+	}
+	if !clearOrphanRecord(repo) {
+		t.Error("not cleared")
+	}
+	if _, err := ReadRekeyState(repo); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("record left: %v", err)
+	}
+	if clearOrphanRecord(repo) {
+		t.Error("nothing left to clear")
+	}
+}
+
+func TestRekeyState_LegacyRollbackInfersTheMigratedCommit(t *testing.T) {
+	f := newRekeyFx(t)
+	repo := f.h.repo
+	noCfg := func(PriorConfig) error { return nil }
+	f.apply(t)
+	st := f.legacy(t)
+	f.emptyCommit(t, "late one")
+	if _, err := RollbackRekey(repo, RollbackOpts{}, noCfg); err == nil || !strings.Contains(err.Error(), "late one") {
+		t.Fatalf("legacy, extra commit: %v", err)
+	}
+	// with the flag it goes, and the late commit is gone
+	if _, err := RollbackRekey(repo, RollbackOpts{DiscardLocalCommits: true}, noCfg); err != nil {
+		t.Fatal(err)
+	}
+	if h, _ := repo.Run("rev-parse", "HEAD"); strings.TrimSpace(h) != st.Tip {
+		t.Error("HEAD not back at the tip")
+	}
+}
