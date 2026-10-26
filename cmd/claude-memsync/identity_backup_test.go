@@ -760,3 +760,103 @@ func TestIdentityBackup_DoesNotAdoptANeighbourOfACustomPQName(t *testing.T) {
 		t.Errorf("the retired classic of a custom-named identity is missing:\n%s", out)
 	}
 }
+
+// laterStoreStores keep one item. The second store replaces it and then either
+// exits 1 ("exit1") or writes junk and exits 0 ("junk").
+func laterStoreStores(t *testing.T, mode string) (store, verify, rec string) {
+	t.Helper()
+	d := t.TempDir()
+	rec = filepath.Join(d, "rec")
+	if err := os.Mkdir(rec, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	second := `cp "$rec/in" "$rec/only"; exit 1`
+	if mode == "junk" {
+		second = `echo junk > "$rec/only"`
+	}
+	s, v := filepath.Join(d, "later-store.sh"), filepath.Join(d, "later-verify.sh")
+	os.WriteFile(s, []byte(`#!/bin/sh
+rec="$1"; cat > "$rec/in"; echo run >> "$rec/runs"
+n=$(wc -l < "$rec/runs" | tr -d ' ')
+if [ "$n" -ge 2 ]; then `+second+`; fi
+cp "$rec/in" "$rec/only"
+`), 0o700)
+	os.WriteFile(v, []byte("#!/bin/sh\ncat \"$1/only\"\n"), 0o700)
+	return s + " " + rec, v + " " + rec, rec
+}
+
+// Item 1 verifies; a later store replaces it and then fails (or its own
+// verify fails). Item 1 must not stay "verified": the key is gone.
+func TestIdentityBackup_FinalPassRunsWhenALaterStoreOrVerifyFails(t *testing.T) {
+	for _, mode := range []string{"exit1", "junk"} {
+		t.Run(mode, func(t *testing.T) {
+			twoIdentityClones(t)
+			store, verify, _ := laterStoreStores(t, mode)
+			code, out, errs := runIDBackup("--all", "--store-cmd", store+" {fingerprint}", "--verify-cmd", verify+" {fingerprint}")
+			if code != 1 {
+				t.Fatalf("exit %d, want 1\n%s%s", code, out, errs)
+			}
+			var first string
+			for _, l := range strings.Split(out, "\n") {
+				if strings.Contains(l, "verified (sha256 matches)") && !strings.Contains(l, " stored (") {
+					first, _, _ = strings.Cut(l, "\t")
+				}
+			}
+			if first == "" {
+				t.Fatalf("the first item never verified, so the scenario did not happen:\n%s", out)
+			}
+			if !strings.Contains(errs, "OVERWRITTEN by a later store: "+first) {
+				t.Errorf("item 1 (%s) must end OVERWRITTEN:\n%s%s", first, out, errs)
+			}
+			if strings.Contains(out, "(1 verified") {
+				t.Errorf("item 1 is still counted as verified:\n%s", out)
+			}
+			if l := idLineWith(out, "OVERWRITTEN"); strings.Count(l, first) != 1 {
+				t.Errorf("the OVERWRITTEN line names the path %d times, want once: %q", strings.Count(l, first), l)
+			}
+		})
+	}
+}
+
+// The same key with a different comment line is the same key.
+func TestIdentityBackup_SameKeyWithAnotherCommentIsStoredOnce(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "client"}, "personal", nil)
+	a, secret, rcpt := idFile(t, t.TempDir(), "a.txt", false)
+	b := filepath.Join(t.TempDir(), "b.txt")
+	if err := os.WriteFile(b, []byte("# another comment, same key\n"+secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setCloneIdentity(t, cfgs["personal"].SyncDir, a)
+	setCloneIdentity(t, cfgs["client"].SyncDir, b)
+	store, verify, rec := fakeStores(t)
+	code, out, errs := runIDBackup("--all", "--store-cmd", store+" {fingerprint}", "--verify-cmd", verify+" {fingerprint}")
+	if code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out, errs)
+	}
+	if n := len(recorded(t, rec, "stdin")); n != 1 {
+		t.Errorf("stored %d times, want once", n)
+	}
+	if !strings.Contains(out, a) || !strings.Contains(out, b) || !strings.Contains(out, agecrypt.GroupFingerprint(agecrypt.JoinFingerprint(rcpt))) {
+		t.Errorf("both files must be listed:\n%s", out)
+	}
+}
+
+// "stored once" is only true when the first copy was stored.
+func TestIdentityBackup_SameKeyLineDoesNotClaimAFailedStore(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "client"}, "personal", nil)
+	a, _, _ := idFile(t, t.TempDir(), "a.txt", false)
+	b := filepath.Join(t.TempDir(), "b.txt")
+	data, _ := os.ReadFile(a)
+	os.WriteFile(b, data, 0o600)
+	setCloneIdentity(t, cfgs["personal"].SyncDir, a)
+	setCloneIdentity(t, cfgs["client"].SyncDir, b)
+	fail := filepath.Join(t.TempDir(), "fail.sh")
+	os.WriteFile(fail, []byte("#!/bin/sh\ncat >/dev/null\nexit 1\n"), 0o700)
+	code, out, errs := runIDBackup("--all", "--store-cmd", fail)
+	if code != 1 {
+		t.Fatalf("exit %d: %s%s", code, out, errs)
+	}
+	if strings.Contains(out, "stored once") {
+		t.Errorf("claims a copy was stored although the store failed:\n%s", out)
+	}
+}
