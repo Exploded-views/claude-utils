@@ -7,8 +7,8 @@
 | Code | Meaning |
 |---|---|
 | 0 | ok |
-| 1 | error (a missing prerequisite, a refused input, a failed step) |
-| 2 | usage (an unknown or malformed argument) |
+| 1 | runtime error: a missing prerequisite tool, a refused file or state (a token or key file with the wrong mode, an existing key or sync dir that is not ours, a repo that is not private, a binary whose version does not match), or a failed step |
+| 2 | usage: an unknown argument; a required flag left out (`--host`, `--role`, `--org`, `--recovery-recipient`, one token source, and `--sha` when the script is not run from a git checkout); a malformed value (a bad host label, org, app name, app id, `--sha`, or a recovery key that is not a post-quantum `age1pq1...` key; an unbalanced quote in a command; a relative path where an absolute one is needed; a `--workspace` that is not a directory or is itself a git checkout, or a `--prebuilt-dir` that is not a directory (all checked before the pause); an unknown role); or flags that conflict (`--org` also a keep-out owner, two token sources, `--delete-org-token-file` without `--org-token-file`, `--check-app` equal to `--org-app`, `--project` with `--skip-project`, `--project` or `--skip-project` with `--role homelab`). All of these are found before anything is read, paused on or changed, so they are exit 2 even when the check key is missing or the token file has the wrong mode. An unknown `--project` / `--skip-project` *name* is a runtime error (exit 1): the known names are only found by looking at the checkouts |
 | 3 | paused: it needs a human, then run the same command again (today: the `--check-key-file` does not exist yet; the output says exactly what to do) |
 
 ## Prerequisites
@@ -54,6 +54,7 @@ Paste one into a Claude Code session on the new host after replacing every `<pla
 | `ORG` | the GitHub organisation that holds the memory repos (required; there is no default) |
 | `RECOVERY` | your own offline post-quantum recovery PUBLIC key, `age1pq1...` (required; see "Make a recovery key") |
 | `KEEP_OUT_OWNERS`, `KEEP_OUT_TERMS` | optional space-separated lists, see above |
+| `PROJECTS`, `SKIP_PROJECTS` | optional space-separated checkout names (personal-dev prompt only; not both), see `--project` / `--skip-project` below |
 | `ADMIN_APP_ID` | numeric App ID of `memsync-admin` |
 | `ADMIN_KEY_CMD` | command that prints the `memsync-admin` private key (reads the owner's password manager at run time) |
 | `CHECK_APP_ID` | numeric App ID of `memsync-check` |
@@ -133,6 +134,10 @@ INPUTS (fill these in; nothing else changes)
     my personal GitHub account; checkouts it owns get a mem-project repo
 - WORKSPACES = ""
     (optional; leave empty for none) space-separated folders (no spaces in the paths) that hold code checkouts; each is pinned to the workspace repo
+- PROJECTS = ""
+    (optional; leave empty for none) space-separated checkout names (the repo name, as the plan shows it) that get a mem-project repo; empty means every own checkout. Not together with SKIP_PROJECTS
+- SKIP_PROJECTS = ""
+    (optional; leave empty for none) space-separated checkout names that get no mem-project repo. Not together with PROJECTS
 - KEEP_OUT_OWNERS = ""
     (optional; leave empty for none) space-separated GitHub owners to keep out
 - KEEP_OUT_TERMS = ""
@@ -160,6 +165,8 @@ boot() {
   for x in $KEEP_OUT_OWNERS; do a+=(--keep-out-owner "$x"); done
   for x in $KEEP_OUT_TERMS; do a+=(--keep-out-term "$x"); done
   for x in $WORKSPACES; do a+=(--workspace "$x"); done
+  for x in $PROJECTS; do a+=(--project "$x"); done
+  for x in $SKIP_PROJECTS; do a+=(--skip-project "$x"); done
   bash "$SRC/scripts/bootstrap.sh" --host "$HOST_LABEL" --role personal-dev --sha "$COMMIT" \
     --org "$ORG" --own-owner "$GITHUB_USER" --recovery-recipient "$RECOVERY" ${a[@]+"${a[@]}"} \
     --org-app memsync-admin --org-app-id "$ADMIN_APP_ID" --org-app-key-cmd "$ADMIN_KEY_CMD" \
@@ -182,10 +189,10 @@ On your own machine (where the `memsync-admin` entry and its key live), mint the
 umask 077
 claude-memsync app-token --app memsync-admin --org <org> > /tmp/org-token
 scp /tmp/org-token <host>:<token-file>      # lands as a 0600 file owned by you on the host
-shred -u /tmp/org-token                      # or rm -P on macOS
+rm -f /tmp/org-token                         # a deleted file on an SSD or APFS is not guaranteed unrecoverable; the token is short-lived for that reason
 ```
 
-On the host the file must be mode 0600, owned by you, with one hard link, and not a symlink; otherwise the script refuses and leaves it alone (check with `ls -l <token-file>`; if the mode is wrong, `chmod 600` it). The script reads it, never prints it and never copies it, and deletes it on every exit path of a real run (success, error, or a signal) with `shred -u`, or by overwriting and removing it where `shred` is missing. The same token serves the dry run and the real run: only the real run deletes it. It expires in about an hour, so if the review takes longer, mint and copy a new one before saying go. If the check key is not there yet the script pauses (exit 3) before it touches the token file.
+On the host the file must be mode 0600, owned by you, with one hard link, and not a symlink; otherwise the script refuses and leaves it alone (check with `ls -l <token-file>`; if the mode is wrong, `chmod 600` it). The script reads it, never prints it and never copies it, and deletes it on every exit path of a real run (success, error, or a signal) with `rm -f` (where `shred` exists it overwrites the file first as an extra). Deleting is not erasing: on an SSD or APFS a deleted file cannot be guaranteed unrecoverable, which is why the token is short-lived (about an hour) and the file is mode 0600. The same token serves the dry run and the real run: only the real run deletes it. It expires in about an hour, so if the review takes longer, mint and copy a new one before saying go. If the check key is not there yet the script pauses (exit 3) before it touches the token file.
 
 <!-- prompt: homelab-tokenfile -->
 ```text
@@ -362,6 +369,7 @@ scripts/bootstrap.sh --host <label> --role <role> --org <org> --recovery-recipie
                      [--sha <commit>] [--prebuilt-dir <dir>]
                      [--workspace <dir>]... [--own-owner <owner>]...
                      [--keep-out-owner <owner>]... [--keep-out-term <term>]...
+                     [--project <name>]... | [--skip-project <name>]...   [--jobs <1-8>]
                      [--repo-url <url>] [--allow-org <org>]...
                      --org-token-file <path> [--delete-org-token-file]
                        | --org-token-cmd "<argv>" | --org-app <name>
@@ -385,6 +393,12 @@ Roles (table at the top of the script):
 | `homelab` | `mem-personal`, `mem-infra-homelab` | pinned to infra-homelab |
 | `personal-dev` | `mem-personal`, `mem-project-code-workspace`, one `mem-project-<name>` per own checkout | pinned to personal |
 
+`--project <name>` (repeatable) limits the project repos to the named checkouts, `--skip-project <name>` (repeatable) leaves the named ones out; the two are mutually exclusive (exit 2). A name is the checkout's repo name as the plan prints it in `own projects found:` (case-insensitive). An unknown name is an error that lists the known ones. The plan shows `selected projects:` and `skipped by choice:`, and a project that is skipped gets no repo, key, sync dir or route (default deny applies). With neither flag every own checkout is used, as before. Both flags are for `--role personal-dev`; the paste prompt takes them as the optional lists `PROJECTS` and `SKIP_PROJECTS`. A re-run with a different selection regenerates `routes.json` (the old one is kept as a timestamped `.bak.<time>`); repos made earlier are left alone.
+
+`--jobs <N>` (1 to 8, default 4) is how many repos are handled at once. The per-repo steps run in parallel, up to N at a time, in two phases over all repos: first check or create each repo and require it private (a public repo stops the run before any key exists), then, per repo, make and register its deploy key, test it with `git ls-remote`, and run `init`. Everything shared stays serial and happens before the jobs start: `~/.ssh/config`, `known_hosts`, `routes.json` and the denylists, the `apps.json` edits, the confirmation prompt, and the summary. Each repo's output is buffered and printed as one block headed `-- <repo>` (one block per phase), in plan order, whatever finishes first. In the second phase the first repo of the plan runs alone before the others start, because the first `init` of a host generates the shared age identity. If a repo fails, nothing new is started, the jobs in flight finish, every failure is reported, and the run exits 1 (no service step); run the same command again once the cause is fixed: finished repos are skipped by their state marks, as on any re-run. `--jobs 1` is the old one-at-a-time behaviour. Before the jobs start the org token is minted once and kept as `org-token` (mode 0600) in a private directory (mode 0700) made for the run, so a key command or `app-token` runs once, not once per job; `init` and `doctor` are handed that file (`--token-file`), `init` records it and the token-split step removes it from every config. The directory, with the job output in it, is deleted on every normal or signalled exit; a SIGKILL or a crash leaves it behind (a `tmp.XXXXXXXXXX` directory under `$TMPDIR` or `/tmp`, mode 0700, holding `org-token`): delete it by hand. If a run dies before the token-split step, a config's `githubTokenFile` still points at the deleted `org-token` path; the next run's token-split step corrects it. The org token lasts about an hour; if a call returns 401 more than 50 minutes after it was minted the script says it has probably expired, and the same command resumes. Each job runs in its own process group: on Ctrl-C (INT) or TERM the script stops every job together with what it started (`claude-memsync`, `git`, `gh`, `ssh`) before it removes the admin entry and the token file, so nothing keeps running after the script has gone; the same command then resumes (a sync dir that an interrupted `init` left half-made is **moved aside, never deleted**: only after you confirm the plan, only when the `initing` mark in the state dir says this script began it, to `<dir>.half-made.<UTC time>`, and it is refused, left alone with a message, on any doubt: a git error (git runs with the sync root as its ceiling, so an enclosing repo is never consulted), a stash, a commit that is on no remote, uncommitted changes, a held `.state/daemon.lock` (the daemon is serving it), a symlink, or a `routes.json` this script did not write that names it (found by parsing the JSON and comparing real, `~`-expanded paths; an unreadable file counts as naming it). The checks run again right before the move, which uses `mv -n` and is verified; a run that was interrupted after its push finds the host already a recipient and goes on). A second signal during the clean-up is ignored, so the clean-up always finishes. Jobs get `/dev/null` as stdin, so one that reads the terminal sees end-of-file instead of stopping. After TERM the jobs and their children get up to 5 s together to finish, then the group is killed. A dry run creates no temp dir or file and runs the per-repo steps one after another. It uses background jobs and `wait <pid>` only, so stock macOS bash 3.2 is enough.
+
+**Guards.** Every decision to proceed (a sync dir safe to move, a repo private, a token or key file ours, GitHub's host key, no predecessor memsync, a deploy key not overwritten, a checkout an own project, the org not kept out, a recovery key valid) is a guard that counts as safe only on positive confirmation: exit status 0 and a last output line of exactly `SAFE:<name>`. A check that cannot tell (a missing tool, a Python exception, empty or odd output, a hang past `BOOTSTRAP_GUARD_TIMEOUT`, 30 s by default) refuses and names the guard. The predecessor-unit guard asks `systemctl --user show`, so on Linux a host where systemd cannot be asked is refused rather than assumed clean. See [ci.md](ci.md#guards-a-check-that-cannot-tell-must-refuse).
+
 Unknown roles are refused. No `mem-client-*` or `mem-orch-*` repo can be created or joined by this script.
 
 `personal-dev` also takes `--workspace <dir>` (repeatable; prompted for on a terminal). Each workspace folder that is not itself a git repo is pinned to `mem-project-code-workspace`. Git checkouts directly under a workspace and under `~` (depth 1 to 2) are discovered; those whose origin owner is an own owner (the `--org` org, plus each `--own-owner`; there are no built-in defaults, so pass `--own-owner <github-user>` for your personal GitHub account) get a `mem-project-<repo>` repo and a remote route. Other owners are listed as third-party and get nothing. Owners in `--keep-out-owner` (repeatable, no default, case-insensitive) are refused, as is any remote whose owner/repo contains a `--keep-out-term`. With neither flag the script prints the note `keep-out lists: none (routing alone decides what syncs)` and continues. Folders that are neither pinned nor matched are denied.
@@ -397,7 +411,7 @@ Unknown roles are refused. No `mem-client-*` or `mem-orch-*` repo can be created
 1b. Org scope (checked separately for the ambient gh login and for the org token; for `--org-app` the token's reach is the owners of `installation/repositories`): if the gh login can see orgs outside the allow list (the `--org` org alone, with no built-in extras; `--allow-org` adds more), a loud WARNING names them, calls out keep-out owners, and repeats in the plan and the summary. It proceeds, and only ever touches repos in `--org`.
 2. Plan: lists the repos to create, keys to add and routes. You type `yes`, or pass `--yes`.
 3. Clone the pinned commit (from `--repo-url`, default `https://github.com/Exploded-views/claude-utils`) to `~/.local/src/claude-utils-<sha>`, verify `HEAD`, build `claude-memsync` and `claude-memmerge` into `~/.local/lib/claude-memsync/<sha>/`, symlink into `~/.local/bin`. With `--prebuilt-dir`: install the given binaries instead (see Usage); no clone, no build.
-4. Create missing repos with `gh repo create --private`, then require `private: true` and `visibility: private` from the API. Non `mem-*` names are refused.
+4. (Per repo, in parallel, see `--jobs`.) Create missing repos with `gh repo create --private`, then require `private: true` and `visibility: private` from the API. Non `mem-*` names are refused.
 5. Deploy keys: `~/.ssh/<repo>_ed25519` (no passphrase, 0600), a `Host gh-<repo>` alias on ssh.github.com:443, GitHub's host key only if its fingerprint is `SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU`, `gh repo deploy-key add ... -w -t <host>`, then `git ls-remote`. If the org has deploy keys disabled the script says how to enable them and stops.
 6. `routes.json` (0600, default deny, `foreignWriters` for the old memsync) and a `denylist-<kind>.txt` per kind containing each `--keep-out-term`, one per line (terms only, never owners).
 7. `claude-memsync init` for each repo (post-quantum age encryption with the `--recovery-recipient` key, archive-deletes, private-only, `--token-cmd "gh auth token"`). A repo that already has content leaves this host without a key, so the script runs `join request` and prints the one-liner a member host runs: `claude-memsync join accept <host> --repo <key> --fingerprint "<8 groups of 4 hex>"`; `claude-memsync join status --repo <key>` shows pending or accepted. The fingerprint is parsed from the `fingerprint: xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx` line `join request` prints (128 bits, grouped); a missing or differently shaped line stops the script.
@@ -407,7 +421,7 @@ Unknown roles are refused. No `mem-client-*` or `mem-orch-*` repo can be created
 10. Service: `install`, `start` (these may need your approval in the session), `status`, `doctor`.
 11. Summary: repos, key names, pending joins, next steps, including running `/reload-plugins` in each open Claude session (or restarting the sessions) so the `memory-notices` hooks load. Private keys and tokens are never printed.
 
-A re-run whose plan differs from the `routes.json` an earlier run wrote (a new project or workspace) regenerates it before any repo is created, keeping the old one as `routes.json.bak`, and puts the home pin back. Keep-out terms are written to the denylists as literal regexes (a leading `#` is escaped).
+A re-run whose plan differs from the `routes.json` an earlier run wrote (a new project or workspace) regenerates it before any repo is created, keeping the old one as a timestamped, never-overwritten `routes.json.bak.<UTC time>` (a numbered suffix if the name is taken), and puts the home pin back. Keep-out terms are written to the denylists as literal regexes (a leading `#` is escaped).
 
 Each completed step leaves a marker under `~/.local/state/claude-memsync-bootstrap/`, so a re-run after a failure resumes and never regenerates keys or re-inits a sync dir.
 

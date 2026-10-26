@@ -214,6 +214,8 @@ CHECK_APP_ID=<check-app-id>        # numeric App ID of memsync-check
 CHECK_KEY_FILE=<check-key-file>    # absolute path of this host's memsync-check key, mode 0600
 KEEP_OUT_OWNERS=""                 # optional, empty for none: space-separated GitHub owners to keep out
 KEEP_OUT_TERMS=""                  # optional, empty for none: space-separated terms to keep out
+PROJECTS=""                        # optional, empty for all: space-separated checkout names to give a project repo
+SKIP_PROJECTS=""                   # optional, empty for none: space-separated checkout names to leave out
 ```
 
 ALREADY SET: nothing; the script is the checkout you are in.
@@ -227,6 +229,8 @@ STEPS
      local a=() x
      for x in $KEEP_OUT_OWNERS; do a+=(--keep-out-owner "$x"); done
      for x in $KEEP_OUT_TERMS; do a+=(--keep-out-term "$x"); done
+     for x in $PROJECTS; do a+=(--project "$x"); done
+     for x in $SKIP_PROJECTS; do a+=(--skip-project "$x"); done
      bash scripts/bootstrap.sh --host "$HOST_LABEL" --role personal-dev --org "$ORG" \
        --recovery-recipient "$RECOVERY" --own-owner "$GITHUB_USER" ${a[@]+"${a[@]}"} \
        --org-app memsync-admin --org-app-id "$ADMIN_APP_ID" --org-app-key-cmd "$ADMIN_KEY_CMD" \
@@ -265,8 +269,18 @@ are. With neither flag the script prints the calm note
 not a warning. (`--deny-owner` and `--deny-term` are the old names and still
 work.)
 
-**Exit codes:** 0 ok, 1 error (a missing prerequisite, a refused input, a
-failed step), 2 usage (an unknown or malformed argument), 3 paused. Exit 3
+**Many checkouts.** A host with dozens of own checkouts gets one project repo
+each, which is slow one at a time. Choose which: `--project <name>` (repeatable)
+keeps only the named checkouts, `--skip-project <name>` leaves some out (not
+both; a name is the repo name shown in the plan, and an unknown one is an
+error that lists the known ones). `--jobs <N>` (1 to 8, default 4) runs the
+per-repo steps (create, deploy key, test, init) N at a time; the output stays in
+plan order and a failed repo is reported after the others finish, with exit 1.
+See [bootstrap.md](bootstrap.md).
+
+**Exit codes:** 0 ok, 1 error (a missing prerequisite, a refused file or state,
+a failed step), 2 usage (an unknown, missing, malformed or conflicting
+argument; the full list is in [bootstrap.md](bootstrap.md#exit-codes)), 3 paused. Exit 3
 means it needs a human before it can go on, today because the
 `--check-key-file` does not exist yet; it says exactly what to do and changes
 nothing. Do that and run the same command again. A host without a password

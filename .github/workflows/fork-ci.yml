@@ -132,6 +132,14 @@ jobs:
           docker run --rm -v "$PWD:/mnt:ro" -w /mnt \
             koalaman/shellcheck@sha256:2097951f02e735b613f4a34de20c40f937a6c8f18ecb170612c88c34517221fb \
             -S warning scripts/*.sh
+      # The setup scripts never remove a directory tree (rm -r, find -delete,
+      # rmtree), except a mktemp -d directory they made themselves.
+      - name: no-delete lint
+        run: |
+          bash scripts/lint-no-delete_test.sh
+          bash scripts/lint-no-delete.sh
+          bash scripts/lint-guards_test.sh
+          bash scripts/lint-guards.sh
       # Stock macOS tools only: no regex repeat bound above 255 (BSD grep and
       # bash [[ =~ ]] refuse it) and no GNU-only flags in scripts/*.sh.
       - name: portability lint
@@ -213,6 +221,38 @@ jobs:
           TARGET: ${{ matrix.target }}
           BOOT_BASH: ${{ matrix.bash }}
         run: bash scripts/package-release_test.sh "$RUNNER_TEMP/package-test"
+
+  job-runner:
+    name: bootstrap job runner (${{ matrix.os }})
+    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            bash: bash
+          - os: macos-latest
+            # macOS's own bash (3.2), as a user runs bootstrap.sh; nothing newer is installed.
+            bash: /bin/bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The runner behind bootstrap.sh --jobs, on its own with slow stub jobs:
+      # order, no new job after a failure, INT/TERM stop the jobs and their children.
+      - name: job runner test
+        env:
+          BOOT_BASH: ${{ matrix.bash }}
+        run: '"$BOOT_BASH" scripts/jobrunner_test.sh'
+      # Fault injection into every registered guard (docs/ci.md): each fault must refuse.
+      - name: guard fault test
+        env:
+          BOOT_BASH: ${{ matrix.bash }}
+        run: '"$BOOT_BASH" scripts/guard_fault_test.sh'
 
   workflow-lint:
     name: workflow lint (hosted runners, SHA pins)

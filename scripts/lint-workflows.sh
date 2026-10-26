@@ -15,7 +15,7 @@
 #     are allowed; docker:// must carry an @sha256:<64 hex> digest.
 set -euo pipefail
 DIR="${1:-$(cd "$(dirname "$0")/.." && pwd)/.github/workflows}"
-[ -d "$DIR" ] || { echo "not a directory: $DIR" >&2; exit 2; }
+[ -d "$DIR" ] || { echo "not a directory: $DIR" >&2; exit 2; }   # fs-ok: usage check, positive: false refuses
 exec python3 -I - "$DIR" <<'PY'
 import os, re, sys
 

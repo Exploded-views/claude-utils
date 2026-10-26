@@ -1,0 +1,31 @@
+# Every "may we proceed?" guard in scripts/bootstrap.sh. One per line:
+#   <name> <tools it runs, space separated, or ->
+# A guard is the function <name>_check, run as `guard <name> args...` (or
+# guard_ok): it prints "SAFE:<name>" only on an explicitly safe outcome, and
+# anything else (another exit code, a missing token, extra output, a signal, a
+# timeout) is a refusal. scripts/guard_fault_test.sh injects faults into each
+# guard (it needs a fixture_<name> function there); scripts/lint-guards.sh checks
+# that the registry, the guard calls, the functions and the fixtures agree.
+# "@helper <name>" lets a guard call that function although it is defined outside
+# the guards block (the test must define it too).
+@helper org_gh
+git_dir git
+git_stash git
+git_unpushed git
+git_clean_tree git
+git_idle git python3
+daemon_lock python3
+routes_unnamed python3
+sync_dir_ours python3 stat
+app_entry_absent python3
+repo_private python3 gh
+token_file_ok stat id
+check_key_ok stat id
+org_not_kept_out tr
+repo_name_ok -
+host_key_fp ssh-keygen awk
+no_old_config python3
+no_predecessor_units systemctl
+recovery_key_ok -
+key_free python3
+project_not_kept_out tr

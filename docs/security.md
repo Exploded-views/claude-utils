@@ -56,6 +56,14 @@ by `--key-cmd`, for a single run (the bootstrap adds its `apps.json` entry for
 the run and removes it on exit); installation tokens minted from it expire
 within an hour. No daemon ever uses it.
 
+During a run the org token is minted once and kept as a mode-0600 file in a
+private (0700) directory made for that run, so parallel repo jobs share it and
+the key command runs once. The directory is deleted on every exit path,
+including Ctrl-C and TERM (the jobs are stopped first, and a second signal cannot interrupt the clean-up); a SIGKILL or crash leaves it behind, so delete a stale `tmp.*` dir with an `org-token` in it by hand. Deleting a file is not
+erasing it: on an SSD or APFS a deleted file cannot be guaranteed
+unrecoverable, which is why the token is short-lived (about an hour) and the
+file is private; the same holds for `--delete-org-token-file`.
+
 **Per-host check keys.** The check App can change nothing, but each host still
 gets its own private key, so a lost host is cut off by deleting that key
 without touching the others. GitHub allows at most **25 private keys per App**

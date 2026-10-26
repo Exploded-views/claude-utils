@@ -82,6 +82,9 @@ case "$1" in
       exit 0
     fi
     need_org
+    # STUB_401=1: the token has expired
+    if [ "${STUB_401:-0}" = 1 ]; then echo "HTTP 401: Bad credentials" >&2; exit 1; fi
+    if [ "${STUB_401:-0}" = 2 ]; then echo "error: connection reset by peer, port 4010" >&2; exit 1; fi
     f="$S/$(basename "$2").json"
     [ -f "$f" ] && { cat "$f"; exit 0; }
     echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
@@ -90,6 +93,9 @@ case "$1" in
     case "$2" in
       create)
         name="$(basename "$3")"
+        # STUB_SWAP_TOKEN=<file>: the org token file is replaced by a symlink mid-run (it is no longer a plain file of ours)
+        if [ -n "${STUB_SWAP_TOKEN:-}" ]; then rm -f "$STUB_SWAP_TOKEN"; ln -s "$STUB_SWAP_TO" "$STUB_SWAP_TOKEN"; fi
+        case "$name" in "${STUB_SLOW:-/}") sleep 2 ;; esac   # a slow repo: output order must not follow finish order
         if [ "${STUB_PUBLIC:-0}" = 1 ]; then
           echo '{"private": false, "visibility": "public"}' >"$S/$name.json"
         else
@@ -106,6 +112,14 @@ cat >"$STUBS/systemctl" <<'EOF'
 echo "systemctl $*" >>"$STUB_DIR/systemctl.log"
 # record whether the org token leaked into this process env (count only, never the value)
 echo "$(basename "$0"):$(env | grep -v '^STUB_' | grep -cF -- "$STUB_ORG_TOKEN")" >>"$STUB_DIR/env.log"
+# `show -p LoadState -p ActiveState -p UnitFileState <unit>`: what the bootstrap asks (an absent unit says not-found)
+case "$*" in
+  *" show "*)
+    # STUB_SYSTEMCTL_HANG=1: the answer never comes (a guard hangs); the pids are logged for the signal tests
+    if [ "${STUB_SYSTEMCTL_HANG:-0}" = 1 ]; then echo "$$" >>"$STUB_DIR/hang.pids"; sleep 60 & echo "$!" >>"$STUB_DIR/hang.pids"; wait; fi
+    if [ "${STUB_OLD_TIMER:-0}" = 1 ]; then printf 'LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n'; else echo "LoadState=not-found"; fi
+    exit 0 ;;
+esac
 # like the real one: the answer is on stdout, the exit status says enabled/active or not
 if [ "${STUB_OLD_TIMER:-0}" = 1 ]; then echo enabled; exit 0; fi
 case "$*" in *is-active*) echo inactive ;; *) echo disabled ;; esac
@@ -144,6 +158,19 @@ case "$1" in
     # init would call the live GitHub API for --private-only; drop it.
     sd=""; prev=""
     for x in "$@"; do [ "$prev" = --sync-dir ] && sd="$x"; prev="$x"; done
+    # STUB_SLOW_INIT=<secs> [STUB_SLOW_MATCH=<substring of the sync dir>]: a slow init whose pids are logged (interrupt tests)
+    if [ -n "${STUB_SLOW_INIT:-}" ]; then
+      case "$sd" in *"${STUB_SLOW_MATCH:-}"*) echo "$$" >>"$STUB_DIR/slow.pids"; sleep "$STUB_SLOW_INIT" & echo "$!" >>"$STUB_DIR/slow.pids"; wait "$!" ;; esac
+    fi
+    # STUB_IDENTITY_EXCL=1: the host's first init makes the shared identity exclusively (like O_EXCL); a second init that
+    # starts while it is being made fails, as two racing first inits would
+    if [ "${STUB_IDENTITY_EXCL:-0}" = 1 ] && [ ! -e "$STUB_DIR/identity.made" ]; then
+      if mkdir "$STUB_DIR/identity.lock" 2>/dev/null; then
+        sleep 2; : >"$STUB_DIR/identity.made"; rmdir "$STUB_DIR/identity.lock"
+      else
+        echo "init: identity.txt is being created by another process" >&2; exit 1
+      fi
+    fi
     n=$#; i=0
     while [ "$i" -lt "$n" ]; do
       x="$1"; shift; i=$((i + 1))
@@ -156,6 +183,9 @@ case "$1" in
     if grep -qE 'githubToken(File|Cmd)' "$sd/config.json" 2>/dev/null; then echo "init-saved-token $sd" >>"$STUB_DIR/memsync.log"; fi
     exit "$rc" ;;
   join)
+    # STUB_JOINREQ_ALREADY=1: this host is already a recipient (an earlier run was interrupted after its push)
+    if [ "$2" = request ] && [ "${STUB_JOINREQ_ALREADY:-0}" = 1 ]; then echo "this host is already a recipient of this repo; nothing to request"; exit 0; fi
+    if [ "$2" = request ] && [ "${STUB_JOINREQ_ALREADY:-0}" = 2 ]; then echo "warning: this host is already a recipient of this repo (not the real message)"; exit 0; fi
     if [ "$2" = request ] && { [ "${STUB_NOFP:-0}" = 1 ] || [ "${STUB_OLDFP:-0}" = 1 ]; }; then
       "$REAL_DIR/claude-memsync" "$@" | if [ "${STUB_NOFP:-0}" = 1 ]; then grep -v '^fingerprint:'; else sed 's/^fingerprint: .*/fingerprint: 0123456789abcdef/'; fi
       exit 0
@@ -177,6 +207,37 @@ echo "secret-tool $*" >>"$STUB_DIR/tool.log"
 echo "secret-tool:$(env | grep -v '^STUB_' | grep -cF -- "$STUB_ORG_TOKEN")" >>"$STUB_DIR/env.log"
 echo "$STUB_ORG_TOKEN"
 EOF
+REAL_GIT="$(command -v git)"; REAL_PY="$(command -v python3)"
+# git: STUB_GIT_LS2=fail|huge makes the SECOND ls-remote of a url (the bootstrap's "does the repo have content?") fail, or answer with a huge list
+cat >"$STUBS/git" <<GITEOF
+#!/bin/sh
+if [ -n "\${STUB_GIT_LS2:-}" ] && [ "\$1" = ls-remote ]; then
+  f="\$STUB_DIR/ls.\$(printf %s "\$2" | cksum | cut -d' ' -f1)"
+  echo x >>"\$f"
+  if [ "\$(wc -l <"\$f" | tr -d ' ')" = 2 ]; then
+    case "\$STUB_GIT_LS2" in
+      fail) echo "fatal: simulated ls-remote failure" >&2; exit 1 ;;
+      huge) awk 'BEGIN { for (i = 0; i < 40000; i++) print "0123456789abcdef0123456789abcdef01234567\trefs/heads/b" i }'; exit \$? ;;
+    esac
+  fi
+fi
+exec "$REAL_GIT" "\$@"
+GITEOF
+# python3: STUB_PY_FAIL_REGISTRY=1 fails the one-line registry probe
+cat >"$STUBS/python3" <<PYEOF2
+#!/bin/sh
+case "\$*" in
+  *'.get("registry")'*) [ "\${STUB_PY_FAIL_REGISTRY:-0}" = 1 ] && exit 1 ;;
+esac
+exec "$REAL_PY" "\$@"
+PYEOF2
+# id: slow while $STUB_DIR/slowid.on exists (a clean-up guard that is still running when a second signal comes)
+REAL_ID="$(command -v id)"
+cat >"$STUBS/id" <<IDEOF
+#!/bin/sh
+[ -e "\$STUB_DIR/slowid.on" ] && sleep 1.5
+exec "$REAL_ID" "\$@"
+IDEOF
 chmod +x "$STUBS"/*
 ssh-keygen -q -t ed25519 -N '' -f "$BASE/other" && awk '{print $2}' "$BASE/other.pub" >"$BASE/otherkey"
 
@@ -359,7 +420,7 @@ ORGARGS=()
 runboot --host testhost --role homelab --yes --org-app memsync-admin --org-app-id 12345 --org-app-key-cmd "cat $BASE/app.pem" \
   --check-app memsync-check --check-app-id 54321 --check-key-file "relative/key.pem"
 ORGARGS=(--org-token-file "$BASE/orgtoken")
-check "a relative --check-key-file is an error (exit 1), not a pause" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'must be an absolute path'" _ "$OUT"
+check "a relative --check-key-file is an error (exit 2), not a pause" bash -c "[ $RC -eq 2 ] && printf '%s\n' \"\$1\" | grep -q 'must be an absolute path'" _ "$OUT"
 
 
 # ============================ --delete-org-token-file ==========================
@@ -586,7 +647,7 @@ NO_SHA=1 runboot --host testhost --role homelab --yes --prebuilt-dir "$PB/dev"
 check "prebuilt without --sha: a dev build is refused (not a release version)" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'not a release version'" _ "$OUT"
 newhome pb8
 runboot --host testhost --role homelab --yes --prebuilt-dir "$PB/does-not-exist"
-check "prebuilt: a directory that does not exist is refused" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'is not a directory'" _ "$OUT"
+check "prebuilt: a directory that does not exist is refused" bash -c "[ $RC -eq 2 ] && printf '%s\n' \"\$1\" | grep -q 'is not a directory'" _ "$OUT"
 
 # ============== the paste prompts in docs/bootstrap.md, as written =============
 # Each prompt is taken from the doc (<!-- prompt: id --> then its ```text
@@ -610,6 +671,7 @@ docvalue() { # input name -> test value (the keep-out and workspace lists come f
   case "$1" in
     COMMIT) printf '%s' "$SHA" ;; HOST_LABEL) printf testhost ;; ORG) printf '%s' "$ORG" ;; RECOVERY) printf '%s' "$PQREC" ;;
     GITHUB_USER) printf example-user ;; WORKSPACES) printf '%s' "${DOC_WS:-}" ;;
+    PROJECTS) printf '%s' "${DOC_PROJECTS:-}" ;; SKIP_PROJECTS) printf '%s' "${DOC_SKIP:-}" ;;
     KEEP_OUT_OWNERS) printf '%s' "${DOC_OWNERS:-}" ;; KEEP_OUT_TERMS) printf '%s' "${DOC_TERMS:-}" ;;
     ADMIN_APP_ID) printf 12345 ;; ADMIN_KEY_CMD) printf 'cat %s' "$BASE/app.pem" ;;
     CHECK_APP_ID) printf 54321 ;; CHECK_KEY_FILE) printf '%s' "$H/.config/claude-memsync/memsync-check.pem" ;;
@@ -622,7 +684,7 @@ docsnippet() { # id mode(dry|real): the prompt as a shell snippet
   printf 'set -u\n'
   while IFS= read -r line; do
     n="${line%% = *}"
-    if [ -n "${DOC_LITERAL:-}" ] && case "$n" in KEEP_OUT_*|WORKSPACES) true ;; *) false ;; esac; then printf '%s=%s\n' "$n" "${line#* = }"   # the doc's own default
+    if [ -n "${DOC_LITERAL:-}" ] && case "$n" in KEEP_OUT_*|WORKSPACES|PROJECTS|SKIP_PROJECTS) true ;; *) false ;; esac; then printf '%s=%s\n' "$n" "${line#* = }"   # the doc's own default
     else printf '%s=%q\n' "$n" "$(docvalue "$n")"; fi
   done < <(docsec "$1" '^INPUTS' '^ALREADY SET')
   while IFS= read -r line; do printf '%s=%s\n' "${line%% = *}" "${line#* = }"; done < <(docsec "$1" '^ALREADY SET' '^STEPS')
@@ -709,7 +771,7 @@ d=json.load(open(sys.argv[1]))
 assert d["githubApp"]=="memsync-check" and d["recheckTokenCmd"] is False
 assert not any(x in d for x in ("githubTokenFile","githubTokenCmd"))' "$H/.claudesync.d/$k/config.json"
   done
-  check "$ROLEN prompt: the admin app minted the org token (key command, per call)" bash -c "[ \$(grep -c 'memsync app-token --app memsync-admin' '$STUB_DIR/memsync.log') -ge 4 ] && grep -qE 'doctor --org example-org --token-cmd .*app-token --app memsync-admin' '$STUB_DIR/memsync.log'"
+  check "$ROLEN prompt: the admin app minted the org token once for the run (key command once), and doctor got it as a token file" bash -c "[ \$(grep -c 'memsync app-token --app memsync-admin' '$STUB_DIR/memsync.log') -eq 1 ] && grep -qE 'doctor --org example-org --token-file [^ ]*/org-token' '$STUB_DIR/memsync.log'"
   check "$ROLEN prompt: every org call used the org token" bash -c "grep -qE '^(repo|api repos)' '$STUB_DIR/gh.who' && ! grep -E '^(repo|api repos)' '$STUB_DIR/gh.who' | grep -v '|org'"
   check "$ROLEN prompt: admin key and org token nowhere on disk, in logs or output" bash -c "! grep -rIlF -- '$ADMIN_MARK' '$H' '$STUB_DIR/memsync.log' '$STUB_DIR/gh.log' && ! printf '%s' \"\$1\" | grep -qF -- '$ADMIN_MARK' && ! grep -rIl -- '$ORGTOK' '$H' '$STUB_DIR/memsync.log' && ! printf '%s' \"\$1\" | grep -qF -- '$ORGTOK' && ! printf '%s' \"\$1\" | grep -q 'BEGIN '" _ "$OUT"
   check "$ROLEN prompt: no daemon-read config names the admin app" bash -c "! grep -rIl 'memsync-admin' '$H/.claudesync.d'"
@@ -882,7 +944,7 @@ newhome ot3
 ORGARGS=(--org-token-cmd "secret-tool read vault://vault/item/field")
 runboot --host testhost --role homelab --yes
 check "cmd variant runs" [ "$RC" -eq 0 ]
-check "cmd variant: secret-tool run without a shell, memsync gets --token-cmd" bash -c "grep -q 'secret-tool read vault://vault/item/field' '$STUB_DIR/tool.log' && grep -q 'doctor --org example-org --token-cmd secret-tool read vault://vault/item/field' '$STUB_DIR/memsync.log'"
+check "cmd variant: secret-tool run without a shell, once; memsync gets the minted --token-file" bash -c "[ \$(grep -c 'secret-tool read vault://vault/item/field' '$STUB_DIR/tool.log') -eq 1 ] && grep -qE 'doctor --org example-org --token-file [^ ]*/org-token' '$STUB_DIR/memsync.log'"
 check "cmd variant: org token not on disk, output or other envs" bash -c "! grep -rIl -- '$ORGTOK' '$H' '$STUB_DIR/gh.log' '$STUB_DIR/memsync.log' && ! printf '%s' \"\$1\" | grep -qF -- '$ORGTOK' && [ \$(grep -v ':0\$' '$STUB_DIR/env.log' | wc -l) -eq 0 ]" _ "$OUT"
 check "cmd variant: org calls used the token" bash -c "! grep -E '^(repo|api repos)' '$STUB_DIR/gh.who' | grep -v '|org'"
 ORGARGS=()
@@ -912,10 +974,10 @@ ORGARGS=(--org-app testapp)
 STUB_ORGS="$(printf 'example-org\nAcme-Client')" runboot --host testhost --role homelab --yes
 [ "$RC" -eq 0 ] || { echo "$OUT" | tail -20; }
 check "app variant runs" [ "$RC" -eq 0 ]
-check "app variant: app-token runs per org call, via the real binary" bash -c "[ \$(grep -c 'memsync app-token --app testapp' '$STUB_DIR/memsync.log') -ge 4 ] && [ \$(grep -c 'POST /app/installations/7/access_tokens' '$BASE/fakeapi.log') -ge 4 ]"
+check "app variant: app-token runs once for the whole run, via the real binary" bash -c "[ \$(grep -c 'memsync app-token --app testapp' '$STUB_DIR/memsync.log') -eq 1 ] && [ \$(grep -c 'POST /app/installations/7/access_tokens' '$BASE/fakeapi.log') -eq 1 ]"
 check "app variant: every org operation used the app's token" bash -c "grep -qE '^repo create' '$STUB_DIR/gh.who' && ! grep -E '^(repo|api repos)' '$STUB_DIR/gh.who' | grep -v '|org'"
 check "app variant: ambient banner, org-token banner computed after the build" bash -c "printf '%s' \"\$1\" | grep -q \"gh login can reach Acme-Client\" && printf '%s' \"\$1\" | grep -q 'b2. Org token from app testapp'" _ "$OUT"
-check "app variant: init and doctor get --token-cmd with the app-token command" bash -c "grep -qE 'init .*--token-cmd .*/claude-memsync app-token --app testapp' '$STUB_DIR/memsync.log' && grep -qE 'doctor --org example-org --token-cmd .*/claude-memsync app-token --app testapp' '$STUB_DIR/memsync.log'"
+check "app variant: init and doctor get the minted --token-file" bash -c "grep -qE 'init .*--token-file [^ ]*/org-token' '$STUB_DIR/memsync.log' && grep -qE 'doctor --org example-org --token-file [^ ]*/org-token' '$STUB_DIR/memsync.log'"
 check "app variant: org token not on disk, output or other envs" bash -c "! grep -rIl -- '$ORGTOK' '$H' '$STUB_DIR/gh.log' '$STUB_DIR/gh.who' '$STUB_DIR/memsync.log' && ! printf '%s' \"\$1\" | grep -qF -- '$ORGTOK' && [ \$(grep -v ':0\$' '$STUB_DIR/env.log' | wc -l) -eq 0 ]" _ "$OUT"
 check "app variant: no token command left in a daemon-read config" bash -c "! grep -rIlE 'githubTokenCmd|app-token' '$H/.claudesync.d'"
 newhome oa5
@@ -1092,7 +1154,7 @@ d=json.load(open(sys.argv[1]))
 rem={r["remote"]:r["repo"] for r in d["routes"] if "remote" in r}
 assert rem=={"github.com/gitgat/ownproj":"project-ownproj","github.com/gitgat/extra":"project-extra"}, rem
 assert set(d["repos"])=={"personal","project-code-workspace","project-ownproj","project-extra"}, set(d["repos"])
-assert os.path.exists(sys.argv[1]+".bak")' "$H/.config/claude-memsync/routes.json"
+import glob; assert glob.glob(sys.argv[1]+".bak.*")' "$H/.config/claude-memsync/routes.json"
 check "the home pin is back after the regeneration" jsonok '
 import json,sys,re,os
 d=json.load(open(sys.argv[1]))
@@ -1117,6 +1179,540 @@ assert rem=={"github.com/example-org/ownproj":"project-ownproj"}, rem
 assert set(d["repos"])=={"personal","project-code-workspace","project-ownproj"}, set(d["repos"])' "$H/.config/claude-memsync/routes.json"
 check "other owners are listed third-party and get no repo" bash -c "printf '%s' \"\$1\" | grep -q 'gitproj.*not synced (third-party)' && printf '%s' \"\$1\" | grep -q 'otherproj.*not synced (third-party)' && ! grep -qE 'gitproj|otherproj' '$STUB_DIR/gh.log'" _ "$OUT"
 check "no built-in owner name in the generated config" bash -c "! grep -rIiE 'gitgat' '$H/.config/claude-memsync'"
+
+# >>> fast-setup (#4): project selection and parallel per-repo steps
+# pjhome <name> <project>...: a fresh personal-dev HOME with one own checkout per
+# project and a bare remote for its memory repo. A "!" in front of a name leaves
+# the bare remote out, so that repo's ls-remote (and so its run) fails.
+pjhome() {
+  local n w; n="$1"; shift
+  newhome "$n"; mkdir -p "$H/code"
+  for w in "$@"; do
+    mkgit "$H/code/${w#!}" "git@github.com:gitgat/${w#!}.git"
+    case "$w" in !*) ;; *) mkbare "mem-project-$w" ;; esac
+    git config --file "$H/.gitconfig" "url.$BASE/remotes/mem-project-${w#!}.git.insteadOf" "git@gh-mem-project-${w#!}:$ORG/mem-project-${w#!}.git"
+  done
+}
+FTN=0
+fstok() { FTN=$((FTN + 1)); TF="$BASE/fstok.$FTN"; printf '%s\n' "$ORGTOK" >"$TF"; chmod 600 "$TF"; }   # a fresh 0600 org token file in TF
+pjrun() { runboot --host testmac --role personal-dev --workspace "$H/code" --own-owner gitgat --yes "$@"; }
+created() { grep 'repo create' "$STUB_DIR/gh.log" | sed 's/.*create example-org\///; s/ --private//' | sort | tr '\n' ' '; }
+routed() { python3 -I -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(" ".join(sorted(r["remote"].split("/")[-1] for r in d["routes"] if "remote" in r)))' "$H/.config/claude-memsync/routes.json"; }
+snapshot() { set +e; # the end state of a run, in a form two runs can be diffed on
+  {
+    echo "created: $(created)"
+    echo "keys: $(find "$H/.ssh" -name '*_ed25519' | sed 's#.*/##' | sort | tr '\n' ' ')"
+    echo "sshconfig:"; cat "$H/.ssh/config"
+    echo "syncdirs: $(find "$H/.claudesync.d" -mindepth 1 -maxdepth 1 | sed 's#.*/##' | sort | tr '\n' ' ')"
+    echo "state: $(find "$H/.local/state/claude-memsync-bootstrap" -type f | sed 's#.*/##' | sort | tr '\n' ' ')"
+    echo "routes:"; cat "$H/.config/claude-memsync/routes.json"
+    echo "memsync:"; grep -v '^init-saved' "$STUB_DIR/memsync.log" | sort
+  } 2>&1 | sed -E "s#$BASE#BASE#g"; set -e
+}
+blocks() { printf '%s\n' "$1" | { grep '^-- mem-' || true; } | tr '\n' ' '; }
+
+echo "--- selection: --project / --skip-project"
+pjhome sel alpha beta gamma delta
+pjrun --dry-run --project beta --project gamma
+check "dry run with --project: the plan shows what was selected and what was skipped by choice" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -qE 'selected projects: beta gamma' && printf '%s\n' \"\$1\" | grep -qE 'skipped by choice: alpha delta' && ! printf '%s\n' \"\$1\" | grep -q 'would check example-org/mem-project-alpha'" _ "$OUT"
+check "dry run with --project changes nothing" bash -c "[ ! -e '$H/.ssh' ] && [ ! -e '$H/.claudesync.d' ] && ! grep -qE 'repo (create|deploy-key)' '$STUB_DIR/gh.log'"
+pjrun --project beta --project gamma
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+check "--project: exits 0 and only the named projects (and the workspace repo) get repos" bash -c "[ $RC -eq 0 ] && [ \"$(created)\" = 'mem-project-beta mem-project-code-workspace mem-project-gamma ' ]"
+check "--project: only the named projects get routes" bash -c "[ \"$(routed)\" = 'beta gamma' ]"
+check "--project: skipped projects get no key and no sync dir" bash -c "[ ! -e '$H/.ssh/mem-project-alpha_ed25519' ] && [ ! -e '$H/.claudesync.d/project-delta' ] && [ -e '$H/.claudesync.d/project-beta' ]"
+pjhome sel2 alpha beta gamma delta
+pjrun --dry-run --skip-project alpha --skip-project delta
+check "--skip-project (dry run): the plan selects every project but the skipped ones" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -qE 'selected projects: beta gamma' && printf '%s\n' \"\$1\" | grep -qE 'skipped by choice: alpha delta'" _ "$OUT"
+pjhome sel4 alpha beta
+pjrun --skip-project alpha
+check "--skip-project (real run): the skipped project gets no repo, key, sync dir or route" bash -c "[ $RC -eq 0 ] && [ \"$(created)\" = 'mem-project-beta mem-project-code-workspace ' ] && [ \"$(routed)\" = 'beta' ] && [ ! -e '$H/.ssh/mem-project-alpha_ed25519' ] && [ ! -e '$H/.claudesync.d/project-alpha' ]"
+pjhome sel3 alpha beta
+pjrun --dry-run
+check "neither flag: all projects are selected, nothing is said to be skipped by choice" bash -c "[ $RC -eq 0 ] && ! printf '%s\n' \"\$1\" | grep -q 'skipped by choice' && printf '%s\n' \"\$1\" | grep -q 'own projects found: alpha beta'" _ "$OUT"
+pjrun --project nosuch --project beta
+check "an unknown --project name is an error that lists the known names, and nothing is created" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -qE \"unknown project 'nosuch' .*alpha.*beta\" && ! grep -q 'repo create' '$STUB_DIR/gh.log'" _ "$OUT"
+pjrun --skip-project nosuch
+check "an unknown --skip-project name is an error too" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -qE \"unknown project 'nosuch' .*alpha\"" _ "$OUT"
+pjrun --project alpha --skip-project beta
+check "--project with --skip-project is a usage error (exit 2)" bash -c "[ $RC -eq 2 ] && printf '%s\n' \"\$1\" | grep -q 'mutually exclusive' && ! grep -q 'repo create' '$STUB_DIR/gh.log'" _ "$OUT"
+pjrun --project Alpha --dry-run
+check "project names match case-insensitively, as repo names are lowercased" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -q 'selected projects: alpha'" _ "$OUT"
+
+echo "--- --jobs: bounds"
+pjhome jb alpha
+for J in 0 9 x -1 ''; do
+  pjrun --dry-run --jobs "$J"
+  check "--jobs '$J' is a usage error (exit 2)" bash -c "[ $RC -eq 2 ] && printf '%s\n' \"\$1\" | grep -q -- '--jobs must be'" _ "$OUT"
+done
+pjrun --dry-run --jobs 8
+check "--jobs 8 (the maximum) is accepted" [ "$RC" -eq 0 ]
+
+echo "--- parallel: --jobs 4 ends in the same state as --jobs 1, in plan order, and the first init runs alone"
+PLAN6="-- mem-personal -- mem-project-code-workspace -- mem-project-alpha -- mem-project-beta -- mem-project-delta -- mem-project-epsilon -- mem-project-gamma -- mem-project-zeta "
+pjhome par alpha beta gamma delta epsilon zeta
+STUB_SLOW=mem-project-alpha STUB_IDENTITY_EXCL=1 pjrun --jobs 1
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+OUT1="$OUT"; RC1=$RC; snapshot >"$BASE/par1.snap"
+pjhome par alpha beta gamma delta epsilon zeta
+STUB_SLOW=mem-project-alpha STUB_IDENTITY_EXCL=1 pjrun --jobs 4
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+OUT4="$OUT"; snapshot >"$BASE/par4.snap"
+check "--jobs 1 and --jobs 4 both exit 0, although two racing first inits would fail (the first init runs alone)" bash -c "[ $RC1 -eq 0 ] && [ $RC -eq 0 ]"
+check "--jobs 4: all six projects have a repo, a key, a sync dir and a route" bash -c "grep -q '^created: mem-project-alpha mem-project-beta mem-project-code-workspace mem-project-delta mem-project-epsilon mem-project-gamma mem-project-zeta ' '$BASE/par4.snap' && [ \"$(routed)\" = 'alpha beta delta epsilon gamma zeta' ]"
+check "--jobs 4: repos, keys, ssh config, sync dirs, state marks, routes and memsync calls are identical to --jobs 1" bash -c "grep -q '^created: mem-project' '$BASE/par4.snap' && diff '$BASE/par1.snap' '$BASE/par4.snap'"
+check "--jobs 4: the blocks come in plan order, once per phase, although the first project is the slowest" bash -c "[ \"$(blocks "$OUT4")\" = '$PLAN6$PLAN6' ]"
+check "a block is contiguous: nothing of another repo between a header and its last line" bash -c "printf '%s\n' \"\$1\" | awk '/^== / {cur=\"\"; next} /^-- mem-/ {cur=\$2; next} cur != \"\" && /mem-(personal|project-[a-z-]+)/ { for (i=1;i<=NF;i++) if (\$i ~ /^mem-(personal|project-)/ && \$i != cur) bad=1 } END {exit bad}'" _ "$OUT4"
+NORM='s/age1[a-z0-9]+/AGE/g; s/fingerprint: .*/fingerprint: FP/; s/--fingerprint "[0-9a-f ]+"/--fingerprint FP/; s/up to [0-9]+ at once/up to N at once/'
+printf '%s\n' "$OUT4" | sed -E "$NORM" >"$BASE/ord4.txt"; printf '%s\n' "$OUT1" | sed -E "$NORM" >"$BASE/ord1.txt"
+check "the output of --jobs 4 and --jobs 1 is the same text (apart from generated keys)" diff "$BASE/ord1.txt" "$BASE/ord4.txt"
+
+echo "--- parallel: nothing new starts once a finished job has failed"
+pjhome npa '!abad' zlater
+pjrun --jobs 2
+check "a repo that failed while another was still running: the next repo is not started" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'not attempted after the failure: mem-project-zlater' && [ ! -e '$H/.ssh/mem-project-zlater_ed25519' ]" _ "$OUT"
+
+echo "--- interrupts: INT and TERM stop the jobs, leave nothing running, and a re-run resumes"
+sigcase() { # name jobs signal expected-rc [second-signal, 0.1 s later] [file|app: how the org token is given]
+  local nm="$1" jb="$2" sg="$3" erc="$4" sg2="${5:-}" mode="${6:-file}" want pid rc n alive t AUTH
+  pjhome "$nm" alpha beta gamma; fstok
+  mkdir -p "$BASE/$nm.tmp"; rm -f "$STUB_DIR/slow.pids"
+  if [ "$mode" = app ]; then AUTH=(--org-app memsync-admin --org-app-id 12345 --org-app-key-cmd "cat $BASE/app.pem")
+  else AUTH=(--org-token-file "$TF" --delete-org-token-file); fi
+  want=$((jb * 2)); [ "$want" -le 8 ] || want=8
+  set -m
+  (HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_SLOW_INIT=60 STUB_SLOW_MATCH=project- TMPDIR="$BASE/$nm.tmp" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" GIT_CONFIG_NOSYSTEM=1 \
+    BOOTSTRAP_APP_API_BASE="http://127.0.0.1:$APIPORT" CLAUDE_UTILS_URL="https://example.invalid/claude-utils.git" \
+    exec python3 -I -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$BASH" "$ROOT/scripts/bootstrap.sh" --sha "$SHA" "${REQ[@]}" --host testmac --role personal-dev --workspace "$H/code" --own-owner gitgat \
+    --yes --jobs "$jb" "${AUTH[@]}" </dev/null >"$BASE/$nm.out" 2>&1) &
+  pid=$!
+  set +m
+  for _ in $(seq 1 480); do n="$({ wc -l <"$STUB_DIR/slow.pids"; } 2>/dev/null || echo 0)"; [ "${n:-0}" -ge "$want" ] && break; sleep 0.5; done
+  kill -"$sg" "$pid" 2>/dev/null || true
+  if [ -n "$sg2" ]; then sleep 0.1; kill -"$sg2" "$pid" 2>/dev/null || true; fi
+  set +e; wait "$pid"; rc=$?; set -e
+  alive=0
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    alive=0
+    for t in $(cat "$STUB_DIR/slow.pids" 2>/dev/null); do kill -0 "$t" 2>/dev/null && alive=$((alive + 1)); done
+    [ "$alive" -eq 0 ] && break; sleep 0.5
+  done
+  SIG_PIDS="$(wc -l <"$STUB_DIR/slow.pids" 2>/dev/null || echo 0)"
+  local tag="$sg${sg2:+ then $sg2 0.1 s later} at --jobs $jb ($mode)"
+  check "$tag: exits $erc with ${SIG_PIDS//[[:space:]]/} stub processes started (at least $want)" bash -c "[ $rc -eq $erc ] && [ ${SIG_PIDS//[[:space:]]/} -ge $want ]"
+  check "$tag: no job process (stub, sleep) is left running" [ "$alive" -eq 0 ]
+  check "$tag: the run's temp dir (job output, minted org token) is gone" bash -c "[ -z \"\$(ls -A '$BASE/$nm.tmp')\" ]"
+  if [ "$mode" = app ]; then
+    check "$tag: the admin app entry is removed from apps.json" bash -c "! grep -qs memsync-admin '$H/.config/claude-memsync/apps.json'"
+  else
+    check "$tag: the --delete-org-token-file file is deleted" bash -c "[ ! -e '$TF' ]"
+  fi
+}
+sigcase sg4 4 INT 130
+runboot --host testmac --role personal-dev --workspace "$H/code" --own-owner gitgat --yes --jobs 2
+check "after INT at --jobs 4 the same command resumes and completes" bash -c "[ $RC -eq 0 ] && [ -d '$H/.claudesync.d/project-gamma' ] && [ -d '$H/.claudesync.d/project-alpha' ]"
+sigcase sg1 1 TERM 143
+mkdir -p "$H/.claudesync.d/project-alpha/half" "$H/.local/state/claude-memsync-bootstrap"; : >"$H/.local/state/claude-memsync-bootstrap/testmac.initing.project-alpha"
+# without --yes (here: no terminal) and on a dry run the dir is not touched
+runboot --host testmac --role personal-dev --workspace "$H/code" --own-owner gitgat --jobs 2 --dry-run
+set +e; OUT="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" "$BASH" "$ROOT/scripts/bootstrap.sh" --sha "$SHA" --org-token-file "$BASE/orgtoken" "${REQ[@]}" --host testmac --role personal-dev --workspace "$H/code" --own-owner gitgat </dev/null 2>&1)"; RC=$?; set -e
+check "a dry run and a refused confirmation leave the half-made sync dir exactly where it is" bash -c "[ $RC -ne 0 ] && [ -d '$H/.claudesync.d/project-alpha/half' ] && ! ls -d '$H/.claudesync.d'/project-alpha.half-made.* >/dev/null 2>&1"
+runboot --host testmac --role personal-dev --workspace "$H/code" --own-owner gitgat --yes --jobs 2
+check "after TERM at --jobs 1 (with a half-made sync dir of an interrupted init) the same command resumes and completes" bash -c "[ $RC -eq 0 ] && [ -d '$H/.claudesync.d/project-gamma' ] && [ ! -e '$H/.claudesync.d/project-alpha/half' ] && printf '%s\n' \"\$1\" | grep -q 'half-made'" _ "$OUT"
+check "... and the half-made dir was moved aside, not deleted" bash -c "[ -d \"\$(ls -d '$H/.claudesync.d'/project-alpha.half-made.* | head -n1)/half\" ]"
+
+echo "--- a half-made sync dir that holds work is never moved"
+pjhome hm alpha
+mkdir -p "$H/.claudesync.d/project-alpha" "$H/.local/state/claude-memsync-bootstrap"
+git -C "$H/.claudesync.d/project-alpha" init -q -b main; echo work >"$H/.claudesync.d/project-alpha/note.md"; git -C "$H/.claudesync.d/project-alpha" add -A
+git -C "$H/.claudesync.d/project-alpha" -c user.name=t -c user.email=t@example.invalid commit -q -m "unpushed work"
+: >"$H/.local/state/claude-memsync-bootstrap/testmac.initing.project-alpha"   # a stale mark
+UNP="$(git -C "$H/.claudesync.d/project-alpha" log --branches --not --remotes --format=%H)"
+pjrun --jobs 2
+check "a stale initing mark next to a dir with an unpushed commit: refused, with a clear message, nothing created" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -qi 'not on any remote' && ! grep -q 'repo create' '$STUB_DIR/gh.log'" _ "$OUT"
+check "... the dir and the commit are intact, and nothing was moved aside" bash -c "[ \"\$(git -C '$H/.claudesync.d/project-alpha' log --branches --not --remotes --format=%H)\" = '$UNP' ] && [ -f '$H/.claudesync.d/project-alpha/note.md' ] && ! ls -d '$H/.claudesync.d'/project-alpha.half-made.* >/dev/null 2>&1"
+pjhome hm2 alpha
+mkdir -p "$H/.claudesync.d/project-alpha/half" "$H/.local/state/claude-memsync-bootstrap" "$H/.config/claude-memsync"
+: >"$H/.local/state/claude-memsync-bootstrap/testmac.initing.project-alpha"
+printf '{"repos":{"project-alpha":{"config":"%s/.claudesync.d/project-alpha/config.json","kind":"project","remote":"mem-project-alpha"}},"routes":[],"default":"deny"}\n' "$H" >"$H/.config/claude-memsync/routes.json"
+pjrun --jobs 2
+check "a dir that a routes.json this script did not write refers to: refused, left alone" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'routes.json' && [ -d '$H/.claudesync.d/project-alpha/half' ]" _ "$OUT"
+
+echo "--- a half-made sync dir: the guard fails closed"
+hmprep() { # name: a HOME with a stale initing mark for project-alpha; sets D
+  pjhome "$1" alpha; D="$H/.claudesync.d/project-alpha"
+  mkdir -p "$H/.claudesync.d" "$H/.local/state/claude-memsync-bootstrap"
+  : >"$H/.local/state/claude-memsync-bootstrap/testmac.initing.project-alpha"
+}
+hmrefused() { # label: the run was refused and the dir is still where it was
+  check "$1" bash -c "[ $RC -ne 0 ] && [ -d '$D' ] && ! ls -d '$H/.claudesync.d'/project-alpha.half-made.* >/dev/null 2>&1 && ! grep -q 'repo create' '$STUB_DIR/gh.log'"
+}
+gitq() { git -C "$D" -c user.name=t -c user.email=t@example.invalid "$@"; }
+hmprep hc1; mkdir -p "$D/.git"; : >"$D/note"
+pjrun --jobs 2
+hmrefused "a corrupt .git (git cannot read it; an enclosing repo must not be consulted): refused, dir left alone"
+check "... with a message that says why" bash -c "printf '%s\n' \"\$1\" | grep -q 'cannot read its git state'" _ "$OUT"
+hmprep hc2; git init -q -b main "$D"; echo a >"$D/f"; gitq add f; gitq commit -q -m c; git -C "$D" remote add origin "$BASE/remotes/mem-project-alpha.git"
+git -C "$D" push -q origin main 2>/dev/null; git -C "$D" fetch -q origin 2>/dev/null; echo b >"$D/f"; gitq stash -q
+pjrun --jobs 2
+hmrefused "a stash (work that only exists there): refused, dir left alone"
+check "... naming the stash" bash -c "printf '%s\n' \"\$1\" | grep -qi 'stash'" _ "$OUT"
+hmprep hc3; git clone -q "$BASE/remotes/mem-project-alpha.git" "$D" 2>/dev/null; echo x >"$D/untracked"
+pjrun --jobs 2
+hmrefused "an uncommitted file in the dir: refused, dir left alone"
+check "... naming the uncommitted changes" bash -c "printf '%s\n' \"\$1\" | grep -qi 'uncommitted'" _ "$OUT"
+hmprep hc4; mkdir -p "$D/.state"; : >"$D/.state/daemon.lock"
+python3 -I -c 'import fcntl, sys, time; f = open(sys.argv[1], "w"); fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); print("held", flush=True); time.sleep(120)' "$D/.state/daemon.lock" >"$BASE/lockheld.out" &
+LKPID=$!
+for _ in $(seq 1 50); do [ -s "$BASE/lockheld.out" ] && break; sleep 0.1; done
+pjrun --jobs 2
+kill "$LKPID" 2>/dev/null || true; wait "$LKPID" 2>/dev/null || true
+hmrefused "a sync dir whose daemon lock is held: refused, dir left alone"
+check "... naming the lock" bash -c "printf '%s\n' \"\$1\" | grep -qi 'lock'" _ "$OUT"
+hmprep hc5; git clone -q "$BASE/remotes/mem-project-alpha.git" "$D" 2>/dev/null
+pjrun --jobs 2
+check "a clean clone with nothing unpushed is moved aside (not deleted) and the run completes" bash -c "[ $RC -eq 0 ] && ls -d '$H/.claudesync.d'/project-alpha.half-made.* >/dev/null 2>&1 && [ -d '$H/.claudesync.d/project-alpha' ]"
+for form in tilde symlink; do
+  hmprep "hr$form"; mkdir -p "$D/half"
+  mkdir -p "$H/.config/claude-memsync"
+  # shellcheck disable=SC2088  # the literal ~ is the point: the script must expand it
+  if [ "$form" = tilde ]; then ref='~/.claudesync.d/project-alpha/config.json'; else ln -s "$H/.claudesync.d" "$H/linkd"; ref="$H/linkd/project-alpha/config.json"; fi
+  printf '{"repos":{"project-alpha":{"config":"%s","kind":"project","remote":"mem-project-alpha"}},"routes":[],"default":"deny"}\n' "$ref" >"$H/.config/claude-memsync/routes.json"
+  pjrun --jobs 2
+  hmrefused "a routes.json that names the dir as $form is recognised: refused, dir left alone"
+done
+hmprep hr4; mkdir -p "$D/half" "$H/.config/claude-memsync"
+printf '{"x":"/\\u0000bad","repos":{"project-alpha":{"config":"%s/.claudesync.d/project-alpha/config.json"}}}\n' "$H" >"$H/.config/claude-memsync/routes.json"
+pjrun --jobs 2
+hmrefused "a routes.json with a string Python cannot resolve (a null byte) still names the dir: refused, dir left alone"
+hmprep hr5; mkdir -p "$D/half" "$H/.config/claude-memsync"
+printf '{"repos":{"project-alpha":{"config":"project-alpha/config.json"}}}\n' >"$H/.config/claude-memsync/routes.json"
+pjrun --jobs 2
+hmrefused "a relative config path (resolved against the daemon's directory, so unknowable here): refused, dir left alone"
+hmprep hr6; mkdir -p "$D/half" "$H/.config/claude-memsync"; ln -s "$H/no-such-routes" "$H/.config/claude-memsync/routes.json"
+pjrun --jobs 2
+hmrefused "a dangling symlink as routes.json is not skipped: refused, dir left alone"
+hmprep hl2; mkdir -p "$D/.state"; ln -s "$H/no-such-lock" "$D/.state/daemon.lock"
+pjrun --jobs 2
+hmrefused "a dangling symlink as daemon.lock is not skipped: refused, dir left alone"
+hmprep hl3; mkdir -p "$D/.state/daemon.lock"
+pjrun --jobs 2
+hmrefused "a daemon.lock that cannot be opened: refused, dir left alone"
+check "... saying the lock could not be checked" bash -c "printf '%s\n' \"\$1\" | grep -q 'could not check the daemon lock'" _ "$OUT"
+hmprep hd1; git init -q -b main "$D"; echo a >"$D/f"; gitq add f; gitq commit -q -m c1; git -C "$D" remote add origin "$BASE/remotes/mem-project-alpha.git"
+git -C "$D" push -q origin main 2>/dev/null; git -C "$D" fetch -q origin 2>/dev/null; gitq checkout -q --detach; echo b >>"$D/f"; gitq commit -q -am c2
+pjrun --jobs 2
+hmrefused "a detached HEAD with a commit on no branch and no remote: refused, dir left alone"
+for st in rebase-merge rebase-apply MERGE_HEAD; do
+  hmprep "hs$st"; git clone -q "$BASE/remotes/mem-project-alpha.git" "$D" 2>/dev/null
+  if [ "$st" = MERGE_HEAD ]; then : >"$D/.git/MERGE_HEAD"; else mkdir -p "$D/.git/$st"; fi
+  pjrun --jobs 2
+  hmrefused "a dir in the middle of a $st: refused, dir left alone"
+done
+hmprep hr3; mkdir -p "$D/half" "$H/.config/claude-memsync"
+printf '%s\n' "{ not json" >"$H/.config/claude-memsync/routes.json"
+pjrun --jobs 2
+hmrefused "a routes.json that cannot be parsed (not written by this script) is not trusted: refused, dir left alone"
+
+echo "--- routes.json backups are timestamped and never overwritten"
+pjhome rb alpha
+BOOTSTRAP_ASIDE_STAMP=20260101T000000Z pjrun --jobs 4
+mkgit "$H/code/beta" "git@github.com:gitgat/beta.git"; mkbare mem-project-beta
+git config --file "$H/.gitconfig" "url.$BASE/remotes/mem-project-beta.git.insteadOf" "git@gh-mem-project-beta:$ORG/mem-project-beta.git"
+BOOTSTRAP_ASIDE_STAMP=20260101T000000Z pjrun --jobs 4
+mkgit "$H/code/gamma" "git@github.com:gitgat/gamma.git"; mkbare mem-project-gamma
+git config --file "$H/.gitconfig" "url.$BASE/remotes/mem-project-gamma.git.insteadOf" "git@gh-mem-project-gamma:$ORG/mem-project-gamma.git"
+BOOTSTRAP_ASIDE_STAMP=20260101T000000Z pjrun --jobs 4
+RB="$H/.config/claude-memsync/routes.json"
+check "two regenerations leave two backups, the second never overwriting the first, and no bare routes.json.bak" bash -c "[ -f '$RB.bak.20260101T000000Z' ] && [ -f '$RB.bak.20260101T000000Z.1' ] && [ ! -e '$RB.bak' ] && ! grep -q project-beta '$RB.bak.20260101T000000Z' && grep -q project-beta '$RB.bak.20260101T000000Z.1' && ! grep -q project-gamma '$RB.bak.20260101T000000Z.1'"
+
+echo "--- patterns are anchored"
+newhome an1
+STUB_JOINREQ_ALREADY=2 runboot --host testhost --role homelab --yes
+check "a line that merely contains the already-a-recipient words is not taken for the real message" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'printed no .fingerprint'" _ "$OUT"
+newhome an2
+ORGARGS=(--org-token-cmd "secret-tool read vault://vault/item/field")
+STUB_401=2 BOOTSTRAP_TOKEN_AGE_BONUS=3600 runboot --host testhost --role homelab --yes
+ORGARGS=(--org-token-file "$BASE/orgtoken")
+check "a failure that merely contains 401 inside another number (port 4010) is not an expired token" bash -c "[ $RC -ne 0 ] && ! printf '%s\n' \"\$1\" | grep -q 'probably expired'" _ "$OUT"
+
+echo "--- an init interrupted after its push: the re-run finds the host already a recipient"
+newhome jr
+STUB_JOINREQ_ALREADY=1 runboot --host testhost --role homelab --yes
+check "join request says already a recipient: that counts as joined, the run completes, no pending join is listed" bash -c "[ $RC -eq 0 ] && [ -e '$H/.local/state/claude-memsync-bootstrap/testhost.join.personal' ] && ! printf '%s\n' \"\$1\" | grep -q 'pending join requests'" _ "$OUT"
+
+echo "--- an expired org token is named as such"
+newhome tx
+ORGARGS=(--org-token-cmd "secret-tool read vault://vault/item/field")
+STUB_401=1 BOOTSTRAP_TOKEN_AGE_BONUS=3600 runboot --host testhost --role homelab --yes
+check "a 401 an hour after the token was minted says the token has probably expired and the run resumes" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'org token has probably expired'" _ "$OUT"
+newhome tx2
+STUB_401=1 runboot --host testhost --role homelab --yes
+ORGARGS=(--org-token-file "$BASE/orgtoken")
+check "a 401 on a fresh token does not claim it expired" bash -c "[ $RC -ne 0 ] && ! printf '%s\n' \"\$1\" | grep -q 'probably expired'" _ "$OUT"
+
+echo "--- a second signal during the clean-up does not cut it short"
+sigcase dsA 2 INT 130 INT file
+sigcase dsB 2 INT 130 TERM app
+sigcase dsC 2 INT 130 HUP file
+
+echo "--- the org token is minted once, and a dry run creates nothing"
+pjhome tk alpha beta gamma
+KC="$BASE/keycount"; : >"$KC"
+ORGARGS=(--org-app memsync-admin --org-app-id 12345 --org-app-key-cmd "sh -c 'echo run >>$KC; cat $BASE/app.pem'")
+pjrun --jobs 4
+ORGARGS=(--org-token-file "$BASE/orgtoken")
+check "--jobs 4 with an admin app: the key command ran exactly once for the whole run" bash -c "[ $RC -eq 0 ] && [ \$(wc -l <'$KC' | tr -d ' ') -eq 1 ]"
+pjhome tmpd alpha
+mkdir -p "$BASE/tmpd.tmp"; chmod 555 "$BASE/tmpd.tmp"
+TMPDIR="$BASE/tmpd.tmp" pjrun --dry-run --jobs 2
+chmod 755 "$BASE/tmpd.tmp"
+check "a dry run creates no temp dir or file (it works with an unwritable TMPDIR)" bash -c "[ $RC -eq 0 ] && [ -z \"\$(ls -A '$BASE/tmpd.tmp')\" ]"
+
+echo "--- parallel: one repo fails, the others finish, every failure is reported"
+pjhome fl alpha '!bad' beta '!worse' gamma
+pjrun --jobs 4
+check "a failing repo makes the run exit nonzero" [ "$RC" -ne 0 ]
+check "the failure is reported, by repo, in the summary" bash -c "printf '%s\n' \"\$1\" | grep -q 'ls-remote over gh-mem-project-bad failed' && printf '%s\n' \"\$1\" | grep -qE 'repo\(s\) failed: .*mem-project-bad'" _ "$OUT"
+check "every repo is accounted for: finished, reported failed, or listed as not attempted" bash -c "for p in alpha beta gamma worse; do [ -d '$H/.claudesync.d/project-'\$p ] || printf '%s\n' \"\$1\" | grep -qE \"(failed:.*|not attempted after the failure:.*)mem-project-\$p\" || exit 1; done" _ "$OUT"
+check "a repo started before the failure finished its steps (repo, deploy key, init)" bash -c "[ -d '$H/.claudesync.d/project-alpha' ]"
+check "the failed repos were not marked initialised" bash -c "[ ! -e '$H/.local/state/claude-memsync-bootstrap/testmac.init.project-bad' ] && [ ! -e '$H/.claudesync.d/project-bad' ]"
+check "a failed run does not go on to the service step" bash -c "! printf '%s\n' \"\$1\" | grep -q '== i. Service'" _ "$OUT"
+mkbare mem-project-bad; mkbare mem-project-worse
+CRE="$(grep -c 'repo create' "$STUB_DIR/gh.log" || true)"
+pjrun --jobs 4
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+check "after the cause is fixed the same command completes (exit 0)" [ "$RC" -eq 0 ]
+check "... and the re-run creates nothing twice: no second repo create, no second deploy key for the ones that were done" bash -c "[ \$(grep -c 'repo create' '$STUB_DIR/gh.log') -eq $CRE ] && [ \$(grep -c 'deploy-key add' '$STUB_DIR/gh.log') -eq \$(ls '$H/.ssh' | grep -c '_ed25519\$') ] && printf '%s\n' \"\$1\" | grep -q 'project-alpha already initialised'" _ "$OUT"
+
+echo "--- paste prompt: PROJECTS and SKIP_PROJECTS expand into repeated flags"
+check "personal-dev-app: PROJECTS and SKIP_PROJECTS default to empty and are marked optional" bash -c "printf '%s\n' \"\$1\" | grep -qx -- '- PROJECTS = \"\"' && printf '%s\n' \"\$1\" | grep -qx -- '- SKIP_PROJECTS = \"\"' && [ \$(printf '%s\n' \"\$1\" | grep -A1 -E '^- (SKIP_)?PROJECTS = ' | grep -c 'optional; leave empty for none') -eq 2 ]" _ "$(docprompt personal-dev-app)"
+pjdoc() { # name: a HOME for the personal-dev prompt with three own checkouts under a workspace
+  newhome "$1"; prompt_setup; mkdir -p "$H/code"
+  for w in alpha beta gamma; do mkgit "$H/code/$w" "git@github.com:example-user/$w.git"; done
+}
+pjdoc doc-pj1
+DOC_WS="$H/code" DOC_PROJECTS="alpha beta" rundoc 3
+check "PROJECTS=\"alpha beta\" becomes two --project flags: those two are selected, the third is skipped by choice" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -q 'selected projects: alpha beta' && printf '%s\n' \"\$1\" | grep -q 'skipped by choice: gamma'" _ "$OUT"
+pjdoc doc-pj2
+DOC_WS="$H/code" DOC_SKIP="alpha" rundoc 3
+check "SKIP_PROJECTS=\"alpha\" becomes --skip-project: the other two are selected" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -q 'selected projects: beta gamma' && printf '%s\n' \"\$1\" | grep -q 'skipped by choice: alpha'" _ "$OUT"
+pjdoc doc-pj4
+DOC_WS="$H/code" DOC_LITERAL=1 rundoc 3
+check "the doc's own empty defaults (PROJECTS=\"\", SKIP_PROJECTS=\"\") run as written: nothing skipped by choice" bash -c "[ $RC -eq 0 ] && ! printf '%s\n' \"\$1\" | grep -q 'skipped by choice'" _ "$OUT"
+
+echo "--- exit codes: a missing, malformed or conflicting flag is a usage error (2); a runtime failure is 1"
+newhome xc
+# rawboot <args...>: the script with exactly these arguments (no defaults added); RAWSCRIPT names another copy of it
+rawboot() {
+  set +e
+  OUT="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" GIT_CONFIG_NOSYSTEM=1 \
+    CLAUDE_UTILS_URL="https://example.invalid/claude-utils.git" "$BASH" "${RAWSCRIPT:-$ROOT/scripts/bootstrap.sh}" "$@" </dev/null 2>&1)"
+  RC=$?
+  set -e
+}
+XB=(--host testhost --role homelab --sha "$SHA" --org-token-file "$BASE/orgtoken" --org "$ORG" --recovery-recipient "$PQREC")
+without() { # flag: XB minus that flag and its value, into XA
+  XA=(); local skip=0 a
+  for a in "${XB[@]}"; do
+    if [ "$skip" -eq 1 ]; then skip=0; continue; fi
+    if [ "$a" = "$1" ]; then skip=1; continue; fi
+    XA+=("$a")
+  done
+}
+NOGIT="$(mktemp -d)"; mkdir "$NOGIT/scripts"; cp "$ROOT/scripts/bootstrap.sh" "$NOGIT/scripts/bootstrap.sh"   # outside any git checkout
+for f in --host --role --org --recovery-recipient; do
+  without "$f"; rawboot "${XA[@]}" --dry-run
+  check "omitting $f exits 2 (usage), with a message naming it" bash -c "[ $RC -eq 2 ] && printf '%s\n' \"\$1\" | grep -q -- '$f'" _ "$OUT"
+done
+without --sha; RAWSCRIPT="$NOGIT/scripts/bootstrap.sh" rawboot "${XA[@]}" --dry-run
+rm -f "$NOGIT/scripts/bootstrap.sh"; rmdir "$NOGIT/scripts" "$NOGIT"
+check "omitting --sha outside a git checkout exits 2" bash -c "[ $RC -eq 2 ] && printf '%s\n' \"\$1\" | grep -q -- '--sha is required'" _ "$OUT"
+rawboot "${XB[@]}" --host 'Bad_Host' --dry-run
+check "a malformed --host exits 2" [ "$RC" -eq 2 ]
+rawboot "${XB[@]}" --org 'bad org!' --dry-run
+check "a malformed --org exits 2" [ "$RC" -eq 2 ]
+rawboot "${XB[@]}" --sha zzz --dry-run
+check "a malformed --sha exits 2" [ "$RC" -eq 2 ]
+rawboot "${XB[@]}" --recovery-recipient age1classic --dry-run
+check "a classic (non post-quantum) --recovery-recipient exits 2" [ "$RC" -eq 2 ]
+rawboot "${XB[@]}" --role nosuch --dry-run
+check "an unknown --role exits 2" [ "$RC" -eq 2 ]
+rawboot "${XB[@]}" --keep-out-owner "$ORG" --dry-run
+check "--org that is also a keep-out owner exits 2" [ "$RC" -eq 2 ]
+rawboot --host testhost --role homelab --sha "$SHA" --org "$ORG" --recovery-recipient "$PQREC" --org-app 'bad name' --dry-run
+check "a malformed --org-app exits 2" [ "$RC" -eq 2 ]
+rawboot "${XB[@]}" --check-app memsync-check --check-app-id notnumeric --check-key-file "$BASE/check.pem" --dry-run
+check "a malformed --check-app-id exits 2" [ "$RC" -eq 2 ]
+rawboot --host testhost --role homelab --sha "$SHA" --org "$ORG" --recovery-recipient "$PQREC" --delete-org-token-file --org-token-cmd 'echo x' --dry-run
+check "--delete-org-token-file with a token command and no token file exits 2" [ "$RC" -eq 2 ]
+rawboot --host testhost --role homelab --sha "$SHA" --org "$ORG" --recovery-recipient "$PQREC" --org-token-cmd 'echo "x' --dry-run
+check "an unbalanced quote in --org-token-cmd exits 2" [ "$RC" -eq 2 ]
+# usage errors are found before the pause (exit 3) and before the token file is looked at (exit 1)
+MISSING_KEY=(--check-app memsync-check --check-app-id 1 --check-key-file "$H/no-such-check.pem")
+rawboot "${XB[@]}" --role personal-dev --workspace "$H/no-such-dir" "${MISSING_KEY[@]}" --dry-run
+check "a --workspace that is not a directory plus a missing check key: exit 2, not the pause" [ "$RC" -eq 2 ]
+mkdir -p "$H/wsgit/.git"
+rawboot "${XB[@]}" --role personal-dev --workspace "$H/wsgit" "${MISSING_KEY[@]}" --dry-run
+check "a --workspace that is itself a git checkout plus a missing check key: exit 2, not the pause" [ "$RC" -eq 2 ]
+rawboot --host testhost --sha "$SHA" --org "$ORG" --recovery-recipient "$PQREC" --org-token-file "$BASE/orgtoken" "${MISSING_KEY[@]}" --dry-run
+check "no --role plus a missing check key: exit 2, not the pause" [ "$RC" -eq 2 ]
+rawboot "${XB[@]}" --host 'Bad_Host' "${MISSING_KEY[@]}" --dry-run
+check "a bad --host plus a missing check key: exit 2, not the pause" [ "$RC" -eq 2 ]
+rawboot "${XB[@]}" --project alpha "${MISSING_KEY[@]}" --dry-run
+check "homelab with --project plus a missing check key: exit 2, not the pause" [ "$RC" -eq 2 ]
+fstok; chmod 644 "$TF"
+rawboot --host testhost --sha "$SHA" --org "$ORG" --recovery-recipient "$PQREC" --org-token-file "$TF" --delete-org-token-file --dry-run
+check "no --role plus a token file with a bad mode: exit 2, not the token-file refusal" bash -c "[ $RC -eq 2 ] && [ -e '$TF' ]"
+newhome xc2
+STUB_PUBLIC=1 rawboot "${XB[@]}" --yes
+check "a runtime failure (a repo that is not private) still exits 1" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'NOT private'" _ "$OUT"
+check "a refused (public) repo gets no ssh alias" bash -c "! grep -qs 'Host gh-mem-infra-homelab' '$H/.ssh/config'"
+pjhome wsg alpha; mkgit "$H/wsrepo" "git@github.com:gitgat/wsrepo.git"
+runboot --host testmac --role personal-dev --workspace "$H/wsrepo" --own-owner gitgat --dry-run
+check "a --workspace that is itself a git checkout (a bad flag value) exits 2" bash -c "[ $RC -eq 2 ] && printf '%s\n' \"\$1\" | grep -q 'is itself a git checkout'" _ "$OUT"
+
+echo "--- positive confirmation: the same shape, everywhere"
+PVB="$BASE/pvprebuilt"; mkdir -p "$PVB/twoline"; cp "$REAL/claude-memmerge" "$PVB/twoline/"
+printf '#!/bin/sh\necho "claude-memsync v0.0.1"\necho "claude-memsync v9.9.9"\n' >"$PVB/twoline/claude-memsync"; chmod +x "$PVB/twoline/claude-memsync"
+newhome pv1
+NO_SHA=1 runboot --host testhost --role homelab --yes --prebuilt-dir "$PVB/twoline"
+check "a prebuilt claude-memsync that prints more than one version line is refused" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'exactly one line' && [ ! -e '$H/.local/lib' ]" _ "$OUT"
+newhome pv2
+STUB_GIT_LS2=fail runboot --host testhost --role homelab --yes
+check "an ls-remote that fails when the bootstrap asks if the repo has content stops the run (it is not read as empty)" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'cannot tell whether'" _ "$OUT"
+newhome pv3
+STUB_GIT_LS2=huge runboot --host testhost --role homelab --yes
+check "an ls-remote with a long answer (SIGPIPE for a head-of-pipe reader) still means the repo has content: a join is requested" bash -c "[ $RC -eq 0 ] && grep -q 'join request --repo personal' '$STUB_DIR/memsync.log'" _ "$OUT"
+newhome pv4
+prompt_setup
+STUB_PY_FAIL_REGISTRY=1 rundoc 2
+check "a python error reading the registry from routes.json is a refusal, not 'no registry'" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -qi 'registry'" _ "$OUT"
+newhome pv5
+mkdir -p "$H/.config/claude-memsync"; printf 'pat\n' >"$BASE/realpat"; chmod 600 "$BASE/realpat"; ln -s "$BASE/realpat" "$H/.config/claude-memsync/github-token"
+runboot --host testhost --role homelab --yes
+check "a Metadata-read PAT file that is a symlink is not used (same checks as the other secret files)" bash -c "[ $RC -eq 0 ] && ! grep -rq githubTokenFile '$H/.claudesync.d' && printf '%s\n' \"\$1\" | grep -q 'no Metadata-read PAT'" _ "$OUT"
+newhome pv6; TF="$BASE/pv6tok"; printf '%s\n' "$ORGTOK" >"$TF"; chmod 600 "$TF"
+ORGARGS=(--org-token-file "$TF" --delete-org-token-file)
+STUB_SWAP_TOKEN="$TF" STUB_SWAP_TO="$BASE/orgtoken" runboot --host testhost --role homelab --yes
+ORGARGS=(--org-token-file "$BASE/orgtoken")
+check "an org token file that was swapped for a symlink during the run is not deleted at exit (it is no longer ours)" bash -c "[ -L '$TF' ] && [ -f '$BASE/orgtoken' ] && printf '%s\n' \"\$1\" | grep -q 'not deleting'" _ "$OUT"
+newhome pv7
+mkdir -p "$H/.config/claude-memsync"; ln -s "$H/not-created" "$H/.config/claude-memsync/denylist-personal.txt"
+runboot --host testhost --role homelab --yes
+check "a denylist that is a dangling symlink is refused and not written through" bash -c "[ $RC -ne 0 ] && [ ! -e '$H/not-created' ]" _ "$OUT"
+newhome pv8
+mkdir -p "$H/.config/claude-memsync"; printf 'this is not json\n' >"$H/.config/claude-memsync/apps.json"; chmod 600 "$H/.config/claude-memsync/apps.json"
+ORGARGS=(--org-app memsync-admin --org-app-id 12345 --org-app-key-cmd "cat $BASE/app.pem")
+runboot --host testhost --role homelab --yes
+ORGARGS=(--org-token-file "$BASE/orgtoken")
+check "an apps.json that cannot be read is a refusal that says so (not 'no entry')" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'cannot read .*apps.json' && ! grep -q Traceback <<<\"\$1\"" _ "$OUT"
+if [ "$(id -u)" -ne 0 ]; then
+  pjhome sd alpha; D="$H/.claudesync.d/project-alpha"
+  mkdir -p "$D" "$H/.local/state/claude-memsync-bootstrap"; : >"$H/.local/state/claude-memsync-bootstrap/testmac.initing.project-alpha"; chmod 000 "$D"
+  pjrun --jobs 2
+  chmod 755 "$D"
+  check "a half-made dir that is mode 000 (its .git cannot be looked at) is not moved: all the guards run, one refuses" bash -c "[ $RC -ne 0 ] && [ -d '$D' ] && ! ls -d '$H/.claudesync.d'/project-alpha.half-made.* >/dev/null 2>&1" _ "$OUT"
+else
+  echo "SKIP    mode-000 half-made dir: chmod 000 does not block root"
+fi
+newhome pv9
+BOOT_PATH="$(minipath sleep)"   # every tool but sleep; then a sleep that refuses fractions
+printf '#!/bin/sh\ncase "$1" in *.*) echo "sleep: invalid time interval" >&2; exit 1 ;; esac\nexec "%s" "$@"\n' "$(type -P sleep)" >"$BOOT_PATH/sleep"; chmod +x "$BOOT_PATH/sleep"
+runboot --host testhost --role homelab --dry-run
+check "a sleep that cannot do fractional seconds is a missing prerequisite (the guard runner polls with sleep 0.05)" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'missing prerequisite: sleep'" _ "$OUT"
+BOOT_PATH=""
+
+echo "--- routes.json: no answer, or a file that cannot be read, is a refusal"
+newhome rj1
+mkdir -p "$H/.config/claude-memsync"; ln -s "$H/nowhere/routes.json" "$H/.config/claude-memsync/routes.json"
+runboot --host testhost --role homelab --yes
+check "a routes.json that is a dangling symlink is refused, left as it is, and nothing is written through it" bash -c "[ $RC -ne 0 ] && [ -L '$H/.config/claude-memsync/routes.json' ] && [ ! -e '$H/nowhere' ] && ! ls '$H/.config/claude-memsync'/routes.json.bak* >/dev/null 2>&1 && ! grep -q 'repo create' '$STUB_DIR/gh.log'" _ "$OUT"
+if [ "$(id -u)" -ne 0 ]; then
+  newhome rj2
+  mkdir -p "$H/.config/claude-memsync" "$H/locked"; printf '{"registry":"x"}\n' >"$H/locked/r.json"; chmod 000 "$H/locked"
+  ln -s "$H/locked/r.json" "$H/.config/claude-memsync/routes.json"
+  runboot --host testhost --role homelab --yes
+  chmod 755 "$H/locked"
+  check "a routes.json behind an unsearchable directory (stat fails with EACCES) is refused and left as it is" bash -c "[ $RC -ne 0 ] && [ -L '$H/.config/claude-memsync/routes.json' ] && grep -q registry '$H/locked/r.json' && ! ls '$H/.config/claude-memsync'/routes.json.bak* >/dev/null 2>&1 && ! grep -q 'repo create' '$STUB_DIR/gh.log'" _ "$OUT"
+fi
+newhome rj3
+mkdir -p "$H/.config/claude-memsync"; printf '{"registry": "git@example.invalid:me/registry.git", \n garbage' >"$H/.config/claude-memsync/routes.json"
+cp "$H/.config/claude-memsync/routes.json" "$BASE/rj3.orig"
+runboot --host testhost --role homelab --yes
+check "an unparseable routes.json (with a registry in it) is refused, not replaced without its registry, and no backup is made" bash -c "[ $RC -ne 0 ] && cmp -s '$BASE/rj3.orig' '$H/.config/claude-memsync/routes.json' && ! ls '$H/.config/claude-memsync'/routes.json.bak* >/dev/null 2>&1 && ! grep -q 'repo create' '$STUB_DIR/gh.log'" _ "$OUT"
+
+echo "--- marks, workspaces and known_hosts: an unreadable one is not an absent one"
+if [ "$(id -u)" -ne 0 ]; then
+  newhome nj1
+  mkdir -p "$H/.local/state/claude-memsync-bootstrap" "$H/locked"; chmod 000 "$H/locked"
+  : >"$H/.local/state/claude-memsync-bootstrap/testhost.init.personal"   # the init is done; the join step comes next
+  ln -s "$H/locked/x" "$H/.local/state/claude-memsync-bootstrap/testhost.needjoin.personal"
+  runboot --host testhost --role homelab --yes
+  chmod 755 "$H/locked"
+  check "a needjoin mark that cannot be read stops the run (the join request is not skipped)" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'cannot tell whether'" _ "$OUT"
+  newhome wg1
+  mkdir -p "$H/ws" "$H/locked"; chmod 000 "$H/locked"; ln -s "$H/locked/g" "$H/ws/.git"
+  runboot --host testmac --role personal-dev --workspace "$H/ws" --own-owner gitgat --dry-run
+  chmod 755 "$H/locked"
+  check "a workspace whose .git cannot be looked at is refused (it is not assumed to be a plain folder)" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'cannot tell'" _ "$OUT"
+fi
+newhome kh1
+mkdir -p "$H/.ssh"; chmod 700 "$H/.ssh"; printf 'github.com ssh-ed25519 %s\n' "$(cat "$BASE/otherkey")" >"$H/.ssh/known_hosts"; chmod 600 "$H/.ssh/known_hosts"
+runboot --host testhost --role homelab --yes
+check "a github.com entry in known_hosts with another key than GitHub's is not trusted: refused" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'host key fingerprint'" _ "$OUT"
+newhome kh2
+mkdir -p "$H/.ssh"; chmod 700 "$H/.ssh"; printf 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n' >"$H/.ssh/known_hosts"; chmod 600 "$H/.ssh/known_hosts"
+runboot --host testhost --role homelab --yes
+check "a github.com entry with GitHub's key is accepted as already there" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -q 'known_hosts already has github.com:22'" _ "$OUT"
+
+echo "--- the real script's traps: a signal while a guard hangs"
+trapcase() { # name signal expected-rc mode(app|file) [second-signal-to-the-group]
+  local nm="$1" sg="$2" erc="$3" mode="$4" sg2="${5:-}" pid rc t0 took n alive t AUTH
+  newhome "$nm"; mkdir -p "$BASE/$nm.tmp"; rm -f "$STUB_DIR/hang.pids" "$STUB_DIR/slowid.on"
+  printf '%s\n' "$ORGTOK" >"$BASE/$nm.tok"; chmod 600 "$BASE/$nm.tok"
+  if [ "$mode" = app ]; then AUTH=(--org-app memsync-admin --org-app-id 12345 --org-app-key-cmd "cat $BASE/app.pem")
+  else AUTH=(--org-token-file "$BASE/$nm.tok" --delete-org-token-file); fi
+  set -m
+  (HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_SYSTEMCTL_HANG=1 TMPDIR="$BASE/$nm.tmp" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" GIT_CONFIG_NOSYSTEM=1 \
+    BOOTSTRAP_APP_API_BASE="http://127.0.0.1:$APIPORT" CLAUDE_UTILS_URL="https://example.invalid/claude-utils.git" \
+    exec python3 -I -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$BASH" "$ROOT/scripts/bootstrap.sh" --sha "$SHA" "${REQ[@]}" --host testhost --role homelab --yes "${AUTH[@]}" </dev/null >"$BASE/$nm.out" 2>&1) &
+  pid=$!
+  set +m
+  for _ in $(seq 1 200); do n="$({ wc -l <"$STUB_DIR/hang.pids"; } 2>/dev/null || echo 0)"; [ "${n:-0}" -ge 2 ] && break; sleep 0.1; done
+  : >"$STUB_DIR/slowid.on"
+  t0=$SECONDS
+  if [ -n "$sg2" ]; then
+    kill -"$sg" -- "-$pid" 2>/dev/null || true
+    sleep 0.4
+    kill -"$sg2" -- "-$pid" 2>/dev/null || true
+  else
+    kill -"$sg" "$pid" 2>/dev/null || true
+  fi
+  set +e; wait "$pid"; rc=$?; set -e
+  took=$((SECONDS - t0))
+  rm -f "$STUB_DIR/slowid.on"
+  alive=0
+  for _ in 1 2 3 4 5 6 7 8; do
+    alive=0
+    for t in $(cat "$STUB_DIR/hang.pids" 2>/dev/null); do kill -0 "$t" 2>/dev/null && alive=$((alive + 1)); done
+    [ "$alive" -eq 0 ] && break; sleep 0.25
+  done
+  local tag="$sg${sg2:+ then $sg2 to the group} while a guard hangs ($mode)"
+  check "$tag: exit $erc, within 6 s, no process left" bash -c "[ $rc -eq $erc ] && [ $took -le 6 ] && [ $alive -eq 0 ]"
+  check "$tag: the run's temp dir is gone" bash -c "[ -z \"\$(ls -A '$BASE/$nm.tmp')\" ]"
+  if [ "$mode" = app ]; then check "$tag: the admin app entry is removed" bash -c "! grep -qs memsync-admin '$H/.config/claude-memsync/apps.json'"
+  else check "$tag: the --delete-org-token-file file is deleted (and no 'not deleting' warning)" bash -c "[ ! -e '$BASE/$nm.tok' ] && ! grep -q 'not deleting' '$BASE/$nm.out'"; fi
+}
+trapcase tc1 INT 130 app
+trapcase tc2 TERM 143 file
+trapcase tc3 INT 130 file INT
+# <<< fast-setup
 
 newhome rtdiff
 mkdir -p "$H/.config/claude-memsync"; echo '{"repos":{},"routes":[],"default":"deny"}' >"$H/.config/claude-memsync/routes.json"
