@@ -442,7 +442,9 @@ func TestNoDaemonPathAccepts(t *testing.T) {
 	for _, d := range dirs {
 		files, _ := filepath.Glob(filepath.Join(d, "*.go"))
 		for _, f := range files {
-			if strings.HasSuffix(f, "_test.go") || strings.HasSuffix(f, "join.go") {
+			// join.go and join_all.go are the interactive `join accept` (one
+			// repo, and --all); neither is reachable from the daemon.
+			if strings.HasSuffix(f, "_test.go") || strings.HasSuffix(f, "join.go") || strings.HasSuffix(f, "join_all.go") {
 				continue
 			}
 			b, _ := os.ReadFile(f)
