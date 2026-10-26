@@ -6,6 +6,12 @@ release is cut is in the README's "Releasing" section; what CI checks about the
 archives is in [ci.md](ci.md#release-packaging-fork-only). The full host setup
 that uses a release is in [setup.md](setup.md) and [bootstrap.md](bootstrap.md).
 
+## Published releases
+
+| Tag | Commit | Notes |
+|---|---|---|
+| [v0.3.0-ev.1](https://github.com/Exploded-views/claude-utils/releases/tag/v0.3.0-ev.1) | `37fa564` | First release of the fork (pre-release): post-quantum encryption by default, one config directory, host bootstrap with `--prebuilt-dir`, fork CI. |
+
 ## What a release holds
 
 One archive per platform, named `claude-utils-<tag>-<os>-<arch>`:
