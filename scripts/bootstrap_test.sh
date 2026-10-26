@@ -82,6 +82,8 @@ case "$1" in
       exit 0
     fi
     need_org
+    # STUB_401=1: the token has expired
+    if [ "${STUB_401:-0}" = 1 ]; then echo "HTTP 401: Bad credentials" >&2; exit 1; fi
     f="$S/$(basename "$2").json"
     [ -f "$f" ] && { cat "$f"; exit 0; }
     echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
@@ -170,6 +172,8 @@ case "$1" in
     if grep -qE 'githubToken(File|Cmd)' "$sd/config.json" 2>/dev/null; then echo "init-saved-token $sd" >>"$STUB_DIR/memsync.log"; fi
     exit "$rc" ;;
   join)
+    # STUB_JOINREQ_ALREADY=1: this host is already a recipient (an earlier run was interrupted after its push)
+    if [ "$2" = request ] && [ "${STUB_JOINREQ_ALREADY:-0}" = 1 ]; then echo "this host is already a recipient of this repo; nothing to request"; exit 0; fi
     if [ "$2" = request ] && { [ "${STUB_NOFP:-0}" = 1 ] || [ "${STUB_OLDFP:-0}" = 1 ]; }; then
       "$REAL_DIR/claude-memsync" "$@" | if [ "${STUB_NOFP:-0}" = 1 ]; then grep -v '^fingerprint:'; else sed 's/^fingerprint: .*/fingerprint: 0123456789abcdef/'; fi
       exit 0
@@ -1180,6 +1184,9 @@ check "--project: skipped projects get no key and no sync dir" bash -c "[ ! -e '
 pjhome sel2 alpha beta gamma delta
 pjrun --dry-run --skip-project alpha --skip-project delta
 check "--skip-project (dry run): the plan selects every project but the skipped ones" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -qE 'selected projects: beta gamma' && printf '%s\n' \"\$1\" | grep -qE 'skipped by choice: alpha delta'" _ "$OUT"
+pjhome sel4 alpha beta
+pjrun --skip-project alpha
+check "--skip-project (real run): the skipped project gets no repo, key, sync dir or route" bash -c "[ $RC -eq 0 ] && [ \"$(created)\" = 'mem-project-beta mem-project-code-workspace ' ] && [ \"$(routed)\" = 'beta' ] && [ ! -e '$H/.ssh/mem-project-alpha_ed25519' ] && [ ! -e '$H/.claudesync.d/project-alpha' ]"
 pjhome sel3 alpha beta
 pjrun --dry-run
 check "neither flag: all projects are selected, nothing is said to be skipped by choice" bash -c "[ $RC -eq 0 ] && ! printf '%s\n' \"\$1\" | grep -q 'skipped by choice' && printf '%s\n' \"\$1\" | grep -q 'own projects found: alpha beta'" _ "$OUT"
@@ -1226,21 +1233,24 @@ pjrun --jobs 2
 check "a repo that failed while another was still running: the next repo is not started" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'not attempted after the failure: mem-project-zlater' && [ ! -e '$H/.ssh/mem-project-zlater_ed25519' ]" _ "$OUT"
 
 echo "--- interrupts: INT and TERM stop the jobs, leave nothing running, and a re-run resumes"
-sigcase() { # name jobs signal expected-rc
-  local nm="$1" jb="$2" sg="$3" erc="$4" want pid rc n alive t
+sigcase() { # name jobs signal expected-rc [second-signal, 0.1 s later] [file|app: how the org token is given]
+  local nm="$1" jb="$2" sg="$3" erc="$4" sg2="${5:-}" mode="${6:-file}" want pid rc n alive t AUTH
   pjhome "$nm" alpha beta gamma; fstok
   mkdir -p "$BASE/$nm.tmp"; rm -f "$STUB_DIR/slow.pids"
+  if [ "$mode" = app ]; then AUTH=(--org-app memsync-admin --org-app-id 12345 --org-app-key-cmd "cat $BASE/app.pem")
+  else AUTH=(--org-token-file "$TF" --delete-org-token-file); fi
   want=$((jb * 2)); [ "$want" -le 8 ] || want=8
   set -m
   (HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_SLOW_INIT=60 STUB_SLOW_MATCH=project- TMPDIR="$BASE/$nm.tmp" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" GIT_CONFIG_NOSYSTEM=1 \
     BOOTSTRAP_APP_API_BASE="http://127.0.0.1:$APIPORT" CLAUDE_UTILS_URL="https://example.invalid/claude-utils.git" \
     exec python3 -I -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
     "$BASH" "$ROOT/scripts/bootstrap.sh" --sha "$SHA" "${REQ[@]}" --host testmac --role personal-dev --workspace "$H/code" --own-owner gitgat \
-    --yes --jobs "$jb" --org-token-file "$TF" --delete-org-token-file </dev/null >"$BASE/$nm.out" 2>&1) &
+    --yes --jobs "$jb" "${AUTH[@]}" </dev/null >"$BASE/$nm.out" 2>&1) &
   pid=$!
   set +m
   for _ in $(seq 1 480); do n="$({ wc -l <"$STUB_DIR/slow.pids"; } 2>/dev/null || echo 0)"; [ "${n:-0}" -ge "$want" ] && break; sleep 0.5; done
   kill -"$sg" "$pid" 2>/dev/null || true
+  if [ -n "$sg2" ]; then sleep 0.1; kill -"$sg2" "$pid" 2>/dev/null || true; fi
   set +e; wait "$pid"; rc=$?; set -e
   alive=0
   for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -1249,17 +1259,65 @@ sigcase() { # name jobs signal expected-rc
     [ "$alive" -eq 0 ] && break; sleep 0.5
   done
   SIG_PIDS="$(wc -l <"$STUB_DIR/slow.pids" 2>/dev/null || echo 0)"
-  check "$sg at --jobs $jb: exits $erc with ${SIG_PIDS//[[:space:]]/} stub processes started (at least $want)" bash -c "[ $rc -eq $erc ] && [ ${SIG_PIDS//[[:space:]]/} -ge $want ]"
-  check "$sg at --jobs $jb: no job process (stub, sleep) is left running" [ "$alive" -eq 0 ]
-  check "$sg at --jobs $jb: the org token file is deleted and the run's temp dir is gone" bash -c "[ ! -e '$TF' ] && [ -z \"\$(ls -A '$BASE/$nm.tmp')\" ]"
+  local tag="$sg${sg2:+ then $sg2 0.1 s later} at --jobs $jb ($mode)"
+  check "$tag: exits $erc with ${SIG_PIDS//[[:space:]]/} stub processes started (at least $want)" bash -c "[ $rc -eq $erc ] && [ ${SIG_PIDS//[[:space:]]/} -ge $want ]"
+  check "$tag: no job process (stub, sleep) is left running" [ "$alive" -eq 0 ]
+  check "$tag: the run's temp dir (job output, minted org token) is gone" bash -c "[ -z \"\$(ls -A '$BASE/$nm.tmp')\" ]"
+  if [ "$mode" = app ]; then
+    check "$tag: the admin app entry is removed from apps.json" bash -c "! grep -qs memsync-admin '$H/.config/claude-memsync/apps.json'"
+  else
+    check "$tag: the --delete-org-token-file file is deleted" bash -c "[ ! -e '$TF' ]"
+  fi
 }
 sigcase sg4 4 INT 130
 runboot --host testmac --role personal-dev --workspace "$H/code" --own-owner gitgat --yes --jobs 2
 check "after INT at --jobs 4 the same command resumes and completes" bash -c "[ $RC -eq 0 ] && [ -d '$H/.claudesync.d/project-gamma' ] && [ -d '$H/.claudesync.d/project-alpha' ]"
 sigcase sg1 1 TERM 143
-mkdir -p "$H/.claudesync.d/project-alpha/half"; : >"$H/.local/state/claude-memsync-bootstrap/testmac.initing.project-alpha" 2>/dev/null || { mkdir -p "$H/.local/state/claude-memsync-bootstrap"; : >"$H/.local/state/claude-memsync-bootstrap/testmac.initing.project-alpha"; }
+mkdir -p "$H/.claudesync.d/project-alpha/half" "$H/.local/state/claude-memsync-bootstrap"; : >"$H/.local/state/claude-memsync-bootstrap/testmac.initing.project-alpha"
+# without --yes (here: no terminal) and on a dry run the dir is not touched
+runboot --host testmac --role personal-dev --workspace "$H/code" --own-owner gitgat --jobs 2 --dry-run
+set +e; OUT="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" "$BASH" "$ROOT/scripts/bootstrap.sh" --sha "$SHA" --org-token-file "$BASE/orgtoken" "${REQ[@]}" --host testmac --role personal-dev --workspace "$H/code" --own-owner gitgat </dev/null 2>&1)"; RC=$?; set -e
+check "a dry run and a refused confirmation leave the half-made sync dir exactly where it is" bash -c "[ $RC -ne 0 ] && [ -d '$H/.claudesync.d/project-alpha/half' ] && ! ls -d '$H/.claudesync.d'/project-alpha.half-made.* >/dev/null 2>&1"
 runboot --host testmac --role personal-dev --workspace "$H/code" --own-owner gitgat --yes --jobs 2
 check "after TERM at --jobs 1 (with a half-made sync dir of an interrupted init) the same command resumes and completes" bash -c "[ $RC -eq 0 ] && [ -d '$H/.claudesync.d/project-gamma' ] && [ ! -e '$H/.claudesync.d/project-alpha/half' ] && printf '%s\n' \"\$1\" | grep -q 'half-made'" _ "$OUT"
+check "... and the half-made dir was moved aside, not deleted" bash -c "[ -d \"\$(ls -d '$H/.claudesync.d'/project-alpha.half-made.* | head -n1)/half\" ]"
+
+echo "--- a half-made sync dir that holds work is never moved"
+pjhome hm alpha
+mkdir -p "$H/.claudesync.d/project-alpha" "$H/.local/state/claude-memsync-bootstrap"
+git -C "$H/.claudesync.d/project-alpha" init -q -b main; echo work >"$H/.claudesync.d/project-alpha/note.md"; git -C "$H/.claudesync.d/project-alpha" add -A
+git -C "$H/.claudesync.d/project-alpha" -c user.name=t -c user.email=t@example.invalid commit -q -m "unpushed work"
+: >"$H/.local/state/claude-memsync-bootstrap/testmac.initing.project-alpha"   # a stale mark
+UNP="$(git -C "$H/.claudesync.d/project-alpha" log --branches --not --remotes --format=%H)"
+pjrun --jobs 2
+check "a stale initing mark next to a dir with an unpushed commit: refused, with a clear message, nothing created" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -qi 'not on any remote' && ! grep -q 'repo create' '$STUB_DIR/gh.log'" _ "$OUT"
+check "... the dir and the commit are intact, and nothing was moved aside" bash -c "[ \"\$(git -C '$H/.claudesync.d/project-alpha' log --branches --not --remotes --format=%H)\" = '$UNP' ] && [ -f '$H/.claudesync.d/project-alpha/note.md' ] && ! ls -d '$H/.claudesync.d'/project-alpha.half-made.* >/dev/null 2>&1"
+pjhome hm2 alpha
+mkdir -p "$H/.claudesync.d/project-alpha/half" "$H/.local/state/claude-memsync-bootstrap" "$H/.config/claude-memsync"
+: >"$H/.local/state/claude-memsync-bootstrap/testmac.initing.project-alpha"
+printf '{"repos":{"project-alpha":{"config":"%s/.claudesync.d/project-alpha/config.json","kind":"project","remote":"mem-project-alpha"}},"routes":[],"default":"deny"}\n' "$H" >"$H/.config/claude-memsync/routes.json"
+pjrun --jobs 2
+check "a dir that a routes.json this script did not write refers to: refused, left alone" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'routes.json' && [ -d '$H/.claudesync.d/project-alpha/half' ]" _ "$OUT"
+
+echo "--- an init interrupted after its push: the re-run finds the host already a recipient"
+newhome jr
+STUB_JOINREQ_ALREADY=1 runboot --host testhost --role homelab --yes
+check "join request says already a recipient: that counts as joined, the run completes, no pending join is listed" bash -c "[ $RC -eq 0 ] && [ -e '$H/.local/state/claude-memsync-bootstrap/testhost.join.personal' ] && ! printf '%s\n' \"\$1\" | grep -q 'pending join requests'" _ "$OUT"
+
+echo "--- an expired org token is named as such"
+newhome tx
+ORGARGS=(--org-token-cmd "secret-tool read vault://vault/item/field")
+STUB_401=1 BOOTSTRAP_TOKEN_AGE_BONUS=3600 runboot --host testhost --role homelab --yes
+check "a 401 an hour after the token was minted says the token has probably expired and the run resumes" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'org token has probably expired'" _ "$OUT"
+newhome tx2
+STUB_401=1 runboot --host testhost --role homelab --yes
+ORGARGS=(--org-token-file "$BASE/orgtoken")
+check "a 401 on a fresh token does not claim it expired" bash -c "[ $RC -ne 0 ] && ! printf '%s\n' \"\$1\" | grep -q 'probably expired'" _ "$OUT"
+
+echo "--- a second signal during the clean-up does not cut it short"
+sigcase dsA 2 INT 130 INT file
+sigcase dsB 2 INT 130 TERM app
+sigcase dsC 2 INT 130 HUP file
 
 echo "--- the org token is minted once, and a dry run creates nothing"
 pjhome tk alpha beta gamma
@@ -1355,6 +1413,11 @@ rawboot --host testhost --role homelab --sha "$SHA" --org "$ORG" --recovery-reci
 check "an unbalanced quote in --org-token-cmd exits 2" [ "$RC" -eq 2 ]
 # usage errors are found before the pause (exit 3) and before the token file is looked at (exit 1)
 MISSING_KEY=(--check-app memsync-check --check-app-id 1 --check-key-file "$H/no-such-check.pem")
+rawboot "${XB[@]}" --role personal-dev --workspace "$H/no-such-dir" "${MISSING_KEY[@]}" --dry-run
+check "a --workspace that is not a directory plus a missing check key: exit 2, not the pause" [ "$RC" -eq 2 ]
+mkdir -p "$H/wsgit/.git"
+rawboot "${XB[@]}" --role personal-dev --workspace "$H/wsgit" "${MISSING_KEY[@]}" --dry-run
+check "a --workspace that is itself a git checkout plus a missing check key: exit 2, not the pause" [ "$RC" -eq 2 ]
 rawboot --host testhost --sha "$SHA" --org "$ORG" --recovery-recipient "$PQREC" --org-token-file "$BASE/orgtoken" "${MISSING_KEY[@]}" --dry-run
 check "no --role plus a missing check key: exit 2, not the pause" [ "$RC" -eq 2 ]
 rawboot "${XB[@]}" --host 'Bad_Host' "${MISSING_KEY[@]}" --dry-run
