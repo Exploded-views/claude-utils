@@ -414,6 +414,46 @@ func rekeyPush(repo *gitwt.Repo, p agecrypt.RekeyPlan, fresh bool) error {
 // or not) whose repo-local memage.identity names the file old.
 func clonesUsingIdentity(old string, hostCfgs []config.Config) []string {
 	want := filepath.Clean(filepath.FromSlash(old))
+	var out []string
+	for _, dir := range cloneDirs(hostCfgs) {
+		if id := identityInGitConfig(filepath.Join(dir, ".git", "config")); id != "" && filepath.Clean(filepath.FromSlash(id)) == want {
+			out = append(out, dir)
+		}
+	}
+	return out
+}
+
+// clonesWithPendingRecord lists the clones whose restore record names old as
+// their classic identity and is not finished: such a clone may still roll
+// back, and a rollback needs the file. A record from an older build (no stage)
+// counts unless the clone is already post-quantum; one that cannot be read
+// counts too.
+func clonesWithPendingRecord(old string, hostCfgs []config.Config) []string {
+	want := filepath.Clean(filepath.FromSlash(old))
+	var out []string
+	for _, dir := range cloneDirs(hostCfgs) {
+		st, err := agecrypt.ReadRekeyStateAt(dir)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			continue
+		case err != nil:
+			out = append(out, dir)
+			continue
+		}
+		if filepath.Clean(filepath.FromSlash(st.ClassicIdentity)) != want || st.Finished() {
+			continue
+		}
+		if st.Stage == "" && gitConfigValue(filepath.Join(dir, ".git", "config"), "memage", "scheme") == agecrypt.SchemePQ {
+			continue
+		}
+		out = append(out, dir)
+	}
+	return out
+}
+
+// cloneDirs lists the git clones of the host: the sync dirs and every clone
+// beside them.
+func cloneDirs(hostCfgs []config.Config) []string {
 	parents := map[string]bool{}
 	for _, c := range hostCfgs {
 		parents[filepath.Dir(filepath.Clean(c.SyncDir))] = true
@@ -426,9 +466,7 @@ func clonesUsingIdentity(old string, hostCfgs []config.Config) []string {
 			return
 		}
 		seen[dir] = true
-		if id := identityInGitConfig(gitCfg); id != "" && filepath.Clean(filepath.FromSlash(id)) == want {
-			out = append(out, dir)
-		}
+		out = append(out, dir)
 	}
 	for _, c := range hostCfgs {
 		check(filepath.Join(c.SyncDir, ".git", "config"))
@@ -445,7 +483,10 @@ func clonesUsingIdentity(old string, hostCfgs []config.Config) []string {
 
 // identityInGitConfig reads memage.identity out of a git config file without
 // running git (the file may belong to any clone).
-func identityInGitConfig(path string) string {
+func identityInGitConfig(path string) string { return gitConfigValue(path, "memage", "identity") }
+
+// gitConfigValue reads [section] key out of a git config file.
+func gitConfigValue(path, section, key string) string {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return ""
@@ -455,13 +496,13 @@ func identityInGitConfig(path string) string {
 		l = strings.TrimSpace(l)
 		if strings.HasPrefix(l, "[") {
 			f := strings.Fields(strings.Trim(l, "[]"))
-			in = len(f) > 0 && strings.EqualFold(f[0], "memage")
+			in = len(f) > 0 && strings.EqualFold(f[0], section)
 			continue
 		}
 		if !in {
 			continue
 		}
-		if k, v, ok := strings.Cut(l, "="); ok && strings.EqualFold(strings.TrimSpace(k), "identity") {
+		if k, v, ok := strings.Cut(l, "="); ok && strings.EqualFold(strings.TrimSpace(k), key) {
 			return strings.Trim(strings.TrimSpace(v), `"`)
 		}
 	}
@@ -483,6 +524,11 @@ func retireClassicIdentity(stdout io.Writer, old string, done config.Config, hos
 	if users := clonesUsingIdentity(old, cfgs); len(users) > 0 {
 		fmt.Fprintf(stdout, "  the classic identity %s is kept: still used by %s\n", old, strings.Join(users, ", "))
 		fmt.Fprintln(stdout, "  rekey those clones (or remove them), then run this command again to retire it")
+		return
+	}
+	if pend := clonesWithPendingRecord(old, cfgs); len(pend) > 0 {
+		fmt.Fprintf(stdout, "  the classic identity %s is kept: the restore record of %s still names it (an unfinished rekey that a rollback would need it for)\n", old, strings.Join(pend, ", "))
+		fmt.Fprintln(stdout, "  finish or roll back that rekey, then run this command again to retire it")
 		return
 	}
 	if !apply {

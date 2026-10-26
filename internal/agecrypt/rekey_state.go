@@ -255,6 +255,45 @@ func PlanFromState(repo *gitwt.Repo, st PreRekeyState) RekeyPlan {
 	return RekeyPlan{Tip: st.Tip, NewCommit: head, NewRecipient: st.NewRecipient, IdentityPath: st.ClassicIdentity}
 }
 
+// RetiredSuffix is what a retired classic identity file is renamed to.
+const RetiredSuffix = ".classic-retired"
+
+// restoreClassicIdentityFile makes sure the classic identity a rollback
+// restores can be loaded, renaming <id>.classic-retired back if that is where
+// it went. Without it the rolled-back repo could not be read by anyone.
+func restoreClassicIdentityFile(path string) error {
+	if path == "" {
+		return errors.New("the restore record names no classic identity; refusing to roll back")
+	}
+	p := filepath.FromSlash(path)
+	if _, err := os.Stat(p); err != nil {
+		if _, rerr := os.Stat(p + RetiredSuffix); rerr != nil {
+			return fmt.Errorf("the classic identity %s is missing, and so is %s: a rollback would leave the classic repo unreadable; put the classic identity file back first (from your offline backup), then rerun", path, filepath.Base(p)+RetiredSuffix)
+		}
+		if err := os.Rename(p+RetiredSuffix, p); err != nil {
+			return fmt.Errorf("cannot rename %s back: %w", filepath.Base(p)+RetiredSuffix, err)
+		}
+	}
+	if _, err := LoadIdentities(p); err != nil {
+		return fmt.Errorf("the classic identity %s cannot be loaded: %w", path, err)
+	}
+	return nil
+}
+
+// ReadRekeyStateAt reads the restore record of the clone at dir (its .git
+// directory); os.ErrNotExist when there is none.
+func ReadRekeyStateAt(dir string) (PreRekeyState, error) {
+	var st PreRekeyState
+	b, err := os.ReadFile(filepath.Join(dir, ".git", RekeyStateFile))
+	if err != nil {
+		return st, err
+	}
+	if err := json.Unmarshal(b, &st); err != nil {
+		return st, fmt.Errorf("%s: %w", RekeyStateFile, err)
+	}
+	return st, nil
+}
+
 // RollbackOpts says what a rollback may do beyond the plain undo.
 type RollbackOpts struct {
 	// DiscardLocalCommits lets the rollback drop commits made after the
@@ -336,6 +375,9 @@ func RollbackRekey(repo *gitwt.Repo, opts RollbackOpts, restoreConfig func(Prior
 		return st, err
 	} else if strings.TrimSpace(out) != "" {
 		return st, errors.New("the work-tree has uncommitted changes; a rollback would discard them (refusing)")
+	}
+	if err := restoreClassicIdentityFile(st.ClassicIdentity); err != nil {
+		return st, err
 	}
 	// The classic identity first: the reset below checks files out through the filter.
 	if err := repo.ConfigSet(IdentityConfigKey, filepath.ToSlash(st.ClassicIdentity)); err != nil {
