@@ -46,7 +46,7 @@ WORKSPACE_REPO="mem-project-code-workspace"
 GITHUB_FP="SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU"
 UTILS_URL="${CLAUDE_UTILS_URL:-https://github.com/Exploded-views/claude-utils}"
 
-HOST="" ROLE="" SHA="" ORG="" AGE_RECOVERY="" DRY_RUN=0 YES=0
+HOST="" ROLE="" SHA="" SHA_GIVEN=0 PREBUILT_DIR="" PB_VER="" ORG="" AGE_RECOVERY="" DRY_RUN=0 YES=0
 WORKSPACES=() OWN_OWNERS=() KEEP_OUT_OWNERS=() KEEP_OUT_TERMS=() ALLOW_ORGS=() ORG_TOKEN_FILE="" ORG_TOKEN_CMD="" ORG_APP=""
 ORG_APP_ID="" ORG_APP_KEY_CMD="" CHECK_APP="" CHECK_APP_ID="" CHECK_KEY_FILE="" APP_API_BASE="${BOOTSTRAP_APP_API_BASE:-}" ADMIN_WRITTEN=0
 
@@ -97,7 +97,7 @@ check_prereqs() {
   if [ "${BASH_VERSINFO[0]}" -lt 3 ] || { [ "${BASH_VERSINFO[0]}" -eq 3 ] && [ "${BASH_VERSINFO[1]}" -lt 2 ]; }; then
     miss "bash ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]} is too old (need >= 3.2; macOS /bin/bash 3.2 is enough)"
   fi
-  for t in sed awk grep tr cut sort head find stat mktemp id uname dirname chmod ln; do
+  for t in sed awk grep tr cut sort head find stat mktemp id uname dirname chmod ln $([ "$BUILD_FROM_SOURCE" -eq 1 ] || echo 'cp cmp'); do
     command -v "$t" >/dev/null 2>&1 || miss "$t (a basic tool the script uses)"
   done
   if command -v git >/dev/null 2>&1; then
@@ -279,6 +279,22 @@ check_token_file() {
   [ "$n" = 1 ] || die "org token file $f must have one hard link (has $n)"
 }
 
+# check_prebuilt: --prebuilt-dir must hold both binaries, executable, and
+# claude-memsync must report the version we expect. Sets PREBUILT_DIR (absolute)
+# and PB_VER. Runs the given claude-memsync once, with `version`, which is the
+# point: the binary says what it is.
+check_prebuilt() {
+  local b got
+  [ -d "$PREBUILT_DIR" ] || die "--prebuilt-dir $PREBUILT_DIR is not a directory"
+  PREBUILT_DIR="$(cd "$PREBUILT_DIR" && pwd -P)"
+  for b in claude-memsync claude-memmerge; do
+    { [ -f "$PREBUILT_DIR/$b" ] && [ -x "$PREBUILT_DIR/$b" ]; } || die "--prebuilt-dir: $PREBUILT_DIR/$b is missing or not executable"
+  done
+  got="$("$PREBUILT_DIR/claude-memsync" version 2>&1)" || die "--prebuilt-dir: '$PREBUILT_DIR/claude-memsync version' failed"
+  PB_VER="${got#claude-memsync }"
+  printf '%s' "$PB_VER" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._+-]*$' || die "--prebuilt-dir: unexpected version output from $PREBUILT_DIR/claude-memsync"
+}
+
 # ---------------------------------------------------------------------------
 # Arguments
 # ---------------------------------------------------------------------------
@@ -286,7 +302,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --host)       [ $# -ge 2 ] || usage; HOST="$2"; shift 2 ;;
     --role)       [ $# -ge 2 ] || usage; ROLE="$2"; shift 2 ;;
-    --sha)        [ $# -ge 2 ] || usage; SHA="$2"; shift 2 ;;
+    --sha)        [ $# -ge 2 ] || usage; SHA="$2"; SHA_GIVEN=1; shift 2 ;;
+    --prebuilt-dir) [ $# -ge 2 ] || usage; PREBUILT_DIR="$2"; shift 2 ;;
     --org)        [ $# -ge 2 ] || usage; ORG="$2"; shift 2 ;;
     --recovery-recipient) [ $# -ge 2 ] || usage; AGE_RECOVERY="$2"; shift 2 ;;
     --workspace)  [ $# -ge 2 ] || usage; WORKSPACES+=("$2"); shift 2 ;;
@@ -312,6 +329,7 @@ while [ $# -gt 0 ]; do
     *)            udie "unknown argument: $1" ;;
   esac
 done
+[ -z "$PREBUILT_DIR" ] || BUILD_FROM_SOURCE=0   # installing given binaries: no clone, no build, no Go
 check_prereqs
 [ -n "$HOST" ] || die "--host is required"
 [ -n "$ORG" ] || die "--org <org> is required: the GitHub organisation that holds the memory repos (there is no default)"
@@ -359,14 +377,30 @@ printf '%s' "$ORG" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9-]*$' || die "bad --org '$O
 for o in ${KEEP_OUT_OWNERS[@]+"${KEEP_OUT_OWNERS[@]}"}; do
   [ "$o" != "$(lower "$ORG")" ] || die "--org '$ORG' is also a keep-out owner; refusing"
 done
-if [ -z "$SHA" ]; then
-  SHA="$(git -C "$(dirname "$0")" rev-parse HEAD 2>/dev/null || true)"
-  [ -n "$SHA" ] || die "--sha is required when the script is not run from a git checkout"
+if [ -n "$PREBUILT_DIR" ]; then
+  check_prebuilt
+  if [ "$SHA_GIVEN" -eq 1 ]; then
+    printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || die "--sha must be a full 40-hex commit"
+    SHORT="$(printf '%s' "$SHA" | cut -c1-12)"
+    LIB_ID="$SHA"
+    SRC="$HOME/.local/src/claude-utils-$SHA"
+    case "$PB_VER" in *"$SHORT"*) ;; *) die "--prebuilt-dir: $PREBUILT_DIR/claude-memsync reports version '$PB_VER', which does not match --sha $SHORT; refusing" ;; esac
+  else
+    printf '%s' "$PB_VER" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9._+-]*$' \
+      || die "--prebuilt-dir: $PREBUILT_DIR/claude-memsync reports version '$PB_VER', which is not a release version (a tagged release stamps vX.Y.Z); pass --sha <commit> for a build of that commit"
+    SHORT="$PB_VER"; LIB_ID="$PB_VER"; SRC=""
+  fi
+else
+  if [ -z "$SHA" ]; then
+    SHA="$(git -C "$(dirname "$0")" rev-parse HEAD 2>/dev/null || true)"
+    [ -n "$SHA" ] || die "--sha is required when the script is not run from a git checkout"
+  fi
+  printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || die "--sha must be a full 40-hex commit"
+  SHORT="$(printf '%s' "$SHA" | cut -c1-12)"
+  LIB_ID="$SHA"
+  SRC="$HOME/.local/src/claude-utils-$SHA"
 fi
-printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || die "--sha must be a full 40-hex commit"
-SHORT="$(printf '%s' "$SHA" | cut -c1-12)"
-SRC="$HOME/.local/src/claude-utils-$SHA"
-LIB="$HOME/.local/lib/claude-memsync/$SHA"
+LIB="$HOME/.local/lib/claude-memsync/$LIB_ID"
 if [ ${#KEEP_OUT_OWNERS[@]} -eq 0 ] && [ ${#KEEP_OUT_TERMS[@]} -eq 0 ]; then
   say "keep-out lists: none (routing alone decides what syncs)"
 fi
@@ -717,7 +751,38 @@ confirm_plan() {
 # ---------------------------------------------------------------------------
 # b. Source and build
 # ---------------------------------------------------------------------------
+step_install_prebuilt() {
+  step "b. Install prebuilt binaries from $PREBUILT_DIR ($SHORT)"
+  local b
+  for b in claude-memsync claude-memmerge; do
+    if [ -e "$LIB/$b" ]; then
+      cmp -s "$PREBUILT_DIR/$b" "$LIB/$b" || die "$LIB/$b exists and differs from $PREBUILT_DIR/$b; refusing to overwrite it"
+    fi
+  done
+  if [ -x "$LIB/claude-memsync" ] && [ -x "$LIB/claude-memmerge" ]; then
+    say "  binaries present in $LIB"
+  else
+    run mkdir -p "$LIB"
+    for b in claude-memsync claude-memmerge; do
+      run cp "$PREBUILT_DIR/$b" "$LIB/$b.tmp"
+      run chmod 755 "$LIB/$b.tmp"
+      run mv -f "$LIB/$b.tmp" "$LIB/$b"
+    done
+  fi
+  link_binaries
+}
+
+link_binaries() {
+  run mkdir -p "$BIN"
+  local b
+  for b in claude-memsync claude-memmerge; do
+    [ ! -e "$BIN/$b" ] || [ -L "$BIN/$b" ] || die "$BIN/$b exists and is not a symlink"
+    run ln -sfn "$LIB/$b" "$BIN/$b"
+  done
+}
+
 step_build() {
+  if [ -n "$PREBUILT_DIR" ]; then step_install_prebuilt; return 0; fi
   step "b. Clone claude-utils at $SHORT and build"
   if [ -d "$SRC/.git" ] && [ "$(git -C "$SRC" rev-parse HEAD)" = "$SHA" ]; then
     say "  clone present at $SRC"
@@ -742,12 +807,7 @@ step_build() {
         sh -c 'go build -o /out/claude-memsync ./cmd/claude-memsync && go build -o /out/claude-memmerge ./cmd/claude-memmerge'
     fi
   fi
-  run mkdir -p "$BIN"
-  local b
-  for b in claude-memsync claude-memmerge; do
-    [ ! -e "$BIN/$b" ] || [ -L "$BIN/$b" ] || die "$BIN/$b exists and is not a symlink"
-    run ln -sfn "$LIB/$b" "$BIN/$b"
-  done
+  link_binaries
 }
 
 # ---------------------------------------------------------------------------
@@ -1071,6 +1131,11 @@ step_home() {
 step_plugin() {
   step "h. Plugin memory-notices"
   if done_p plugin; then say "  already installed"; return 0; fi
+  if [ "$BUILD_FROM_SOURCE" -eq 0 ] && { [ -z "$SRC" ] || [ ! -d "$SRC/.git" ]; }; then
+    say "  plugin step skipped: a prebuilt install has no source checkout"
+    NEXT_STEPS+=("install the plugin from a clone of the matching commit: claude plugin marketplace add <clone> && claude plugin install memory-notices@claude-utils")
+    return 0
+  fi
   if [ "$DRY_RUN" -eq 0 ] && ! command -v claude >/dev/null; then
     warn "claude not found; skipping the plugin"
     NEXT_STEPS+=("install Claude Code, then: claude plugin marketplace add $SRC && claude plugin install memory-notices@claude-utils")

@@ -279,7 +279,7 @@ jsonok() { python3 -I -c "$1" "$2"; }
 # stubs for gh, go and friends, the real rest), minus the ones named, so a
 # missing tool is really missing.
 MININ=0
-MINI_TOOLS="git python3 ssh-keygen ssh-keyscan gh systemctl launchctl claude go sed awk grep tr cut sort head tail find dirname basename cat id uname stat mktemp chmod mkdir ln rm cp mv touch date env wc tee readlink sleep sh bash shred dd tar sha256sum"
+MINI_TOOLS="cmp git python3 ssh-keygen ssh-keyscan gh systemctl launchctl claude go sed awk grep tr cut sort head tail find dirname basename cat id uname stat mktemp chmod mkdir ln rm cp mv touch date env wc tee readlink sleep sh bash shred dd tar sha256sum"
 minipath() {
   local d="$BASE/mini.$MININ" t p; MININ=$((MININ + 1))
   rm -rf "$d"; mkdir -p "$d"
@@ -447,7 +447,7 @@ else
   BOOT_PATH="$(minipath go)" runboot --host testhost --role homelab --dry-run --sha "$BSHA" --prebuilt-dir "$PB/real"
   check "prebuilt dry run without Go on PATH exits 0" [ "$RC" -eq 0 ]
   check "prebuilt dry run says it installs from the dir, to the sha dir, and clones nothing" bash -c "printf '%s\n' \"\$1\" | grep -q 'Install prebuilt binaries from $PB/real' && printf '%s\n' \"\$1\" | grep -q '.local/lib/claude-memsync/$BSHA' && ! printf '%s\n' \"\$1\" | grep -q 'git clone'" _ "$OUT"
-  check "prebuilt dry run changes nothing" untouched
+  check "prebuilt dry run changes nothing" bash -c "[ -z \"\$(find '$H' -mindepth 1 -not -name .gitconfig | head -1)\" ] && ! grep -qE 'repo (create|deploy-key)' '$STUB_DIR/gh.log'"
   newhome pb2
   runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
   [ "$RC" -eq 0 ] || echo "$OUT" | tail -8
