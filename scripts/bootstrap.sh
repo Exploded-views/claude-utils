@@ -201,6 +201,27 @@ else:
 ' "$1" "$2"
 }
 
+# check_key_pause: the per-host check key has to be minted by a human in the
+# GitHub UI. When the file is not there, say exactly how and exit 3 (paused,
+# needs a human) before anything is changed; the same command resumes.
+check_key_pause() {
+  local f="$CHECK_KEY_FILE"
+  case "$f" in /*) ;; *) die "--check-key-file must be an absolute path" ;; esac
+  if [ ! -e "$f" ] && [ ! -L "$f" ]; then
+    {
+      printf 'PAUSED: the check key %s does not exist yet. Nothing has been changed.\n' "$f"
+      printf 'A human has to create it:\n'
+      printf '  1. In a browser, as an owner of %s: GitHub > Settings > Developer settings > GitHub Apps > %s\n' "$ORG" "$CHECK_APP"
+      printf '  2. Under "Private keys" click "Generate a private key"; the browser downloads a .pem.\n'
+      printf '  3. On this host: copy the downloaded .pem to %s\n' "$f"
+      printf '  4. chmod 600 %s\n' "$f"
+      printf '  5. Delete the download from wherever the browser put it.\n'
+      printf '  6. Rerun the same command.\n'
+    } >&2
+    exit 3
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Arguments
 # ---------------------------------------------------------------------------
@@ -258,6 +279,7 @@ if [ -n "$CHECK_APP$CHECK_APP_ID$CHECK_KEY_FILE" ]; then
   printf '%s' "$CHECK_APP" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' || die "bad --check-app '$CHECK_APP'"
   printf '%s' "$CHECK_APP_ID" | grep -Eq '^[0-9]{1,20}$' || die "bad --check-app-id (numeric)"
   [ "$CHECK_APP" != "$ORG_APP" ] || die "--check-app must differ from --org-app: the admin app never serves the daemon"
+  check_key_pause
 fi
 ORG_TOKEN_ARGV=()
 if [ -n "$ORG_TOKEN_CMD" ]; then
