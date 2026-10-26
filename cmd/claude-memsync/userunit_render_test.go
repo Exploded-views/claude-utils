@@ -56,6 +56,10 @@ func TestGeneratedUserUnit_InstallSectionNamesDefaultTarget(t *testing.T) {
 		f, _ := os.OpenFile(log, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
 		defer f.Close()
 		f.WriteString("ours --user " + strings.Join(args, " ") + "\n")
+		if args[0] == "enable" { // what the real one does
+			os.MkdirAll(filepath.Dir(wantsLink(unit)), 0o755)
+			os.Symlink(unit, wantsLink(unit))
+		}
 		return nil
 	}
 	oldG := unitGOOS

@@ -664,10 +664,17 @@ about it. Re-run `claude-memsync install` (or just `claude-memsync start`): it
 rewrites the unit to `WantedBy=default.target`, runs
 `systemctl --user daemon-reload` and re-enables it. Then check with
 `systemctl --user is-enabled claude-memsync.service` and, after the next
-reboot, `claude-memsync status`. New installs are right from the start. On
-macOS the launchd agent sets `RunAtLoad` and `KeepAlive`; a plist written by an
-older version lacks `RunAtLoad`, so `claude-memsync uninstall` and `install`
-once.
+reboot, `claude-memsync status`. `status` and `doctor` count the unit as fine
+only when it says `WantedBy=default.target` and the link in
+`~/.config/systemd/user/default.target.wants/` exists. If the user manager is
+not reachable (no login session), nothing is changed and the exact systemctl
+commands are printed. Re-running `install` with a different `--config` or
+`--routes` also rewrites the unit's `ExecStart`; restart the daemon to apply
+it. New installs are right from the start.
+
+On macOS the launchd agent sets `RunAtLoad` and `KeepAlive` explicitly. The
+library's `KeepAlive` default already starts the agent at load, so `RunAtLoad`
+is insurance and a plist from an older version needs no action.
 
 ## Converting a classic repo to post-quantum
 

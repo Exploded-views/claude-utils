@@ -48,16 +48,30 @@ func installTask(configPath string) error {
 	if err != nil {
 		return err
 	}
-	// A unit written by an earlier version is fixed in place: kardianos
-	// refuses to install over an existing unit.
-	if _, _, wrong := userUnitWrong(); wrong {
-		return ensureUserUnitTarget(os.Stderr)
+	// An existing unit is repaired in place (kardianos refuses to install
+	// over one): its autostart target, and its ExecStart when the requested
+	// config or routes differ.
+	if _, content, ok := readUserUnit(); ok {
+		cp := configPath
+		if cp == "" {
+			cp = defaultConfigPath()
+		}
+		exe, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		want := execStartLine(exe, serviceConfig(cp).Arguments)
+		if _, changed := setExecStart(content, want); changed || userUnitIsWrong() {
+			return repairUserUnit(os.Stderr, want)
+		}
 	}
 	if err := kardianosInstall(svc); err != nil {
 		return err
 	}
 	return ensureUserUnitTarget(os.Stderr)
 }
+
+func userUnitIsWrong() bool { _, _, w := userUnitWrong(); return w }
 
 func uninstallTask() error {
 	svc, err := userSvc("")
