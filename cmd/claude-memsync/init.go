@@ -43,12 +43,8 @@ func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
 // defaultIdentityPath is where init keeps this host's age identity: outside
 // the sync repo, which must never hold it.
 func defaultIdentityPath() string {
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		home, _ := os.UserHomeDir()
-		dir = filepath.Join(home, ".config")
-	}
-	return filepath.Join(dir, "claude-memsync", "identity.txt")
+	p, _ := config.Resolve("identity.txt", "identity-pq.txt")
+	return p
 }
 
 // runInit handles `claude-memsync init [flags]`.
@@ -70,7 +66,7 @@ func runInit(args []string) int {
 	archiveDeletes := flags.Bool("archive-deletes", false, "archive instead of delete: a note removed from a Claude folder moves to archive/ in the repo (sets archiveDeletes in config.json)")
 	denylist := flags.String("denylist", "", "UTF-8 file of regexes (one per line) to install as the denylist before the first commit")
 	encrypt := flags.Bool("encrypt", false, "encrypt every file in the repo with age (new or already-encrypted remotes only)")
-	identity := flags.String("identity", "", "with --encrypt: age identity file (default: per-host key under the user config dir; generated if missing)")
+	identity := flags.String("identity", "", "with --encrypt: age identity file (default: identity.txt in the claude-memsync config dir, $XDG_CONFIG_HOME or ~/.config, or in the older OS config dir if the file is already there; generated if missing)")
 	scheme := flags.String("encryption-scheme", agecrypt.SchemePQ, "with --encrypt: pq (hybrid post-quantum age keys only, the default) or classic (upstream-compatible X25519/ssh keys); saved as encryptionScheme")
 	var extraRecipients stringList
 	var gopts guardOpts

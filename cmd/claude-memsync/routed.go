@@ -25,14 +25,11 @@ import (
 // routesEnv overrides the routes.json location (tests, unusual layouts).
 const routesEnv = "CLAUDE_MEMSYNC_ROUTES"
 
-// defaultRoutesPath is ~/.config/claude-memsync/routes.json, per host and never
+// defaultRoutesPath is routes.json in config.Dir(), per host and never
 // synced.
 func defaultRoutesPath() string {
-	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "claude-memsync", "routes.json")
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "claude-memsync", "routes.json")
+	dir, _ := config.Dir()
+	return filepath.Join(dir, "routes.json")
 }
 
 // knownRoutesPaths lists the places a routes file may be without being named:

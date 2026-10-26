@@ -178,8 +178,13 @@ claude-memsync init --remote git@gh-mem-personal:<your-org>/mem-personal.git \
   --github-app memsync-check
 ```
 
-`init --encrypt` creates this host's own hybrid identity under the user config
-dir (mode 0600) and prints only its public key. With several repos, write
+`init --encrypt` creates this host's own hybrid identity in
+`~/.config/claude-memsync/` (or `$XDG_CONFIG_HOME/claude-memsync/`; mode 0600)
+and prints only its public key. On a Mac the identity is there too, except on
+installs made before this rule, where it stays in
+`~/Library/Application Support/claude-memsync/` and keeps working (`status` hints
+at moving it; see "The config directory" in [claude-memsync.md](claude-memsync.md)).
+With several repos, write
 `~/.config/claude-memsync/routes.json` (see "Several repos per host" in
 [claude-memsync.md](claude-memsync.md#several-repos-per-host)), pin the home
 folder, and start the service:

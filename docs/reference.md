@@ -65,7 +65,7 @@ Usage of init:
   -host-label string
     	a name you choose for this host (such as laptop-2): titles its deploy keys, labels its age recipient, names it in the registry; saved to config
   -identity string
-    	with --encrypt: age identity file (default: per-host key under the user config dir; generated if missing)
+    	with --encrypt: age identity file (default: identity.txt in the claude-memsync config dir, $XDG_CONFIG_HOME or ~/.config, or in the older OS config dir if the file is already there; generated if missing)
   -ignore-foreign-writers
     	go on although a foreignWriters entry is active or cannot be checked (logged)
   -private-only
