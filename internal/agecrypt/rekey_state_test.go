@@ -378,6 +378,10 @@ func TestRekeyState_VerifyAndDropBackup(t *testing.T) {
 	if _, _, err := VerifyHybridRemote(repo, "main", 1); err == nil {
 		t.Error("a wrong commit count must fail")
 	}
+	if err := DropBackup(repo); err == nil {
+		t.Fatal("an unfinished record must keep the backup")
+	}
+	f.stage(t, RekeyRecPublished)
 	if err := DropBackup(repo); err != nil {
 		t.Fatal(err)
 	}

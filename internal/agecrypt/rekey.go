@@ -351,6 +351,9 @@ func DropBackup(repo *gitwt.Repo) error {
 	if _, err := repo.Run("rev-parse", "--verify", "--quiet", BackupRef); err != nil {
 		return errors.New("no backup ref " + BackupRef)
 	}
+	if err := checkDropAllowed(repo); err != nil {
+		return err
+	}
 	// Only the refs that held the old history: `--all` would also expire the
 	// stash reflog (the daemon's autostash) and lose its entries.
 	for _, ref := range []string{"HEAD", "refs/heads/main", "refs/remotes/origin/main"} {

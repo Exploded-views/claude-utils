@@ -577,3 +577,32 @@ func RollbackRekey(repo *gitwt.Repo, opts RollbackOpts, restoreConfig func(Prior
 	removeRekeyState(repo)
 	return st, nil
 }
+
+// checkDropAllowed refuses to drop the backup (the rollback point) while the
+// rekey is not published: the record must be finished or, for one from an older
+// build, origin/main must have moved off the backup tip and HEAD descend from
+// the migrated commit that can be inferred. No record means there is nothing
+// the backup is protecting.
+func checkDropAllowed(repo *gitwt.Repo) error {
+	st, err := ReadRekeyState(repo)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if st.Finished() {
+		return nil
+	}
+	if st.Stage == "" {
+		remote, _ := revOf(repo, "refs/remotes/origin/main")
+		if remote != "" && remote != st.Tip {
+			if mc, ok := InferMigrated(repo, st, "refs/remotes/origin/main"); ok {
+				if _, err := repo.Run("merge-base", "--is-ancestor", mc, "HEAD"); err == nil {
+					return nil
+				}
+			}
+		}
+	}
+	return errors.New("the rekey is not published (restore record stage " + stageName(st) + "), and the backup is its rollback point: finish it with `recipients rekey-pq --apply` or undo it with `--rollback` first")
+}
