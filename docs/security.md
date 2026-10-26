@@ -203,14 +203,27 @@ your password manager's CLI. What it protects, and what it does not:
 
 - **The key is passed only on that command's standard input.** It is not in an
   argument (visible in the process list), not in the environment, and never
-  printed or logged by the tool. Errors name an exit status or a timeout, not
-  the command's output.
-- **It refuses a weak source.** A file readable by group or others, owned by
-  someone else, with another hard link, a symlink, or not an age identity is
-  not read into the store command.
+  printed or logged by the tool. The `{fingerprint}` and `{name}` placeholders
+  carry only public values. The store and verify commands' stderr is discarded
+  on purpose; errors name an exit status or a timeout, so to diagnose a
+  failing command, run it by hand.
+- **It refuses a weak source.** A file with any permission beyond 0600, owned
+  by someone else, with another hard link, a symlink (also when a clone's
+  `memage.identity` names one), or not an age identity is not read into the
+  store command. **On Windows the mode, owner and hard-link checks are not
+  made** (there are no such bits; the ACL is not inspected): only the
+  regular-file, symlink and parse checks apply.
+- **It will not silently lose a key.** With several identities, a fixed item
+  title would be overwritten by each in turn, and each would still verify. The
+  command refuses to run unless the title carries `{fingerprint}` or `{name}`,
+  and refuses two files that expand to the same item.
 - **Verification compares digests.** The read-back is checked by SHA-256 and
-  only the verdict is shown. Without `--verify-cmd` the backup is unverified,
-  and the command says so.
+  only the verdict is shown. Without `--verify-cmd` the backup is
+  UNVERIFIED: the command says so up front and in its summary line, but still
+  exits 0.
+- **It reduces what a crash leaves behind.** Core dumps are turned off
+  (`RLIMIT_CORE` soft limit 0) and on Linux the process is made undumpable
+  (`PR_SET_DUMPABLE` 0), best effort. Windows has no equivalent.
 - **It does not protect the key from the command you give it.** The store
   command receives the plaintext key and can do anything with it; a wrapper
   script that logs its stdin defeats the point. Use the manager's own CLI.

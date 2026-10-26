@@ -501,7 +501,7 @@ Usage of identity backup:
   -routes string
     	routes file
   -store-cmd string
-    	command that stores the identity read from its stdin (argv, no shell)
+    	command that stores the identity read from its stdin (argv, no shell; {fingerprint} and {name} are replaced per file, and needed when several files are found)
   -verify-cmd string
     	command that prints the stored bytes on stdout, to compare with the file
 ```

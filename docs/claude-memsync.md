@@ -1089,28 +1089,48 @@ Stores this host's age identity file or files in your password manager and,
 with `--verify-cmd`, proves the stored copy is the same bytes. See
 [setup.md](setup.md#back-up-the-host-identity) for the usage and examples.
 
-What it does, in order, for each file:
+What it does, in order:
 
-1. Resolves the files: `--identity`, else the distinct `memage.identity` of
-   `--repo`'s or `--config`'s clone, else of every clone this host routes
-   (a shared identity once).
-2. Checks the file: a regular file, not a symlink (also checked on the opened
+1. Hardens the process once the arguments are valid: core dumps off
+   (`RLIMIT_CORE` soft limit 0 on Linux and macOS) and, on Linux,
+   `PR_SET_DUMPABLE` 0. Best effort; Windows has no equivalent.
+2. Resolves the files: `--identity`, else the distinct `memage.identity` of
+   `--repo`'s or `--config`'s clone, else of every clone this host routes.
+   For the whole host it adds the default identities related read clones use,
+   and any classic identity or `*.classic-retired` that `rekey-pq` keeps beside
+   a listed one. Each file is labelled (`used by: <repos>`, `related clones`,
+   `classic history and rollback`); clones that give nothing print
+   `skipped: <dir> (<reason>)`. The configured path is not symlink-resolved.
+3. With more than one file, `--store-cmd` must contain `{fingerprint}` (the
+   grouped fingerprint with dashes) or `{name}` (the file's base name), else it
+   exits 2 before running anything: one fixed item name would be overwritten by
+   each file in turn while every one still verified. Both placeholders are
+   replaced in every argument of `--store-cmd` and `--verify-cmd` for each
+   file; they never contain key material. Two files that would expand to the
+   same store arguments are refused too.
+4. Checks every file: a regular file, not a symlink (also checked on the opened
    file), no permission bits beyond 0600, owned by the current user, one hard
    link, and an age classic (`AGE-SECRET-KEY-1…`) or hybrid
    (`AGE-SECRET-KEY-PQ-1…`) identity. The contents are never part of a message.
-3. Runs `--store-cmd` with the file's bytes on stdin (the argument line is
+   **On Windows the mode, owner and hard-link checks are skipped** (Windows has
+   no such bits; the file's ACL is not inspected), so only the regular-file,
+   symlink and parse checks apply there.
+5. Runs `--store-cmd` with the file's bytes on stdin (the argument line is
    split without a shell; interactive timeout 120 s, with the "waiting for your
-   password manager" line). Its stdout and stderr are discarded, and an error
-   names only the exit status or the timeout.
-4. With `--verify-cmd`, runs it (output at most 64 KiB) and compares the
+   password manager" line). Its stdout and stderr are discarded, so to find out
+   why a store or verify command fails, run it by hand; an error here names
+   only the exit status or the timeout.
+6. With `--verify-cmd`, runs it (output at most 64 KiB) and compares the
    SHA-256 of its stdout with the file's. Only the verdict is printed. The
    buffers holding the key are zeroed after use, best effort.
-5. Prints `<path>`, the public-key fingerprint (the grouped form `join`
-   shows) and the result.
+7. Prints `<path>`, the public-key fingerprint (the grouped form `join`
+   shows), the result and the reason, then a summary:
+   `N stored (M verified, K UNVERIFIED), F failed`.
 
-Exit codes: 0 when every file was stored (and verified, when asked), 1 on any
-failure (an unsafe file, a failed or timed-out command, a mismatch), 2 for a
-usage error. `--dry-run` runs no command; it still checks the files.
+Exit codes: 0 when every file was stored (and verified, when asked; a stored
+but UNVERIFIED file still exits 0), 1 on any failure (an unsafe file, a failed
+or timed-out command, a mismatch), 2 for a usage error. `--dry-run` runs no
+command and prints no summary; it still checks the files.
 
 ### apps.json
 

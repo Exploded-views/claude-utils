@@ -307,7 +307,7 @@ func identityPaths(sel repoSel, all bool, explicit string) (targets idTargets, s
 func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 	fs := flag.NewFlagSet("identity backup", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	storeLine := fs.String("store-cmd", "", "command that stores the identity read from its stdin (argv, no shell)")
+	storeLine := fs.String("store-cmd", "", "command that stores the identity read from its stdin (argv, no shell; {fingerprint} and {name} are replaced per file, and needed when several files are found)")
 	verifyLine := fs.String("verify-cmd", "", "command that prints the stored bytes on stdout, to compare with the file")
 	explicit := fs.String("identity", "", "back up this identity file instead of the clones' memage.identity")
 	all := fs.Bool("all", false, "every distinct identity the routed clones of this host name (the default)")
