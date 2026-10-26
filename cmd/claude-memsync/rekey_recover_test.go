@@ -391,3 +391,45 @@ func TestRekeyPQ_AllRollbackSkipsPublishedRepos(t *testing.T) {
 		}
 	}
 }
+
+// N5: a corrupt restore record is not "missing"; the advice must not be to
+// drop the backup, which is all that is left of the classic history.
+func TestRekeyPQ_CorruptRecordGivesRecoveryAdviceNotDropBackup(t *testing.T) {
+	c, newRec, _ := unpublishedRekey(t)
+	rec := filepath.Join(c.cfg.SyncDir, ".git", "memsync-pre-pq.json")
+	if err := os.WriteFile(rec, []byte(`{"tip": "abc`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, args := range map[string][]string{
+		"apply":    {"--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root", "--apply"},
+		"dry run":  {"--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root"},
+		"rollback": {"--rollback"},
+	} {
+		code, out, errb := rekey(t, c, args...)
+		all := out + errb
+		if code == 0 {
+			t.Errorf("%s: a corrupt record must fail:\n%s", name, all)
+		}
+		if strings.Contains(all, "--drop-backup") {
+			t.Errorf("%s: must not advise --drop-backup:\n%s", name, all)
+		}
+		for _, want := range []string{"unreadable", agecrypt.BackupRef} {
+			if !strings.Contains(all, want) {
+				t.Errorf("%s: advice lacks %q:\n%s", name, want, all)
+			}
+		}
+	}
+	if _, err := c.repo.Run("rev-parse", "--verify", "--quiet", agecrypt.BackupRef); err != nil {
+		t.Error("the backup ref is gone")
+	}
+}
+
+func TestRekeyPQ_RecordWriteLeavesNoTempFile(t *testing.T) {
+	c, _, _ := unpublishedRekey(t)
+	ents, _ := os.ReadDir(filepath.Join(c.cfg.SyncDir, ".git"))
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), "memsync-pre-pq.json") && e.Name() != "memsync-pre-pq.json" {
+			t.Errorf("leftover %s", e.Name())
+		}
+	}
+}
