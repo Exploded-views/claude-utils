@@ -101,6 +101,20 @@ A new package with statements fails `check` until it has a floor. Run
 `make ratchet` and commit the new line in `coverage-floors.json`. Lowering a
 floor is a deliberate hand edit in a reviewed change, never done by the tool.
 
+## Performance budgets (planned)
+
+> **Planned, not yet running.** There is no performance job in `fork-ci.yml`
+> today. The plan, tracked in
+> [issue #5](https://github.com/Exploded-views/claude-utils/issues/5), is a
+> `perf-budgets.json` that CI ratchets the way it ratchets coverage floors, with
+> budgets for the per-prompt `changes --hook` (warm and cold), `status`,
+> `changes`, an idle sync cycle per repo and the age filter per note, after the
+> daemon writes a small changes index so that the hook spawns no git. Until it
+> lands, only the 1.5 s self-deadline of `changes --hook` bounds that path.
+> Likewise, the `internal/sync` coverage floor can flake under host load until
+> [issue #6](https://github.com/Exploded-views/claude-utils/issues/6) makes its
+> tests deterministic.
+
 ## Re-pinning actions
 
 Actions are pinned by full commit SHA with the version in a comment. To update:

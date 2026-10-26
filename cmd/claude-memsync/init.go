@@ -73,7 +73,7 @@ func runInit(args []string) int {
 	flags.BoolVar(&gopts.IgnoreForeign, "ignore-foreign-writers", false, "go on although a foreignWriters entry is active or cannot be checked (logged)")
 	flags.BoolVar(&gopts.SkipQuiet, "skip-quiet-window", false, "skip the start-up quiet window")
 	var recoveryRecipients stringList
-	flags.Var(&recoveryRecipients, "recovery-recipient", "with --encrypt: the owner's offline recovery key (an age1pq1... public key under the pq scheme, repeatable): a recipient like --recipient, marked \"# recovery\", saved as recoveryRecipients, and the only kind of recipient `join accept` lets go unlabelled")
+	flags.Var(&recoveryRecipients, "recovery-recipient", "with --encrypt: the owner's offline recovery key (an age1pq1... public key under the pq scheme, repeatable): a recipient like --recipient, marked \"# recovery\", saved as recoveryRecipients, and the only kind of recipient \"join accept\" lets go unlabelled")
 	flags.Var(&extraRecipients, "recipient", "with --encrypt: extra age/ssh public key, e.g. an offline recovery key (repeatable)")
 
 	if err := flags.Parse(args); err != nil {
