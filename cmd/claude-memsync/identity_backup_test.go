@@ -637,7 +637,7 @@ func TestIdentityBackup_FinalVerifyCatchesAnOverwrite(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit %d, want 1\n%s%s", code, out, errs)
 	}
-	if n := strings.Count(out+errs, "OVERWRITTEN by a later store:"); n != 1 {
+	if n := strings.Count(out, "OVERWRITTEN by a later store:"); n != 1 {
 		t.Errorf("OVERWRITTEN reported %d times, want 1 (the earlier item):\n%s%s", n, out, errs)
 	}
 	if strings.Contains(out, "2 stored (2 verified") {

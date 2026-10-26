@@ -21,8 +21,12 @@ import (
 
 const identityUsage = "usage: claude-memsync identity backup --store-cmd \"<argv>\" [--verify-cmd \"<argv>\"] [--identity <path> | --all | --repo <name> | --config <path>] [--routes <path>] [--dry-run]"
 
-// hardenFn is hardenProcess; tests replace it.
-var hardenFn = hardenProcess
+// hardenFn is hardenProcess and readIdentityFn is readIdentityFile; tests
+// replace them.
+var (
+	hardenFn       = hardenProcess
+	readIdentityFn = readIdentityFile
+)
 
 // maxIdentityBytes bounds an identity file: a real one is a few hundred bytes,
 // and the verify command's output is capped at secretcmd.MaxOutput anyway.
@@ -358,24 +362,17 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 		return 1
 	}
 
-	if len(paths) > 1 && !hasPlaceholder(storeArgv) {
-		fmt.Fprintf(stderr, "identity backup: %d identities would go through one fixed --store-cmd, and a manager that replaces an item by name would keep only the last key while every one still verified. Nothing was run.\n  files:\n", len(paths))
-		for _, t := range paths {
-			fmt.Fprintf(stderr, "    %s\n", t.Path)
-		}
-		fmt.Fprintln(stderr, "  Add {fingerprint} (or {name}) to the item's title in --store-cmd and --verify-cmd, or back the files up one at a time with --identity <path>.")
-		return 2
-	}
-
-	// Read and check every file first, so a collision between item names is
+	// Read and check every file first, so a problem with the item names is
 	// found before anything is stored.
 	type loaded struct {
-		path string
-		why  string
-		info *idFileInfo
-		err  error
+		path  string
+		why   string
+		info  *idFileInfo
+		err   error
+		dupOf string // the first path holding the same bytes
+		sum   [sha256.Size]byte
 	}
-	files := make([]loaded, 0, len(paths))
+	files := make([]*loaded, 0, len(paths))
 	defer func() {
 		for _, f := range files {
 			if f.info != nil {
@@ -383,20 +380,49 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 			}
 		}
 	}()
-	items := map[string]string{} // substituted store argv -> path
+	var uniq []*loaded // one per distinct content
 	for _, t := range paths {
-		p := t.Path
-		info, err := readIdentityFile(p)
-		files = append(files, loaded{p, t.why(), info, err})
+		info, err := readIdentityFn(t.Path)
+		f := &loaded{path: t.Path, why: t.why(), info: info, err: err}
+		files = append(files, f)
 		if err != nil {
 			continue
 		}
-		key := strings.Join(substitute(storeArgv, info.Fingerprint, p), "\x00")
-		if other, dup := items[key]; dup {
-			fmt.Fprintf(stderr, "identity backup: %s and %s would be stored under the same item (%s expands to the same arguments for both). Nothing was run; add {fingerprint} to the title.\n", other, p, "--store-cmd")
+		f.sum = sha256.Sum256(info.data)
+		for _, u := range uniq {
+			if u.sum == f.sum {
+				f.dupOf = u.path
+				break
+			}
+		}
+		if f.dupOf == "" {
+			uniq = append(uniq, f)
+		}
+	}
+	if len(uniq) > 1 && !hasPlaceholder(storeArgv) {
+		fmt.Fprintf(stderr, "identity backup: %d identities would go through one fixed --store-cmd, and a manager that replaces an item by name would keep only the last key. Nothing was run.\n  files:\n", len(uniq))
+		for _, u := range uniq {
+			fmt.Fprintf(stderr, "    %s\n", u.path)
+		}
+		fmt.Fprintln(stderr, "  Add {fingerprint} (or {name}) to the item's title in --store-cmd and --verify-cmd, or back the files up one at a time with --identity <path>.")
+		return 2
+	}
+	storeKeys, verifyKeys := map[string]string{}, map[string]string{}
+	for _, u := range uniq {
+		k := strings.Join(substitute(storeArgv, u.info.Fingerprint, u.path), "\x00")
+		if other, dup := storeKeys[k]; dup {
+			fmt.Fprintf(stderr, "identity backup: %s and %s hold different keys but would be stored under the same item (--store-cmd expands to the same arguments for both). Nothing was run; add {fingerprint} to the title.\n", other, u.path)
 			return 2
 		}
-		items[key] = p
+		storeKeys[k] = u.path
+		if len(uniq) > 1 && len(verifyArgv) > 0 {
+			k = strings.Join(substitute(verifyArgv, u.info.Fingerprint, u.path), "\x00")
+			if other, dup := verifyKeys[k]; dup {
+				fmt.Fprintf(stderr, "identity backup: --verify-cmd expands to the same arguments for %s and %s, so it would read the same item back for both and could not notice an overwrite. Nothing was run; put {fingerprint} where --verify-cmd names the item.\n", other, u.path)
+				return 2
+			}
+			verifyKeys[k] = u.path
+		}
 	}
 
 	failed, verified, unverified := 0, 0, 0
@@ -405,6 +431,7 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 	} else if len(verifyArgv) == 0 {
 		fmt.Fprintln(stderr, "warning: no --verify-cmd, so the backup is UNVERIFIED: nothing reads it back to check it was stored intact; add --verify-cmd, or restore it once to be sure")
 	}
+	var stored []*loaded // items to read back again at the end
 	for _, f := range files {
 		p, info := f.path, f.info
 		why := "\t(" + f.why + ")"
@@ -412,6 +439,10 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 			fmt.Fprintf(stdout, "%s\tREFUSED%s\n", p, why)
 			fmt.Fprintf(stderr, "identity backup: %s: %v\n", p, f.err)
 			failed++
+			continue
+		}
+		if f.dupOf != "" {
+			fmt.Fprintf(stdout, "%s\tfingerprint %s\tsame key as %s (stored once)%s\n", p, info.Fingerprint, f.dupOf, why)
 			continue
 		}
 		sArgv := substitute(storeArgv, info.Fingerprint, p)
@@ -428,7 +459,6 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 			continue
 		}
 		res, err := storeAndVerify(stderr, info, sArgv, vArgv)
-		wipe(info.data)
 		fmt.Fprintf(stdout, "%s\tfingerprint %s\t%s%s\n", p, info.Fingerprint, res, why)
 		if err != nil {
 			fmt.Fprintf(stderr, "identity backup: %s: %v\n", p, err)
@@ -437,8 +467,31 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 		}
 		if len(vArgv) > 0 {
 			verified++
+			stored = append(stored, f)
 		} else {
 			unverified++
+		}
+	}
+	// A later store may have replaced an earlier item whatever the argument
+	// layout: read every item back once more, after the last store.
+	if !*dry && len(stored) > 1 {
+		for _, f := range stored {
+			vArgv := substitute(verifyArgv, f.info.Fingerprint, f.path)
+			got, err := secretcmd.Run(context.Background(), vArgv, secretcmd.KeyCmdTimeout())
+			want := sha256.Sum256(f.info.data)
+			have := sha256.Sum256(got)
+			wipe(got)
+			if err == nil && subtle.ConstantTimeCompare(want[:], have[:]) == 1 {
+				continue
+			}
+			msg := "OVERWRITTEN by a later store: " + f.path
+			if err != nil {
+				msg = "NOT READABLE at the end (" + err.Error() + "): " + f.path
+			}
+			fmt.Fprintf(stdout, "%s\tfingerprint %s\t%s\n", f.path, f.info.Fingerprint, msg)
+			fmt.Fprintf(stderr, "identity backup: %s\n", msg)
+			verified--
+			failed++
 		}
 	}
 	if !*dry {
