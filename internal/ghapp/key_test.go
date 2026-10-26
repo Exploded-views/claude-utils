@@ -1,6 +1,7 @@
 package ghapp
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -8,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/MarimerLLC/claude-utils/internal/secretcmd"
 )
 
 func TestLoadKeyFilePerms(t *testing.T) {
@@ -69,9 +72,26 @@ func TestLoadKeyCmdTimeout(t *testing.T) {
 	}
 }
 
-func TestKeyCmdDefaultTimeoutIs10s(t *testing.T) {
-	if keyCmdTimeout != 10*time.Second {
-		t.Errorf("keyCmdTimeout = %v", keyCmdTimeout)
+func TestKeyCmdDefaultTimeoutIs120s(t *testing.T) {
+	t.Setenv(secretcmd.TimeoutEnv, "")
+	if got := effectiveKeyTimeout(); got != 120*time.Second {
+		t.Errorf("effectiveKeyTimeout() = %v, want 2m0s", got)
+	}
+}
+
+func TestLoadKeyCmdAnnouncesTheWait(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs printf")
+	}
+	var b bytes.Buffer
+	old := secretcmd.Notice
+	secretcmd.Notice = &b
+	defer func() { secretcmd.Notice = old }()
+	if _, err := LoadKeyCmd(context.Background(), []string{"printf", "k"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), "waiting for your password manager") {
+		t.Errorf("no wait message: %q", b.String())
 	}
 }
 

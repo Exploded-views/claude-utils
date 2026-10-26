@@ -3,9 +3,11 @@ package main
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/lock"
+	"github.com/MarimerLLC/claude-utils/internal/secretcmd"
 )
 
 // The recipients CLI must not run while the daemon holds the sync dir.
@@ -64,4 +66,24 @@ func TestProgramStart_SingleRepoTakesTheLockOnceAndStopReleasesIt(t *testing.T) 
 		t.Fatalf("after Stop the lock must be free: %v", err)
 	}
 	l.Release()
+}
+
+// The daemon asks nobody to approve a prompt, so its secret commands keep the
+// short timeout; starting it must switch the process to that mode.
+func TestProgramStart_MarksTheProcessAsTheDaemonForSecretCommands(t *testing.T) {
+	cfg := guardCfg(t, privateH(), false)
+	cfg.PrivateOnly = false
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(secretcmd.TimeoutEnv, "")
+	t.Cleanup(func() { secretcmd.SetDaemon(false) })
+	p := &program{configPath: cfg.Path()}
+	if err := p.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	defer p.Stop(nil)
+	if got := secretcmd.KeyCmdTimeout(); got != 10*time.Second {
+		t.Fatalf("daemon key command timeout = %v, want 10s", got)
+	}
 }
