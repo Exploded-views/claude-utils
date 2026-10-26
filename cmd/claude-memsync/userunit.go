@@ -120,21 +120,37 @@ func autostartConfirmed(path, content string) bool {
 	return targetRight(content) && linkRight(path)
 }
 
-// readUserUnit reads the installed unit. ok is false on a non-Linux host, a
-// missing or an unreadable unit.
-func readUserUnit() (path, content string, ok bool) {
+// loadUserUnit reads the installed unit. found is false (with a nil err) on
+// a non-Linux host or a missing unit; any other failure to find or read it is
+// err, which callers must report: an unreadable unit is never silent.
+func loadUserUnit() (path, content string, found bool, err error) {
 	if unitGOOS != "linux" {
-		return "", "", false
+		return "", "", false, nil
 	}
 	p, err := userUnitPathFn()
 	if err != nil {
-		return "", "", false
+		return "", "", false, err
 	}
 	b, err := os.ReadFile(p)
-	if err != nil {
-		return "", "", false
+	if errors.Is(err, os.ErrNotExist) {
+		return "", "", false, nil
 	}
-	return p, string(b), true
+	if err != nil {
+		return p, "", false, err
+	}
+	return p, string(b), true, nil
+}
+
+// unreadableWarning is the message for a unit that cannot be read.
+func unreadableWarning(err error) string {
+	return "warning: cannot read the service unit (" + err.Error() + "); autostart not confirmed"
+}
+
+// readUserUnit is loadUserUnit without the error: ok is false on a non-Linux
+// host, a missing or an unreadable unit.
+func readUserUnit() (path, content string, ok bool) {
+	p, c, found, err := loadUserUnit()
+	return p, c, found && err == nil
 }
 
 // userUnitWrong reports an installed unit that is not confirmed to autostart.
@@ -155,19 +171,92 @@ func execStartLine(exe string, args []string) string {
 	return l
 }
 
-// setExecStart replaces the unit's ExecStart line with want.
-func setExecStart(content, want string) (string, bool) {
-	lines := strings.Split(content, "\n")
+// serviceExecIndex is the index of the ExecStart line inside [Service], or -1.
+// Lines in other sections are ignored; a trailing \r (CRLF unit) is not part
+// of the line.
+func serviceExecIndex(lines []string) int {
+	in := false
 	for i, l := range lines {
-		if strings.HasPrefix(l, "ExecStart=") {
-			if l == want {
-				return content, false
-			}
-			lines[i] = want
-			return strings.Join(lines, "\n"), true
+		t := strings.TrimSpace(l)
+		if strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]") {
+			in = t == "[Service]"
+			continue
+		}
+		if in && strings.HasPrefix(strings.TrimSuffix(l, "\r"), "ExecStart=") {
+			return i
 		}
 	}
-	return content, false
+	return -1
+}
+
+// currentExecStart is the unit's [Service] ExecStart line (without any \r).
+func currentExecStart(content string) (string, bool) {
+	lines := strings.Split(content, "\n")
+	if i := serviceExecIndex(lines); i >= 0 {
+		return strings.TrimSuffix(lines[i], "\r"), true
+	}
+	return "", false
+}
+
+// setExecStart replaces the [Service] ExecStart line with want. A line that
+// already equals want (ignoring a CRLF) is no change; a replaced line keeps
+// its CR.
+func setExecStart(content, want string) (string, bool) {
+	lines := strings.Split(content, "\n")
+	i := serviceExecIndex(lines)
+	if i < 0 {
+		return content, false
+	}
+	cur := strings.TrimSuffix(lines[i], "\r")
+	if cur == want {
+		return content, false
+	}
+	lines[i] = want + lines[i][len(cur):]
+	return strings.Join(lines, "\n"), true
+}
+
+// parseExecStart splits an ExecStart line written by execStartLine into the
+// executable and its (unquoted) arguments. ok is false for any other shape,
+// such as a hand edit; the caller then leaves the line alone.
+func parseExecStart(line string) (exe string, args []string, ok bool) {
+	rest, found := strings.CutPrefix(line, "ExecStart=")
+	if !found {
+		return "", nil, false
+	}
+	exe, rest, _ = strings.Cut(rest, " ")
+	exe = strings.ReplaceAll(exe, `\x20`, " ")
+	for rest != "" {
+		if !strings.HasPrefix(rest, `"`) {
+			return "", nil, false
+		}
+		var b strings.Builder
+		i := 1
+		for ; i < len(rest) && rest[i] != '"'; i++ {
+			if rest[i] == '\\' && i+1 < len(rest) && rest[i+1] == '"' {
+				i++
+			}
+			b.WriteByte(rest[i])
+		}
+		if i >= len(rest) {
+			return "", nil, false
+		}
+		args = append(args, b.String())
+		rest = strings.TrimPrefix(rest[i+1:], " ")
+	}
+	return exe, args, true
+}
+
+// withFlag returns args with the value of flag set (replaced in place, or
+// appended when absent).
+func withFlag(args []string, flag, value string) []string {
+	out := append([]string(nil), args...)
+	for i := 0; i+1 < len(out); i++ {
+		if out[i] == flag {
+			out[i+1] = value
+			return out
+		}
+	}
+	return append(out, flag, value)
 }
 
 func manualSteps() string {
@@ -188,7 +277,11 @@ func ensureUserUnitTarget(w io.Writer) error { return repairUserUnit(w, "") }
 // (while the old file still names multi-user.target, so its .wants link goes),
 // rewrite atomically, reload, enable, and confirm.
 func repairUserUnit(w io.Writer, wantExec string) error {
-	path, content, ok := readUserUnit()
+	path, content, ok, rerr := loadUserUnit()
+	if rerr != nil {
+		fmt.Fprintln(w, unreadableWarning(rerr))
+		return fmt.Errorf("cannot read the service unit: %w", rerr)
+	}
 	if !ok {
 		return nil
 	}
@@ -203,6 +296,13 @@ func repairUserUnit(w io.Writer, wantExec string) error {
 	if !targetRight(fixed) {
 		fmt.Fprintln(w, userUnitName+": the [Install] WantedBy is not a plain line this program can rewrite safely; "+manualSteps())
 		return fmt.Errorf("%s: cannot repair the WantedBy line automatically", path)
+	}
+	if fixed != content {
+		// Before anything is disabled: a refusal must leave the unit enabled.
+		if st, err := os.Lstat(path); err == nil && st.Mode()&os.ModeSymlink != 0 {
+			fmt.Fprintf(w, "%s: %s is a symlink; not replacing it, fix the link target by hand\n", userUnitName, path)
+			return fmt.Errorf("%s is a symlink; not replacing it", path)
+		}
 	}
 	if err := systemctlFn("daemon-reload"); err != nil {
 		fmt.Fprintln(w, userUnitName+": the systemd user manager is not reachable, so nothing was changed; "+manualSteps())
@@ -232,7 +332,9 @@ func repairUserUnit(w io.Writer, wantExec string) error {
 		fmt.Fprintf(w, "re-enabled %s: it said default.target but was not linked into %s.wants\n", userUnitName, userTarget)
 	}
 	if execChanged {
-		fmt.Fprintf(w, "updated the unit's ExecStart to the requested arguments; restart the daemon to apply them (claude-memsync stop; claude-memsync start)\n")
+		old, _ := currentExecStart(content)
+		now, _ := currentExecStart(fixed)
+		fmt.Fprintf(w, "updated the unit's ExecStart (paths only, no secrets):\n  was: %s\n  now: %s\nrestart the daemon to apply it (claude-memsync stop; claude-memsync start)\n", old, now)
 	}
 	return nil
 }
@@ -279,6 +381,9 @@ func writeFileAtomic(path string, data []byte) error {
 // that is not confirmed to start at boot, or "" when there is nothing to warn
 // about.
 func unitTargetWarning() string {
+	if _, _, _, err := loadUserUnit(); err != nil {
+		return unreadableWarning(err)
+	}
 	if _, _, wrong := userUnitWrong(); !wrong {
 		return ""
 	}
