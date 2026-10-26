@@ -192,7 +192,7 @@ func (ts *idTargets) add(path, user, extra string) {
 }
 
 const (
-	whyRelated = "related clones"
+	whyDefault = "host default"
 	whyClassic = "classic history and rollback"
 )
 
@@ -211,19 +211,45 @@ func expandIdentityPath(p string) string {
 	return filepath.Clean(p)
 }
 
+// relatedConfigured reports whether this host's routes file names a registry,
+// the place related-repo relations live.
+func relatedConfigured(routesFlag string) bool {
+	path, ok, err := resolveRoutesPath(routesFlag)
+	if err != nil || !ok {
+		return false
+	}
+	set, err := loadRouted(path)
+	return err == nil && set.File.Registry != ""
+}
+
 func lexists(p string) bool {
 	_, err := os.Lstat(p)
 	return err == nil
 }
 
-// classicOf is the classic file beside a hybrid identity (identity-pq.txt ->
-// identity.txt); any other path is its own classic.
+// classicOf is the classic file beside a hybrid identity under the exact
+// naming `rekey-pq` and `init` use for the host default: identity-pq.<ext> ->
+// identity.<ext>. Any other path is its own classic: a file merely sitting
+// beside a "-pq" one is not adopted.
 func classicOf(p string) string {
 	ext := filepath.Ext(p)
-	if base := strings.TrimSuffix(p, ext); strings.HasSuffix(base, "-pq") {
-		return strings.TrimSuffix(base, "-pq") + ext
+	if filepath.Base(strings.TrimSuffix(p, ext)) == "identity-pq" {
+		return filepath.Join(filepath.Dir(p), "identity"+ext)
 	}
 	return p
+}
+
+// retiredCandidates are the names `rekey-pq` may have given the retired
+// classic identity: <path>.classic-retired, and for a "-pq" name (rekey-pq
+// adds "-pq" to whatever the classic file was called) the retired file of the
+// name without it. Only the explicit .classic-retired marker is guessed at.
+func retiredCandidates(p string) []string {
+	out := []string{p + ".classic-retired"}
+	ext := filepath.Ext(p)
+	if base := strings.TrimSuffix(p, ext); strings.HasSuffix(base, "-pq") && filepath.Base(base) != "-pq" {
+		out = append(out, strings.TrimSuffix(base, "-pq")+ext+".classic-retired")
+	}
+	return out
 }
 
 // identityPaths resolves the files to back up. --identity names one. Otherwise
@@ -281,10 +307,14 @@ func identityPaths(sel repoSel, all bool, explicit string) (targets idTargets, s
 	}
 	if wholeHost {
 		// What related read clones decrypt with (related_age.go).
+		defaultWhy := whyDefault
+		if relatedConfigured(sel.Routes) {
+			defaultWhy += " (related clones)"
+		}
 		pq := defaultIdentityFor(agecrypt.SchemePQ)
 		for _, p := range []string{pq, defaultIdentityPath()} {
 			if p != "" && lexists(p) {
-				targets.add(expandIdentityPath(p), "", whyRelated)
+				targets.add(expandIdentityPath(p), "", defaultWhy)
 			}
 		}
 	}
@@ -294,8 +324,10 @@ func identityPaths(sel repoSel, all bool, explicit string) (targets idTargets, s
 		if c != t.Path && lexists(c) {
 			targets.add(c, "", whyClassic)
 		}
-		if lexists(c + ".classic-retired") {
-			targets.add(c+".classic-retired", "", whyClassic)
+		for _, r := range retiredCandidates(t.Path) {
+			if lexists(r) {
+				targets.add(r, "", whyClassic)
+			}
 		}
 	}
 	if len(targets) == 0 {
@@ -425,7 +457,7 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 		}
 	}
 
-	failed, verified, unverified := 0, 0, 0
+	failed, verified, unverified, verifyFailed := 0, 0, 0, 0
 	if *dry {
 		fmt.Fprintln(stdout, "dry run: nothing is run or stored")
 	} else if len(verifyArgv) == 0 {
@@ -458,11 +490,15 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 			fmt.Fprintf(stdout, "%s\tfingerprint %s\twould be stored with %s%s%s\n", p, info.Fingerprint, sArgv[0], v, why)
 			continue
 		}
-		res, err := storeAndVerify(stderr, info, sArgv, vArgv)
+		res, stage, err := storeAndVerify(stderr, info, sArgv, vArgv)
 		fmt.Fprintf(stdout, "%s\tfingerprint %s\t%s%s\n", p, info.Fingerprint, res, why)
 		if err != nil {
 			fmt.Fprintf(stderr, "identity backup: %s: %v\n", p, err)
-			failed++
+			if stage == stageVerify {
+				verifyFailed++
+			} else {
+				failed++
+			}
 			continue
 		}
 		if len(vArgv) > 0 {
@@ -491,13 +527,13 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 			fmt.Fprintf(stdout, "%s\tfingerprint %s\t%s\n", f.path, f.info.Fingerprint, msg)
 			fmt.Fprintf(stderr, "identity backup: %s\n", msg)
 			verified--
-			failed++
+			verifyFailed++
 		}
 	}
 	if !*dry {
-		fmt.Fprintf(stdout, "%d stored (%d verified, %d UNVERIFIED), %d failed\n", verified+unverified, verified, unverified, failed)
+		fmt.Fprintf(stdout, "%d stored (%d verified, %d UNVERIFIED, %d verify-failed), %d store-failed\n", verified+unverified+verifyFailed, verified, unverified, verifyFailed, failed)
 	}
-	if failed > 0 {
+	if failed > 0 || verifyFailed > 0 {
 		return 1
 	}
 	return 0
@@ -532,29 +568,35 @@ func substitute(argv []string, fingerprint, path string) []string {
 	return out
 }
 
+// The stage a storeAndVerify failure happened in.
+const (
+	stageStore  = "store"
+	stageVerify = "verify"
+)
+
 // storeAndVerify stores info's bytes and, with a verify command, reads them
 // back and compares SHA-256 digests. res is what to print; err is non-nil
-// for a failure.
-func storeAndVerify(stderr io.Writer, info *idFileInfo, storeArgv, verifyArgv []string) (res string, err error) {
+// for a failure, and stage says whether the store or the read-back failed.
+func storeAndVerify(stderr io.Writer, info *idFileInfo, storeArgv, verifyArgv []string) (res, stage string, err error) {
 	fmt.Fprintln(stderr, secretcmd.WaitMessage)
 	ctx := context.Background()
 	timeout := secretcmd.KeyCmdTimeout()
 	if err := secretcmd.Feed(ctx, storeArgv, info.data, timeout); err != nil {
-		return "NOT STORED", fmt.Errorf("the store command did not succeed: %w", err)
+		return "NOT STORED", stageStore, fmt.Errorf("the store command did not succeed: %w", err)
 	}
 	if len(verifyArgv) == 0 {
-		return "stored (unverified)", nil
+		return "stored (unverified)", "", nil
 	}
 	got, err := secretcmd.Run(ctx, verifyArgv, timeout)
 	if err != nil {
 		wipe(got)
-		return "stored, NOT VERIFIED", fmt.Errorf("the verify command did not succeed: %w", err)
+		return "stored, NOT VERIFIED", stageVerify, fmt.Errorf("the verify command did not succeed: %w", err)
 	}
 	want := sha256.Sum256(info.data)
 	have := sha256.Sum256(got)
 	wipe(got)
 	if subtle.ConstantTimeCompare(want[:], have[:]) != 1 {
-		return "MISMATCH", errors.New("what the verify command returned differs from the identity file; the stored copy is not a usable backup")
+		return "MISMATCH", stageVerify, errors.New("what the verify command returned differs from the identity file; the stored copy is not a usable backup")
 	}
-	return "verified (sha256 matches)", nil
+	return "verified (sha256 matches)", "", nil
 }

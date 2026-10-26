@@ -581,10 +581,10 @@ func TestIdentityBackup_SummaryLine(t *testing.T) {
 		want string
 		code int
 	}{
-		"verified":   {[]string{"--store-cmd", store, "--verify-cmd", verify}, "1 stored (1 verified, 0 UNVERIFIED, 0 verify-failed), 0 store-failed", 0},
-		"unverified": {[]string{"--store-cmd", store}, "1 stored (0 verified, 1 UNVERIFIED, 0 verify-failed), 0 store-failed", 0},
-		"store fail": {[]string{"--store-cmd", fail}, "0 stored (0 verified, 0 UNVERIFIED, 0 verify-failed), 1 store-failed", 1},
-		"mismatch":   {[]string{"--store-cmd", store, "--verify-cmd", wrong}, "1 stored (0 verified, 0 UNVERIFIED, 1 verify-failed), 0 store-failed", 1},
+		"verified":         {[]string{"--store-cmd", store, "--verify-cmd", verify}, "1 stored (1 verified, 0 UNVERIFIED, 0 verify-failed), 0 store-failed", 0},
+		"unverified":       {[]string{"--store-cmd", store}, "1 stored (0 verified, 1 UNVERIFIED, 0 verify-failed), 0 store-failed", 0},
+		"store fail":       {[]string{"--store-cmd", fail}, "0 stored (0 verified, 0 UNVERIFIED, 0 verify-failed), 1 store-failed", 1},
+		"mismatch":         {[]string{"--store-cmd", store, "--verify-cmd", wrong}, "1 stored (0 verified, 0 UNVERIFIED, 1 verify-failed), 0 store-failed", 1},
 		"verify cmd fails": {[]string{"--store-cmd", store, "--verify-cmd", "false"}, "1 stored (0 verified, 0 UNVERIFIED, 1 verify-failed), 0 store-failed", 1},
 	} {
 		code, out, errs := runIDBackup(append([]string{"--identity", path}, c.args...)...)
