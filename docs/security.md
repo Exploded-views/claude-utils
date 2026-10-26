@@ -135,7 +135,9 @@ Every change to the recipient set (a join, a retire, a rekey) re-encrypts the
 it (with a lease on the old tip, only after every check that can refuse the push
 has passed; a failed or interrupted run can be resumed or, before the push,
 rolled back, and the old tip stays at a local backup ref until `--drop-backup`,
-which removes the classic ciphertext from that clone only). That stops the remote from serving old commits on its branches, but it does
+which removes the classic ciphertext from that clone only; the daemon syncs
+nothing in a repo whose rekey is unfinished, and a rollback refuses to drop
+commits made after the rekey unless told to). That stops the remote from serving old commits on its branches, but it does
 not erase them: GitHub keeps unreachable objects fetchable **by SHA** until its
 own garbage collection removes them (and cached views, forks or other clones
 may keep them indefinitely). Ask GitHub support to purge them if it matters,

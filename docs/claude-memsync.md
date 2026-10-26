@@ -1473,8 +1473,9 @@ Migrate an existing classic repo whose only member is this host:
 
     claude-memsync recipients rekey-pq --repo <name> | --all \
         --recovery-recipient <age1pq1...> --host <label> [--fresh-root] [--apply]
-    claude-memsync recipients rekey-pq --repo <name> | --all --rollback
+    claude-memsync recipients rekey-pq --repo <name> | --all --rollback [--discard-local-commits]
     claude-memsync recipients rekey-pq --repo <name> | --all --drop-backup
+    claude-memsync recipients retire-classic [--repo <name> | --all] [--apply]
 
 It is a dry run unless `--apply` (daemon stopped): it prints the repos, the
 current recipient count and the file counts, and says when history will be
@@ -1504,20 +1505,47 @@ and rerun the same command: finished repos are skipped, a repo that was
 migrated locally but whose push failed (the remote still at the backup tip) has
 its push retried, and a crash between moving HEAD and repointing
 `memage.identity`/`memage.scheme`/the pin is finished. A rerun must use the same
-`--host`, `--recovery-recipient` and `--fresh-root`. `--rollback` undoes a
-migration that was never published: for a repo whose remote still equals
-`refs/memsync/pre-pq` it resets the branch to it and restores
-`memage.identity`, `memage.scheme`, the pin, `config.json` and the synced-head
-record; it refuses when the remote has already moved off the backup (or the
-work-tree is dirty). The new hybrid identity file is left in place and reused by
-a later `rekey-pq`.
+`--host`, `--recovery-recipient` and `--fresh-root`. The record also holds the
+migrated commit (`newCommit`) and a stage (`started`, `committed`, `migrated`,
+`published`). A finished record, or an origin/main that contains `newCommit`
+(the daemon synced on top), makes a rerun print `already done` and only retire
+the classic identity, whatever the flags; a dry run on a finished repo says the
+same and exits 0. Every resume stage repoints `memage.identity`,
+`memage.scheme` and the pin again and resets an index that differs from HEAD
+(a crash between moving HEAD and updating the index). The record is written
+through a temp file, fsynced, renamed, and its directory fsynced; an
+unreadable record is reported as such, with the advice not to drop the backup.
+`--apply` refuses while `.state/parked.json` or `.state/pull-running` exists.
+
+`--rollback` undoes a migration that was never published: for a repo whose
+remote still equals `refs/memsync/pre-pq` it resets the branch to it and
+restores `memage.identity`, `memage.scheme`, the pin, `config.json` and the
+synced-head record (HEAD is read under the sync lock); it refuses when the
+remote has already moved off the backup (or the work-tree is dirty). It
+requires HEAD to be `newCommit`: otherwise it lists the commits made since
+(count and subjects) and needs `--discard-local-commits`. It first loads the
+classic identity, renaming `<name>.classic-retired` back if needed, and refuses
+if neither file exists. With `--all`, a published repo is reported as
+`published; nothing to roll back`. The new hybrid identity file is left in
+place and reused by a later `rekey-pq`.
+
+While a repo's record is not `published`/`done`, or the repo is not
+post-quantum yet, the daemon does not sync it: each cycle logs
+`rekey-pq: not syncing this repo this cycle` and `status` prints a
+`rekey-pq: not syncing` line. A record written by an older build (no stage)
+blocks only while the repo is not pq.
 
 The classic identity is renamed `<name>.classic-retired` only when no git clone
 beside the sync directories still names it in `memage.identity`: every
 `*/.git/config` under the parent directory of each sync dir is checked,
-including clones that are not routed (such as a `*.incident-*` copy). If one is
-found, the file stays, the clone is named in the output, and a rerun retires it
-once nothing uses it.
+including clones that are not routed (such as a `*.incident-*` copy). A clone
+whose restore record names the file as its classic identity and is not finished
+keeps it too (a rollback of that clone would need it). If one is found, the
+file stays, the clone is named in the output, and a rerun retires it once
+nothing uses it. `recipients retire-classic [--repo <name> | --all] [--apply]`
+does just that step with no rekey flags and the same scan of all clones: it
+finds the file in the repo's record or as the current identity's name without
+`-pq`, reports what it would do without `--apply`, and renames it with it.
 
 The pre-migration tip stays at `refs/memsync/pre-pq`; `rekey-pq --drop-backup`
 deletes it and its record, expires the reflogs of HEAD, `main` and

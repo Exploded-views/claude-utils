@@ -446,7 +446,7 @@ usage: claude-memsync related dismiss <from> <to> [--routes FILE]
 ## `claude-memsync recipients`
 
 ```text
-usage: claude-memsync recipients add <public-key> [--host <label>] | remove <public-key> | list | accept --yes | label self --host <label> | label recovery <public-key> [--all] | rekey-pq --recovery-recipient <age1pq1...> --host <label> [--all] [--fresh-root] [--apply] | rekey-pq (--repo <name> | --all) --rollback | rekey-pq --drop-backup  [--repo <name> | --config <path>] [--routes <path>]
+usage: claude-memsync recipients add <public-key> [--host <label>] | remove <public-key> | list | accept --yes | label self --host <label> | label recovery <public-key> [--all] | rekey-pq --recovery-recipient <age1pq1...> --host <label> [--all] [--fresh-root] [--apply] | rekey-pq (--repo <name> | --all) --rollback [--discard-local-commits] | rekey-pq --drop-backup | retire-classic [--all] [--apply]  [--repo <name> | --config <path>] [--routes <path>]
 ```
 
 ## `claude-memsync join`

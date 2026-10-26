@@ -406,19 +406,42 @@ If something fails part way:
 - **Rerun the same command** (same `--host`, `--recovery-recipient`,
   `--fresh-root`). Finished repos are skipped; a repo that was migrated locally
   but whose push failed gets its push retried; a run that crashed between
-  moving HEAD and repointing the identity, scheme and pin is finished.
+  moving HEAD and repointing the identity, scheme and pin is finished (every
+  resume repoints again and resets an index left on the old blobs). A dry run
+  on such a repo says the earlier apply was interrupted and how to finish or
+  undo it.
+- A rerun after the daemon has synced on top of the migration reports
+  `already done` and only retires the classic identity (the record names the
+  migrated commit; an origin/main that contains it counts as published). It
+  never fails the commit-count check.
 - To give up on a repo that was **not pushed**, run
   `claude-memsync recipients rekey-pq --repo <repo> --rollback`: it resets the
   branch to the pre-migration tip and restores the identity, scheme, pin and
-  `config.json`. Once the remote has moved off the backup, rollback is refused;
-  the restore record is `.git/memsync-pre-pq.json`.
+  `config.json`. If commits were made after the rekey it refuses, listing their
+  count and subjects; add `--discard-local-commits` to drop them. It needs the
+  classic identity: it renames `<id>.classic-retired` back, and refuses if
+  neither file exists. Once the remote has moved off the backup, rollback is
+  refused (with `--all` such a repo is reported as `published; nothing to roll
+  back` and the run goes on); the restore record is `.git/memsync-pre-pq.json`.
+- While a rekey is unfinished (a record that is not `published`, or a repo that
+  is not post-quantum yet) the daemon syncs nothing in that repo: it logs
+  `rekey-pq: not syncing this repo` every cycle and `status` shows the same.
+  `--apply` also refuses to start while `.state/parked.json` or
+  `.state/pull-running` exists: start the daemon, let one cycle finish so it
+  recovers, stop it and rerun.
+- If the record itself is unreadable the message says so and names
+  `refs/memsync/pre-pq`: do **not** `--drop-backup`, it is all that is left of
+  the classic history. Inspect the repo and finish or undo the migration by hand.
 - If the push succeeded but the check afterwards failed, the output says
   `pushed; verification failed`; look at origin/main before relying on it.
 
 The old classic identity file is renamed `*.classic-retired` only when no git
 clone beside the sync directories (routed or not, such as a `*.incident-*`
 copy) still points at it; otherwise it is kept, the clone is named, and a rerun
-retires it later. The pre-migration tip stays at `refs/memsync/pre-pq` until
+retires it later; a clone whose unfinished restore record names the file also
+keeps it. To retire it once nothing uses it, without any rekey flags, run
+`claude-memsync recipients retire-classic [--repo <repo> | --all] [--apply]`
+(a dry run without `--apply`). The pre-migration tip stays at `refs/memsync/pre-pq` until
 `rekey-pq --repo <repo> --drop-backup`; that removes the classic ciphertext from
 the local clone (after a `--fresh-root` run) without touching stash entries.
 
