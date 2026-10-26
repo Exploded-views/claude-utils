@@ -16,7 +16,7 @@
 # "portability-lint: skip-file" in its first lines is skipped.
 set -euo pipefail
 DIR="${1:-$(cd "$(dirname "$0")" && pwd)}"
-[ -d "$DIR" ] || { echo "not a directory: $DIR" >&2; exit 2; }
+[ -d "$DIR" ] || { echo "not a directory: $DIR" >&2; exit 2; }   # fs-ok: usage check, positive: false refuses
 exec python3 -I - "$DIR" <<'PY'
 import os, re, sys
 

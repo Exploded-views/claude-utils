@@ -1650,24 +1650,25 @@ echo "--- marks, workspaces and known_hosts: an unreadable one is not an absent 
 if [ "$(id -u)" -ne 0 ]; then
   newhome nj1
   mkdir -p "$H/.local/state/claude-memsync-bootstrap" "$H/locked"; chmod 000 "$H/locked"
+  : >"$H/.local/state/claude-memsync-bootstrap/testhost.init.personal"   # the init is done; the join step comes next
   ln -s "$H/locked/x" "$H/.local/state/claude-memsync-bootstrap/testhost.needjoin.personal"
   runboot --host testhost --role homelab --yes
   chmod 755 "$H/locked"
-  check "a needjoin mark that cannot be read stops the run (the join request is not skipped)" bash -c "[ $RC -ne 0 ] && printf '%s\\n' \\"\\$1\\" | grep -q 'cannot tell whether'" _ "$OUT"
+  check "a needjoin mark that cannot be read stops the run (the join request is not skipped)" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'cannot tell whether'" _ "$OUT"
   newhome wg1
   mkdir -p "$H/ws" "$H/locked"; chmod 000 "$H/locked"; ln -s "$H/locked/g" "$H/ws/.git"
   runboot --host testmac --role personal-dev --workspace "$H/ws" --own-owner gitgat --dry-run
   chmod 755 "$H/locked"
-  check "a workspace whose .git cannot be looked at is refused (it is not assumed to be a plain folder)" bash -c "[ $RC -ne 0 ] && printf '%s\\n' \\"\\$1\\" | grep -q 'cannot tell'" _ "$OUT"
+  check "a workspace whose .git cannot be looked at is refused (it is not assumed to be a plain folder)" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'cannot tell'" _ "$OUT"
 fi
 newhome kh1
 mkdir -p "$H/.ssh"; chmod 700 "$H/.ssh"; printf 'github.com ssh-ed25519 %s\n' "$(cat "$BASE/otherkey")" >"$H/.ssh/known_hosts"; chmod 600 "$H/.ssh/known_hosts"
 runboot --host testhost --role homelab --yes
-check "a github.com entry in known_hosts with another key than GitHub's is not trusted: refused" bash -c "[ $RC -ne 0 ] && printf '%s\\n' \\"\\$1\\" | grep -q 'host key fingerprint'" _ "$OUT"
+check "a github.com entry in known_hosts with another key than GitHub's is not trusted: refused" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'host key fingerprint'" _ "$OUT"
 newhome kh2
 mkdir -p "$H/.ssh"; chmod 700 "$H/.ssh"; printf 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n' >"$H/.ssh/known_hosts"; chmod 600 "$H/.ssh/known_hosts"
 runboot --host testhost --role homelab --yes
-check "a github.com entry with GitHub's key is accepted as already there" bash -c "[ $RC -eq 0 ] && printf '%s\\n' \\"\\$1\\" | grep -q 'known_hosts already has github.com:22'" _ "$OUT"
+check "a github.com entry with GitHub's key is accepted as already there" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -q 'known_hosts already has github.com:22'" _ "$OUT"
 
 echo "--- the real script's traps: a signal while a guard hangs"
 trapcase() { # name signal expected-rc mode(app|file) [second-signal-to-the-group]

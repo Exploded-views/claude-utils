@@ -91,7 +91,7 @@ fixture_repo_name_ok() { GA=(mem-project-x); }
 fixture_host_key_fp() {
   [ -f "$W/hk" ] || ssh-keygen -q -t ed25519 -N "" -f "$W/hk" >/dev/null 2>&1
   GITHUB_FP="$(ssh-keygen -lf "$W/hk.pub" | awk 'NR==1{print $2}')"
-  GA=(github.com "$W/hk.pub")
+  GA=(github.com "$(cat "$W/hk.pub")")
 }
 fixture_no_old_config() { mkdir -p "$XDG_CFG/memsync"; printf '{}\n' >"$XDG_CFG/memsync/config.json"; GA=(); PARENTS=("$XDG_CFG/memsync"); }
 notdir_no_old_config() { XDG_CFG="$W/afile"; }
@@ -140,7 +140,7 @@ unsnap() { SYNC_ROOT="$S_SR"; ROUTES="$S_RT"; APPS="$S_AP"; XDG_CFG="$S_XC"; }
 IS_ROOT=0; [ "$(id -u)" -ne 0 ] || IS_ROOT=1
 
 while read -r name deps; do
-  case "$name" in ''|'#'*) continue ;; esac
+  case "$name" in ''|'#'*|'@'*) continue ;; esac
   if ! declare -F "fixture_$name" >/dev/null; then bad "$name: no fixture_$name in scripts/guard_fault_test.sh"; continue; fi
   if ! declare -F "${name}_check" >/dev/null; then bad "$name: no ${name}_check function in scripts/bootstrap.sh"; continue; fi
   GA=() OKBIN="" PARENTS=()
@@ -184,7 +184,7 @@ done <"$REG"
 # --- specific cases ---
 CASES=$((CASES + 1))
 snap; fixture_host_key_fp; cat "$W/hk.pub" "$W/hk.pub" >"$W/two.pub"
-if guard_ok host_key_fp github.com "$W/two.pub"; then bad "host_key_fp: a scan with two key lines was accepted"; else ok; fi
+if guard_ok host_key_fp github.com "$(cat "$W/two.pub")"; then bad "host_key_fp: a scan with two key lines was accepted"; else ok; fi
 unsnap
 if [ "$(uname -s)" = Linux ]; then
   CASES=$((CASES + 1))

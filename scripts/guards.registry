@@ -6,6 +6,9 @@
 # timeout) is a refusal. scripts/guard_fault_test.sh injects faults into each
 # guard (it needs a fixture_<name> function there); scripts/lint-guards.sh checks
 # that the registry, the guard calls, the functions and the fixtures agree.
+# "@helper <name>" lets a guard call that function although it is defined outside
+# the guards block (the test must define it too).
+@helper org_gh
 git_dir git
 git_stash git
 git_unpushed git
