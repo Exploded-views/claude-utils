@@ -21,6 +21,9 @@ import (
 
 const identityUsage = "usage: claude-memsync identity backup --store-cmd \"<argv>\" [--verify-cmd \"<argv>\"] [--identity <path> | --all | --repo <name> | --config <path>] [--routes <path>] [--dry-run]"
 
+// hardenFn is hardenProcess; tests replace it.
+var hardenFn = hardenProcess
+
 // maxIdentityBytes bounds an identity file: a real one is a few hundred bytes,
 // and the verify command's output is capped at secretcmd.MaxOutput anyway.
 const maxIdentityBytes = secretcmd.MaxOutput
@@ -345,6 +348,7 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 	if *all && (sel.Repo != "" || sel.Config != "") {
 		return usage("--all does not go with --repo or --config")
 	}
+	hardenFn()
 	paths, skipped, err := identityPaths(sel, *all, *explicit)
 	for _, l := range skipped {
 		fmt.Fprintln(stdout, l)

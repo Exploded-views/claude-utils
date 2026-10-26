@@ -8,3 +8,6 @@ import "io/fs"
 // is the user's.
 func identityModeOK(fs.FileInfo) error       { return nil }
 func identityOwnerLinksOK(fs.FileInfo) error { return nil }
+
+// hardenProcess has nothing to set on Windows (no core dumps or rlimits here).
+func hardenProcess() {}

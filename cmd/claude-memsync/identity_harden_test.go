@@ -13,6 +13,18 @@ func TestHardenProcess_DisablesCoreDumps(t *testing.T) {
 		t.Skip(err)
 	}
 	t.Cleanup(func() { syscall.Setrlimit(syscall.RLIMIT_CORE, &old) })
+	// start from a nonzero soft limit, or the test proves nothing
+	up := old
+	if up.Max == 0 {
+		t.Skip("hard core limit is 0 here")
+	}
+	up.Cur = 1 << 20
+	if up.Max < up.Cur {
+		up.Cur = up.Max
+	}
+	if err := syscall.Setrlimit(syscall.RLIMIT_CORE, &up); err != nil {
+		t.Skip(err)
+	}
 	hardenProcess()
 	var got syscall.Rlimit
 	if err := syscall.Getrlimit(syscall.RLIMIT_CORE, &got); err != nil {
