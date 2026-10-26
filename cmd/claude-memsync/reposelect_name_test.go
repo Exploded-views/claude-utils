@@ -40,12 +40,12 @@ func TestResolveRepo_AcceptsKeyNameAndOwnerName(t *testing.T) {
 		"mem-project-trap": "git@github.com:example-org/mem-trap-remote.git",
 	})
 	cases := []struct{ in, want string }{
-		{"bitc", "bitc"},                                // the key
-		{"mem-project-bitc", "bitc"},                    // the GitHub repo name
-		{"example-org/mem-project-bitc", "bitc"},        // owner/name
-		{"Example-Org/Mem-Project-Bitc", "bitc"},        // GitHub names are case-insensitive
-		{"mem-project-other", "other"},                  // https remote without .git
-		{"mem-project-trap", "mem-project-trap"},        // an exact key always wins
+		{"bitc", "bitc"},                                    // the key
+		{"mem-project-bitc", "bitc"},                        // the GitHub repo name
+		{"example-org/mem-project-bitc", "bitc"},            // owner/name
+		{"Example-Org/Mem-Project-Bitc", "bitc"},            // GitHub names are case-insensitive
+		{"mem-project-other", "other"},                      // https remote without .git
+		{"mem-project-trap", "mem-project-trap"},            // an exact key always wins
 		{"example-org/mem-trap-remote", "mem-project-trap"}, // ...and the owner/name still finds it
 	}
 	for _, c := range cases {

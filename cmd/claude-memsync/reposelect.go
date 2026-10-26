@@ -3,9 +3,11 @@ package main
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
+	"github.com/MarimerLLC/claude-utils/internal/ghguard"
 )
 
 // repoSel is the --repo / --config / --routes trio the per-repo commands share.
@@ -51,9 +53,32 @@ func (s *routedSet) repoList() string {
 	return strings.Join(out, ", ")
 }
 
+// keysByRemote lists the routes keys whose remote URL names the repo: by its
+// GitHub name ("mem-project-x") or, when want has a slash, by "owner/name".
+// GitHub names are case-insensitive.
+func (s *routedSet) keysByRemote(want string) []string {
+	var keys []string
+	for k, c := range s.Cfgs {
+		owner, name, err := ghguard.ParseRemote(c.RemoteURL)
+		if err != nil {
+			continue
+		}
+		have := name
+		if strings.Contains(want, "/") {
+			have = owner + "/" + name
+		}
+		if strings.EqualFold(have, want) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // resolveRepo picks the one repo a command acts on.
 //
-//   - --repo <name> (a routes.json repos key) and --config <path> each name a
+//   - --repo <name> (a routes.json repos key, else the GitHub repo name or
+//     owner/name of a routed repo's remote; two matches are refused) and --config <path> each name a
 //     repo; giving both is an error.
 //   - With routes present and neither given: explicit means refuse, listing the
 //     repos; otherwise the personal repo (else the first by name).
@@ -81,11 +106,17 @@ func resolveRepo(sel repoSel, explicit bool) (cfg config.Config, name string, er
 		if set == nil {
 			return cfg, "", errors.New("--repo needs a routes file (see --routes)")
 		}
-		c, ok := set.Cfgs[sel.Repo]
-		if !ok {
-			return cfg, "", fmt.Errorf("no repo %q on this host; repos: %s", sel.Repo, set.repoList())
+		if c, ok := set.Cfgs[sel.Repo]; ok { // an exact key always wins
+			return c, sel.Repo, nil
 		}
-		return c, sel.Repo, nil
+		keys := set.keysByRemote(sel.Repo)
+		switch len(keys) {
+		case 0:
+			return cfg, "", fmt.Errorf("no repo %q on this host; repos: %s", sel.Repo, set.repoList())
+		case 1:
+			return set.Cfgs[keys[0]], keys[0], nil
+		}
+		return cfg, "", fmt.Errorf("--repo %q is ambiguous: it is the remote name of %s; say which with --repo <key> or --repo <owner>/<name>", sel.Repo, strings.Join(keys, ", "))
 	case sel.Config != "":
 		// An explicit path is never replaced by defaults: a typo must not
 		// act on the default repo.
