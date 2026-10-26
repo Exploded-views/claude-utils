@@ -254,3 +254,30 @@ func TestRekeyPQ_KeepsTheClassicIdentityNamedByAnotherClonesRecord(t *testing.T)
 		t.Errorf("the hint must name the clone:\n%s", out)
 	}
 }
+
+// N1: a crash between SetScheme and PinCurrent leaves the pin stale. Every
+// resume stage repoints again, so the push guard does not refuse for ever.
+func TestRekeyPQ_ResumeRepinsAfterACrashBetweenSchemeAndPin(t *testing.T) {
+	c, newRec, _ := unpublishedRekey(t)
+	pin := filepath.Join(c.cfg.SyncDir, ".git", "memage-pinned")
+	if err := os.WriteFile(pin, []byte("stale\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := agecrypt.Unreviewed(c.repo); !u {
+		t.Fatal("setup: the pin must be stale")
+	}
+	unblockPush(t, c.origin)
+	code, out, errb := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root", "--apply")
+	if code != 0 {
+		t.Fatalf("resume: exit %d\n%s%s", code, out, errb)
+	}
+	if u, _ := agecrypt.Unreviewed(c.repo); u {
+		t.Error("the pin is still stale after the resume")
+	}
+	if originTip(t, c.origin) == "" {
+		t.Error("nothing pushed")
+	}
+	if n, _ := gitwt.New(c.origin).Run("rev-list", "--count", "main"); strings.TrimSpace(n) != "1" {
+		t.Errorf("origin has %s commits", n)
+	}
+}
