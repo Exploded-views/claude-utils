@@ -289,6 +289,9 @@ minipath() {
   done
   printf '%s' "$d"
 }
+mkgit() { # dir remote
+  mkdir -p "$1"; git -C "$1" init -q; git -C "$1" remote add origin "$2"
+}
 untouched() { [ -z "$(find "$H" -mindepth 1 -not -name .gitconfig | head -1)" ] && [ ! -s "$STUB_DIR/gh.log" ]; }
 quick_exit() { # after the new-flag sections, when BT_QUICK is set
   [ -n "${BT_QUICK:-}" ] || return 0
@@ -401,8 +404,6 @@ check "token file deleted: the token is not in the signalled run's output" bash 
 # ============================ keep-out (was: client) ===========================
 echo "--- keep-out flags: new names, old names, wording"
 newhome ko0
-BOOT_PATH="$(minipath)" runboot --host testhost --role homelab --dry-run
-OUT0="$OUT"
 set +e; OUTNONE="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" "$BASH" "$ROOT/scripts/bootstrap.sh" --sha "$SHA" --org-token-file "$BASE/orgtoken" "${REQ[@]}" --host testhost --role homelab --dry-run </dev/null 2>&1)"; NRC=$?; set -e
 check "no keep-out flags: exit 0 and exactly the calm note" bash -c "[ $NRC -eq 0 ] && printf '%s\n' \"\$1\" | grep -qx 'keep-out lists: none (routing alone decides what syncs)'" _ "$OUTNONE"
 check "no keep-out flags: nothing reads as a warning or an error" bash -c "! printf '%s\n' \"\$1\" | grep -E 'keep-out|client owners' | grep -qE 'WARNING|ERROR|!!!'" _ "$OUTNONE"
@@ -413,14 +414,13 @@ for how in old new; do
   newhome "ko-$how"
   if [ "$how" = old ]; then KOF=(--deny-owner Some-Owner --deny-term 'a.b' --deny-term other); else KOF=(--keep-out-owner Some-Owner --keep-out-term 'a.b' --keep-out-term other); fi
   runboot --host testhost --role homelab --yes "${KOF[@]}"
-  cp "$H/.config/claude-memsync/routes.json" "$BASE/ko-$how.routes" 2>/dev/null && sed -i "s#$H#HOME#g" "$BASE/ko-$how.routes" || : >"$BASE/ko-$how.routes.missing"
+  cp "$H/.config/claude-memsync/routes.json" "$BASE/ko-$how.routes" 2>/dev/null && sed -i "s#$H#HOME#g; s#ko-$how#ko#g" "$BASE/ko-$how.routes" || : >"$BASE/ko-$how.routes.missing"
   for k in personal infra; do cp "$H/.config/claude-memsync/denylist-$k.txt" "$BASE/ko-$how.deny-$k" 2>/dev/null || :; done
 done
 check "--keep-out-owner/-term and --deny-owner/-term give an identical routes.json" bash -c "[ -s '$BASE/ko-old.routes' ] && cmp -s '$BASE/ko-old.routes' '$BASE/ko-new.routes'"
 check "... and identical denylist files (terms only, regex-escaped)" bash -c "cmp -s '$BASE/ko-old.deny-personal' '$BASE/ko-new.deny-personal' && cmp -s '$BASE/ko-old.deny-infra' '$BASE/ko-new.deny-infra' && grep -qxF 'a\\.b' '$BASE/ko-new.deny-personal' && grep -qx other '$BASE/ko-new.deny-personal' && ! grep -qi some-owner '$BASE/ko-new.deny-personal'"
 newhome ko-pd
 mkdir -p "$H/code"
-mkgit() { mkdir -p "$1"; git -C "$1" init -q; git -C "$1" remote add origin "$2"; }
 mkgit "$H/code/keepme" "git@github.com:example-org/keepme.git"
 mkgit "$H/code/byowner" "git@github.com:Some-Owner/byowner.git"
 mkgit "$H/code/byterm" "git@github.com:example-org/has-secretword-inside.git"
@@ -709,9 +709,6 @@ check "deploy keys disabled gives the org hint" bash -c "[ $RC -ne 0 ] && printf
 echo "--- personal-dev run"
 newhome pdev
 mkdir -p "$H/code/notes"
-mkgit() { # dir remote
-  mkdir -p "$1"; git -C "$1" init -q; git -C "$1" remote add origin "$2"
-}
 mkgit "$H/code/ownproj" "git@github.com:gitgat/ownproj.git"
 mkgit "$H/code/thirdlib" "https://github.com/someoneelse/thirdlib.git"
 mkgit "$H/code/clientapp" "https://github.com/Acme-Client/clientapp.git"
