@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 
@@ -28,8 +29,7 @@ func main() {
 	if len(os.Args) >= 2 {
 		switch os.Args[1] {
 		case "version", "--version", "-v":
-			fmt.Println(version.Strings("claude-memmerge"))
-			return
+			os.Exit(runVersion(os.Stdout, os.Stderr, os.Args[2:]))
 		case "help", "--help", "-h":
 			usage()
 			return
@@ -108,6 +108,21 @@ func main() {
 	if conflict {
 		os.Exit(1)
 	}
+}
+
+// runVersion prints the version (--json: one JSON line); any other argument
+// is refused with exit 2, like claude-memsync's version.
+func runVersion(stdout, stderr io.Writer, args []string) int {
+	if len(args) == 1 && args[0] == "--json" {
+		fmt.Fprintln(stdout, version.JSON("claude-memmerge"))
+		return 0
+	}
+	if len(args) > 0 {
+		fmt.Fprintf(stderr, "version: unexpected argument %q (only --json is accepted)\n", args[0])
+		return 2
+	}
+	fmt.Fprintln(stdout, version.Strings("claude-memmerge"))
+	return 0
 }
 
 func usage() {

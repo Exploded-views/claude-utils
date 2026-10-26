@@ -43,6 +43,8 @@ func main() {
 		os.Exit(runRecipients(os.Args[2:]))
 	case "join":
 		os.Exit(runJoin(os.Args[2:]))
+	case "identity":
+		os.Exit(runIdentity(os.Args[2:]))
 	case "route":
 		os.Exit(runRoute(os.Args[2:]))
 	case "changes":
@@ -74,7 +76,11 @@ func main() {
 
 func runVersion(stdout, stderr io.Writer, args []string) int {
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help" || args[0] == "-help") {
-		fmt.Fprintln(stdout, "usage: claude-memsync version\n\nPrint the version; takes no flags")
+		fmt.Fprintln(stdout, "usage: claude-memsync version [--json]\n\nPrint the version (--json: one JSON line with name, version, commit, go, os, arch)")
+		return 0
+	}
+	if len(args) == 1 && args[0] == "--json" {
+		fmt.Fprintln(stdout, version.JSON("claude-memsync"))
 		return 0
 	}
 	if len(args) > 0 {
@@ -106,6 +112,7 @@ Subcommands:
   unrelate    Remove a relation
   related     List relations; "related sync" fetches read clones, "related context" prints a session index, "related suggest" offers edges from this host's data
   recipients  add | remove | list | accept the age recipients of an encrypted repo
+  identity    identity backup: store this host's age identity through a password-manager command, and verify it
   join        join request|status|list|accept|reject: add a new host as an age recipient of an existing repo
   host        list | check-key: the machines that share these repos (deploy keys, recipients, expiry)
   install     Install as a system service (Windows Service / systemd unit / launchd plist)

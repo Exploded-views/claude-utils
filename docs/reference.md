@@ -27,6 +27,7 @@ Subcommands:
   unrelate    Remove a relation
   related     List relations; "related sync" fetches read clones, "related context" prints a session index, "related suggest" offers edges from this host's data
   recipients  add | remove | list | accept the age recipients of an encrypted repo
+  identity    identity backup: store this host's age identity through a password-manager command, and verify it
   join        join request|status|list|accept|reject: add a new host as an age recipient of an existing repo
   host        list | check-key: the machines that share these repos (deploy keys, recipients, expiry)
   install     Install as a system service (Windows Service / systemd unit / launchd plist)
@@ -480,6 +481,34 @@ Usage of join request:
     	host label (^[a-z0-9][a-z0-9-]{0,31}$)
 ```
 
+## `claude-memsync identity`
+
+```text
+usage: claude-memsync identity backup --store-cmd "<argv>" [--verify-cmd "<argv>"] [--identity <path> | --all | --repo <name> | --config <path>] [--routes <path>] [--dry-run]
+```
+
+## `claude-memsync identity backup -h`
+
+```text
+Usage of identity backup:
+  -all
+    	every distinct identity the routed clones of this host name (the default)
+  -config string
+    	back up the identity of the repo of this config.json
+  -dry-run
+    	list what would be stored and where; run nothing
+  -identity string
+    	back up this identity file instead of the clones' memage.identity
+  -repo string
+    	back up the identity of this routed repo
+  -routes string
+    	routes file
+  -store-cmd string
+    	command that stores the identity read from its stdin (argv, no shell; {fingerprint} and {name} are replaced per file, and needed when several files are found)
+  -verify-cmd string
+    	command that prints the stored bytes on stdout, to compare with the file
+```
+
 ## `claude-memsync host`
 
 ```text
@@ -573,7 +602,7 @@ Report the service state, the routing and each repo's state; takes no flags
 ## `claude-memsync version -h`
 
 ```text
-usage: claude-memsync version
+usage: claude-memsync version [--json]
 
-Print the version; takes no flags
+Print the version (--json: one JSON line with name, version, commit, go, os, arch)
 ```

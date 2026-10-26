@@ -196,6 +196,58 @@ the scrypt work factor. The design therefore:
 
 This feature is not built yet; see [setup.md](setup.md#break-glass-join-self-planned).
 
+## Backing up the host identity
+
+`identity backup` hands the host identity to a command you choose, normally
+your password manager's CLI. What it protects, and what it does not:
+
+- **The key is passed only on that command's standard input.** It is not in an
+  argument (visible in the process list), not in the environment, and never
+  printed or logged by the tool. The `{fingerprint}` and `{name}` placeholders
+  carry only public values. The store and verify commands' stderr is discarded
+  on purpose; errors name an exit status or a timeout, so to diagnose a
+  failing command, run it by hand.
+- **It refuses a weak source.** A file with any permission beyond 0600, owned
+  by someone else, with another hard link, a symlink (also when a clone's
+  `memage.identity` names one), or not an age identity is not read into the
+  store command. **On Windows the mode, owner and hard-link checks are not
+  made** (there are no such bits; the ACL is not inspected): only the
+  regular-file, symlink and parse checks apply.
+- **It guards against losing a key to an overwrite, as far as it can see.**
+  With several different keys, a fixed item title would be overwritten by
+  each in turn, and each would still verify right after its own store. The
+  command refuses to run unless `--store-cmd` carries `{fingerprint}` or
+  `{name}`, refuses two different keys that expand to the same item, and
+  refuses a `--verify-cmd` that is the same for any two different keys.
+  After the last store it reads back every item that verified and reports any
+  that a later store replaced (`OVERWRITTEN by a later store`, exit 1), even
+  when that later store or its verify failed. It cannot know how your manager
+  names things: an item that is shared in a way the arguments do not show is
+  only caught by that final read-back, and only if `--verify-cmd` is given.
+- **`--verify-cmd` must read the copy back from the password manager.** A
+  command that reads the local file, or prints a constant, proves nothing and
+  will say "verified". Conversely, a stale item with identical contents (an
+  earlier backup of the same key) can satisfy the verify; that is not a loss,
+  but it does not prove this run's store worked.
+- **Verification compares digests.** The read-back is checked by SHA-256 and
+  only the verdict is shown. Without `--verify-cmd` the backup is
+  UNVERIFIED: the command says so up front and in its summary line, but still
+  exits 0.
+- **It reduces what a crash leaves behind.** Core dumps are turned off
+  (`RLIMIT_CORE` soft limit 0) and on Linux the process is made undumpable
+  (`PR_SET_DUMPABLE` 0), best effort. Windows has no equivalent.
+- **It does not protect the key from the command you give it.** The store
+  command receives the plaintext key and can do anything with it; a wrapper
+  script that logs its stdin defeats the point. Use the manager's own CLI.
+- **It does not protect the key in memory.** Buffers are zeroed after use, but
+  Go may have copied them and the OS may have paged them out; the key is also
+  already on disk in the identity file.
+- **A backup is as strong as its store.** Anyone who gets into the password
+  manager item can decrypt every repo this host is a recipient of, so treat it
+  like the recovery key: strong manager protection, no shared vaults.
+- **It does not rotate or revoke.** A copied key stays valid until the host is
+  retired (`host retire`) and the repos re-encrypted.
+
 ## Other guards
 
 - **Private repos only.** Repos are created with `private: true` and read back;

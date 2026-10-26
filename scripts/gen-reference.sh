@@ -88,6 +88,8 @@ section() {
   section "recipients" recipients
   section "join" join
   section "join request -h" join request -h
+  section "identity" identity
+  section "identity backup -h" identity backup -h
   section "host" host
   section "host list -h" host list -h
   section "host check-key -h" host check-key -h

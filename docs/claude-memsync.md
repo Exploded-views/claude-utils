@@ -138,7 +138,28 @@ and SSH keys. None require root.
 | `claude-memsync run` | Run in the foreground (for debugging). |
 | `claude-memsync changes --since <rev>` or `--marker <file>` | List memory files changed in the sync repo since a point (`--project`, `--json`, `--limit`, `--update-marker`, `--hook`). See [Telling a running session what changed](#telling-a-running-session-what-changed). |
 | `claude-memsync distill` | Rebuild the distilled-memory catalog index (`--prune`, `--dry-run`, and with several repos `--repo <name>` or `--config <path>`, `--routes <path>`). See [distilling-memories.md](distilling-memories.md). |
-| `claude-memsync version` | Print version. |
+| `claude-memsync version [--json]` | Print the version. See [version output](#version-output). |
+
+## Version output
+
+`claude-memsync version` prints one line, `claude-memsync <version>`, for
+example `claude-memsync v0.3.0-ev.1`. `claude-memsync version --json` prints
+exactly one JSON object on one line, with these keys in this order:
+
+```json
+{"name":"claude-memsync","version":"v0.3.0-ev.1","commit":"<40 hex characters, or empty>","go":"go1.27.2","os":"linux","arch":"amd64"}
+```
+
+`version` is the same string the text line shows. `commit` is the VCS revision
+Go embedded in the build, and is `""` when the build has none (a build from a
+source archive, or with `-buildvcs=false`). `go`, `os` and `arch` come from the
+Go runtime. `claude-memmerge version --json` prints the same object with
+`"name":"claude-memmerge"`. `version` takes no other argument (anything else
+exits 2 without acting).
+
+Both forms are a stable interface for scripts: the text line's format and the
+JSON keys will not change without a "breaking" note in the
+[CHANGELOG](../CHANGELOG.md).
 
 ## How it works
 
@@ -1056,6 +1077,74 @@ saying so. The identity stays where it is and keeps working: each clone's git
 config holds the identity's absolute path (`memage.identity`), so moving the
 file would leave every repo keyless. Do not move or copy it by hand; a safe
 `identity move` that rewrites every clone is planned.
+
+### identity backup
+
+```sh
+claude-memsync identity backup --store-cmd "<argv>" [--verify-cmd "<argv>"] \
+    [--identity <path> | --all | --repo <name> | --config <path>] [--routes <path>] [--dry-run]
+```
+
+Stores this host's age identity file or files in your password manager and,
+with `--verify-cmd`, proves the stored copy is the same bytes. See
+[setup.md](setup.md#back-up-the-host-identity) for the usage and examples.
+
+What it does, in order:
+
+1. Hardens the process once the arguments are valid: core dumps off
+   (`RLIMIT_CORE` soft limit 0 on Linux and macOS) and, on Linux,
+   `PR_SET_DUMPABLE` 0. Best effort; Windows has no equivalent.
+2. Resolves the files: `--identity`, else the distinct `memage.identity` of
+   `--repo`'s or `--config`'s clone, else of every clone this host routes.
+   For the whole host it adds the default identities related read clones use,
+   and any classic identity or `*.classic-retired` that `rekey-pq` keeps beside
+   a listed one (exactly `identity-pq.<ext>` to `identity.<ext>`, and
+   `<name>.classic-retired`; no other neighbour is guessed). A default file
+   that is not an age identity is refused (exit 1), not skipped. Each file is
+   labelled (`used by: <repos>`, `host default`, which reads `host default
+   (related clones)` when the routes file has a registry, and
+   `classic history and rollback`); clones that give nothing print
+   `skipped: <dir> (<reason>)`. The configured path is not symlink-resolved.
+3. With more than one distinct key (the same bytes at two paths count once and
+   are stored once), `--store-cmd` must contain `{fingerprint}` (the grouped
+   fingerprint with dashes) or `{name}` (the file's base name), else it exits 2
+   before running anything: one fixed item name would be overwritten by each
+   file in turn while every one still verified. Both placeholders are replaced
+   in every argument of `--store-cmd` and `--verify-cmd` for each file; they
+   never contain key material. Two different keys that would expand to the
+   same store arguments are refused, and so is a `--verify-cmd` that expands
+   the same for any two different keys (each verify would read the same item
+   back). Files whose parsed keys are equal are one item even if their comment
+   lines differ.
+4. Checks every file: a regular file, not a symlink (also checked on the opened
+   file), no permission bits beyond 0600, owned by the current user, one hard
+   link, and an age classic (`AGE-SECRET-KEY-1…`) or hybrid
+   (`AGE-SECRET-KEY-PQ-1…`) identity. The contents are never part of a message.
+   **On Windows the mode, owner and hard-link checks are skipped** (Windows has
+   no such bits; the file's ACL is not inspected), so only the regular-file,
+   symlink and parse checks apply there.
+5. Runs `--store-cmd` with the file's bytes on stdin (the argument line is
+   split without a shell; interactive timeout 120 s, with the "waiting for your
+   password manager" line). Its stdout and stderr are discarded, so to find out
+   why a store or verify command fails, run it by hand; an error here names
+   only the exit status or the timeout.
+6. With `--verify-cmd`, runs it (output at most 64 KiB) and compares the
+   SHA-256 of its stdout with the file's. Only the verdict is printed. The
+   buffers holding the key are zeroed after use, best effort.
+7. Prints `<path>`, the public-key fingerprint (the grouped form `join`
+   shows), the result and the reason. After the last store, with a
+   `--verify-cmd`, once more than one store was attempted, the final pass
+   re-reads the items that verified (even if a later store or verify failed);
+   one that no longer matches is reported `OVERWRITTEN by a later store:
+   <path>` (on stderr; the result line says `OVERWRITTEN by a later store`). Then a summary:
+   `N stored (M verified, K UNVERIFIED, V verify-failed), F store-failed`
+   (`V`: a read-back error, a `MISMATCH` or an overwrite; `F`: a failed store
+   command or a refused file).
+
+Exit codes: 0 when every file was stored (and verified, when asked; a stored
+but UNVERIFIED file still exits 0), 1 on any failure (an unsafe file, a failed
+or timed-out command, a mismatch), 2 for a usage error. `--dry-run` runs no
+command and prints no summary; it still checks the files.
 
 ### apps.json
 

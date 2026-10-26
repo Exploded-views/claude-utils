@@ -316,6 +316,98 @@ claude-memsync doctor --org <org>
 `doctor --install-timer` writes a daily check of every `mem-*` repo's
 visibility.
 
+### Back up the host identity
+
+The host identity is the only copy of the key that opens this host's notes
+(the recovery key is a second way in, but only for repos that list it). Lose
+the file and the host cannot read its own repos. Put a copy in your password
+manager with `identity backup`. Run `--dry-run` first: it lists every file
+that would be stored, why it is on the list, and with which command, and runs
+nothing.
+
+A host usually has more than one identity file, and a manager that replaces an
+item by name would keep only the last. So when more than one distinct key is
+found, the item's title must differ per file: put `{fingerprint}` (the
+identity's public-key fingerprint, with dashes for spaces) or `{name}` (the
+file's base name) in the title in `--store-cmd`, and in `--verify-cmd` wherever
+it names the item, so each verify reads back its own item. The command refuses
+to run (exit 2, nothing stored) without a placeholder in `--store-cmd`, if two
+different keys would get the same item, or if `--verify-cmd` would be the same
+for any two different keys. As a last check, after the final store it reads
+every item that verified back again and reports
+`OVERWRITTEN by a later store: <path>` (exit 1) for one that no longer
+matches, whatever the arguments looked like. The same key at two paths (even
+with different comment lines) is stored once and both paths are listed. If
+you would rather not use placeholders, back the files up one at a time with
+`--identity <path>`, with a different item title for each.
+
+For 1Password (`op`), with placeholders for your own vault:
+
+```sh
+claude-memsync identity backup --dry-run \
+  --store-cmd "op document create - --title memsync-identity-{fingerprint} --vault <vault>" \
+  --verify-cmd "op document get memsync-identity-{fingerprint} --vault <vault>"
+```
+
+Drop `--dry-run` to do it. For any other manager, give the command that
+creates an item from stdin and the command that prints it back, each as you
+would type it (they are split into arguments and never run through a shell,
+so `$VAR`, pipes and `~` are not expanded):
+
+```sh
+claude-memsync identity backup \
+  --store-cmd "<manager-cli> create-from-stdin --title memsync-identity-{fingerprint}" \
+  --verify-cmd "<manager-cli> print --title memsync-identity-{fingerprint}"
+```
+
+The command hands the identity file's bytes to the store command on its
+standard input and nowhere else: not in an argument, the environment, the
+output or a log. With `--verify-cmd` it runs that command, which must print the
+stored bytes on stdout, and compares SHA-256 digests; each file ends in
+`verified (sha256 matches)` or `MISMATCH`. Without `--verify-cmd` it warns that
+the backup is **UNVERIFIED**: the store command only reported success, nothing
+read the copy back. Each file prints its path, its public-key fingerprint
+(grouped as in `join`), the result, and why it is on the list. The last line
+of a run is a summary such as
+`3 stored (3 verified, 0 UNVERIFIED, 0 verify-failed), 0 store-failed`:
+`verify-failed` is stored but not proven (a read-back error, `MISMATCH` or an
+overwrite), `store-failed` is not stored (a failed store command or a refused
+file). The exit status is 0 only if every file was stored (and verified, when
+asked); a stored but UNVERIFIED file still exits 0, so read the summary. Your manager may prompt you to approve; the
+command waits up to 120 seconds (`CLAUDE_MEMSYNC_SECRET_TIMEOUT` changes that).
+
+Which files:
+
+- By default, every distinct `memage.identity` named by this host's clones,
+  plus the host's default identities that related read clones decrypt with
+  (`identity-pq.*` and `identity.*` in the config directory, if present), plus
+  the classic `identity.*` beside an `identity-pq.*` and any
+  `<name>.classic-retired` file that `rekey-pq` keeps (no other neighbour is
+  guessed at). A default file that is not an age identity is refused, exit 1;
+  it is not skipped. The
+  classic file is the key to the pre-migration history and the rollback point,
+  so keep it until you have dropped that backup (`rekey-pq --drop-backup`).
+  Each is labelled: `used by: <repos>`, `host default` (`host default (related
+  clones)` when the routes file has a registry), or
+  `classic history and rollback`.
+- A clone that is not a git repo, or has no `memage.identity` (it is not
+  encrypted), prints `skipped: <dir> (<reason>)`; nothing is skipped silently.
+- `--repo <name>` or `--config <path>` backs up that one clone's identity (and
+  its classic files); `--identity <path>` names one file. `--all` is the
+  default and may be omitted. Clones that share a file store it once.
+- A `memage.identity` that is a symlink is refused, like `--identity`: name the
+  real file.
+- A file with any permission beyond 0600, not owned by you, with more than one
+  hard link, or that does not parse as an age identity is refused, and the
+  store command is not run for it.
+- The verify command must print the exact bytes. A manager that adds or trims a
+  trailing newline reports `MISMATCH`; the stored copy may still be fine, so
+  restore it once by hand and compare to be sure.
+- If a store or verify command fails, run it by hand to see why: its stderr is
+  discarded on purpose, so the key can never reach a log through it.
+- Run it again after `rekey-pq`, which creates a new hybrid identity file and
+  leaves the classic one (renamed `*.classic-retired` once no clone uses it).
+
 ## Each extra machine
 
 ### 1. Bootstrap from one prompt

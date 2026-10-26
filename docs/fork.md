@@ -132,7 +132,6 @@ release; the behaviour described elsewhere in these docs is what ships.
 |---|---|
 | [#1](https://github.com/Exploded-views/claude-utils/issues/1) | `join accept --all`: accept a host's pending requests across every repo in one command (today: one `join accept` per repo) |
 | [#2](https://github.com/Exploded-views/claude-utils/issues/2) | Consistent repo keys across hosts. The keys in `routes.json` can differ between hosts, so a command printed on one host (such as the `join accept` line) can fail on another; `--repo` already accepts the GitHub repo name for that reason. The fix derives keys from the repo name, with aliases for existing hosts (a migration) |
-| [#3](https://github.com/Exploded-views/claude-utils/issues/3) | An `identity backup` command: store the age identity through a password-manager command, read it back and compare, never print it. Not built; today you back the identity up by hand, offline |
 | [#4](https://github.com/Exploded-views/claude-utils/issues/4) | Faster, selectable setup for a host with many repos |
 | [#5](https://github.com/Exploded-views/claude-utils/issues/5) | A precomputed changes index, so per-prompt hooks spawn no git, and performance budgets ratcheted in CI (planned, see [ci.md](ci.md#performance-budgets-planned)) |
 | [#6](https://github.com/Exploded-views/claude-utils/issues/6) | Deterministic `internal/sync` coverage: its coverage varies with host load close to its floor, so CI can flake. The fix makes the timing-dependent tests deterministic; the floor is not lowered |
