@@ -413,7 +413,12 @@ If something fails part way:
 - A rerun after the daemon has synced on top of the migration reports
   `already done` and only retires the classic identity (the record names the
   migrated commit; an origin/main that contains it counts as published). It
-  never fails the commit-count check.
+  never fails the commit-count check. A record from an older build names no
+  commit and no stage: for a repo that is already post-quantum, with
+  origin/main past the backup tip, the migrated commit is inferred from the
+  history (the single root with `--fresh-root`, else the first commit after the
+  backup tip), the record is completed, and the flags and `config.json` are
+  not touched.
 - To give up on a repo that was **not pushed**, run
   `claude-memsync recipients rekey-pq --repo <repo> --rollback`: it resets the
   branch to the pre-migration tip and restores the identity, scheme, pin and

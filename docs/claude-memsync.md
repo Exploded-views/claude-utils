@@ -1529,15 +1529,23 @@ if neither file exists. With `--all`, a published repo is reported as
 `published; nothing to roll back`. The new hybrid identity file is left in
 place and reused by a later `rekey-pq`.
 
-While a repo's record is not `published`/`done`, or the repo is not
-post-quantum yet, the daemon does not sync it: each cycle logs
+While a repo's record is not `published`, or the repo is not post-quantum
+yet, the daemon does not sync it: each cycle logs
 `rekey-pq: not syncing this repo this cycle` and `status` prints a
-`rekey-pq: not syncing` line. A record written by an older build (no stage)
-blocks only while the repo is not pq.
+`rekey-pq: not syncing` line. A record written by an older build (no stage, no
+`newCommit`) blocks only while the repo is not pq, or while the cached
+`origin/main` is still the backup tip (the push never happened). For such a
+record the migrated commit is inferred from the history when origin/main has
+moved off the backup tip (the single root with `--fresh-root`, else the first
+commit after the tip), and a rerun completes the record (`newCommit`,
+`published`) and prints `already done` without touching `config.json`;
+`--rollback --discard-local-commits` lists the commits since that commit, and
+refuses if it cannot be inferred.
 
 The classic identity is renamed `<name>.classic-retired` only when no git clone
 beside the sync directories still names it in `memage.identity`: every
-`*/.git/config` under the parent directory of each sync dir is checked,
+`*/.git/config` under the parent directory of each sync dir (and the default
+sync dir) is checked, paths compared after `~` expansion and symlink resolution,
 including clones that are not routed (such as a `*.incident-*` copy). A clone
 whose restore record names the file as its classic identity and is not finished
 keeps it too (a rollback of that clone would need it). If one is found, the
@@ -1548,7 +1556,9 @@ finds the file in the repo's record or as the current identity's name without
 `-pq`, reports what it would do without `--apply`, and renames it with it.
 
 The pre-migration tip stays at `refs/memsync/pre-pq`; `rekey-pq --drop-backup`
-deletes it and its record, expires the reflogs of HEAD, `main` and
+refuses while the rekey is unpublished (a finished record, or for an older
+record origin/main off the tip with HEAD descending from the inferred migrated
+commit), because the backup is the rollback point. Then it deletes it and its record, expires the reflogs of HEAD, `main` and
 `origin/main` (not the stash) and runs `gc --prune=now`, so the classic
 ciphertext leaves the local clone. This removes classic ciphertext locally
 only after a `--fresh-root` run: without it the classic history is still the
