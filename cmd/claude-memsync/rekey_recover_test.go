@@ -459,3 +459,26 @@ func TestRekeyPQ_RollbackReadsHeadUnderTheSyncLock(t *testing.T) {
 		t.Errorf("synced-head record %q, want the restored tip %q", strings.TrimSpace(string(got)), oldTip)
 	}
 }
+
+// N8: `status` says the daemon is not syncing a repo with an unfinished rekey.
+func TestStatus_SaysSyncingIsStoppedForAnUnfinishedRekey(t *testing.T) {
+	c, newRec, _ := unpublishedRekey(t)
+	has := func() bool {
+		for _, l := range encryptionLines(c.cfg) {
+			if strings.Contains(l, "rekey-pq") && strings.Contains(l, "not syncing") {
+				return true
+			}
+		}
+		return false
+	}
+	if !has() {
+		t.Errorf("status lacks the rekey-pq line: %q", encryptionLines(c.cfg))
+	}
+	unblockPush(t, c.origin)
+	if code, o, e := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root", "--apply"); code != 0 {
+		t.Fatalf("%s%s", o, e)
+	}
+	if has() {
+		t.Errorf("status still says syncing is stopped after the rekey finished: %q", encryptionLines(c.cfg))
+	}
+}
