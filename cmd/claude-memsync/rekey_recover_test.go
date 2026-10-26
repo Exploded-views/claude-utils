@@ -135,3 +135,58 @@ func TestRekeyPQ_NewCommitAncestorOfOriginIsDone(t *testing.T) {
 		t.Fatalf("exit %d, want \"already done\":\n%s%s", code, out, errb)
 	}
 }
+
+// unpublishedRekey applies a rekey whose push is blocked, so it is local only.
+func unpublishedRekey(t *testing.T) (classicRepo, string, string) {
+	t.Helper()
+	c := newClassicRepo(t)
+	_, newRec := newPQKey(t, "newrec")
+	oldTip, _ := c.repo.Run("rev-parse", "HEAD")
+	blockPush(t, c.origin)
+	if code, o, e := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root", "--apply"); code == 0 {
+		t.Fatalf("push was blocked yet exit 0\n%s%s", o, e)
+	}
+	return c, newRec, strings.TrimSpace(oldTip)
+}
+
+func rollbackCmd(t *testing.T, c classicRepo, extra ...string) (int, string, string) {
+	t.Helper()
+	return rekey(t, c, append([]string{"--rollback"}, extra...)...)
+}
+
+// S2: local commits made after the rekey are not silently dropped.
+func TestRekeyPQ_RollbackRefusesToDropLocalCommits(t *testing.T) {
+	c, _, oldTip := unpublishedRekey(t)
+	head, _ := c.repo.Run("rev-parse", "HEAD")
+	commitEmpty(t, c.repo, "note written after the rekey")
+	commitEmpty(t, c.repo, "second late note")
+	code, out, errb := rollbackCmd(t, c)
+	if code == 0 {
+		t.Fatalf("rollback dropped local commits silently\n%s%s", out, errb)
+	}
+	for _, want := range []string{"2 commits", "note written after the rekey", "second late note", "--discard-local-commits"} {
+		if !strings.Contains(errb, want) {
+			t.Errorf("refusal lacks %q:\n%s", want, errb)
+		}
+	}
+	if agecrypt.SchemeOf(c.repo) != agecrypt.SchemePQ {
+		t.Error("a refused rollback changed the repo")
+	}
+	if h, _ := c.repo.Run("rev-parse", "HEAD"); h == head {
+		t.Fatal("setup: the late commits are missing")
+	}
+	if code, out, errb := rollbackCmd(t, c, "--discard-local-commits"); code != 0 {
+		t.Fatalf("rollback with --discard-local-commits: %d\n%s%s", code, out, errb)
+	}
+	if h, _ := c.repo.Run("rev-parse", "HEAD"); strings.TrimSpace(h) != oldTip {
+		t.Error("HEAD not back at the old tip")
+	}
+}
+
+func TestRekeyPQ_DiscardFlagGoesOnlyWithRollback(t *testing.T) {
+	c := newClassicRepo(t)
+	_, newRec := newPQKey(t, "newrec")
+	if code, _, _ := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--discard-local-commits"); code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+}
