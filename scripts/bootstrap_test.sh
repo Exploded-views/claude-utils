@@ -243,6 +243,9 @@ mkbare() { # name [with-content]
 # newhome <name>: fresh fake HOME with insteadOf maps for every bare repo.
 newhome() {
   H="${HROOT:-$BASE}/$1/home"; STUB_DIR="${HROOT:-$BASE}/$1/stub"
+  # The runner's own XDG_CONFIG_HOME (GitHub's ubuntu images export one) must not
+  # leak into a fake HOME: the real binary resolves its config dir through it.
+  export XDG_CONFIG_HOME="$H/.config"
   rm -rf "${HROOT:-${BASE:?}}/$1"; mkdir -p "$H" "$STUB_DIR"
   cp "$STUBS/memsync-wrap" "$STUB_DIR/"; cp "$BASE/otherkey" "$STUB_DIR/"
   : >"$STUB_DIR/gh.log"; : >"$STUB_DIR/memsync.log"
@@ -401,6 +404,29 @@ set +e; wait "$SIGPID"; SIGRC=$?; set -e
 check "token file deleted: gone after SIGTERM mid-run (exit 143)" bash -c "[ $SIGRC -eq 143 ] && [ ! -e '$TF' ]"
 check "token file deleted: the token is not in the signalled run's output" bash -c "! grep -qF -- '$ORGTOK' '$SH_OUT'"
 
+
+echo "--- XDG_CONFIG_HOME: a non-default config dir holds routes.json, apps.json and the denylists"
+newhome xdg
+export XDG_CONFIG_HOME="$H/elsewhere"
+mkdir -p "$XDG_CONFIG_HOME/claude-memsync"
+cp "$BASE/app.pem" "$XDG_CONFIG_HOME/claude-memsync/app.pem"; chmod 600 "$XDG_CONFIG_HOME/claude-memsync/app.pem"
+printf '[{"name":"testapp","appId":"12345","org":"example-org","keyFile":"%s","apiBase":"http://127.0.0.1:%s"}]\n' \
+  "$XDG_CONFIG_HOME/claude-memsync/app.pem" "$APIPORT" >"$XDG_CONFIG_HOME/claude-memsync/apps.json"
+chmod 600 "$XDG_CONFIG_HOME/claude-memsync/apps.json"
+ORGARGS=(--org-app testapp)
+runboot --host testhost --role homelab --yes
+ORGARGS=(--org-token-file "$BASE/orgtoken")
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -8
+check "XDG_CONFIG_HOME set: the run reads apps.json from there and exits 0" [ "$RC" -eq 0 ]
+check "XDG_CONFIG_HOME set: routes.json and the denylists are written there, 0600" bash -c "[ -f '$XDG_CONFIG_HOME/claude-memsync/routes.json' ] && [ -f '$XDG_CONFIG_HOME/claude-memsync/denylist-personal.txt' ]"
+check "XDG_CONFIG_HOME set: nothing was written to \$HOME/.config" bash -c "[ ! -e '$H/.config' ]"
+check "XDG_CONFIG_HOME set: the daemon-side configs are consistent with it (the binary found routes.json there)" bash -c "grep -q 'route home infra-homelab' '$STUB_DIR/memsync.log'"
+newhome xdg2
+export XDG_CONFIG_HOME="$H/elsewhere"
+mkdir -p "$XDG_CONFIG_HOME/memsync"; echo '{"repo":"git@x:y/z.git"}' >"$XDG_CONFIG_HOME/memsync/config.json"
+runboot --host testhost --role homelab --yes
+check "XDG_CONFIG_HOME set: the old memsync config is looked for there too, and refused" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'old memsync is configured'" _ "$OUT"
+newhome xdg3
 
 # ============================ keep-out (was: client) ===========================
 echo "--- keep-out flags: new names, old names, wording"
