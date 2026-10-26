@@ -76,6 +76,62 @@ mark()   { [ "$DRY_RUN" -eq 1 ] && return 0; mkdir -p "$STATE"; : >"$STATE/$HOST
 
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
+version_ge() { # have want (dotted, major.minor)
+  [ "$(printf '%s\n%s\n' "$2" "$1" | sort -t. -k1,1n -k2,2n | head -n1)" = "$2" ]
+}
+
+# ---------------------------------------------------------------------------
+# Prerequisites. Checked first, before any change and in --dry-run too: one
+# "missing prerequisite:" line per missing tool, then exit 1.
+# ---------------------------------------------------------------------------
+BUILD_FROM_SOURCE=1     # --prebuilt-dir turns this off: Go is then not needed
+GO_MODE=""
+check_prereqs() {
+  local missing=0 t gv gmin=1.25 gomod v
+  miss() { printf 'missing prerequisite: %s\n' "$*" >&2; missing=$((missing + 1)); }
+  if [ "${BASH_VERSINFO[0]}" -lt 3 ] || { [ "${BASH_VERSINFO[0]}" -eq 3 ] && [ "${BASH_VERSINFO[1]}" -lt 2 ]; }; then
+    miss "bash ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]} is too old (need >= 3.2; macOS /bin/bash 3.2 is enough)"
+  fi
+  for t in sed awk grep tr cut sort head find stat mktemp id uname dirname chmod ln; do
+    command -v "$t" >/dev/null 2>&1 || miss "$t (a basic tool the script uses)"
+  done
+  if command -v git >/dev/null 2>&1; then
+    gv="$(git --version | sed -E 's/[^0-9]*([0-9]+\.[0-9]+).*/\1/')"
+    version_ge "$gv" 2.26 || miss "git $gv is too old (need >= 2.26)"
+  else
+    miss "git (to clone and verify the pinned commit and reach the memory repos)"
+  fi
+  command -v python3 >/dev/null 2>&1 || miss "python3 (JSON edits and argument splitting)"
+  command -v ssh-keygen >/dev/null 2>&1 || miss "ssh-keygen (per-repo deploy keys and host-key checks)"
+  command -v ssh-keyscan >/dev/null 2>&1 || miss "ssh-keyscan (GitHub host keys)"
+  command -v gh >/dev/null 2>&1 || miss "gh (the GitHub CLI; org operations)"
+  case "$(uname -s 2>/dev/null)" in
+    Linux)  command -v systemctl >/dev/null 2>&1 || miss "systemctl (claude-memsync install registers a systemd user service)" ;;
+    Darwin) command -v launchctl >/dev/null 2>&1 || miss "launchctl (claude-memsync install registers a launchd agent)" ;;
+  esac
+  if [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
+    # The Go floor is the go.mod of the tree this script sits in, when there is one.
+    gomod="$(dirname "$0")/../go.mod"
+    if [ -r "$gomod" ]; then
+      v="$(sed -n 's/^go \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' "$gomod" 2>/dev/null | head -n1 || true)"
+      [ -z "$v" ] || gmin="$v"
+    fi
+    if command -v go >/dev/null 2>&1 && version_ge "$(go version | sed -E 's/.*go([0-9]+\.[0-9]+).*/\1/')" "$gmin"; then
+      GO_MODE=go
+    elif command -v docker >/dev/null 2>&1 && [ "$(uname -s 2>/dev/null)" = Linux ]; then
+      GO_MODE=docker
+    elif command -v go >/dev/null 2>&1; then
+      miss "go $(go version | sed -E 's/.*go([0-9]+\.[0-9]+).*/\1/') is too old (need >= $gmin, the go.mod version; or docker on Linux; or --prebuilt-dir)"
+    else
+      miss "go (need >= $gmin to build from source; or docker on Linux; or --prebuilt-dir; on macOS: brew install go)"
+    fi
+  fi
+  if [ "$missing" -gt 0 ]; then
+    printf 'ERROR: %s prerequisite(s) missing; nothing was changed\n' "$missing" >&2
+    exit 1
+  fi
+}
+
 # valid_name <repo>: only mem-* names, never client or orchestrator repos.
 valid_name() {
   case "$1" in
@@ -177,6 +233,7 @@ while [ $# -gt 0 ]; do
     *)            die "unknown argument: $1" ;;
   esac
 done
+check_prereqs
 [ -n "$HOST" ] || die "--host is required"
 [ -n "$ORG" ] || die "--org <org> is required: the GitHub organisation that holds the memory repos (there is no default)"
 [ -n "$AGE_RECOVERY" ] || die "--recovery-recipient <age1pq1...> is required: your own offline post-quantum recovery PUBLIC key (generate one as docs/bootstrap.md describes; there is no default)"
@@ -246,10 +303,6 @@ say "claude-memsync bootstrap: host=$HOST role=$ROLE org=$ORG commit=$SHORT$([ "
 # ---------------------------------------------------------------------------
 # a. Preflight
 # ---------------------------------------------------------------------------
-version_ge() { # have want (dotted, major.minor)
-  [ "$(printf '%s\n%s\n' "$2" "$1" | sort -t. -k1,1n -k2,2n | head -n1)" = "$2" ]
-}
-
 # org_token prints the org token. It is only called inside the command
 # substitution of org_gh (or the preflight check), so it never outlives a call.
 org_token() {
@@ -441,27 +494,12 @@ check_key_file() {
   [ "$n" = 1 ] || die "check key file $f must have one hard link (has $n)"
 }
 
-GO_MODE=""
 preflight() {
   step "a. Preflight"
-  local gv
-  command -v git >/dev/null || die "git not found"
-  gv="$(git --version | sed -E 's/[^0-9]*([0-9]+\.[0-9]+).*/\1/')"
-  version_ge "$gv" 2.26 || die "git $gv is too old (need >= 2.26)"
-  for c in gh ssh-keygen ssh-keyscan python3; do
-    command -v "$c" >/dev/null || die "$c not found"
-  done
   gh auth status >/dev/null 2>&1 || die "gh is not logged in (run: gh auth login)"
   [ -z "$CHECK_APP" ] || check_key_file
   admin_entry_add
   check_org_scope
-  if command -v go >/dev/null && version_ge "$(go version | sed -E 's/.*go([0-9]+\.[0-9]+).*/\1/')" 1.25; then
-    GO_MODE=go
-  elif command -v docker >/dev/null && [ "$(uname -s)" = Linux ]; then
-    GO_MODE=docker
-  else
-    die "need Go >= 1.25 (or docker on Linux). On macOS: brew install go"
-  fi
   command -v claude >/dev/null || warn "claude not found on PATH; the plugin step will be skipped"
 
   # Predecessor writers: refuse while any is active.
@@ -484,7 +522,7 @@ PY
       fi
     done
   fi
-  say "  ok (git $gv, gh logged in, build via $GO_MODE)"
+  say "  ok (gh logged in${GO_MODE:+, build via $GO_MODE})"
 }
 
 check_sync_dirs() { # run after the plan is final
