@@ -138,30 +138,33 @@ func TestVis_CloneURLOfThisOrgAndPrivateIsAccepted(t *testing.T) {
 	}
 }
 
-// Hooks and the session context check only the owner's edges, use a short
-// timeout, and rely on cached verdicts; with neither a verdict nor the API an
-// edge fails closed and the context says so.
+// Hooks and the session context are offline: they rely on cached verdicts only
+// and look only at the owner's edges; with no verdict an edge fails closed and
+// the context says so. A non-hook command asks the API and fills the cache.
 func TestVis_HooksCheckOnlyOwnEdgesAndUseTheCache(t *testing.T) {
 	api := newFakeAPI(t)
 	visHost(t, api, nil)
-	oldQ, oldTTL := quickTimeout, visTTL
-	quickTimeout = 80 * time.Millisecond
-	t.Cleanup(func() { quickTimeout, visTTL = oldQ, oldTTL })
 	if code, _, errs := relate("mem-project-a", "mem-project-b", "--read"); code != 0 {
 		t.Fatalf("relate: %s", errs)
 	}
 	if code, _, errs := relate("mem-project-x", "mem-project-y", "--read"); code != 0 {
-		t.Skipf("registry will not hold a foreign edge here: %s", errs)
+		t.Fatalf("the foreign edge must be in the registry for this test: %s", errs)
 	}
 	api.set(func() { api.hits = map[string]int{} })
-	os.RemoveAll(visCachePathOf(t))
+	cache := visCachePathOf(t)
+	os.RemoveAll(cache)
 
-	// A hook never reaches the network: with no verdict the edge is unverified.
-	_, ctx, _ := contextFor("/proj/x")
+	// No verdict: the edge is unverified, nothing is asked, and only the
+	// owner's repos are ever mentioned.
+	_, ctx, errs := contextFor("/proj/x")
 	if !strings.Contains(ctx, "unverified") || api.count() != 0 {
 		t.Fatalf("a hook with no cached verdict must not ask the API (%d hits):\n%s", api.count(), ctx)
 	}
-	// A non-hook command asks the API and fills the cache.
+	if strings.Contains(errs+ctx, "mem-project-x") || strings.Contains(errs+ctx, "mem-project-y") {
+		t.Errorf("a hook looked at an edge the owner is not an end of:\n%s\n%s", ctx, errs)
+	}
+
+	// A non-hook command asks the API and fills the cache; a hook then serves from it.
 	rc, err := loadRelCtx("")
 	if err != nil {
 		t.Fatal(err)
@@ -171,40 +174,32 @@ func TestVis_HooksCheckOnlyOwnEdgesAndUseTheCache(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	_, ctx, _ = contextFor("/proj/x")
-	if !strings.Contains(ctx, "mem-project-b") || strings.Contains(ctx, "unverified") {
-		t.Fatalf("context:\n%s", ctx)
-	}
-	api.mu.Lock()
-	for p := range api.hits {
-		if strings.Contains(p, "mem-project-x") || strings.Contains(p, "mem-project-y") {
-			t.Errorf("an edge the owner is not an end of was checked: %s", p)
-		}
-	}
-	api.mu.Unlock()
 	before := api.count()
 	if before == 0 {
 		t.Fatal("the non-hook check should have asked the API")
 	}
-	contextFor("/proj/x")
+	_, ctx, errs = contextFor("/proj/x")
+	if !strings.Contains(ctx, "mem-project-b") || strings.Contains(ctx, "unverified") {
+		t.Fatalf("context:\n%s", ctx)
+	}
+	if b, _ := os.ReadFile(cache); strings.Contains(string(b), "mem-project-x") || strings.Contains(string(b), "mem-project-y") || strings.Contains(errs, "mem-project-x") {
+		t.Errorf("an edge the owner is not an end of was checked: %s %s", b, errs)
+	}
 	if api.count() != before {
-		t.Errorf("a fresh cached verdict must not call the API again (%d -> %d)", before, api.count())
+		t.Errorf("a hook must not call the API (%d -> %d)", before, api.count())
 	}
 
-	// Expired verdicts and a slow API: the stale verdict still serves.
+	// An expired verdict (beyond the TTL, within the cap) still serves a hook.
+	old := visTTL
 	visTTL = 0
-	api.set(func() { api.delay = 400 * time.Millisecond })
-	start := time.Now()
+	t.Cleanup(func() { visTTL = old })
 	_, ctx, _ = contextFor("/proj/x")
 	if strings.Contains(ctx, "unverified") || !strings.Contains(ctx, "mem-project-b") {
-		t.Fatalf("a cached verdict must serve when the API is slow:\n%s", ctx)
-	}
-	if time.Since(start) > 3*time.Second {
-		t.Errorf("the hook waited %v on a slow API", time.Since(start))
+		t.Fatalf("a cached verdict must serve a hook:\n%s", ctx)
 	}
 
-	// No verdict at all and no API: fail closed, said plainly.
-	os.RemoveAll(visCachePathOf(t))
+	// No verdict at all: fail closed, said plainly.
+	os.RemoveAll(cache)
 	_, ctx, _ = contextFor("/proj/x")
 	if !strings.Contains(ctx, "unverified") {
 		t.Fatalf("want an unverified edge:\n%s", ctx)
