@@ -511,3 +511,111 @@ func TestJoinAcceptAll_PrintsTheAcceptingHostsKey(t *testing.T) {
 		t.Errorf("want the accepting host's key line for each accepted repo, got %d:\n%s", n, out)
 	}
 }
+
+// ---- round 2: a diverged clone, and a fetch that fails, must not hide origin's other key ----
+
+// pushUnrelatedToOrigin moves origin on without touching joins/.
+func pushUnrelatedToOrigin(t *testing.T, cfg config.Config) {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "other")
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("clone", "-q", cfg.RemoteURL, dir)
+	run("-C", dir, "commit", "-q", "--allow-empty", "-m", "origin moves on")
+	run("-C", dir, "push", "-q", "origin", "HEAD:main")
+}
+
+func localUnpushedCommit(t *testing.T, cfg config.Config) {
+	t.Helper()
+	if _, err := gitwt.New(cfg.SyncDir).Run("commit", "-q", "--allow-empty", "-m", "local unpushed"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func keyAdded(t *testing.T, cfg config.Config, rec string) bool {
+	t.Helper()
+	ls, _ := agecrypt.ListRecipients(cfg.SyncDir)
+	return strings.Contains(strings.Join(ls, "\n"), rec)
+}
+
+func TestJoinAcceptAll_ADivergedCloneStillShowsOriginsOtherKey(t *testing.T) {
+	cfgs := joinAllHost(t, "personal", "projects")
+	rec := newAgeRecipient(t)
+	fp := addJoinRequest(t, cfgs["personal"], "new-host", rec)
+	addJoinRequest(t, cfgs["projects"], "new-host", rec) // the honest request at HEAD
+	localUnpushedCommit(t, cfgs["projects"])
+	tamperOrigin(t, cfgs["projects"], "new-host", newAgeRecipient(t))
+	runningDaemon(t, cfgs["personal"].SyncDir, cfgs["projects"].SyncDir)
+	code, out, errs := runJoinCmd("accept", "new-host", "--all", "--allow-unlabelled", "--fingerprint", fp)
+	if code != 1 || !strings.Contains(out, "projects: fingerprint mismatch") {
+		t.Fatalf("exit %d, want 1 naming projects\n%s%s", code, out, errs)
+	}
+	if keyAdded(t, cfgs["personal"], rec) {
+		t.Error("personal accepted while projects' origin holds another key under the label")
+	}
+}
+
+func TestJoinAcceptAll_ADivergedReadOnlyCloneWithNoRequestStillShowsOriginsOtherKey(t *testing.T) {
+	cfgs := joinAllHost(t, "personal", "projects")
+	rec := newAgeRecipient(t)
+	fp := addJoinRequest(t, cfgs["personal"], "new-host", rec)
+	localUnpushedCommit(t, cfgs["projects"])
+	tamperOrigin(t, cfgs["projects"], "new-host", newAgeRecipient(t))
+	ro := cfgs["projects"]
+	ro.ReadOnly = true
+	if err := config.Save(ro); err != nil {
+		t.Fatal(err)
+	}
+	runningDaemon(t, cfgs["personal"].SyncDir)
+	code, out, errs := runJoinCmd("accept", "new-host", "--all", "--allow-unlabelled", "--fingerprint", fp)
+	if code != 1 || !strings.Contains(out, "projects: fingerprint mismatch") {
+		t.Fatalf("exit %d, want 1 naming projects\n%s%s", code, out, errs)
+	}
+	if keyAdded(t, cfgs["personal"], rec) {
+		t.Error("personal accepted while a read-only repo's origin holds another key")
+	}
+}
+
+// A candidate that cannot be brought up to date under the lock leaves its
+// origin's state unknown: nothing is accepted anywhere.
+func TestJoinAcceptAll_ACandidateThatCannotSyncRefusesEveryRepo(t *testing.T) {
+	cfgs := joinAllHost(t, "personal", "projects")
+	rec := newAgeRecipient(t)
+	fp := addJoinRequest(t, cfgs["personal"], "new-host", rec)
+	addJoinRequest(t, cfgs["projects"], "new-host", rec)
+	localUnpushedCommit(t, cfgs["projects"])
+	pushUnrelatedToOrigin(t, cfgs["projects"]) // diverged, but no other key
+	runningDaemon(t, cfgs["personal"].SyncDir, cfgs["projects"].SyncDir)
+	code, out, errs := runJoinCmd("accept", "new-host", "--all", "--allow-unlabelled", "--fingerprint", fp)
+	if code != 1 || !strings.Contains(out, "projects: cannot sync") || !strings.Contains(out, "nothing accepted anywhere") {
+		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+	if keyAdded(t, cfgs["personal"], rec) {
+		t.Error("personal was accepted although projects could not be synced")
+	}
+}
+
+func TestJoinAcceptAll_AFailedFetchRefusesEveryRepo(t *testing.T) {
+	cfgs := joinAllHost(t, "personal", "projects")
+	rec := newAgeRecipient(t)
+	fp := addJoinRequest(t, cfgs["personal"], "new-host", rec)
+	tamperOrigin(t, cfgs["projects"], "new-host", newAgeRecipient(t)) // unseen: the fetch will fail
+	if _, err := gitwt.New(cfgs["projects"].SyncDir).Run("remote", "set-url", "origin", filepath.Join(t.TempDir(), "nonexistent.git")); err != nil {
+		t.Fatal(err)
+	}
+	f := runningDaemon(t, cfgs["personal"].SyncDir, cfgs["projects"].SyncDir)
+	code, out, errs := runJoinCmd("accept", "new-host", "--all", "--allow-unlabelled", "--fingerprint", fp)
+	if code != 1 || !strings.Contains(out, "projects: cannot fetch") || !strings.Contains(out, "nothing accepted anywhere") {
+		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+	if keyAdded(t, cfgs["personal"], rec) {
+		t.Error("personal accepted although projects' origin could not be read")
+	}
+	if f.did() != "" {
+		t.Errorf("the service was touched: %q", f.did())
+	}
+}

@@ -493,6 +493,10 @@ func TestNoDaemonPathAccepts_GuardCatchesProbes(t *testing.T) {
 		{cmdDir, "main.go", "joinCmd(w)", false},
 		{cmdDir, "join_labels.go", "joinCmd(w)", false},
 		{cmdDir, "service_test.go", "AcceptJoin( joinCmd(", false},
+		{"../sync", "join.go", "AcceptJoin(r)", true},
+		{cmdDir, "service.go", "run := joinCmd", true},
+		{cmdDir, "service.go", "f := joinAll", true},
+		{cmdDir, "join_all.go", "x := joinChangeOne", false},
 	} {
 		got := len(acceptRefs(tc.dir, tc.base, []byte(tc.src))) > 0
 		if got != tc.want {
@@ -834,5 +838,26 @@ func TestRequestsForLabel_SeesHeadAndTheRemoteTipSeparately(t *testing.T) {
 	}
 	if valid != 1 {
 		t.Errorf("want exactly one valid version: %+v", got)
+	}
+}
+
+// HEAD and the remote tip have diverged: the tip's request is still read.
+func TestRequestsForLabel_ADivergedTipIsStillRead(t *testing.T) {
+	a, b := pair(t)
+	j, _, err := RequestJoin(b.repo, "host-b", joinNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.repo.Run("push", "origin", "main")
+	a.write(t, "local.txt", "x\n")
+	a.commit(t, "local only") // a diverges from origin, which now holds the request
+	a.repo.Run("fetch", "-q", "origin", "main")
+	got := RequestsForLabel(a.repo, "host-b")
+	if len(got) != 1 || !got[0].Valid || got[0].Join.Fingerprint != j.Fingerprint {
+		t.Fatalf("the diverged tip's request must be seen: %+v", got)
+	}
+	// ListJoins keeps its rule for list/status: a diverged tip is not read.
+	if es, _ := ListJoins(a.repo); len(es) != 0 {
+		t.Errorf("ListJoins read a diverged tip: %+v", es)
 	}
 }
