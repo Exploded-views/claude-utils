@@ -325,12 +325,14 @@ func TestHeldBackPull_TrackedFileDeletedUpstreamDaemon(t *testing.T) {
 	flushes := make(chan error, 16)
 	f.loop.OnFlush = func(_ bool, err error) { flushes <- err }
 	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel) // a failing test must not leave the loop running
 	done := make(chan error, 1)
 	go func() { done <- f.loop.Run(ctx) }()
 
-	// The startup flush is the cycle under test: it pulls the deletion, and the
-	// held-back Claude copy survives it. No later flush is guaranteed (none
-	// comes in practice: the preserved copy raises no event), so none is awaited.
+	// The startup flush is the cycle under test: it pulls the upstream deletion
+	// and must leave the held-back Claude copy as it was, neither deleting nor
+	// rewriting it. No later flush is awaited: the daemon raises none unless a
+	// watched file changes, and a correct cycle changes nothing in the Claude tree.
 	lastErr := awaitFlush(t, flushes, "startup flush")
 	cancel()
 	if err := <-done; err != nil {
