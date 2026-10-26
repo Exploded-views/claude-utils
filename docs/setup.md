@@ -388,22 +388,32 @@ claude-memsync join accept <host-label> --all --fingerprint "<fp>"
 
 `join list --all` prints one table over every routed repo (repo, label,
 fingerprint, time). `accept --all` looks at every encrypted repo on this host
-that has a request from `<host-label>` and accepts those whose fingerprint
-equals `--fingerprint`, then prints one line per repo: `accepted and pushed`,
-`no request`, `fingerprint mismatch`, `refused (<reason>)`, or `skipped
-(read-only | rekey-blocked | unencrypted)`. The service is stopped once and
-started once for the whole set; a repo with an unfinished rekey is skipped and
-left untouched. `--all` does not go with `--repo` or `--config`, and `accept`
-still needs `--fingerprint`.
+and accepts the request from `<host-label>` in those whose fingerprint equals
+`--fingerprint`, then prints one line per repo: `accepted and pushed`,
+`no request`, `fingerprint mismatch`, `malformed request`, `cannot fetch`,
+`cannot sync`, `refused (<reason>)`, `not run (interrupted)` (or another
+`not run (<reason>)`, such as a lock held by something else), or `skipped
+(read-only | rekey-blocked | unencrypted | missing: not a git clone)`. The
+service is stopped once and started once for the whole set; a repo with an
+unfinished rekey is skipped and left untouched. `--all` does not go with
+`--repo` or `--config`, and `accept` still needs `--fingerprint`.
 
 - **A mismatch refuses everything.** If any repo holds a request under that
   label with a different fingerprint, or one that is not a valid request,
   nothing is accepted in any repo (that can mean a second key under one
-  label), the repo is named, and the command exits 1. Both this clone's copy
-  and origin's are compared, and the check is made again under the lock after
-  every repo has been brought up to date with origin, before anything is
-  changed. Look at `join list --all`, `join reject` the stray one, and run it
-  again.
+  label), the repo is named, and the command exits 1. Every encrypted repo is
+  fetched first, and both the clone's copy and origin's are compared, even in
+  a clone that has diverged from origin. If origin cannot be fetched in any
+  repo (`cannot fetch`), nothing is accepted: another key could be there
+  unseen. Then only the repos that would be changed (not read-only, not
+  rekey-blocked) are brought up to date with origin under the lock and
+  checked again; one that cannot be brought up to date (`cannot sync`) also
+  refuses everything. The others are looked at once, before the lock.
+  That check under the lock is local: another host can still push a request
+  between the check and a repo's own push. That push is then rejected and
+  reported, repos accepted before it stay accepted, and the other request
+  stays visible in `join list`. Look at `join list --all`, `join reject` the
+  stray one, and run it again.
 - **Exit codes.** 0 when every repo that had a request was accepted. 1 when a
   request was refused or skipped, on a mismatch, and when no repo has a request
   from that label (nothing was done, which a script should notice). 2 for a

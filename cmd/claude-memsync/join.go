@@ -119,13 +119,18 @@ func joinCmd(stdout, stderr io.Writer, args []string) int {
 	}
 }
 
-// joinFetch brings in the remote's state without touching the work-tree.
-func joinFetch(repo *gitwt.Repo) {
+// joinFetch brings in the remote's state without touching the work-tree. A
+// failure is ignored: list and status then show what the clone has.
+func joinFetch(repo *gitwt.Repo) { _ = joinFetchErr(repo) }
+
+// joinFetchErr is joinFetch that says whether the remote could be read.
+func joinFetchErr(repo *gitwt.Repo) error {
 	br, err := repo.CurrentBranch()
 	if err != nil || br == "" || br == "HEAD" {
 		br = defaultBranch
 	}
-	_, _ = repo.Run("fetch", "-q", "origin", br)
+	_, err = repo.Run("fetch", "-q", "origin", br)
+	return err
 }
 
 // joinGuardHook lets tests see which push guard a join command used.

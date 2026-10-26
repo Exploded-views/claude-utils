@@ -138,7 +138,17 @@ func joinChangeAll(stdout, stderr io.Writer, set *routedSet, action, label, fp s
 			p.status = "skipped (unencrypted)"
 			continue
 		}
-		joinFetch(repo)
+		if err := joinFetchErr(repo); err != nil {
+			// Origin may hold another key under the label that cannot be seen.
+			p.fail = true
+			if accept {
+				mismatched = append(mismatched, n)
+				p.status = fmt.Sprintf("cannot fetch (%v); nothing accepted anywhere", err)
+			} else {
+				p.status = fmt.Sprintf("cannot fetch (%v)", err)
+			}
+			continue
+		}
 		ok, mm := classifyRequests(agecrypt.RequestsForLabel(repo, label), accept, fp)
 		if !ok {
 			p.status = "no request"
@@ -167,7 +177,7 @@ func joinChangeAll(stdout, stderr io.Writer, set *routedSet, action, label, fp s
 				p.status = "not accepted (the request from " + label + " in " + strings.Join(where, ", ") + " does not match --fingerprint)"
 			}
 		}
-		fmt.Fprintf(stderr, "join accept --all: refusing every repo: the request from %q in %s does not match --fingerprint (a different key or an unreadable request), which may mean a second key under one label. Check with the person who runs the new host, or `join list --all`; reject the stray request, then run this again.\n", label, strings.Join(where, ", "))
+		fmt.Fprintf(stderr, "join accept --all: refusing every repo: the request from %q in %s cannot be matched to --fingerprint (a different key, an unreadable request, or origin could not be read), which may mean a second key under one label. Check with the person who runs the new host, or `join list --all`; reject the stray request, then run this again.\n", label, strings.Join(where, ", "))
 	}
 	if len(mismatched) > 0 {
 		refuseAll(mismatched)
@@ -193,7 +203,13 @@ func joinChangeAll(stdout, stderr io.Writer, set *routedSet, action, label, fp s
 				repo := gitwt.New(p.cfg.SyncDir)
 				if err := agecrypt.SyncFromOrigin(repo); err != nil {
 					p.do, p.fail = false, true
-					p.status = fmt.Sprintf("refused (could not bring this clone up to date with origin; nothing was changed: %v)", err)
+					if accept {
+						// Origin's state here is unknown: it may hold another key.
+						late = append(late, p.name)
+						p.status = fmt.Sprintf("cannot sync (%v); nothing accepted anywhere", err)
+					} else {
+						p.status = fmt.Sprintf("refused (could not bring this clone up to date with origin; nothing was changed: %v)", err)
+					}
 					continue
 				}
 				ok, mm := classifyRequests(agecrypt.RequestsForLabel(repo, label), accept, fp)

@@ -515,7 +515,19 @@ func RequestsForLabel(repo *gitwt.Repo, label string) []JoinEntry {
 	path := JoinPath(label)
 	seen := map[string]bool{}
 	var res []JoinEntry
-	for _, r := range joinRefs(repo) {
+	// Stricter than joinRefs: the remote tip is read unless it is already in
+	// HEAD's history, so a clone that has diverged from origin still shows
+	// what origin holds. (joinRefs, for list and status, skips a diverged tip
+	// so that an accepted request does not reappear from a stale tip; a
+	// decision to accept must not rely on that.)
+	refs := []string{"HEAD"}
+	tip := "refs/remotes/origin/" + branchOf(repo)
+	if _, err := repo.Run("rev-parse", "--verify", "--quiet", tip); err == nil {
+		if anc, err := repo.IsAncestor(tip, "HEAD"); err != nil || !anc {
+			refs = append(refs, tip)
+		}
+	}
+	for _, r := range refs {
 		b, ok := blobAtRev(repo, r, path)
 		if !ok || seen[string(b)] {
 			continue

@@ -3,6 +3,7 @@ package agecrypt
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -437,27 +438,29 @@ func TestInfoAttributesExemptJoins(t *testing.T) {
 }
 
 // acceptRefs lists what file base (in dir) may not contain. Only join.go and
-// join_all.go, the interactive `join accept`, may call AcceptJoin; in
-// cmd/claude-memsync nothing but main.go and join*.go may call the join
-// command's entry points (a daemon path must not reach them).
+// join_all.go of cmd/claude-memsync, the interactive `join accept`, may call
+// AcceptJoin; in that directory nothing but main.go and join*.go may mention
+// the join command's entry points, as a call or as a value (a daemon path must
+// not reach them).
 func acceptRefs(dir, base string, src []byte) []string {
 	if strings.HasSuffix(base, "_test.go") {
 		return nil
 	}
+	inCmd := filepath.Base(dir) == "claude-memsync"
 	var bad []string
 	text := string(src)
-	if base != "join.go" && base != "join_all.go" && strings.Contains(text, "AcceptJoin(") {
+	if !(inCmd && (base == "join.go" || base == "join_all.go")) && strings.Contains(text, "AcceptJoin(") {
 		bad = append(bad, "AcceptJoin(")
 	}
-	if filepath.Base(dir) == "claude-memsync" && base != "main.go" && !strings.HasPrefix(base, "join") {
-		for _, call := range []string{"joinAll(", "joinChangeAll(", "joinChangeOne(", "joinCmd("} {
-			if strings.Contains(text, call) {
-				bad = append(bad, call)
-			}
+	if inCmd && base != "main.go" && !strings.HasPrefix(base, "join") {
+		for _, m := range joinEntryRE.FindAllString(text, -1) {
+			bad = append(bad, m)
 		}
 	}
 	return bad
 }
+
+var joinEntryRE = regexp.MustCompile(`\bjoin(Cmd|All|ChangeAll|ChangeOne)\b`)
 
 // Nothing in the sync loop may be able to accept a request.
 func TestNoDaemonPathAccepts(t *testing.T) {
