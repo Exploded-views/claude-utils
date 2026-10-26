@@ -5,10 +5,10 @@
   "github.com/MarimerLLC/claude-utils/internal/agecrypt": 74.4,
   "github.com/MarimerLLC/claude-utils/internal/archive": 80.5,
   "github.com/MarimerLLC/claude-utils/internal/changes": 78.3,
-  "github.com/MarimerLLC/claude-utils/internal/config": 88.2,
+  "github.com/MarimerLLC/claude-utils/internal/config": 91.8,
   "github.com/MarimerLLC/claude-utils/internal/distill": 76.8,
   "github.com/MarimerLLC/claude-utils/internal/foreign": 83.4,
-  "github.com/MarimerLLC/claude-utils/internal/ghapp": 82.0,
+  "github.com/MarimerLLC/claude-utils/internal/ghapp": 82.5,
   "github.com/MarimerLLC/claude-utils/internal/ghguard": 90.5,
   "github.com/MarimerLLC/claude-utils/internal/gitwt": 25.8,
   "github.com/MarimerLLC/claude-utils/internal/hosts": 81.4,
@@ -19,7 +19,7 @@
   "github.com/MarimerLLC/claude-utils/internal/scrub": 93.2,
   "github.com/MarimerLLC/claude-utils/internal/secretcmd": 95.0,
   "github.com/MarimerLLC/claude-utils/internal/sync": 83.8,
-  "github.com/MarimerLLC/claude-utils/internal/testenv": 0.0,
+  "github.com/MarimerLLC/claude-utils/internal/testenv": 25.4,
   "github.com/MarimerLLC/claude-utils/internal/version": 0.0,
   "github.com/MarimerLLC/claude-utils/tools/coverfloors": 94.4
 }

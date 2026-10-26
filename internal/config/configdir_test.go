@@ -115,3 +115,23 @@ func TestResolve_LegacyFallback(t *testing.T) {
 		}
 	})
 }
+
+func TestNoHome(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	if d, err := Dir(); err == nil {
+		t.Fatalf("Dir() = %q with no home and no XDG_CONFIG_HOME, want an error", d)
+	}
+	setPlatform(t, "darwin", "")
+	if d := LegacyDir(); d != "" {
+		t.Errorf("darwin LegacyDir = %q with no home", d)
+	}
+	if p, legacy := Resolve("identity.txt"); p != "identity.txt" || legacy {
+		t.Errorf("Resolve = %q, %v with no home", p, legacy)
+	}
+	GOOS, UserConfigDir = "windows", func() (string, error) { return "", os.ErrNotExist }
+	if d := LegacyDir(); d != "" {
+		t.Errorf("windows LegacyDir = %q without a user config dir", d)
+	}
+}
