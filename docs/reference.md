@@ -454,11 +454,11 @@ usage: claude-memsync recipients add <public-key> [--host <label>] | remove <pub
 ```text
 usage:
   claude-memsync join request --repo <name> --label <host-label>   (on the new host)
-  claude-memsync join status [--repo <name>]                       (on the new host)
-  claude-memsync join list [--repo <name>]                         (on a member host)
+  claude-memsync join status [--repo <name>]                       (on the new host; lists each key with its label)
+  claude-memsync join list [--repo <name>]                         (on a member host; shows each request's label)
   claude-memsync join accept <label> --repo <name> --fingerprint <fp> [--allow-unlabelled]
   claude-memsync join reject <label> [--repo <name>]
-  (repo selection as for recipients: --repo <name> | --config <path>, --routes <path>)
+  (repo selection as for recipients: --repo <key-or-GitHub-repo-name> | --config <path>, --routes <path>)
 ```
 
 ## `claude-memsync join request -h`
