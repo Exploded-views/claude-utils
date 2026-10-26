@@ -619,3 +619,39 @@ func TestJoinAcceptAll_AFailedFetchRefusesEveryRepo(t *testing.T) {
 		t.Errorf("the service was touched: %q", f.did())
 	}
 }
+
+func TestJoinAcceptAll_TheOtherReposNameTheRealCauseOfARefusal(t *testing.T) {
+	cfgs := joinAllHost(t, "personal", "projects")
+	rec := newAgeRecipient(t)
+	fp := addJoinRequest(t, cfgs["personal"], "new-host", rec)
+	if _, err := gitwt.New(cfgs["projects"].SyncDir).Run("remote", "set-url", "origin", filepath.Join(t.TempDir(), "nonexistent.git")); err != nil {
+		t.Fatal(err)
+	}
+	runningDaemon(t, cfgs["personal"].SyncDir, cfgs["projects"].SyncDir)
+	code, out, errs := runJoinCmd("accept", "new-host", "--all", "--allow-unlabelled", "--fingerprint", fp)
+	if code != 1 {
+		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+	if !strings.Contains(out, "personal: not accepted (blocked by projects: cannot fetch") {
+		t.Errorf("personal's line must name the real cause:\n%s", out)
+	}
+	if strings.Contains(out, "does not match --fingerprint") {
+		t.Errorf("a fetch failure is reported as a fingerprint mismatch:\n%s", out)
+	}
+}
+
+func TestJoinAcceptAll_WhenEveryFetchFailsItDoesNotAlsoSayNoRequestExists(t *testing.T) {
+	cfgs := joinAllHost(t, "personal", "projects")
+	for _, c := range cfgs {
+		if _, err := gitwt.New(c.SyncDir).Run("remote", "set-url", "origin", filepath.Join(t.TempDir(), "nonexistent.git")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, out, errs := runJoinCmd("accept", "new-host", "--all", "--allow-unlabelled", "--fingerprint", "0123456789abcdef0123456789abcdef")
+	if code != 1 || !strings.Contains(out, "personal: cannot fetch") || !strings.Contains(out, "projects: cannot fetch") {
+		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+	if strings.Contains(out+errs, "no join request from") {
+		t.Errorf("the refusal is contradicted by \"no join request\":\n%s%s", out, errs)
+	}
+}
