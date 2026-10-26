@@ -284,7 +284,7 @@ jr_flush() { # hand every finished job at the front to jr_emit, in order
 
 jr_start() { # index
   set -m
-  ( "$JR_FN" "$1" ) >"$JR_JD/$1.out" 2>"$JR_JD/$1.err" &
+  ( "$JR_FN" "$1" ) </dev/null >"$JR_JD/$1.out" 2>"$JR_JD/$1.err" &   # job control hands background jobs the tty; a read from it would stop the job
   JR_PID[$1]=$!
   set +m
   JR_L=$(($1 + 1))
@@ -307,19 +307,29 @@ jr_run() {
   while [ "$JR_NEXT" -lt "$JR_L" ]; do jr_wait_oldest; jr_poll; jr_flush; done
 }
 
+# jr_shield: the first thing an exit trap does, so that a second signal while it
+# cleans up cannot cut the clean-up short.
+jr_shield() { trap - EXIT; trap '' INT TERM HUP; }
+
 jr_kill_all() { # stop every job still running, with its children; wait for them
-  local i n
+  local i n any
   for ((i = JR_NEXT; i < JR_L; i++)); do
     [ -z "${JR_RC[$i]-}" ] || continue
-    kill -TERM -- "-${JR_PID[$i]}" 2>/dev/null || kill -TERM "${JR_PID[$i]}" 2>/dev/null || true
+    kill -TERM -- "-${JR_PID[$i]}" 2>/dev/null || true
+  done
+  # one shared grace period of 5 s for every group, polled until each is gone
+  for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    any=0
+    for ((i = JR_NEXT; i < JR_L; i++)); do
+      [ -z "${JR_RC[$i]-}" ] || continue
+      if kill -0 -- "-${JR_PID[$i]}" 2>/dev/null; then any=1; fi
+    done
+    [ "$any" -eq 0 ] && break
+    sleep 0.25 || true
   done
   for ((i = JR_NEXT; i < JR_L; i++)); do
     [ -z "${JR_RC[$i]-}" ] || continue
-    for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-      kill -0 "${JR_PID[$i]}" 2>/dev/null || break
-      sleep 0.25 || true
-    done
-    kill -KILL -- "-${JR_PID[$i]}" 2>/dev/null || kill -KILL "${JR_PID[$i]}" 2>/dev/null || true
+    if kill -0 -- "-${JR_PID[$i]}" 2>/dev/null; then kill -KILL -- "-${JR_PID[$i]}" 2>/dev/null || true; fi
     wait "${JR_PID[$i]}" 2>/dev/null || true
     JR_RC[$i]=143
   done
@@ -360,7 +370,7 @@ run_dir_remove() {
 }
 on_exit() {
   local rc=$?
-  trap - EXIT
+  jr_shield
   set +e   # clean up as much as possible, whatever fails on the way
   jr_kill_all   # repo jobs still running, with what they started
   run_dir_remove
@@ -460,7 +470,7 @@ done
 # Runtime failures (file modes, existing keys, non-private repos) are exit 1.
 # ---------------------------------------------------------------------------
 validate_flags() {
-  local o re n_tok=0 v
+  local o re n_tok=0 v w
   [ -n "$HOST" ] || udie "--host is required"
   [ -n "$ORG" ] || udie "--org <org> is required: the GitHub organisation that holds the memory repos (there is no default)"
   [ -n "$AGE_RECOVERY" ] || udie "--recovery-recipient <age1pq1...> is required: your own offline post-quantum recovery PUBLIC key (generate one as docs/bootstrap.md describes; there is no default)"
@@ -513,6 +523,11 @@ validate_flags() {
     [ "$CHECK_APP" != "$ORG_APP" ] || udie "--check-app must differ from --org-app: the admin app never serves the daemon"
     case "$CHECK_KEY_FILE" in /*) ;; *) udie "--check-key-file must be an absolute path" ;; esac
   fi
+  for w in ${WORKSPACES[@]+"${WORKSPACES[@]}"}; do
+    case "$w" in "~"*) w="$HOME${w#\~}" ;; esac
+    [ -d "$w" ] || udie "workspace '$w' is not a directory"
+    [ ! -e "$w/.git" ] || udie "workspace '$w' is itself a git checkout; give its parent folder"
+  done
   if [ -n "$PREBUILT_DIR" ]; then
     [ -d "$PREBUILT_DIR" ] || udie "--prebuilt-dir $PREBUILT_DIR is not a directory"
     if [ "$SHA_GIVEN" -eq 1 ]; then
@@ -616,7 +631,7 @@ org_token() {
     out="$("${ORG_TOKEN_ARGV[@]}")" || rc=$?
     [ "$rc" -eq 0 ] || return 1
     out="$(printf '%s' "$out" | tr -d '\r\n')"
-    if [ -n "$RUN_DIR" ] && [ -n "$out" ]; then ( umask 077; printf '%s\n' "$out" >"$RUN_DIR/org-token" ); fi
+    if [ -n "$RUN_DIR" ] && [ -n "$out" ]; then ( umask 077; printf '%s\n' "$out" >"$RUN_DIR/org-token"; date +%s >"$RUN_DIR/org-token.at" ); fi
     printf '%s' "$out"
   fi
 }
@@ -837,20 +852,46 @@ PY
   say "  ok (gh logged in${GO_MODE:+, build via $GO_MODE})"
 }
 
+# A sync dir that is there without an init mark is refused, unless this script
+# began it (the initing mark) and it holds nothing that exists only there: then
+# it is moved aside, after the plan is confirmed, just before its init (see
+# half_made_aside). Never deleted.
+half_made_check() { # key: die unless the half-made dir is safe to move aside
+  local d="$SYNC_ROOT/$1" unpushed
+  if [ -e "$d/.git" ]; then
+    unpushed="$(git -C "$d" log --branches --not --remotes --format=%h 2>/dev/null | head -n1 || true)"
+    [ -z "$unpushed" ] || die "$d began as an init of this bootstrap but holds a commit that is not on any remote ($unpushed); refusing to move it. Look at it with: git -C $d log --branches --not --remotes"
+  fi
+  if [ -e "$ROUTES" ] && ! done_p routes && grep -qF -- "$d" "$ROUTES" 2>/dev/null; then
+    die "$d is named in $ROUTES, which this bootstrap did not write; refusing to move it"
+  fi
+}
 check_sync_dirs() { # run after the plan is final
   local i k
   for i in "${!R_KEYS[@]}"; do
     k="${R_KEYS[$i]}"
     if [ -e "$SYNC_ROOT/$k" ] && ! done_p "init.$k"; then
       if [ -e "$STATE/$HOST.initing.$k" ]; then   # this script began it and was interrupted
-        if [ "$DRY_RUN" -eq 1 ]; then warn "$SYNC_ROOT/$k is half-made by an interrupted run of this bootstrap; a real run would remove it and start again"
-        else warn "$SYNC_ROOT/$k is half-made by an interrupted run of this bootstrap; removing it and starting again"; fi
-        [ "$DRY_RUN" -eq 1 ] || rm -rf -- "${SYNC_ROOT:?}/${k:?}"
+        half_made_check "$k"
+        warn "$SYNC_ROOT/$k is half-made by an interrupted run of this bootstrap; after you confirm, it is moved aside (to $k.half-made.<time>), never deleted"
       else
         die "$SYNC_ROOT/$k already exists and was not made by this bootstrap; refusing to touch it"
       fi
     fi
   done
+}
+# half_made_aside <key>: after confirmation, in the repo's job, just before its init.
+half_made_aside() {
+  local d="$SYNC_ROOT/$1" to i
+  [ "$DRY_RUN" -eq 0 ] && [ -e "$d" ] || return 0
+  to="$d.half-made.${BOOTSTRAP_ASIDE_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
+  if [ -e "$to" ] || [ -L "$to" ]; then
+    i=1
+    while [ -e "$to.$i" ] || [ -L "$to.$i" ]; do i=$((i + 1)); done
+    to="$to.$i"
+  fi
+  say "  $d is half-made by an interrupted run: moving it aside to $to"
+  mv "$d" "$to"
 }
 
 # ---------------------------------------------------------------------------
@@ -1253,6 +1294,17 @@ job_note() { # key|join text: tell the parent
   else PENDING_JOINS+=("$2"); fi
 }
 
+# token_hint <gh output>: after a 401, say so when the minted token is old (they last about an hour).
+token_hint() {
+  local t=0
+  printf '%s' "$1" | grep -qE '401|Bad credentials' || return 0
+  [ -n "$RUN_DIR" ] && [ -s "$RUN_DIR/org-token.at" ] || return 0
+  t="$(cat "$RUN_DIR/org-token.at")"
+  if [ $(($(date +%s) - t + ${BOOTSTRAP_TOKEN_AGE_BONUS:-0})) -gt 3000 ]; then
+    printf 'the org token has probably expired (it was minted over 50 minutes ago and lasts about an hour); re-run the same command: the run resumes\n'
+  fi
+}
+
 repo_check() { # index
   local i="$1" name out
   name="${R_NAMES[$i]}"
@@ -1265,7 +1317,7 @@ repo_check() { # index
     elif printf '%s' "$out" | grep -qiE 'not found|404'; then
       run org_gh repo create "$ORG/$name" --private
     else
-      die "cannot look up $ORG/$name: $out"
+      die "cannot look up $ORG/$name: $out $(token_hint "$out")"
     fi
     check_private "$name"
     say "  $name is private"
@@ -1297,7 +1349,7 @@ repo_keys_init() { # index
         if printf '%s' "$out" | grep -qiE '422|forbidden|disabled|not allowed'; then
           die "deploy keys look disabled for $ORG. One-time org setting: Organization settings > Repository > (Member privileges / Deploy keys) allow deploy keys on repositories (API field deploy_keys_enabled_for_repositories). Then re-run; this script resumes."
         fi
-        die "gh repo deploy-key add failed for $name: $out"
+        die "gh repo deploy-key add failed for $name: $out $(token_hint "$out")"
       fi
       mark "deploykey.$name"
     fi
@@ -1313,6 +1365,7 @@ repo_keys_init() { # index
   # script, so an interrupted init's half-made dir can be cleared on the re-run.
   if ! done_p "init.$k"; then
     [ "$DRY_RUN" -eq 1 ] || { git ls-remote "$url" 2>/dev/null | grep -q . && content=1; }
+    half_made_aside "$k"
     mark "initing.$k"
     run "$BIN/claude-memsync" init --remote "$url" --sync-dir "$SYNC_ROOT/$k" --encrypt \
       --host-label "$HOST" --recovery-recipient "$AGE_RECOVERY" --archive-deletes --private-only \
@@ -1331,6 +1384,11 @@ repo_keys_init() { # index
     fi
     out="$("$BIN/claude-memsync" join request --repo "$k" --label "$HOST" 2>&1)" || die "join request failed: $out"
     printf '%s\n' "$out"
+    if printf '%s' "$out" | grep -q 'already a recipient'; then   # an earlier run got as far as the push
+      say "  $name: this host is already a recipient; no join to accept"
+      mark "join.$k"
+      return 0
+    fi
     fp="$(printf '%s\n' "$out" | grep -E '^fingerprint: ([0-9a-f]{4} ){7}[0-9a-f]{4}$' | head -n1 | sed 's/^fingerprint: //' || true)"
     [ -n "$fp" ] || die "join request printed no 'fingerprint: <8 groups of 4 hex>' line; refusing to continue"
     mark "join.$k"

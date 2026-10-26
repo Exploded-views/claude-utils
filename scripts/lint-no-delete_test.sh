@@ -4,7 +4,14 @@
 # the "ok" ones, not), and the repo's own scripts/ must pass. Stock macOS tools only.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-W="$(mktemp -d)"; trap 'for f in "$W"/*/*; do [ -f "$f" ] && rm -f "$f"; done; for d in "$W"/*; do [ -d "$d" ] && rmdir "$d"; done; rmdir "$W"' EXIT
+W="$(mktemp -d)"
+cleanup() {
+  local f d
+  for f in "$W"/*/*; do [ -f "$f" ] && rm -f "$f"; done
+  for d in "$W"/*; do [ -d "$d" ] && rmdir "$d"; done
+  rmdir "$W"
+}
+trap cleanup EXIT
 PASS=0 FAIL=0
 ok()    { PASS=$((PASS + 1)); printf 'PASS    %s\n' "$1"; }
 bad()   { FAIL=$((FAIL + 1)); printf 'FAIL    %s\n' "$1"; }

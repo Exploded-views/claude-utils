@@ -26,11 +26,15 @@ export CGO_ENABLED=0
 cd "$ROOT"
 
 ARCHIVES=()
+STAGE_ROOT=""
+stage_cleanup() { [ -z "$STAGE_ROOT" ] || rm -rf -- "$STAGE_ROOT"; STAGE_ROOT=""; }
+trap stage_cleanup EXIT
 for target in "${TARGETS[@]}"; do
   GOOS="${target%/*}"; GOARCH="${target#*/}"
   name="claude-utils-${VERSION}-${GOOS}-${GOARCH}"
-  stage="$OUT/$name"
-  rm -rf "$stage"; mkdir -p "$stage/scripts"
+  STAGE_ROOT="$(mktemp -d)"   # staged in a fresh temp dir, which is the only tree this script removes
+  stage="$STAGE_ROOT/$name"
+  mkdir -p "$stage/scripts"
   ext=""; [ "$GOOS" != windows ] || ext=".exe"
 
   echo "::group::build ${target}"
@@ -46,11 +50,11 @@ for target in "${TARGETS[@]}"; do
   cp scripts/bootstrap.sh "$stage/scripts/bootstrap.sh"; chmod 755 "$stage/scripts/bootstrap.sh"
 
   if [ "$GOOS" = windows ]; then
-    (cd "$OUT" && zip -qr "${name}.zip" "$name"); ARCHIVES+=("${name}.zip")
+    rm -f "$OUT/${name}.zip"; (cd "$STAGE_ROOT" && zip -qr "$OUT/${name}.zip" "$name"); ARCHIVES+=("${name}.zip")
   else
-    (cd "$OUT" && tar -czf "${name}.tar.gz" "$name"); ARCHIVES+=("${name}.tar.gz")
+    (cd "$STAGE_ROOT" && tar -czf "$OUT/${name}.tar.gz" "$name"); ARCHIVES+=("${name}.tar.gz")
   fi
-  rm -rf "$stage"
+  stage_cleanup
 done
 
 # sha256sum on Linux, shasum on macOS: the same "<hash>  <file>" lines either way.

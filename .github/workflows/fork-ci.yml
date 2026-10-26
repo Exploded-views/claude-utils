@@ -132,6 +132,12 @@ jobs:
           docker run --rm -v "$PWD:/mnt:ro" -w /mnt \
             koalaman/shellcheck@sha256:2097951f02e735b613f4a34de20c40f937a6c8f18ecb170612c88c34517221fb \
             -S warning scripts/*.sh
+      # The setup scripts never remove a directory tree (rm -r, find -delete,
+      # rmtree), except a mktemp -d directory they made themselves.
+      - name: no-delete lint
+        run: |
+          bash scripts/lint-no-delete_test.sh
+          bash scripts/lint-no-delete.sh
       # Stock macOS tools only: no regex repeat bound above 255 (BSD grep and
       # bash [[ =~ ]] refuse it) and no GNU-only flags in scripts/*.sh.
       - name: portability lint

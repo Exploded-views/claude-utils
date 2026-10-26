@@ -59,7 +59,7 @@ within an hour. No daemon ever uses it.
 During a run the org token is minted once and kept as a mode-0600 file in a
 private (0700) directory made for that run, so parallel repo jobs share it and
 the key command runs once. The directory is deleted on every exit path,
-including Ctrl-C and TERM (the jobs are stopped first). Deleting a file is not
+including Ctrl-C and TERM (the jobs are stopped first, and a second signal cannot interrupt the clean-up); a SIGKILL or crash leaves it behind, so delete a stale `tmp.*` dir with an `org-token` in it by hand. Deleting a file is not
 erasing it: on an SSD or APFS a deleted file cannot be guaranteed
 unrecoverable, which is why the token is short-lived (about an hour) and the
 file is private; the same holds for `--delete-org-token-file`.
