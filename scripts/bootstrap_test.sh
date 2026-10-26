@@ -377,7 +377,10 @@ notoken() { ! printf '%s' "$OUT" | grep -qF -- "$ORGTOK"; }
 newhome td1; mktok
 tokrun --dry-run
 check "token file deleted: a successful dry run exits 0" [ "$RC" -eq 0 ]
-check "token file deleted: the file is gone after the dry run" [ ! -e "$TF" ]
+check "dry run: the token file is NOT deleted (a dry run changes nothing), unchanged" bash -c "[ -f '$TF' ] && [ \"\$(cat '$TF')\" = '$ORGTOK' ]"
+check "dry run: says the file would be deleted on a real run" bash -c "printf '%s\n' \"\$1\" | grep -qF 'dry run: the org token file would be deleted on a real run'" _ "$OUT"
+tokrun --yes
+check "the same token file then serves the real run, which deletes it" bash -c "[ $RC -eq 0 ] && [ ! -e '$TF' ]"
 check "token file deleted: the token is not in the output" notoken
 newhome td2; mktok
 tokrun --yes
@@ -390,8 +393,8 @@ STUB_PUBLIC=1 tokrun --yes
 check "token file deleted: gone after a forced failure (public repo)" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'NOT private' && [ ! -e '$TF' ]" _ "$OUT"
 check "token file deleted: the token is not in the failing output" notoken
 newhome td4; mktok
-BOOT_PATH="$(minipath shred)" tokrun --dry-run
-check "token file deleted: without shred the overwrite-and-remove fallback still removes it" bash -c "[ $RC -eq 0 ] && [ ! -e '$TF' ]"
+BOOT_PATH="$(minipath shred)" STUB_PUBLIC=1 tokrun --yes
+check "token file deleted: without shred the overwrite-and-remove fallback still removes it" bash -c "[ $RC -ne 0 ] && [ ! -e '$TF' ]"
 newhome td5; mktok; chmod 644 "$TF"
 tokrun --dry-run
 check "token file with a loose mode is refused, and left alone" bash -c "[ $RC -eq 1 ] && printf '%s' \"\$1\" | grep -q 'must be mode 0600 (is 644)' && [ -e '$TF' ]" _ "$OUT"
@@ -669,8 +672,8 @@ echo "--- paste prompt: homelab with an org token file"
 newhome doc-tf
 prompt_setup
 mktok; rundoc homelab-tokenfile\ dry
-check "token-file prompt: dry run succeeds and consumes the token file" bash -c "[ $RC -eq 0 ] && [ ! -e '$TF' ]" 
-mktok; rundoc homelab-tokenfile\ real
+check "token-file prompt: dry run succeeds and keeps the token file for the real run" bash -c "[ $RC -eq 0 ] && [ -f '$TF' ]"
+rundoc homelab-tokenfile\ real
 [ "$RC" -eq 0 ] || echo "$OUT" | tail -20
 check "token-file prompt: real run succeeds, the file is gone" bash -c "[ $RC -eq 0 ] && [ ! -e '$TF' ]"
 check "token-file prompt: org calls used the token, and it is nowhere in the output or on disk" bash -c "grep -qE '^(repo|api repos)' '$STUB_DIR/gh.who' && ! grep -E '^(repo|api repos)' '$STUB_DIR/gh.who' | grep -v '|org' && ! printf '%s' \"\$1\" | grep -qF -- '$ORGTOK' && ! grep -rIlF -- '$ORGTOK' '$H'" _ "$OUT"
@@ -690,7 +693,8 @@ rm -rf "$H/.local/src/claude-utils-$SHA"
 mktok; rundoc crewkit\ dry
 [ "$RC" -eq 0 ] || echo "$OUT" | tail -20
 check "crewkit prompt: dry run succeeds with no Go, no clone" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -q 'Install prebuilt binaries from'" _ "$OUT"
-mktok; rundoc crewkit\ real
+check "crewkit prompt: the dry run left the token file for the real run" [ -f "$TF" ]
+rundoc crewkit\ real
 [ "$RC" -eq 0 ] || echo "$OUT" | tail -20
 check "crewkit prompt: real run succeeds and installs the extracted binaries into the version dir" bash -c "[ $RC -eq 0 ] && [ -x '$H/.local/bin/claude-memsync' ] && readlink '$H/.local/bin/claude-memsync' | grep -q '/lib/claude-memsync/v' && [ ! -e '$H/.local/src/claude-utils-$SHA' ]"
 check "crewkit prompt: no go build, token file deleted" bash -c "[ ! -e '$STUB_DIR/go.log' ] && [ ! -e '$TF' ]"
