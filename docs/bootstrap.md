@@ -92,6 +92,7 @@ ALREADY SET, FOR REFERENCE (no action needed)
 - SRC = ~/.local/src/claude-utils-$COMMIT
 
 STEPS
+0. Keep your password manager unlocked and in view: the run asks it for the admin key (do not read it yourself).
 1. git clone "$REPO" "$SRC" && git -C "$SRC" checkout "$COMMIT"
 2. Read "$SRC/scripts/bootstrap.sh" in full before running anything.
 3. Define this once:
@@ -148,6 +149,7 @@ ALREADY SET, FOR REFERENCE (no action needed)
 - SRC = ~/.local/src/claude-utils-$COMMIT
 
 STEPS
+0. Keep your password manager unlocked and in view: the run asks it for the admin key (do not read it yourself).
 1. git clone "$REPO" "$SRC" && git -C "$SRC" checkout "$COMMIT"
 2. Read "$SRC/scripts/bootstrap.sh" in full before running anything.
 3. Define this once:
@@ -310,8 +312,12 @@ Build the binary from a clone of this repo, then register both apps in the org. 
 ```
 git clone https://github.com/Exploded-views/claude-utils ~/.local/src/claude-utils-<commit>
 git -C ~/.local/src/claude-utils-<commit> checkout <commit>
-cd ~/.local/src/claude-utils-<commit> && go build -o ~/.local/bin/claude-memsync ./cmd/claude-memsync
+L=~/.local/lib/claude-memsync/<commit>; mkdir -p "$L" ~/.local/bin
+cd ~/.local/src/claude-utils-<commit> && go build -o "$L/claude-memsync" ./cmd/claude-memsync
+ln -sfn "$L/claude-memsync" ~/.local/bin/claude-memsync
 ```
+
+This is bootstrap's own layout (`~/.local/lib/claude-memsync/<sha>/` plus symlinks in `~/.local/bin`), so a later bootstrap run adopts it. A standalone binary copied straight into `~/.local/bin` also works: bootstrap moves a regular file there aside to `<name>.pre-bootstrap-<UTC time>` and links its own build in its place; an existing symlink is simply re-pointed, and anything that is neither a regular file nor a symlink is refused.
 
 1. `memsync-admin` (repository Administration: write, Metadata: read). The key goes straight into the password manager and is never written to a file; `--key-cmd-store` reads the key on stdin, `--key-cmd` is the command that prints it back (use that as `<admin-key-cmd>`):
 

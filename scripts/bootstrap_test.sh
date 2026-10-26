@@ -479,8 +479,9 @@ printf 'hand-added-line\n' >>"$DLF"
 runboot --host testhost --role homelab --yes --keep-out-term alpha --keep-out-term 'beta.x'
 check "rerun with A and B: the file holds both, A once, the hand-added line kept" bash -c "[ \$(grep -cx alpha '$DLF') -eq 1 ] && grep -qxF 'beta\\.x' '$DLF' && grep -qx hand-added-line '$DLF'"
 check "rerun: says how many terms it added" bash -c "printf '%s\n' \"\$1\" | grep -q 'added 1 keep-out term' " _ "$OUT"
+DLN="$(wc -l <"$DLF")"
 runboot --host testhost --role homelab --yes --keep-out-term alpha --keep-out-term 'beta.x'
-check "a second rerun adds nothing and says so" bash -c "[ \$(wc -l <'$DLF') -eq 3 ] && printf '%s\n' \"\$1\" | grep -q 'denylist-personal.txt: no new keep-out terms'" _ "$OUT"
+check "a second rerun adds nothing and says so" bash -c "[ \$(wc -l <'$DLF') -eq $DLN ] && printf '%s\n' \"\$1\" | grep -q 'denylist-personal.txt: no new keep-out terms'" _ "$OUT"
 check "the file stays 0600" mode "$DLF" 600
 
 echo "--- a reachable org with empty keep-out owners: the plan suggests KEEP_OUT_OWNERS"
@@ -502,7 +503,7 @@ REALPLAN="$(printf '%s\n' "$OUT" | sed -n '/repos (private, in/,/deploy keys/p' 
 REALN2="$(printf '%s\n' "$OUT" | grep -c '^  mem-.* is private$')"
 check "dry-run plan tally ($PLANN) = real-run plan tally ($REALPLAN) = repos checked private ($REALN2)" bash -c "[ $PLANN -ge 2 ] && [ $PLANN -eq $REALPLAN ] && [ $PLANN -eq $REALN2 ]"
 check "no stale 'host check-key' note when there is no registry; the summary names /reload-plugins" bash -c "! printf '%s\n' \"\$1\" | grep -q 'when a registry is configured' && printf '%s\n' \"\$1\" | grep -q '/reload-plugins'" _ "$OUT"
-check "the docs: step 0 asks to keep the password manager unlocked, in both app prompts" bash -c "[ \$(grep -c 'keep your password manager unlocked and in view' '$ROOT/docs/bootstrap.md') -ge 2 ]"
+check "the docs: step 0 asks to keep the password manager unlocked, in both app prompts" bash -c "[ \$(grep -ci 'keep your password manager unlocked and in view' '$ROOT/docs/bootstrap.md') -ge 2 ]"
 check "the docs: the app-registration build uses bootstrap's own layout" bash -c "sed -n '/## Register the GitHub Apps/,/## Usage/p' '$ROOT/docs/bootstrap.md' | grep -q '.local/lib/claude-memsync/'"
 
 # ============================ keep-out (was: client) ===========================

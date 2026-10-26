@@ -467,7 +467,7 @@ org_gh() {
 # Org reach, checked twice and reported separately: (a) what the ambient gh
 # login can see, (b) what the org token can see. Both warn and proceed (the
 # owner accepted this). The script only ever touches repos in --org.
-BANNER_AMBIENT="" BANNER_TOKEN=""
+BANNER_AMBIENT="" BANNER_TOKEN="" REACH_ORGS=()
 org_banner() {
   [ -z "$BANNER_AMBIENT" ] || printf '\n%s\n' "$BANNER_AMBIENT" >&2
   [ -z "$BANNER_TOKEN" ] || printf '\n%s\n' "$BANNER_TOKEN" >&2
@@ -487,6 +487,16 @@ reach_banner() { # label orgs-output
 !!! KEEP-OUT ORG(S) reachable through the $label: $denied. This script never creates, touches or keys any repo outside $ORG."
   printf '%s' "$b"
 }
+# note_reach <orgs-output>: remember the orgs outside the allow list (not in a
+# subshell, unlike reach_banner), for the plan's KEEP_OUT_OWNERS suggestion.
+note_reach() {
+  local o
+  while IFS= read -r o; do
+    [ -n "$o" ] || continue
+    in_list "$(lower "$o")" "${ALLOW_ORGS[@]}" && continue
+    in_list "$o" ${REACH_ORGS[@]+"${REACH_ORGS[@]}"} || REACH_ORGS+=("$o")
+  done <<<"$1"
+}
 check_token_readable() {
   local t
   t="$(org_token)" || die "cannot read the org token (--org-token-file / --org-token-cmd / --org-app); stopping"
@@ -496,7 +506,7 @@ check_token_readable() {
 check_ambient_scope() {
   local orgs
   if orgs="$(gh api user/orgs --paginate --jq '.[].login' 2>/dev/null)"; then
-    BANNER_AMBIENT="$(reach_banner "gh login" "$orgs")"
+    BANNER_AMBIENT="$(reach_banner "gh login" "$orgs")"; note_reach "$orgs"
   else
     warn "cannot list the orgs the ambient gh login can see"
   fi
@@ -507,12 +517,12 @@ check_token_scope() {
     # An installation token cannot list /user/orgs; the owners of the repos the
     # installation reaches are the orgs it can touch.
     if orgs="$(org_gh api installation/repositories --paginate --jq '.repositories[].owner.login' 2>/dev/null | sort -u)"; then
-      BANNER_TOKEN="$(reach_banner "org token" "$orgs")"
+      BANNER_TOKEN="$(reach_banner "org token" "$orgs")"; note_reach "$orgs"
     else
       warn "cannot list the repositories the app installation reaches"
     fi
   elif orgs="$(org_gh api user/orgs --paginate --jq '.[].login' 2>/dev/null)"; then
-    BANNER_TOKEN="$(reach_banner "org token" "$orgs")"
+    BANNER_TOKEN="$(reach_banner "org token" "$orgs")"; note_reach "$orgs"
   else
     warn "cannot list the orgs the org token can see"
   fi
@@ -759,6 +769,9 @@ confirm_plan() {
     if [ "$t" = pin ]; then say "    folder $a -> $b"; else say "    remote $a -> $b"; fi
   done
   say "  encryption: age on every repo, recovery recipient $AGE_RECOVERY"
+  if [ ${#REACH_ORGS[@]} -gt 0 ] && [ ${#KEEP_OUT_OWNERS[@]} -eq 0 ]; then
+    say "  suggestion: these orgs are reachable and none is kept out; to keep any out, set KEEP_OUT_OWNERS=\"${REACH_ORGS[*]}\" (or pass --keep-out-owner <org>)"
+  fi
   if [ "$DRY_RUN" -eq 1 ] || [ "$YES" -eq 1 ]; then return 0; fi
   [ -t 0 ] || die "not a terminal: pass --yes to accept this plan"
   printf 'Type yes to create these repos and keys: '
@@ -792,9 +805,14 @@ step_install_prebuilt() {
 
 link_binaries() {
   run mkdir -p "$BIN"
-  local b
+  local b aside
   for b in claude-memsync claude-memmerge; do
-    [ ! -e "$BIN/$b" ] || [ -L "$BIN/$b" ] || die "$BIN/$b exists and is not a symlink"
+    if [ -e "$BIN/$b" ] && [ ! -L "$BIN/$b" ]; then
+      [ -f "$BIN/$b" ] || die "$BIN/$b exists and is not a regular file or a symlink; refusing to touch it"
+      aside="$BIN/$b.pre-bootstrap-$(date -u +%Y%m%dT%H%M%SZ)"
+      say "  $BIN/$b is a standalone binary, not a symlink: moving it aside to $aside"
+      run mv "$BIN/$b" "$aside"
+    fi
     run ln -sfn "$LIB/$b" "$BIN/$b"
   done
 }
@@ -1014,7 +1032,18 @@ step_routes() {
   local k t new regen=0
   for k in $(printf '%s\n' ${R_KINDS[@]+"${R_KINDS[@]}"} | sort -u); do
     if [ -e "$CFG/denylist-$k.txt" ]; then
-      say "  denylist-$k.txt exists (kept)"
+      # A re-run adds new keep-out terms (escaped, de-duplicated) and never removes a line.
+      local f="$CFG/denylist-$k.txt" esc added=0
+      for t in ${KEEP_OUT_TERMS[@]+"${KEEP_OUT_TERMS[@]}"}; do
+        esc="$(re_escape "$t")"
+        grep -qxF -- "$esc" "$f" && continue
+        added=$((added + 1))
+        [ "$DRY_RUN" -eq 1 ] && continue
+        if [ -s "$f" ] && [ -n "$(tail -c1 "$f")" ]; then printf '\n' >>"$f"; fi
+        printf '%s\n' "$esc" >>"$f"
+      done
+      if [ "$added" -gt 0 ]; then say "  denylist-$k.txt: $([ "$DRY_RUN" -eq 1 ] && echo "would add" || echo added) $added keep-out term(s); existing lines kept"
+      else say "  denylist-$k.txt: no new keep-out terms (existing lines kept)"; fi
     else
       run mkdir -p "$CFG"
       say "  writing $CFG/denylist-$k.txt (${#KEEP_OUT_TERMS[@]} keep-out terms)"
@@ -1106,7 +1135,6 @@ step_token_split() {
         fi
       else
         say "  no registry in routes.json: the check key is not recorded there"
-        NEXT_STEPS+=("when a registry is configured: claude-memsync host check-key --fingerprint $fp --app $slug")
       fi
     fi
   elif [ -f "$tf" ] && [ "$(stat -c %a "$tf" 2>/dev/null || stat -f %Lp "$tf")" = 600 ]; then
@@ -1203,7 +1231,7 @@ step_summary() {
     for i in "${!PENDING_JOINS[@]}"; do say "    ${PENDING_JOINS[$i]}"; done
   fi
   say "  next:"
-  say "    - restart Claude sessions so the memory-notices hooks load"
+  say "    - run /reload-plugins in each open Claude session, or restart the sessions, so the memory-notices hooks load"
   for i in ${NEXT_STEPS[@]+"${!NEXT_STEPS[@]}"}; do say "    - ${NEXT_STEPS[$i]}"; done
   [ ${#PENDING_JOINS[@]} -eq 0 ] || say "    - after the join is accepted: claude-memsync status"
 }
