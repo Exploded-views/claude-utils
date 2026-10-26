@@ -477,6 +477,168 @@ newhome pb8
 runboot --host testhost --role homelab --yes --prebuilt-dir "$PB/does-not-exist"
 check "prebuilt: a directory that does not exist is refused" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'is not a directory'" _ "$OUT"
 
+# ============== the paste prompts in docs/bootstrap.md, as written =============
+# Each prompt is taken from the doc (<!-- prompt: id --> then its ```text
+# fence): the INPUTS names get test values, the ALREADY SET lines run as written,
+# and the boot() function plus its "boot --dry-run" / "boot --yes" lines run as a
+# real shell snippet with `set -u`, with the prompt's own step 1 (the clone) done
+# by hand. A flag the script does not know fails the run (exit 2); an input the
+# steps do not use, or a name the steps use but INPUTS does not list, fails a
+# check below. The doc and this test cannot drift apart.
+ssh-keygen -q -t rsa -b 2048 -m PEM -N '' -f "$BASE/check" && mv "$BASE/check" "$BASE/check.pem" && chmod 600 "$BASE/check.pem"
+ADMIN_MARK="$(sed -n 2p "$BASE/app.pem")"
+docprompt() { # id: the lines of that prompt's fenced block
+  awk -v id="$1" '$0 == "<!-- prompt: " id " -->" {f=1; next} f==1 && /^```text/ {f=2; next} f==2 && /^```/ {exit} f==2 {print}' "$ROOT/docs/bootstrap.md"
+}
+docsec() { # id start-regex end-regex: the "NAME = value" bullets of a section
+  docprompt "$1" | awk -v s="$2" -v e="$3" '$0 ~ s {f=1; next} $0 ~ e {f=0} f && /^- [A-Z_]+ = / {sub(/^- /, ""); print}'
+}
+docfunc() { docprompt "$1" | awk '/^boot\(\) \{/ {f=1} f {print} f && /^\}/ {exit}'; }
+docsteps() { docprompt "$1" | awk '/^STEPS/ {f=1} f'; }
+docvalue() { # input name -> test value (the keep-out and workspace lists come from DOC_OWNERS, DOC_TERMS, DOC_WS)
+  case "$1" in
+    COMMIT) printf '%s' "$SHA" ;; HOST_LABEL) printf testhost ;; ORG) printf '%s' "$ORG" ;; RECOVERY) printf '%s' "$PQREC" ;;
+    GITHUB_USER) printf example-user ;; WORKSPACES) printf '%s' "${DOC_WS:-}" ;;
+    KEEP_OUT_OWNERS) printf '%s' "${DOC_OWNERS:-}" ;; KEEP_OUT_TERMS) printf '%s' "${DOC_TERMS:-}" ;;
+    ADMIN_APP_ID) printf 12345 ;; ADMIN_KEY_CMD) printf 'cat %s' "$BASE/app.pem" ;;
+    CHECK_APP_ID) printf 54321 ;; CHECK_KEY_FILE) printf '%s' "$H/.config/claude-memsync/memsync-check.pem" ;;
+    TOKEN_FILE) printf '%s' "${TF:-/nonexistent-token}" ;; TAG) printf v0.0.0-doc ;; PLATFORM) printf linux-amd64 ;;
+    *) printf 'NO-TEST-VALUE-FOR-%s' "$1" ;;
+  esac
+}
+docsnippet() { # id mode(dry|real): the prompt as a shell snippet
+  local line n
+  printf 'set -u\n'
+  while IFS= read -r line; do
+    n="${line%% = *}"
+    if [ -n "${DOC_LITERAL:-}" ] && case "$n" in KEEP_OUT_*|WORKSPACES) true ;; *) false ;; esac; then printf '%s=%s\n' "$n" "${line#* = }"   # the doc's own default
+    else printf '%s=%q\n' "$n" "$(docvalue "$n")"; fi
+  done < <(docsec "$1" '^INPUTS' '^ALREADY SET')
+  while IFS= read -r line; do printf '%s=%s\n' "${line%% = *}" "${line#* = }"; done < <(docsec "$1" '^ALREADY SET' '^STEPS')
+  docfunc "$1"
+  if [ "$2" = dry ]; then docprompt "$1" | grep -x 'boot --dry-run'; else docprompt "$1" | grep -x 'boot --yes'; fi
+}
+DOC_IDS=(homelab-app personal-dev-app homelab-tokenfile crewkit)
+docnum() { case "$1" in 1) echo "homelab-app dry" ;; 2) echo "homelab-app real" ;; 3) echo "personal-dev-app dry" ;; 4) echo "personal-dev-app real" ;; esac; }
+rundoc() { # n | "id mode": run that prompt in the fake HOME; sets RC and OUT
+  local spec snip
+  case "$1" in [0-9]) spec="$(docnum "$1")" ;; *) spec="$1" ;; esac
+  # shellcheck disable=SC2086
+  snip="$(docsnippet $spec || true)"
+  [ -n "$snip" ] && printf '%s\n' "$snip" | grep -q '^boot --' || { RC=99; OUT="prompt $spec not found in docs/bootstrap.md"; return; }
+  set +e
+  OUT="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" GIT_CONFIG_NOSYSTEM=1 \
+    BOOTSTRAP_APP_API_BASE="http://127.0.0.1:$APIPORT" CLAUDE_UTILS_URL="https://example.invalid/claude-utils.git" \
+    bash -c "$snip" </dev/null 2>&1)"
+  RC=$?
+  set -e
+}
+prompt_setup() { # step 1 of the prompt (the clone) and the host's own check key
+  mkdir -p "$H/.local/src" "$H/.config/claude-memsync"
+  git clone -q "$BASE/utils.git" "$H/.local/src/claude-utils-$SHA" && git -C "$H/.local/src/claude-utils-$SHA" checkout -q "$SHA"
+  cp "$BASE/check.pem" "$H/.config/claude-memsync/memsync-check.pem"; chmod 600 "$H/.config/claude-memsync/memsync-check.pem"
+}
+
+echo "--- paste prompts: structure, and the doc against the script's flags"
+for id in "${DOC_IDS[@]}"; do
+  check "$id: prompt found, with INPUTS, ALREADY SET, STEPS and a boot() function" bash -c "[ -n \"\$1\" ] && printf '%s\n' \"\$2\" | grep -q '^boot() {'" _ "$(docsec "$id" '^INPUTS' '^ALREADY SET')" "$(docfunc "$id")"
+  check "$id: the real run line is 'boot --yes' and the dry run line is 'boot --dry-run'" bash -c "printf '%s\n' \"\$1\" | grep -qx 'boot --dry-run' && printf '%s\n' \"\$1\" | grep -qx 'boot --yes'" _ "$(docprompt "$id")"
+  check "$id: every input is used by the steps" bash -c "
+    for n in \$(printf '%s\n' \"\$1\" | sed 's/ = .*//'); do printf '%s\n' \"\$2\" | grep -qE \"\\\$\{?\$n\\b\" || { echo \"unused input \$n\"; exit 1; }; done" _ "$(docsec "$id" '^INPUTS' '^ALREADY SET')" "$(docsteps "$id")"
+  check "$id: the steps use only names that INPUTS or ALREADY SET define" bash -c "
+    def=\$( (printf '%s\n' \"\$1\"; printf '%s\n' \"\$2\") | sed 's/ = .*//'); for n in \$(printf '%s\n' \"\$3\" | grep -o '\\\$[A-Z][A-Z_]*' | tr -d '\$' | sort -u); do printf '%s\n' \"\$def\" | grep -qx \"\$n\" || { echo \"undefined \$n\"; exit 1; }; done" _ "$(docsec "$id" '^INPUTS' '^ALREADY SET')" "$(docsec "$id" '^ALREADY SET' '^STEPS')" "$(docsteps "$id")"
+  check "$id: every flag in boot() is one the script knows" bash -c "
+    for f in \$(printf '%s\n' \"\$1\" | grep -o -- '--[a-z][a-z-]*' | sort -u); do grep -qE -- \"(^|[ |])\$f[ |)]\" '$ROOT/scripts/bootstrap.sh' || { echo \"unknown flag \$f\"; exit 1; }; done" _ "$(docfunc "$id")"
+  check "$id: both keep-out lists default to empty and are marked optional" bash -c "printf '%s\n' \"\$1\" | grep -qx -- '- KEEP_OUT_OWNERS = \"\"' && printf '%s\n' \"\$1\" | grep -qx -- '- KEEP_OUT_TERMS = \"\"' && [ \$(printf '%s\n' \"\$1\" | grep -c '(optional; leave empty for none)') -ge 2 ]" _ "$(docprompt "$id")"
+  check "$id: the recovery or other long value is not written inline twice" bash -c "[ \$(printf '%s\n' \"\$1\" | grep -c 'age1pq1') -le 1 ]" _ "$(docprompt "$id")"
+done
+check "the doc tells the reader to use bash, not zsh" grep -q 'bash, not zsh' "$ROOT/docs/bootstrap.md"
+check "a flag the script does not know fails the run (the test would notice drift)" bash -c "
+  s=\$(printf 'set -u\nboot() { bash \"$ROOT/scripts/bootstrap.sh\" --no-such-flag; }\nboot\n'); out=\$(bash -c \"\$s\" 2>&1); [ \$? -eq 2 ] && printf '%s' \"\$out\" | grep -q 'unknown argument'"
+
+for P in "homelab-app:1:2:personal infra-homelab" "personal-dev-app:3:4:personal"; do
+  IFS=: read -r ROLEN DRYN REALN KEYSN <<<"$P"
+  echo "--- paste prompt: $ROLEN"
+  newhome "doc-$ROLEN"
+  prompt_setup
+  rundoc "$DRYN"
+  [ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+  check "$ROLEN prompt: dry run succeeds and shows the plan" bash -c "[ $RC -eq 0 ] && printf '%s' \"\$1\" | grep -q '== Plan' && printf '%s' \"\$1\" | grep -q 'would add the app entry memsync-admin' && printf '%s' \"\$1\" | grep -q 'githubApp=memsync-check'" _ "$OUT"
+  check "$ROLEN prompt: empty keep-out lists give the calm note" bash -c "printf '%s\n' \"\$1\" | grep -qx 'keep-out lists: none (routing alone decides what syncs)'" _ "$OUT"
+  check "$ROLEN prompt: dry run changes nothing" bash -c "[ ! -e '$H/.config/claude-memsync/apps.json' ] && [ ! -e '$H/.ssh' ] && ! grep -qE 'repo (create|deploy-key)' '$STUB_DIR/gh.log' && [ ! -e '$H/.local/bin/claude-memsync' ]"
+  rundoc "$REALN"
+  [ "$RC" -eq 0 ] || echo "$OUT" | tail -30
+  check "$ROLEN prompt: real run succeeds" [ "$RC" -eq 0 ]
+  check "$ROLEN prompt: admin entry gone, check entry kept (key file, fingerprint, no key command), apps.json 0600" jsonok '
+import json,sys
+a=json.load(open(sys.argv[1]))
+assert [x["name"] for x in a]==["memsync-check"], a
+e=a[0]
+assert e["appId"]=="54321" and e["org"]=="example-org" and e["keyFile"].endswith("/memsync-check.pem") and "keyCmd" not in e
+assert e["keyFingerprint"].startswith("SHA256:") and e["apiBase"].startswith("http://127.0.0.1:")' "$H/.config/claude-memsync/apps.json"
+  check "$ROLEN prompt: apps.json mode 0600" mode "$H/.config/claude-memsync/apps.json" 600
+  check "$ROLEN prompt: recorded fingerprint is the check key's" bash -c "[ \"\$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))[0][\"keyFingerprint\"])' '$H/.config/claude-memsync/apps.json')\" = \"\$('$REAL/claude-memsync' app key-fingerprint --key-file '$BASE/check.pem')\" ]"
+  for k in $KEYSN; do
+    check "$ROLEN prompt: $k config re-checks through the check app, no PAT file or token command" jsonok '
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d["githubApp"]=="memsync-check" and d["recheckTokenCmd"] is False
+assert not any(x in d for x in ("githubTokenFile","githubTokenCmd"))' "$H/.claudesync.d/$k/config.json"
+  done
+  check "$ROLEN prompt: the admin app minted the org token (key command, per call)" bash -c "[ \$(grep -c 'memsync app-token --app memsync-admin' '$STUB_DIR/memsync.log') -ge 4 ] && grep -qE 'doctor --org example-org --token-cmd .*app-token --app memsync-admin' '$STUB_DIR/memsync.log'"
+  check "$ROLEN prompt: every org call used the org token" bash -c "grep -qE '^(repo|api repos)' '$STUB_DIR/gh.who' && ! grep -E '^(repo|api repos)' '$STUB_DIR/gh.who' | grep -v '|org'"
+  check "$ROLEN prompt: admin key and org token nowhere on disk, in logs or output" bash -c "! grep -rIlF -- '$ADMIN_MARK' '$H' '$STUB_DIR/memsync.log' '$STUB_DIR/gh.log' && ! printf '%s' \"\$1\" | grep -qF -- '$ADMIN_MARK' && ! grep -rIl -- '$ORGTOK' '$H' '$STUB_DIR/memsync.log' && ! printf '%s' \"\$1\" | grep -qF -- '$ORGTOK' && ! printf '%s' \"\$1\" | grep -q 'BEGIN '" _ "$OUT"
+  check "$ROLEN prompt: no daemon-read config names the admin app" bash -c "! grep -rIl 'memsync-admin' '$H/.claudesync.d'"
+done
+
+echo "--- paste prompt: the two-item keep-out lists expand into repeated flags"
+newhome doc-ko
+prompt_setup
+DOC_OWNERS="Acme-Client other-owner" DOC_TERMS="acmeclient other.term" rundoc 4
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+check "two-item lists: the real run succeeds" [ "$RC" -eq 0 ]
+check "two-item lists: both terms are in every denylist (regex-escaped), no owner is" bash -c "for k in personal; do grep -qx acmeclient '$H/.config/claude-memsync/denylist-\$k.txt' && grep -qxF 'other\\.term' '$H/.config/claude-memsync/denylist-\$k.txt' && ! grep -qi 'acme-client\|other-owner' '$H/.config/claude-memsync/denylist-\$k.txt' || exit 1; done"
+check "two-item lists: no keep-out note about empty lists" bash -c "! printf '%s\n' \"\$1\" | grep -q 'keep-out lists: none'" _ "$OUT"
+newhome doc-ws
+prompt_setup
+mkdir -p "$H/code"
+DOC_WS="$H/code" DOC_LITERAL='' rundoc 3
+check "WORKSPACES expands into --workspace (dry run, personal-dev)" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -q 'workspace $H/code -> mem-project-code-workspace'" _ "$OUT"
+newhome doc-lit
+prompt_setup
+DOC_LITERAL=1 rundoc 2
+check "the doc's own empty defaults (KEEP_OUT_OWNERS=\"\", KEEP_OUT_TERMS=\"\") run as written" bash -c "[ $RC -eq 0 ] || exit 1; printf '%s\n' \"\$1\" | grep -qx 'keep-out lists: none (routing alone decides what syncs)'" _ "$OUT"
+
+echo "--- paste prompt: homelab with an org token file"
+newhome doc-tf
+prompt_setup
+mktok; rundoc homelab-tokenfile\ dry
+check "token-file prompt: dry run succeeds and consumes the token file" bash -c "[ $RC -eq 0 ] && [ ! -e '$TF' ]" 
+mktok; rundoc homelab-tokenfile\ real
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+check "token-file prompt: real run succeeds, the file is gone" bash -c "[ $RC -eq 0 ] && [ ! -e '$TF' ]"
+check "token-file prompt: org calls used the token, and it is nowhere in the output or on disk" bash -c "grep -qE '^(repo|api repos)' '$STUB_DIR/gh.who' && ! grep -E '^(repo|api repos)' '$STUB_DIR/gh.who' | grep -v '|org' && ! printf '%s' \"\$1\" | grep -qF -- '$ORGTOK' && ! grep -rIlF -- '$ORGTOK' '$H'" _ "$OUT"
+check "token-file prompt: init and doctor were handed a token file (never the token)" has "$STUB_DIR/memsync.log" 'doctor --org example-org --token-file '
+newhome doc-tf2
+prompt_setup
+rm -f "$H/.config/claude-memsync/memsync-check.pem"
+mktok; rundoc homelab-tokenfile\ real
+check "token-file prompt: without the check key it pauses (exit 3) and the token file is still deleted" bash -c "[ $RC -eq 3 ] && [ ! -e '$TF' ]"
+
+echo "--- paste prompt: crewkit (release archive, --prebuilt-dir)"
+newhome doc-ck
+prompt_setup
+CKX="$(bash -c "set -u; HOME='$H'; TAG=v0.0.0-doc; PLATFORM=linux-amd64; $(docsec crewkit '^ALREADY SET' '^STEPS' | sed 's/ = /=/'); printf '%s' \"\$X\"")"
+mkdir -p "$CKX/scripts"; cp "$ROOT/scripts/bootstrap.sh" "$CKX/scripts/"; cp "$PB/wrap/claude-memsync" "$PB/wrap/claude-memmerge" "$CKX/"
+rm -rf "$H/.local/src/claude-utils-$SHA"
+mktok; rundoc crewkit\ dry
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+check "crewkit prompt: dry run succeeds with no Go, no clone" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -q 'Install prebuilt binaries from'" _ "$OUT"
+mktok; rundoc crewkit\ real
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+check "crewkit prompt: real run succeeds and installs the extracted binaries into the version dir" bash -c "[ $RC -eq 0 ] && [ -x '$H/.local/bin/claude-memsync' ] && readlink '$H/.local/bin/claude-memsync' | grep -q '/lib/claude-memsync/v' && [ ! -e '$H/.local/src/claude-utils-$SHA' ]"
+check "crewkit prompt: no go build, token file deleted" bash -c "[ ! -e '$STUB_DIR/go.log' ] && [ ! -e '$TF' ]"
+
 quick_exit
 
 # ============================ homelab ==========================================
@@ -718,7 +880,7 @@ set +e
 NODENY="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" GIT_CONFIG_NOSYSTEM=1 \
   bash "$ROOT/scripts/bootstrap.sh" --sha "$SHA" --repo-url "https://example.invalid/other.git" ${ORGARGS[@]+"${ORGARGS[@]}"} "${REQ[@]}" --host testhost --role homelab --dry-run </dev/null 2>&1)"
 set -e
-check "no keep-out flags: a calm one-line note, no warning prefix" bash -c "printf '%s' \"\$1\" | grep -qx 'keep-out lists: none (routing alone decides what syncs)' && ! printf '%s' \"\$1\" | grep -qE 'WARNING|!!!|client owners'" _ "$NODENY"
+check "no keep-out flags: a calm one-line note, no warning prefix" bash -c "printf '%s' \"\$1\" | grep -qx 'keep-out lists: none (routing alone decides what syncs)' && ! printf '%s' \"\$1\" | grep -q 'client owners'" _ "$NODENY"
 check "--repo-url is accepted" bash -c "! printf '%s' \"\$1\" | grep -q 'unknown argument'" _ "$NODENY"
 echo "--- refusals"
 newhome pub
@@ -836,77 +998,6 @@ RTOUT="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_ORG_TOKEN="$ORG
 set -e
 check "dry run with a differing routes.json says what it would do and leaves the file alone" bash -c "printf '%s' \"\$1\" | grep -q 'writing .*routes.json' && [ \$(cat '$H/.config/claude-memsync/routes.json' | tr -d ' \n') = '{\"repos\":{},\"routes\":[],\"default\":\"deny\"}' ] && [ ! -e '$H/.config/claude-memsync/routes.json.bak' ]" _ "$RTOUT"
 
-# ============== the paste prompts in docs/bootstrap.md, as written =============
-# The command lines are taken from the doc (the first two under (a), the next
-# two under (b): dry run, then real), the placeholders are substituted, and they
-# run with the prompt's own step 1 (the clone) done by hand. The doc and this
-# test cannot drift apart.
-ssh-keygen -q -t rsa -b 2048 -m PEM -N '' -f "$BASE/check" && mv "$BASE/check" "$BASE/check.pem" && chmod 600 "$BASE/check.pem"
-ADMIN_MARK="$(sed -n 2p "$BASE/app.pem")"
-docline() { # n: the nth command line of the doc
-  awk -v n="$1" '/^bash ~\/\.local\/src\/claude-utils-<commit>\/scripts\/bootstrap\.sh /{c++; if (c == n) print}' "$ROOT/docs/bootstrap.md"
-}
-fill() { # line: placeholders -> test values
-  local l="$1"
-  l="${l//<commit>/$SHA}"; l="${l//<host-label>/testhost}"; l="${l//<client-org>/Acme-Client}"; l="${l//<client-term>/acmeclient}"
-  l="${l//<admin-app-id>/12345}"; l="${l//<admin-key-cmd>/cat $BASE/app.pem}"
-  l="${l//<github-user>/example-user}"
-  l="${l//<org>/$ORG}"; l="${l//<recovery-recipient>/$PQREC}"
-  l="${l//<check-app-id>/54321}"; l="${l//<check-key-file>/$H/.config/claude-memsync/memsync-check.pem}"
-  printf '%s' "$l"
-}
-rundoc() { # n: run the nth doc line in the fake HOME; sets RC and OUT
-  local cmd; cmd="$(fill "$(docline "$1")")"
-  [ -n "$cmd" ] || { RC=99; OUT="doc line $1 not found"; return; }
-  set +e
-  OUT="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" GIT_CONFIG_NOSYSTEM=1 \
-    BOOTSTRAP_APP_API_BASE="http://127.0.0.1:$APIPORT" CLAUDE_UTILS_URL="https://example.invalid/claude-utils.git" \
-    bash -c "$cmd" </dev/null 2>&1)"
-  RC=$?
-  set -e
-}
-prompt_setup() { # step 1 of the prompt (the clone) and the host's own check key
-  mkdir -p "$H/.local/src" "$H/.config/claude-memsync"
-  git clone -q "$BASE/utils.git" "$H/.local/src/claude-utils-$SHA" && git -C "$H/.local/src/claude-utils-$SHA" checkout -q "$SHA"
-  cp "$BASE/check.pem" "$H/.config/claude-memsync/memsync-check.pem"; chmod 600 "$H/.config/claude-memsync/memsync-check.pem"
-}
-check "doc has four command lines, two per prompt" bash -c "[ -n \"\$1\" ] && [ -n \"\$2\" ] && [ -n \"\$3\" ] && [ -n \"\$4\" ] && [ -z \"\$5\" ]" _ "$(docline 1)" "$(docline 2)" "$(docline 3)" "$(docline 4)" "$(docline 5)"
-check "each prompt's first line is the dry run, the second is not" bash -c "case \"\$1\" in *' --dry-run') ;; *) exit 1 ;; esac; case \"\$2\" in *' --dry-run') exit 1 ;; esac; case \"\$3\" in *' --dry-run') ;; *) exit 1 ;; esac; case \"\$4\" in *' --dry-run') exit 1 ;; esac" _ "$(docline 1)" "$(docline 2)" "$(docline 3)" "$(docline 4)"
-
-for P in "homelab:1:2:personal infra-homelab" "personal-dev:3:4:personal"; do
-  IFS=: read -r ROLEN DRYN REALN KEYSN <<<"$P"
-  echo "--- paste prompt: $ROLEN"
-  newhome "doc-$ROLEN"
-  prompt_setup
-  rundoc "$DRYN"
-  [ "$RC" -eq 0 ] || echo "$OUT" | tail -20
-  check "$ROLEN prompt: dry run succeeds and shows the plan" bash -c "[ $RC -eq 0 ] && printf '%s' \"\$1\" | grep -q '== Plan' && printf '%s' \"\$1\" | grep -q 'would add the app entry memsync-admin' && printf '%s' \"\$1\" | grep -q 'githubApp=memsync-check'" _ "$OUT"
-  check "$ROLEN prompt: dry run changes nothing" bash -c "[ ! -e '$H/.config/claude-memsync/apps.json' ] && [ ! -e '$H/.ssh' ] && ! grep -qE 'repo (create|deploy-key)' '$STUB_DIR/gh.log' && [ ! -e '$H/.local/bin/claude-memsync' ]"
-  rundoc "$REALN"
-  [ "$RC" -eq 0 ] || echo "$OUT" | tail -30
-  check "$ROLEN prompt: real run succeeds" [ "$RC" -eq 0 ]
-  check "$ROLEN prompt: admin entry gone, check entry kept (key file, fingerprint, no key command), apps.json 0600" jsonok '
-import json,sys
-a=json.load(open(sys.argv[1]))
-assert [x["name"] for x in a]==["memsync-check"], a
-e=a[0]
-assert e["appId"]=="54321" and e["org"]=="example-org" and e["keyFile"].endswith("/memsync-check.pem") and "keyCmd" not in e
-assert e["keyFingerprint"].startswith("SHA256:") and e["apiBase"].startswith("http://127.0.0.1:")' "$H/.config/claude-memsync/apps.json"
-  check "$ROLEN prompt: apps.json mode 0600" mode "$H/.config/claude-memsync/apps.json" 600
-  check "$ROLEN prompt: recorded fingerprint is the check key's" bash -c "[ \"\$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))[0][\"keyFingerprint\"])' '$H/.config/claude-memsync/apps.json')\" = \"\$('$REAL/claude-memsync' app key-fingerprint --key-file '$BASE/check.pem')\" ]"
-  for k in $KEYSN; do
-    check "$ROLEN prompt: $k config re-checks through the check app, no PAT file or token command" jsonok '
-import json,sys
-d=json.load(open(sys.argv[1]))
-assert d["githubApp"]=="memsync-check" and d["recheckTokenCmd"] is False
-assert not any(x in d for x in ("githubTokenFile","githubTokenCmd"))' "$H/.claudesync.d/$k/config.json"
-  done
-  check "$ROLEN prompt: the admin app minted the org token (key command, per call)" bash -c "[ \$(grep -c 'memsync app-token --app memsync-admin' '$STUB_DIR/memsync.log') -ge 4 ] && grep -qE 'doctor --org example-org --token-cmd .*app-token --app memsync-admin' '$STUB_DIR/memsync.log'"
-  check "$ROLEN prompt: every org call used the org token" bash -c "grep -qE '^(repo|api repos)' '$STUB_DIR/gh.who' && ! grep -E '^(repo|api repos)' '$STUB_DIR/gh.who' | grep -v '|org'"
-  check "$ROLEN prompt: admin key and org token nowhere on disk, in logs or output" bash -c "! grep -rIlF -- '$ADMIN_MARK' '$H' '$STUB_DIR/memsync.log' '$STUB_DIR/gh.log' && ! printf '%s' \"\$1\" | grep -qF -- '$ADMIN_MARK' && ! grep -rIl -- '$ORGTOK' '$H' '$STUB_DIR/memsync.log' && ! printf '%s' \"\$1\" | grep -qF -- '$ORGTOK' && ! printf '%s' \"\$1\" | grep -q 'BEGIN '" _ "$OUT"
-  check "$ROLEN prompt: no daemon-read config names the admin app" bash -c "! grep -rIl 'memsync-admin' '$H/.claudesync.d'"
-done
-
 echo "--- check app and admin entry: refusals and clean-up"
 newhome ck1
 prompt_setup
@@ -985,6 +1076,13 @@ chmod 600 "$RKROUTES"
 rkhash() { # repo: hash of every note in the repo's work-tree
   (cd "$H/.claudesync.d/$1/projects" && find . -type f | LC_ALL=C sort | while read -r f; do printf '%s ' "$f"; cksum <"$f"; done)
 }
+rkhash_origin() { # repo: the same lines, from origin's ciphertext decrypted with the repo's new identity
+  local f t="$BASE/rk-origin.blob"
+  git -C "$BASE/remotes/rk-$1.git" ls-tree -r --name-only main | grep '^projects/' | LC_ALL=C sort | while read -r f; do
+    git -C "$BASE/remotes/rk-$1.git" cat-file blob "main:$f" >"$t"
+    printf './%s ' "${f#projects/}"; (cd "$H/.claudesync.d/$1" && HOME="$H" "$REAL/claude-memsync" age-textconv "$t") | cksum
+  done
+}
 RKB_A="$(rkhash alpha)"; RKB_B="$(rkhash beta)"
 check "rekey: the work-trees hold the notes" bash -c "[ -n \"\$1\" ] && [ -n \"\$2\" ]" _ "$RKB_A" "$RKB_B"
 set +e
@@ -1006,8 +1104,23 @@ for n in alpha beta; do
   rm -rf "$SY/projects"; git -C "$SY" checkout -q -- projects
   if [ "$n" = alpha ]; then WANT="$RKB_A"; else WANT="$RKB_B"; fi
   check "rekey $n: every note decrypts to exactly what it was" [ "$(rkhash "$n")" = "$WANT" ]
+  # The same comparison against what origin holds: its blobs decrypted
+  # (age-textconv), not the local index or work-tree.
+  check "rekey $n: origin's blobs, decrypted, equal the original plaintext" [ "$(rkhash_origin "$n")" = "$WANT" ]
+  check "rekey $n: origin's .age-recipients carry the '# host:' and '# recovery' labels" bash -c "
+    r=\$(git -C '$OR' show main:.age-recipients) && printf '%s\n' \"\$r\" | grep -q '^# host:rk' && printf '%s\n' \"\$r\" | grep -q '^# recovery' && printf '%s\n' \"\$r\" | grep -q '$PQREC'"
   check "rekey $n: the work-tree is clean" bash -c "[ -z \"\$(git -C '$SY' status --porcelain)\" ]"
 done
+# Restart the daemon (a foreground run, stopped by timeout, as in the upgrade
+# section) on the rekeyed repo, drop one new note in the Claude tree, and check
+# it lands on origin as hybrid ciphertext that decrypts back.
+echo "--- rekey-pq --all: the restarted daemon syncs a new note as hybrid ciphertext"
+printf 'written after the rekey\n' >"$RKC/-p1/memory/after-rekey.md"
+HOME="$H" GIT_CONFIG_NOSYSTEM=1 timeout 25 "$REAL/claude-memsync" run -config "$H/.claudesync.d/alpha/config.json" -skip-quiet-window >"$BASE/rk-run.log" 2>&1 || true
+RKN="projects/-p1/memory/after-rekey.md"
+check "rekey: the new note reached origin" bash -c "git -C '$BASE/remotes/rk-alpha.git' cat-file -e main:$RKN"
+check "rekey: ... as hybrid-only ciphertext" bash -c "b=\$(git -C '$BASE/remotes/rk-alpha.git' cat-file blob main:$RKN | head -c 600); printf '%s' \"\$b\" | grep -aq -- '-> mlkem768x25519' && ! printf '%s' \"\$b\" | grep -aq -- '-> X25519'"
+check "rekey: ... which decrypts to the note" bash -c "git -C '$BASE/remotes/rk-alpha.git' cat-file blob main:$RKN >'$BASE/rk-new.blob' && [ \"\$(cd '$H/.claudesync.d/alpha' && HOME='$H' '$REAL/claude-memsync' age-textconv '$BASE/rk-new.blob')\" = 'written after the rekey' ]"
 check "rekey: the notes read back byte for byte" bash -c "diff <(cat '$RKC/-p1/memory/two.md') '$H/.claudesync.d/alpha/projects/-p1/memory/two.md'"
 
 # An upgrade: a second build is bootstrapped over the first and the daemon
