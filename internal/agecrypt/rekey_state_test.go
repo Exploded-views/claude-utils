@@ -214,11 +214,11 @@ func TestRekeyState_RollbackGuards(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "1 commit") || !strings.Contains(err.Error(), "late note") || !strings.Contains(err.Error(), "--discard-local-commits") {
 		t.Fatalf("extra commit: %v", err)
 	}
-	// a legacy record (no NewCommit) cannot tell, so it asks too
+	// a legacy record (no NewCommit): the migrated commit is inferred and the late commit still listed
 	if err := UpdateRekeyState(repo, func(s *PreRekeyState) { s.NewCommit = "" }); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RollbackRekey(repo, RollbackOpts{}, noCfg); err == nil || !strings.Contains(err.Error(), "does not name the migrated commit") {
+	if _, err := RollbackRekey(repo, RollbackOpts{}, noCfg); err == nil || !strings.Contains(err.Error(), "late note") {
 		t.Fatalf("legacy record: %v", err)
 	}
 	if err := UpdateRekeyState(repo, func(s *PreRekeyState) { s.NewCommit = p.NewCommit }); err != nil {

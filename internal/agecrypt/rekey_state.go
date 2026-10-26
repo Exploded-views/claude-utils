@@ -479,11 +479,8 @@ const maxListedSubjects = 10
 
 // localCommitsError lists the commits a rollback would drop: their count and
 // subjects, nothing else.
-func localCommitsError(repo *gitwt.Repo, st PreRekeyState) error {
-	if st.NewCommit == "" {
-		return errors.New("the restore record does not name the migrated commit (an older build wrote it), so commits made after the rekey cannot be told apart; if there are none, rerun with --discard-local-commits")
-	}
-	out, _ := repo.Run("log", "--format=%s", st.NewCommit+"..HEAD")
+func localCommitsError(repo *gitwt.Repo, migrated string) error {
+	out, _ := repo.Run("log", "--format=%s", migrated+"..HEAD")
 	var subs []string
 	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
 		if l = strings.TrimSpace(l); l != "" {
@@ -542,8 +539,22 @@ func RollbackRekey(repo *gitwt.Repo, opts RollbackOpts, restoreConfig func(Prior
 	if remote, _ := revOf(repo, "refs/remotes/origin/main"); remote != tip {
 		return st, errors.New("the remote has moved off the backup (the migrated history was pushed, or someone else pushed); a local rollback would diverge from it, so it is refused")
 	}
-	if head, _ := revOf(repo, "HEAD"); (st.NewCommit == "" || head != st.NewCommit) && !opts.DiscardLocalCommits {
-		return st, localCommitsError(repo, st)
+	if head, _ := revOf(repo, "HEAD"); head != st.Tip {
+		// Nothing to discard at the tip itself. Otherwise the migrated commit
+		// (recorded, or inferred for a record from an older build) must be
+		// HEAD, or the commits after it are listed and need the flag.
+		mc, ok := InferMigrated(repo, st, "HEAD")
+		switch {
+		case !ok:
+			return st, errors.New("cannot tell which commit is the migrated one (the restore record has no newCommit and the history does not show it), so commits made after the rekey cannot be listed; inspect the repo by hand")
+		case head != mc && !opts.DiscardLocalCommits:
+			return st, localCommitsError(repo, mc)
+		case head != mc:
+			// listed in the log so the discard is not silent
+			if out, _ := repo.Run("log", "--format=%s", mc+"..HEAD"); strings.TrimSpace(out) != "" {
+				fmt.Fprintf(os.Stderr, "rollback drops these commits:\n%s\n", strings.TrimSpace(out))
+			}
+		}
 	}
 	if repo.MergeInProgress() || repo.RebaseInProgress() || repo.HasUnmerged() {
 		return st, errors.New("a merge or rebase is in progress")
