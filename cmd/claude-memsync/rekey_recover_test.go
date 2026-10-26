@@ -628,3 +628,47 @@ func TestLegacyRecord_RerunWithOtherFlagsIsNotInterrupted(t *testing.T) {
 		t.Errorf("recoveryRecipients rewritten: %v", cc.RecoveryRecipients)
 	}
 }
+
+// setRecordStage rewrites the stage of the repo's restore record.
+func setRecordStage(t *testing.T, syncDir, stage string) {
+	t.Helper()
+	m := recordMap(t, syncDir)
+	m["stage"] = stage
+	out, _ := json.MarshalIndent(m, "", "  ")
+	if err := os.WriteFile(filepath.Join(syncDir, ".git", "memsync-pre-pq.json"), out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// S1: pushed, then a crash before config.json and the stage were saved, and
+// the daemon is blocked on the unfinished stage. The rerun must finish the tail.
+func TestRekeyPQ_SyncedButUnfinishedStageRunsThePublishTail(t *testing.T) {
+	c := newClassicRepo(t)
+	_, newRec := newPQKey(t, "newrec")
+	cfgBefore, _ := os.ReadFile(c.cfg.Path())
+	args := []string{"--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root", "--apply"}
+	if code, o, e := rekey(t, c, args...); code != 0 {
+		t.Fatalf("%s%s", o, e)
+	}
+	commitEmpty(t, c.repo, "auto: daemon sync")
+	if err := c.repo.Push("main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(c.cfg.Path(), cfgBefore, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setRecordStage(t, c.cfg.SyncDir, "migrated")
+	if _, blocked := agecrypt.RekeyBlocksSync(c.repo); !blocked {
+		t.Fatal("setup: the daemon must be blocked")
+	}
+	code, out, errb := rekey(t, c, args...)
+	if code != 0 {
+		t.Fatalf("exit %d\n%s%s", code, out, errb)
+	}
+	if cc, _ := config.Load(c.cfg.Path()); cc.EncryptionScheme != "pq" || cc.HostLabel != "vm-1" {
+		t.Errorf("config.json not saved: %+v", cc)
+	}
+	if why, blocked := agecrypt.RekeyBlocksSync(c.repo); blocked {
+		t.Errorf("the daemon stays blocked: %s", why)
+	}
+}
