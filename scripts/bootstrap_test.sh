@@ -360,7 +360,7 @@ ORGARGS=()
 runboot --host testhost --role homelab --yes --org-app memsync-admin --org-app-id 12345 --org-app-key-cmd "cat $BASE/app.pem" \
   --check-app memsync-check --check-app-id 54321 --check-key-file "relative/key.pem"
 ORGARGS=(--org-token-file "$BASE/orgtoken")
-check "a relative --check-key-file is an error (exit 1), not a pause" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'must be an absolute path'" _ "$OUT"
+check "a relative --check-key-file is an error (exit 2), not a pause" bash -c "[ $RC -eq 2 ] && printf '%s\n' \"\$1\" | grep -q 'must be an absolute path'" _ "$OUT"
 
 
 # ============================ --delete-org-token-file ==========================
@@ -587,7 +587,7 @@ NO_SHA=1 runboot --host testhost --role homelab --yes --prebuilt-dir "$PB/dev"
 check "prebuilt without --sha: a dev build is refused (not a release version)" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'not a release version'" _ "$OUT"
 newhome pb8
 runboot --host testhost --role homelab --yes --prebuilt-dir "$PB/does-not-exist"
-check "prebuilt: a directory that does not exist is refused" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'is not a directory'" _ "$OUT"
+check "prebuilt: a directory that does not exist is refused" bash -c "[ $RC -eq 2 ] && printf '%s\n' \"\$1\" | grep -q 'is not a directory'" _ "$OUT"
 
 # ============== the paste prompts in docs/bootstrap.md, as written =============
 # Each prompt is taken from the doc (<!-- prompt: id --> then its ```text
@@ -1211,7 +1211,7 @@ ORD4="$(blocks "$OUT")"; OUTO4="$OUT"
 pjhome ord alpha beta gamma delta
 STUB_SLOW=mem-project-alpha pjrun --jobs 1
 ORD1="$(blocks "$OUT")"
-check "the per-repo blocks come in plan order even when the first repo is the slowest" bash -c "[ \"$ORD4\" = '-- mem-personal -- mem-project-code-workspace -- mem-project-alpha -- mem-project-beta -- mem-project-delta -- mem-project-gamma ' ]"
+check "the per-repo blocks come in plan order (once per phase) even when the first repo is the slowest" bash -c "[ \"$ORD4\" = '-- mem-personal -- mem-project-code-workspace -- mem-project-alpha -- mem-project-beta -- mem-project-delta -- mem-project-gamma -- mem-personal -- mem-project-code-workspace -- mem-project-alpha -- mem-project-beta -- mem-project-delta -- mem-project-gamma ' ]"
 check "the block order at --jobs 4 equals the order at --jobs 1" bash -c "[ -n \"$ORD4\" ] && [ \"$ORD4\" = \"$ORD1\" ]"
 check "a block is contiguous: nothing of another repo between a header and its last line" bash -c "printf '%s\n' \"\$1\" | awk '/^== / {cur=\"\"; next} /^-- mem-/ {cur=\$2; next} cur != \"\" && /mem-(personal|project-[a-z-]+)/ { for (i=1;i<=NF;i++) if (\$i ~ /^mem-(personal|project-)/ && \$i != cur) bad=1 } END {exit bad}'" _ "$OUTO4"
 NORM='s/age1[a-z0-9]+/AGE/g; s/fingerprint: .*/fingerprint: FP/; s/--fingerprint "[0-9a-f ]+"/--fingerprint FP/; s/up to [0-9]+ at once/up to N at once/'

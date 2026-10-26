@@ -1080,17 +1080,16 @@ step_routes() {
 # ---------------------------------------------------------------------------
 # f. init each repo
 # ---------------------------------------------------------------------------
-# repo_job <index>: everything for one repo that touches only that repo: check
-# or create it (private), its deploy key and test, and its init. It runs in a
-# subshell with its output in files; what the parent needs (a key made, a join
-# to accept) goes to $JD/<index>.key and .join. It touches no shared file.
-repo_job() {
-  local i="$1" k name kind url content=0 out fp key pub
-  k="${R_KEYS[$i]}"; name="${R_NAMES[$i]}"; kind="${R_KINDS[$i]}"
-  url="git@gh-$name:$ORG/$name.git"
-  key="$HOME/.ssh/${name}_ed25519"; pub="$key.pub"
+# The per-repo work is two phases, each over all repos: first check or create
+# every repo and require it private (a public repo stops the run before any
+# key exists), then each repo's deploy key, test and init. A job touches only
+# its own repo and no shared file; it runs in a subshell with its output in
+# files, and what the parent needs (a key made, a join to accept) goes to
+# $JD/<index>.key and .join.
+repo_check() { # index
+  local i="$1" name out
+  name="${R_NAMES[$i]}"
   valid_name "$name" || die "refusing repo name $name"
-  # c. the repo, private
   if [ "$DRY_RUN" -eq 1 ]; then
     say "  would check $ORG/$name, create it with --private if missing, and verify private=true"
   else
@@ -1104,6 +1103,13 @@ repo_job() {
     check_private "$name"
     say "  $name is private"
   fi
+}
+
+repo_keys_init() { # index
+  local i="$1" k name kind url content=0 out fp key pub
+  k="${R_KEYS[$i]}"; name="${R_NAMES[$i]}"; kind="${R_KINDS[$i]}"
+  url="git@gh-$name:$ORG/$name.git"
+  key="$HOME/.ssh/${name}_ed25519"; pub="$key.pub"
   # d. the deploy key
   if done_p "keygen.$name"; then
     say "  key for $name already generated"
@@ -1177,20 +1183,22 @@ repo_reap() {
   for f in out err key join; do rm -f "${JD:?}/${i:?}.$f"; done
 }
 
-# The per-repo steps with at most $JOBS at a time (bash 3.2: background jobs
-# and wait <pid>, no wait -n). Jobs start in plan order and are reaped in plan
-# order, so the output is always the plan's order. The first repo runs alone:
-# the first init of a host generates the shared age identity, and two inits
-# must not race to make it. After a failure nothing new starts; the jobs in
-# flight finish, every failure is reported, and the run exits 1.
-step_repos_keys_init() {
-  step "f. Per repo: private repo, deploy key, init (up to $JOBS at once; output in plan order)"
+# run_phase <title> <function> <warm-up 0|1>: the function for every repo with
+# at most $JOBS at a time (bash 3.2: background jobs and wait <pid>, no wait
+# -n). Jobs start in plan order and are reaped in plan order, so the output is
+# always the plan's order. With warm-up the first repo runs alone: the first
+# init of a host generates the shared age identity, and two inits must not race
+# to make it. After a failure nothing new starts; the jobs in flight finish,
+# every failure is reported, and the run exits 1.
+run_phase() {
+  step "$1"
   local i n=${#R_NAMES[@]} not_started=""
+  FAILED_REPOS=""
   JD="$(mktemp -d)"
   for ((i = 0; i < n; i++)); do
-    while [ ${#FQ[@]} -ge "$JOBS" ] || { [ "$i" -eq 1 ] && [ ${#FQ[@]} -gt 0 ]; }; do repo_reap; done
+    while [ ${#FQ[@]} -ge "$JOBS" ] || { [ "$3" -eq 1 ] && [ "$i" -eq 1 ] && [ ${#FQ[@]} -gt 0 ]; }; do repo_reap; done
     if [ -n "$FAILED_REPOS" ]; then not_started="${not_started:+$not_started }${R_NAMES[$i]}"; continue; fi
-    ( repo_job "$i" ) >"$JD/$i.out" 2>"$JD/$i.err" &
+    ( "$2" "$i" ) >"$JD/$i.out" 2>"$JD/$i.err" &
     FQ+=("$i"); FQP+=("$!")
   done
   while [ ${#FQ[@]} -gt 0 ]; do repo_reap; done
@@ -1201,6 +1209,11 @@ step_repos_keys_init() {
     set -- $FAILED_REPOS
     die "$# repo(s) failed: $FAILED_REPOS"
   fi
+}
+
+step_repos_keys_init() {
+  run_phase "c. Repos in $ORG (must be private; up to $JOBS at once, output in plan order)" repo_check 0
+  run_phase "f. Per repo: deploy key and init (up to $JOBS at once, output in plan order)" repo_keys_init 1
 }
 
 # Token split: the bootstrap uses the org token (init, repo create, doctor).
