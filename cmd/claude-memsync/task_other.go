@@ -51,17 +51,32 @@ func installTask(configPath string) error {
 	// An existing unit is repaired in place (kardianos refuses to install
 	// over one): its autostart target, and its ExecStart when the requested
 	// config or routes differ.
-	if _, content, ok := readUserUnit(); ok {
-		cp := configPath
-		if cp == "" {
-			cp = defaultConfigPath()
-		}
+	_, content, ok, rerr := loadUserUnit()
+	if rerr != nil {
+		fmt.Fprintln(os.Stderr, unreadableWarning(rerr))
+		return fmt.Errorf("install: cannot read the service unit: %w", rerr)
+	}
+	if ok {
 		exe, err := os.Executable()
 		if err != nil {
 			return err
 		}
-		want := execStartLine(exe, serviceConfig(cp).Arguments)
-		if _, changed := setExecStart(content, want); changed || userUnitIsWrong() {
+		want := ""
+		if cur, found := currentExecStart(content); found {
+			// Keep the unit's own arguments (and any hand edit); only the
+			// flags given on this install replace their counterparts. The
+			// binary path is refreshed.
+			if _, args, parsed := parseExecStart(cur); parsed {
+				if installCfgExplicit && configPath != "" {
+					args = withFlag(args, "--config", configPath)
+				}
+				if installRoutesExplicit && unitRoutes != "" {
+					args = withFlag(args, "--routes", unitRoutes)
+				}
+				want = execStartLine(exe, args)
+			}
+		}
+		if _, changed := setExecStart(content, want); (want != "" && changed) || userUnitIsWrong() {
 			return repairUserUnit(os.Stderr, want)
 		}
 	}

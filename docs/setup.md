@@ -682,9 +682,15 @@ reboot, `claude-memsync status`. `status` and `doctor` count the unit as fine
 only when it says `WantedBy=default.target` and the link in
 `~/.config/systemd/user/default.target.wants/` exists. If the user manager is
 not reachable (no login session), nothing is changed and the exact systemctl
-commands are printed. Re-running `install` with a different `--config` or
-`--routes` also rewrites the unit's `ExecStart`; restart the daemon to apply
-it. New installs are right from the start.
+commands are printed. A bare re-run of `install` keeps the unit's existing
+`ExecStart` arguments (`--config`, `--routes`, hand edits); only a `--config`
+and/or `--routes` given on that run replace their counterparts, and the binary
+path is refreshed. When `ExecStart` changes, the old and new lines are printed
+(paths only); restart the daemon to apply it (`claude-memsync stop`, then
+`claude-memsync start`). A unit that cannot be read, other than being absent,
+gives "cannot read the service unit (...); autostart not confirmed". A
+symlinked unit is refused before anything is disabled, so it stays enabled.
+New installs are right from the start.
 
 On macOS the launchd agent sets `RunAtLoad` and `KeepAlive` explicitly. The
 library's `KeepAlive` default already starts the agent at load, so `RunAtLoad`

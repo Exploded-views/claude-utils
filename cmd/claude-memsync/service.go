@@ -66,6 +66,12 @@ func (p *program) Stop(s service.Service) error {
 // environment or default location it happens to be started from.
 var unitRoutes string
 
+// installCfgExplicit and installRoutesExplicit say that `install` was given
+// --config / --routes on its command line (not resolved from the environment
+// or a default). Re-running install over an existing unit replaces only the
+// arguments given explicitly.
+var installCfgExplicit, installRoutesExplicit bool
+
 func serviceConfig(configPath string) *service.Config {
 	args := []string{"run"}
 	if configPath != "" {
@@ -191,6 +197,15 @@ func runInstall(args []string) int {
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
+	installCfgExplicit, installRoutesExplicit = false, false
+	flags.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "config":
+			installCfgExplicit = true
+		case "routes":
+			installRoutesExplicit = true
+		}
+	})
 	if rp, ok, err := resolveRoutesPath(*routesFlag); err != nil {
 		fmt.Fprintln(os.Stderr, "install:", err)
 		return 1

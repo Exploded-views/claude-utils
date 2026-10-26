@@ -394,7 +394,9 @@ func TestInstallRerun_NewArgsRewriteExecStart(t *testing.T) {
 	want := execStartLine(exe, []string{"run", "--config", "/new/config.json", "--routes", "/new/routes.json"})
 	old := unitRoutes
 	unitRoutes = "/new/routes.json"
-	t.Cleanup(func() { unitRoutes = old })
+	oc, or := installCfgExplicit, installRoutesExplicit
+	installCfgExplicit, installRoutesExplicit = true, true // both flags were given
+	t.Cleanup(func() { unitRoutes, installCfgExplicit, installRoutesExplicit = old, oc, or })
 	var err error
 	stderr := captureStderr(t, func() { err = installTask("/new/config.json") })
 	if err != nil {
