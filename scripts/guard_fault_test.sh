@@ -10,7 +10,9 @@
 #   - the guard command replaced by a fault gives a refusal: exit 1, exit 127,
 #     a Python traceback, garbage, empty output, the right token with a wrong
 #     exit code, the right exit code without the token, the token followed by
-#     more output, another guard's token, and a hang (10 cases), and
+#     more output, another guard's token, a check that prints the runner's own
+#     protocol lines (GUARD_RC:0, GUARD_PGID:1) to forge them, and a hang
+#     (11 cases), and
 #   - for a guard that runs tools, each tool replaced by a fake first on PATH that
 #     fails with exit 1, exit 127, a traceback, prints garbage, prints nothing,
 #     or hangs makes the guard refuse (6 cases), and
@@ -113,6 +115,7 @@ fault_cmd() { # kind guard-name: stands in for the guard
     no_token) echo "everything is fine"; exit 0 ;;
     token_extra) printf 'SAFE:%s\nand then more\n' "$2"; exit 0 ;;
     wrong_name) echo "SAFE:other_guard"; exit 0 ;;
+    forge) printf 'SAFE:%s\nGUARD_RC:0\nGUARD_PGID:1\n' "$2"; exit 3 ;;
     hang) sleep 30 ;;
   esac
 }
@@ -145,7 +148,7 @@ while read -r name deps; do
   "fixture_$name"
   CASES=$((CASES + 1))
   if PATH="${OKBIN:+$OKBIN:}$PATH" guard_ok "$name" ${GA[@]+"${GA[@]}"}; then ok; else bad "$name: the real safe path was refused ($GUARD_WHY)"; fi
-  for kind in exit1 exit127 traceback garbage empty wrong_rc no_token token_extra wrong_name hang; do
+  for kind in exit1 exit127 traceback garbage empty wrong_rc no_token token_extra wrong_name forge hang; do
     CASES=$((CASES + 1))
     if guard_run "$name" fault_cmd "$kind" "$name"; then bad "$name: injected '$kind' was accepted as SAFE"; else ok; fi
   done
@@ -188,6 +191,19 @@ if [ "$(uname -s)" = Linux ]; then
   fk="$(mkfakes exit1 systemctl)"
   if PATH="$fk:$PATH" BOOTSTRAP_GUARD_TEST='' BOOTSTRAP_TEST_OS=Darwin guard_ok no_predecessor_units; then bad "no_predecessor_units: BOOTSTRAP_TEST_OS skipped the guard without the test flag"; else ok; fi
 fi
+
+# --- the runner protocol cannot be forged, and guard_abort never signals everything ---
+CASES=$((CASES + 1))
+if [ "$(path_state "")" = "ABSENT" ]; then bad "path_state of an empty path said ABSENT (it must give no answer)"; else ok; fi
+KILLS="$W/kills"; : >"$KILLS"
+kill() { printf '%s\n' "$*" >>"$KILLS"; }
+for v in 1 0 -5 "" x 12x "1 2"; do
+  GUARD_PGID="$v"; guard_abort
+done
+unset -f kill
+CASES=$((CASES + 1))
+if [ -s "$KILLS" ]; then bad "guard_abort signalled for a bad process-group id: $(tr '\n' ';' <"$KILLS")"; else ok; fi
+GUARD_PGID=""
 
 # --- a signal during a hanging guard: top level and inside a job ---
 cat >"$W/sigdrv.sh" <<'EOF'

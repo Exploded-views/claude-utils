@@ -198,10 +198,9 @@ foo_check() {
 }
 # <<< guards
 guard foo"
-check "a positive [ -d x ] / [ -f x ] is fine" clean "# >>> guards
+check "a positive [ -d x ] / [ -f x ] is flagged too: every file test goes through path_state or says why (fs-ok)" flagged "# >>> guards
 foo_check() {
   [ -d x ] || return 1
-  [ -f y ] || return 1
   echo SAFE:foo
 }
 # <<< guards
@@ -213,6 +212,146 @@ guard foo
 other() {
   cmd1 || true
 }"
+# ---- the fs-ok / guard-ok markers are real trailing comments, with a reason ----
+G1='# >>> guards
+foo_check() {
+  echo SAFE:foo
+}
+# <<< guards
+guard foo'
+check "[ -e x ] with a trailing fs-ok: <reason> is clean" clean "$G1
+[ -e x ] && echo hi # fs-ok: nothing depends on it"
+check "[ -e x ] without a marker is flagged anywhere in a script" flagged "$G1
+[ -e x ] && echo hi"
+check "fs-ok without a reason is flagged" flagged "$G1
+[ -e x ] && echo hi # fs-ok:"
+check "fs-ok inside a string is not a marker" flagged "$G1
+[ -e x ] && echo \"# fs-ok: because\""
+check "fs-ok in the middle of a comment text without the colon form is flagged" flagged "$G1
+[ -e x ] && echo hi # this is not fs-ok really"
+check "[[ -s \$1 ]] is a file test" flagged "$G1
+[[ -s \$1 ]] && echo hi"
+check "[ -a x ] is a file test" flagged "$G1
+[ -a x ] && echo hi"
+check "test -d x is a file test" flagged "$G1
+test -d x && echo hi"
+check "[ ! -f x ] is a file test" flagged "$G1
+[ ! -f x ] && echo hi"
+check "! [ -d x ] is a file test" flagged "$G1
+! [ -d x ] && echo hi"
+check "-r -w -x -O -G -N -L -h are file tests" flagged "$G1
+[ -w x ] && [ -x y ] && [ -O z ] && [ -G a ] && [ -N b ] && [ -h c ] && echo hi"
+check "a file test inside a python heredoc is not shell" clean "$G1
+python3 - <<'PY'
+if [ -e x ]:
+    pass
+PY"
+check "path_state is the way" clean "$G1
+st=\"\$(path_state x)\" || exit 1"
+check "-e as an option of another command is not a file test" clean "$G1
+grep -e foo file; sed -e s/a/b/ file; ls -d x"
+check "guard-ok exempts the x=\$(cmd) || x= rule only" flagged "# >>> guards
+foo_check() {
+  local o
+  o=\"\$(cmd1)\" || o=\"\"   # guard-ok: stricter path
+  guard_run foo echo SAFE:foo   # guard-ok: please
+  echo SAFE:foo
+}
+# <<< guards
+guard foo"
+check "guard-ok does not exempt guard foo -- <cmd>" flagged "$G1
+guard foo -- echo SAFE:foo # guard-ok: no"
+check "guard-ok in a string does not exempt the x=\$(cmd) || x= rule" flagged "# >>> guards
+foo_check() {
+  local o
+  o=\"\$(cmd1)\" || o=\"# guard-ok: nope\"
+  echo SAFE:foo
+}
+# <<< guards
+guard foo"
+check "guard-ok without a reason does not exempt" flagged "# >>> guards
+foo_check() {
+  local o
+  o=\"\$(cmd1)\" || o=\"\"   # guard-ok
+  echo SAFE:foo
+}
+# <<< guards
+guard foo"
+# ---- more ways round it ----
+check "[ -f x ] || echo SAFE:foo is flagged" flagged "# >>> guards
+foo_check() {
+  [ -f x ] || echo SAFE:foo
+}
+# <<< guards
+guard foo"
+check "grep -q x f || echo SAFE:foo is flagged" flagged "# >>> guards
+foo_check() {
+  grep -q x f || echo SAFE:foo
+}
+# <<< guards
+guard foo"
+check "! grep ... || ... is flagged" flagged "# >>> guards
+foo_check() {
+  ! grep -q x f || return 1
+  echo SAFE:foo
+}
+# <<< guards
+guard foo"
+check "until <cmd> is flagged" flagged "# >>> guards
+foo_check() {
+  until cmd1; do :; done
+  echo SAFE:foo
+}
+# <<< guards
+guard foo"
+check "o=\$(ls ...; true) is flagged" flagged "# >>> guards
+foo_check() {
+  local o
+  o=\"\$(ls -A d 2>/dev/null; true)\"
+  echo SAFE:foo
+}
+# <<< guards
+guard foo"
+check "local o=\$(cmd) (declare and assign hides the status) is flagged" flagged "# >>> guards
+foo_check() {
+  local o=\"\$(cmd1)\"
+  echo SAFE:foo
+}
+# <<< guards
+guard foo"
+check "find / ls in a guard path is a filesystem probe and is flagged" flagged "# >>> guards
+foo_check() {
+  local o
+  o=\"\$(find d -type f)\" || return 1
+  [ -z \"\$o\" ] || return 1
+  echo SAFE:foo
+}
+# <<< guards
+guard foo"
+check "a guard path that calls a function defined outside the guards block is flagged" flagged "helper() { :; }
+# >>> guards
+foo_check() {
+  helper x || return 1
+  echo SAFE:foo
+}
+# <<< guards
+guard foo"
+check "eval is flagged" flagged "$G1
+eval \"guard\"\"_run foo echo SAFE:foo\""
+check "function foo_check { is a guard function too" flagged "# >>> guards
+function foo_check {
+  cmd1 || true
+  echo SAFE:foo
+}
+# <<< guards
+guard foo"
+check "foo_check () { with a space is a guard function too" flagged "# >>> guards
+foo_check () {
+  cmd1 || true
+  echo SAFE:foo
+}
+# <<< guards
+guard foo"
 check "the repo's own scripts/ pass" bash "$ROOT/scripts/lint-guards.sh"
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]

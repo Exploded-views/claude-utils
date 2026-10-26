@@ -115,6 +115,8 @@ echo "$(basename "$0"):$(env | grep -v '^STUB_' | grep -cF -- "$STUB_ORG_TOKEN")
 # `show -p LoadState -p ActiveState -p UnitFileState <unit>`: what the bootstrap asks (an absent unit says not-found)
 case "$*" in
   *" show "*)
+    # STUB_SYSTEMCTL_HANG=1: the answer never comes (a guard hangs); the pids are logged for the signal tests
+    if [ "${STUB_SYSTEMCTL_HANG:-0}" = 1 ]; then echo "$$" >>"$STUB_DIR/hang.pids"; sleep 60 & echo "$!" >>"$STUB_DIR/hang.pids"; wait; fi
     if [ "${STUB_OLD_TIMER:-0}" = 1 ]; then printf 'LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n'; else echo "LoadState=not-found"; fi
     exit 0 ;;
 esac
@@ -229,6 +231,13 @@ case "\$*" in
 esac
 exec "$REAL_PY" "\$@"
 PYEOF2
+# id: slow while $STUB_DIR/slowid.on exists (a clean-up guard that is still running when a second signal comes)
+REAL_ID="$(command -v id)"
+cat >"$STUBS/id" <<IDEOF
+#!/bin/sh
+[ -e "\$STUB_DIR/slowid.on" ] && sleep 1.5
+exec "$REAL_ID" "\$@"
+IDEOF
 chmod +x "$STUBS"/*
 ssh-keygen -q -t ed25519 -N '' -f "$BASE/other" && awk '{print $2}' "$BASE/other.pub" >"$BASE/otherkey"
 
@@ -1617,6 +1626,91 @@ printf '#!/bin/sh\ncase "$1" in *.*) echo "sleep: invalid time interval" >&2; ex
 runboot --host testhost --role homelab --dry-run
 check "a sleep that cannot do fractional seconds is a missing prerequisite (the guard runner polls with sleep 0.05)" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'missing prerequisite: sleep'" _ "$OUT"
 BOOT_PATH=""
+
+echo "--- routes.json: no answer, or a file that cannot be read, is a refusal"
+newhome rj1
+mkdir -p "$H/.config/claude-memsync"; ln -s "$H/nowhere/routes.json" "$H/.config/claude-memsync/routes.json"
+runboot --host testhost --role homelab --yes
+check "a routes.json that is a dangling symlink is refused, left as it is, and nothing is written through it" bash -c "[ $RC -ne 0 ] && [ -L '$H/.config/claude-memsync/routes.json' ] && [ ! -e '$H/nowhere' ] && ! ls '$H/.config/claude-memsync'/routes.json.bak* >/dev/null 2>&1 && ! grep -q 'repo create' '$STUB_DIR/gh.log'" _ "$OUT"
+if [ "$(id -u)" -ne 0 ]; then
+  newhome rj2
+  mkdir -p "$H/.config/claude-memsync" "$H/locked"; printf '{"registry":"x"}\n' >"$H/locked/r.json"; chmod 000 "$H/locked"
+  ln -s "$H/locked/r.json" "$H/.config/claude-memsync/routes.json"
+  runboot --host testhost --role homelab --yes
+  chmod 755 "$H/locked"
+  check "a routes.json behind an unsearchable directory (stat fails with EACCES) is refused and left as it is" bash -c "[ $RC -ne 0 ] && [ -L '$H/.config/claude-memsync/routes.json' ] && grep -q registry '$H/locked/r.json' && ! ls '$H/.config/claude-memsync'/routes.json.bak* >/dev/null 2>&1 && ! grep -q 'repo create' '$STUB_DIR/gh.log'" _ "$OUT"
+fi
+newhome rj3
+mkdir -p "$H/.config/claude-memsync"; printf '{"registry": "git@example.invalid:me/registry.git", \n garbage' >"$H/.config/claude-memsync/routes.json"
+cp "$H/.config/claude-memsync/routes.json" "$BASE/rj3.orig"
+runboot --host testhost --role homelab --yes
+check "an unparseable routes.json (with a registry in it) is refused, not replaced without its registry, and no backup is made" bash -c "[ $RC -ne 0 ] && cmp -s '$BASE/rj3.orig' '$H/.config/claude-memsync/routes.json' && ! ls '$H/.config/claude-memsync'/routes.json.bak* >/dev/null 2>&1 && ! grep -q 'repo create' '$STUB_DIR/gh.log'" _ "$OUT"
+
+echo "--- marks, workspaces and known_hosts: an unreadable one is not an absent one"
+if [ "$(id -u)" -ne 0 ]; then
+  newhome nj1
+  mkdir -p "$H/.local/state/claude-memsync-bootstrap" "$H/locked"; chmod 000 "$H/locked"
+  ln -s "$H/locked/x" "$H/.local/state/claude-memsync-bootstrap/testhost.needjoin.personal"
+  runboot --host testhost --role homelab --yes
+  chmod 755 "$H/locked"
+  check "a needjoin mark that cannot be read stops the run (the join request is not skipped)" bash -c "[ $RC -ne 0 ] && printf '%s\\n' \\"\\$1\\" | grep -q 'cannot tell whether'" _ "$OUT"
+  newhome wg1
+  mkdir -p "$H/ws" "$H/locked"; chmod 000 "$H/locked"; ln -s "$H/locked/g" "$H/ws/.git"
+  runboot --host testmac --role personal-dev --workspace "$H/ws" --own-owner gitgat --dry-run
+  chmod 755 "$H/locked"
+  check "a workspace whose .git cannot be looked at is refused (it is not assumed to be a plain folder)" bash -c "[ $RC -ne 0 ] && printf '%s\\n' \\"\\$1\\" | grep -q 'cannot tell'" _ "$OUT"
+fi
+newhome kh1
+mkdir -p "$H/.ssh"; chmod 700 "$H/.ssh"; printf 'github.com ssh-ed25519 %s\n' "$(cat "$BASE/otherkey")" >"$H/.ssh/known_hosts"; chmod 600 "$H/.ssh/known_hosts"
+runboot --host testhost --role homelab --yes
+check "a github.com entry in known_hosts with another key than GitHub's is not trusted: refused" bash -c "[ $RC -ne 0 ] && printf '%s\\n' \\"\\$1\\" | grep -q 'host key fingerprint'" _ "$OUT"
+newhome kh2
+mkdir -p "$H/.ssh"; chmod 700 "$H/.ssh"; printf 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n' >"$H/.ssh/known_hosts"; chmod 600 "$H/.ssh/known_hosts"
+runboot --host testhost --role homelab --yes
+check "a github.com entry with GitHub's key is accepted as already there" bash -c "[ $RC -eq 0 ] && printf '%s\\n' \\"\\$1\\" | grep -q 'known_hosts already has github.com:22'" _ "$OUT"
+
+echo "--- the real script's traps: a signal while a guard hangs"
+trapcase() { # name signal expected-rc mode(app|file) [second-signal-to-the-group]
+  local nm="$1" sg="$2" erc="$3" mode="$4" sg2="${5:-}" pid rc t0 took n alive t AUTH
+  newhome "$nm"; mkdir -p "$BASE/$nm.tmp"; rm -f "$STUB_DIR/hang.pids" "$STUB_DIR/slowid.on"
+  printf '%s\n' "$ORGTOK" >"$BASE/$nm.tok"; chmod 600 "$BASE/$nm.tok"
+  if [ "$mode" = app ]; then AUTH=(--org-app memsync-admin --org-app-id 12345 --org-app-key-cmd "cat $BASE/app.pem")
+  else AUTH=(--org-token-file "$BASE/$nm.tok" --delete-org-token-file); fi
+  set -m
+  (HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_SYSTEMCTL_HANG=1 TMPDIR="$BASE/$nm.tmp" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" GIT_CONFIG_NOSYSTEM=1 \
+    BOOTSTRAP_APP_API_BASE="http://127.0.0.1:$APIPORT" CLAUDE_UTILS_URL="https://example.invalid/claude-utils.git" \
+    exec python3 -I -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$BASH" "$ROOT/scripts/bootstrap.sh" --sha "$SHA" "${REQ[@]}" --host testhost --role homelab --yes "${AUTH[@]}" </dev/null >"$BASE/$nm.out" 2>&1) &
+  pid=$!
+  set +m
+  for _ in $(seq 1 200); do n="$({ wc -l <"$STUB_DIR/hang.pids"; } 2>/dev/null || echo 0)"; [ "${n:-0}" -ge 2 ] && break; sleep 0.1; done
+  : >"$STUB_DIR/slowid.on"
+  t0=$SECONDS
+  if [ -n "$sg2" ]; then
+    kill -"$sg" -- "-$pid" 2>/dev/null || true
+    sleep 0.4
+    kill -"$sg2" -- "-$pid" 2>/dev/null || true
+  else
+    kill -"$sg" "$pid" 2>/dev/null || true
+  fi
+  set +e; wait "$pid"; rc=$?; set -e
+  took=$((SECONDS - t0))
+  rm -f "$STUB_DIR/slowid.on"
+  alive=0
+  for _ in 1 2 3 4 5 6 7 8; do
+    alive=0
+    for t in $(cat "$STUB_DIR/hang.pids" 2>/dev/null); do kill -0 "$t" 2>/dev/null && alive=$((alive + 1)); done
+    [ "$alive" -eq 0 ] && break; sleep 0.25
+  done
+  local tag="$sg${sg2:+ then $sg2 to the group} while a guard hangs ($mode)"
+  check "$tag: exit $erc, within 6 s, no process left" bash -c "[ $rc -eq $erc ] && [ $took -le 6 ] && [ $alive -eq 0 ]"
+  check "$tag: the run's temp dir is gone" bash -c "[ -z \"\$(ls -A '$BASE/$nm.tmp')\" ]"
+  if [ "$mode" = app ]; then check "$tag: the admin app entry is removed" bash -c "! grep -qs memsync-admin '$H/.config/claude-memsync/apps.json'"
+  else check "$tag: the --delete-org-token-file file is deleted (and no 'not deleting' warning)" bash -c "[ ! -e '$BASE/$nm.tok' ] && ! grep -q 'not deleting' '$BASE/$nm.out'"; fi
+}
+trapcase tc1 INT 130 app
+trapcase tc2 TERM 143 file
+trapcase tc3 INT 130 file INT
 # <<< fast-setup
 
 newhome rtdiff
