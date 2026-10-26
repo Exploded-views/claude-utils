@@ -462,3 +462,96 @@ func TestIdentityBackup_HelpExitsZeroAndPrintsUsage(t *testing.T) {
 		t.Errorf("-h does not describe -store-cmd: %q %q", out, errs)
 	}
 }
+
+func idLineWith(out, needle string) string {
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, needle) {
+			return l
+		}
+	}
+	return ""
+}
+
+// The host default identity (read by related clones) and the classic files
+// rekey-pq keeps are still needed; each is listed with why.
+func TestIdentityBackup_IncludesHostDefaultsAndClassicWithReasons(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "client"}, "personal", nil)
+	c, _, _ := idFile(t, t.TempDir(), "c.txt", true)
+	setCloneIdentity(t, cfgs["personal"].SyncDir, c)
+	base := defaultIdentityPath()
+	if err := os.MkdirAll(filepath.Dir(base), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	classic, _, _ := idFile(t, filepath.Dir(base), filepath.Base(base), false)
+	pq, _, _ := idFile(t, filepath.Dir(base), filepath.Base(newIdentityPath(base)), true)
+	retired, _, _ := idFile(t, filepath.Dir(base), filepath.Base(base)+".classic-retired", false)
+	store, _, rec := fakeStores(t)
+	code, out, errs := runIDBackup("--all", "--dry-run", "--store-cmd", store+" {fingerprint}")
+	if code != 0 {
+		t.Fatalf("exit %d: %s %s", code, out, errs)
+	}
+	for path, why := range map[string]string{
+		c:       "used by: personal",
+		pq:      "related clones",
+		classic: "classic history and rollback",
+		retired: "classic history and rollback",
+	} {
+		l := idLineWith(out, path)
+		if l == "" || !strings.Contains(l, why) {
+			t.Errorf("%s: want a line saying %q, got %q\n%s", path, why, l, out)
+		}
+	}
+	if !strings.Contains(idLineWith(out, classic), "related clones") {
+		t.Errorf("the classic default is also read by related clones: %q", idLineWith(out, classic))
+	}
+	if l := idLineWith(out, "skipped:"); !strings.Contains(l, cfgs["client"].SyncDir) {
+		t.Errorf("a clone without an identity must be reported as skipped:\n%s", out)
+	}
+	if len(recorded(t, rec, "stdin")) != 0 {
+		t.Fatal("dry run stored")
+	}
+	// one clone's scope does not drag in the host defaults
+	_, out, _ = runIDBackup("--repo", "personal", "--dry-run", "--store-cmd", store)
+	if strings.Contains(out, base) || !strings.Contains(out, c) {
+		t.Errorf("--repo personal must list only that clone's identity:\n%s", out)
+	}
+}
+
+func TestIdentityBackup_SkippedClonesAreNeverSilent(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "projects", "client"}, "personal", nil)
+	c, _, _ := idFile(t, t.TempDir(), "c.txt", false)
+	setCloneIdentity(t, cfgs["personal"].SyncDir, c)
+	if err := os.RemoveAll(filepath.Join(cfgs["projects"].SyncDir, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	store, _, _ := fakeStores(t)
+	code, out, errs := runIDBackup("--all", "--dry-run", "--store-cmd", store)
+	if code != 0 {
+		t.Fatalf("exit %d: %s %s", code, out, errs)
+	}
+	for dir, reason := range map[string]string{cfgs["projects"].SyncDir: "not a git repo", cfgs["client"].SyncDir: "no memage.identity"} {
+		want := "skipped: " + dir + " (" + reason
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestIdentityBackup_RefusesASymlinkedConfiguredIdentity(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal"}, "personal", nil)
+	dir := t.TempDir()
+	real, _, _ := idFile(t, dir, "real.txt", false)
+	link := filepath.Join(dir, "link.txt")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	setCloneIdentity(t, cfgs["personal"].SyncDir, link)
+	store, _, rec := fakeStores(t)
+	code, out, errs := runIDBackup("--repo", "personal", "--store-cmd", store)
+	if code != 1 || !strings.Contains(errs, "symlink") {
+		t.Fatalf("exit %d, stderr %q: want 1 and a symlink refusal", code, errs)
+	}
+	if len(recorded(t, rec, "stdin")) != 0 || strings.Contains(out, "verified") {
+		t.Fatal("a symlinked identity was stored")
+	}
+}
