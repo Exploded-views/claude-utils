@@ -181,7 +181,7 @@ scp /tmp/org-token <host>:<token-file>      # lands as a 0600 file owned by you 
 shred -u /tmp/org-token                      # or rm -P on macOS
 ```
 
-On the host the file must be mode 0600, owned by you, with one hard link, and not a symlink; otherwise the script refuses and leaves it alone (check with `ls -l <token-file>`; if the mode is wrong, `chmod 600` it). The script reads it, never prints it and never copies it, and deletes it on every exit path (success, error, or a signal) with `shred -u`, or by overwriting and removing it where `shred` is missing. **The dry run also consumes it**: `--delete-org-token-file` deletes on every exit, so mint and copy a fresh token after you say go, before the real run. If the check key is not there yet the script pauses (exit 3) before it touches the token file.
+On the host the file must be mode 0600, owned by you, with one hard link, and not a symlink; otherwise the script refuses and leaves it alone (check with `ls -l <token-file>`; if the mode is wrong, `chmod 600` it). The script reads it, never prints it and never copies it, and deletes it on every exit path of a real run (success, error, or a signal) with `shred -u`, or by overwriting and removing it where `shred` is missing. The same token serves the dry run and the real run: only the real run deletes it. It expires in about an hour, so if the review takes longer, mint and copy a new one before saying go. If the check key is not there yet the script pauses (exit 3) before it touches the token file.
 
 <!-- prompt: homelab-tokenfile -->
 ```text
@@ -224,9 +224,9 @@ boot() {
     --org-token-file "$TOKEN_FILE" --delete-org-token-file \
     --check-app memsync-check --check-app-id "$CHECK_APP_ID" --check-key-file "$CHECK_KEY_FILE" "$@"
 }
-4. Dry run, and show me the plan (this deletes the token file; I will copy a new one):
+4. Dry run, and show me the plan (the token file is kept; it expires about an hour after I minted it, so tell me if this takes longer and I will copy a new one):
 boot --dry-run
-5. After I say go and have copied a fresh token file, the same command with --yes instead of --dry-run:
+5. After I say go, the same command with --yes instead of --dry-run:
 boot --yes
 Stop and tell me before any step that needs me (a pause with exit 3, a pending join). Never print or read the token file or any key.
 ```
@@ -282,9 +282,9 @@ boot() {
     --org-token-file "$TOKEN_FILE" --delete-org-token-file \
     --check-app memsync-check --check-app-id "$CHECK_APP_ID" --check-key-file "$CHECK_KEY_FILE" "$@"
 }
-5. Dry run, and show me the plan (this deletes the token file; I will copy a new one):
+5. Dry run, and show me the plan (the token file is kept; it expires about an hour after I minted it, so tell me if this takes longer and I will copy a new one):
 boot --dry-run
-6. After I say go and have copied a fresh token file, the same command with --yes instead of --dry-run:
+6. After I say go, the same command with --yes instead of --dry-run:
 boot --yes
 Stop and tell me before any step that needs me (a pause with exit 3, a pending join). Never print or read the token file or any key.
 ```
@@ -364,7 +364,7 @@ scripts/bootstrap.sh --host <label> --role <role> --org <org> --recovery-recipie
 
 `--org-app-id` with `--org-app-key-cmd` adds the admin app's `apps.json` entry (a key command, never a key file) for the run and removes it when the script exits, whether it succeeded or not. An existing entry of that name is never replaced: the script refuses instead. `--check-app` needs `--check-app-id` and `--check-key-file`; see step 7b. If the check key file does not exist yet, the script exits 3 (paused) right after the prerequisite checks, before anything is changed, and prints how to create it.
 
-`--delete-org-token-file` is valid only with `--org-token-file <path>` (otherwise exit 2). The file must be absolute, a plain file (not a symlink), mode 0600, owned by you, with one hard link, or the script refuses and leaves it alone. The token is read from it as before, never printed and never copied anywhere else; on every exit path (success, error, a signal) an exit trap deletes the file with `shred -u`, or overwrites it and removes it where `shred` is not installed. This includes `--dry-run`: a dry run consumes the file.
+`--delete-org-token-file` is valid only with `--org-token-file <path>` (otherwise exit 2). The file must be absolute, a plain file (not a symlink), mode 0600, owned by you, with one hard link, or the script refuses and leaves it alone. The token is read from it as before, never printed and never copied anywhere else; on every exit path (success, error, a signal) an exit trap deletes the file with `shred -u`, or overwrites it and removes it where `shred` is not installed. A `--dry-run` never deletes it (a dry run changes nothing); it prints `dry run: the org token file would be deleted on a real run`, so the same token serves the dry run and the real run.
 
 `--prebuilt-dir <dir>` installs `<dir>/claude-memsync` and `<dir>/claude-memmerge` into `~/.local/lib/claude-memsync/<sha-or-version>/` (and links them into `~/.local/bin`) and skips the clone and the build, so Go is not a prerequisite. The script refuses if the directory or either binary is missing or not executable, or if `<dir>/claude-memsync version` is not what is expected: it must contain the first 12 hex characters of `--sha` when `--sha` is given; without `--sha` it must be a release version (`vX.Y.Z`, what `release.yml` stamps into the binaries), and that version names the install directory. An existing, different binary in that directory is never overwritten. Without a source checkout the plugin step is skipped and the summary says how to add it.
 

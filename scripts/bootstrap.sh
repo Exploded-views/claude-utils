@@ -231,7 +231,8 @@ check_key_pause() {
 # ---------------------------------------------------------------------------
 # One exit trap for everything that must happen on every exit path (success,
 # error, signal): remove the temporary admin app entry, and, with
-# --delete-org-token-file, securely delete the org token file.
+# --delete-org-token-file, securely delete the org token file (a real run only:
+# a dry run leaves it, so the same token serves the dry run and the real run).
 # ---------------------------------------------------------------------------
 DELETE_TOKEN_FILE=0 TOKEN_FILE_ARMED=0
 secure_delete() { # file: shred -u if there, else overwrite with zeros and remove
@@ -355,7 +356,11 @@ for v in "$ORG_TOKEN_FILE" "$ORG_TOKEN_CMD" "$ORG_APP"; do [ -z "$v" ] || n_tok=
 if [ "$DELETE_TOKEN_FILE" -eq 1 ]; then
   [ -n "$ORG_TOKEN_FILE" ] || udie "--delete-org-token-file is only valid with --org-token-file <path>"
   check_token_file
-  TOKEN_FILE_ARMED=1   # from here on every exit path deletes the file
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "dry run: the org token file would be deleted on a real run"   # a dry run changes nothing
+  else
+    TOKEN_FILE_ARMED=1   # from here on every exit path deletes the file
+  fi
 fi
 if [ -n "$ORG_APP" ]; then
   printf '%s' "$ORG_APP" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' || die "bad --org-app '$ORG_APP'"
