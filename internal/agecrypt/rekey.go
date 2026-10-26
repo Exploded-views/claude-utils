@@ -95,6 +95,16 @@ func PlanRekeyPQ(repo *gitwt.Repo, o RekeyOpts, fetch bool) (RekeyPlan, error) {
 	if repo.MergeInProgress() || repo.RebaseInProgress() || repo.HasUnmerged() {
 		return p, errors.New("a merge or rebase is in progress")
 	}
+	// An unfinished park or pull belongs to the daemon's recovery, which
+	// must run before the history is rewritten under it.
+	for _, m := range []struct{ file, what string }{
+		{"parked.json", "files held back by a secret scan are still parked"},
+		{"pull-running", "a pull was interrupted"},
+	} {
+		if _, err := os.Stat(filepath.Join(repo.Dir, ".state", m.file)); err == nil {
+			return p, fmt.Errorf(".state/%s exists: %s. Start the daemon (`claude-memsync start`) and let one cycle finish so it recovers (the file goes away), stop it, then rerun this command", m.file, m.what)
+		}
+	}
 	// Dirty or unpushed state would be lost or published by a rewrite.
 	if out, err := repo.Run("status", "--porcelain"); err != nil {
 		return p, err
