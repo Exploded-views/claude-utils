@@ -595,7 +595,8 @@ already pulled and copied into `~/.claude`, or committed itself.
 | `--synced` | Compare with the commit last copied into `~/.claude` (`.state/synced-head`) instead of `HEAD`, when that file exists and names a commit. Without it the CLI uses `HEAD`. Hook mode always does this and rejects the flag. |
 | `--json` | Print JSON instead of text. |
 | `--limit` | List at most N changes (default 20), then `...N more`. `0` lifts the cap. |
-| `--hook` | Hook mode, see [Hook mode](#hook-mode). Takes only `--config`, `--project` and `--limit`. |
+| `--hook` | Hook mode, see [Hook mode](#hook-mode). Takes only `--config`, `--routes`, `--project`, `--limit` and `--deadline`. |
+| `--deadline` | With `--hook`: give up after this long (default `1.5s`, or `$CLAUDE_MEMSYNC_HOOK_DEADLINE_MS` in milliseconds); `0` means no deadline. See [Hook mode](#hook-mode). |
 | `--config` | Path to `config.json` (default `~/.claudesync/config.json`). |
 
 Text output:
@@ -687,6 +688,17 @@ records the baseline. Any error exits 0 and writes one line to stderr, and so
 does a panic, so the hook can never block a prompt. On an error before the
 report is printed, nothing goes to stdout; if the marker write fails after the
 report was printed, the next prompt repeats the report.
+
+The hook gives itself a deadline of 1500 ms, well inside Claude Code's 10 s
+hook timeout (which discards the output of a hook that overruns, after which
+the markers would have moved anyway). Change it with `--deadline <duration>`
+(for example `--deadline 3s`) or with `CLAUDE_MEMSYNC_HOOK_DEADLINE_MS`
+(milliseconds; the flag wins); `0` turns the deadline off. If the reports for
+all repos are not computed in time, for instance because the host's disk is
+saturated, the hook prints nothing, moves no marker, writes one line to stderr
+(`changes: hook deadline exceeded; notices deferred to the next prompt`) and
+exits 0 at once. It is all or nothing: a repo that finished while another did
+not is not reported either, so the next prompt reports every change.
 
 Markers are kept, not deleted when a session ends: a session resumed with the
 same id needs its marker to report what changed while it was closed. Instead,
