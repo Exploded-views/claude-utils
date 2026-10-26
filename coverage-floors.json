@@ -1,7 +1,7 @@
 {
   "github.com/MarimerLLC/claude-utils/cmd/claude-focus": 0.0,
   "github.com/MarimerLLC/claude-utils/cmd/claude-memmerge": 0.0,
-  "github.com/MarimerLLC/claude-utils/cmd/claude-memsync": 80.2,
+  "github.com/MarimerLLC/claude-utils/cmd/claude-memsync": 80.7,
   "github.com/MarimerLLC/claude-utils/internal/agecrypt": 76.0,
   "github.com/MarimerLLC/claude-utils/internal/archive": 80.5,
   "github.com/MarimerLLC/claude-utils/internal/changes": 78.5,
