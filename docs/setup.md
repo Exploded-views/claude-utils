@@ -403,9 +403,11 @@ unfinished rekey is skipped and left untouched. `--all` does not go with
   nothing is accepted in any repo (that can mean a second key under one
   label), the repo is named, and the command exits 1. Every encrypted repo is
   fetched first, and both the clone's copy and origin's are compared, even in
-  a clone that has diverged from origin. If origin cannot be fetched in any
+  a clone that has diverged from origin. If origin cannot be fetched in one
   repo (`cannot fetch`), nothing is accepted: another key could be there
-  unseen. Then only the repos that would be changed (not read-only, not
+  unseen. A repo with no `origin` remote counts as `cannot fetch`, so it
+  refuses everything too. For `reject --all`, a fetch or sync failure refuses
+  only that repo. Then only the repos that would be changed (not read-only, not
   rekey-blocked) are brought up to date with origin under the lock and
   checked again; one that cannot be brought up to date (`cannot sync`) also
   refuses everything. The others are looked at once, before the lock.

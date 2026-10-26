@@ -449,8 +449,8 @@ func acceptRefs(dir, base string, src []byte) []string {
 	inCmd := filepath.Base(dir) == "claude-memsync"
 	var bad []string
 	text := string(src)
-	if !(inCmd && (base == "join.go" || base == "join_all.go")) && strings.Contains(text, "AcceptJoin(") {
-		bad = append(bad, "AcceptJoin(")
+	if !(inCmd && (base == "join.go" || base == "join_all.go")) && acceptRE.MatchString(text) {
+		bad = append(bad, "AcceptJoin")
 	}
 	if inCmd && base != "main.go" && !strings.HasPrefix(base, "join") {
 		for _, m := range joinEntryRE.FindAllString(text, -1) {
@@ -459,6 +459,8 @@ func acceptRefs(dir, base string, src []byte) []string {
 	}
 	return bad
 }
+
+var acceptRE = regexp.MustCompile(`\bAcceptJoin\b`)
 
 var joinEntryRE = regexp.MustCompile(`\bjoin(Cmd|All|ChangeAll|ChangeOne)\b`)
 

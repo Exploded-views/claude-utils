@@ -170,14 +170,26 @@ func joinChangeAll(stdout, stderr io.Writer, set *routedSet, action, label, fp s
 		}
 	}
 
+	refused := false
 	refuseAll := func(where []string) {
+		refused = true
+		// Name each blocking repo with its own cause ("cannot fetch", ...).
+		var causes []string
+		for _, n := range where {
+			for _, p := range plans {
+				if p.name == n {
+					causes = append(causes, n+": "+strings.SplitN(p.status, " (", 2)[0])
+				}
+			}
+		}
+		by := strings.Join(causes, ", ")
 		for _, p := range plans {
 			if p.do {
 				p.do, p.fail = false, true
-				p.status = "not accepted (the request from " + label + " in " + strings.Join(where, ", ") + " does not match --fingerprint)"
+				p.status = "not accepted (blocked by " + by + ")"
 			}
 		}
-		fmt.Fprintf(stderr, "join accept --all: refusing every repo: the request from %q in %s cannot be matched to --fingerprint (a different key, an unreadable request, or origin could not be read), which may mean a second key under one label. Check with the person who runs the new host, or `join list --all`; reject the stray request, then run this again.\n", label, strings.Join(where, ", "))
+		fmt.Fprintf(stderr, "join accept --all: refusing every repo, blocked by %s: the request from %q cannot be matched to --fingerprint, or origin could not be read; that may mean a second key under one label. Check with the person who runs the new host, or `join list --all`; reject the stray request, then run this again.\n", by, label)
 	}
 	if len(mismatched) > 0 {
 		refuseAll(mismatched)
@@ -287,7 +299,7 @@ func joinChangeAll(stdout, stderr io.Writer, set *routedSet, action, label, fp s
 			}
 		}
 	}
-	if found == 0 {
+	if found == 0 && !refused {
 		fmt.Fprintf(stderr, "join %s --all: no join request from %s in any repo on this host (has it been pulled? see `join list --all`)\n", action, label)
 		return 1
 	}
