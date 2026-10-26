@@ -157,7 +157,7 @@ func joinPush(cfg config.Config, repo *gitwt.Repo, request bool) error {
 func joinRequest(stdout, stderr io.Writer, cfg config.Config, repo *gitwt.Repo, label string) int {
 	var j agecrypt.Join
 	var res agecrypt.JoinResult
-	err := withSyncLock(cfg.SyncDir, func() error {
+	err := withSyncLockStopping(stderr, cfg.SyncDir, func() error {
 		// A request is built on origin's tip and nothing else: if the clone
 		// cannot be brought up to date, or differs from origin in any other
 		// way, nothing is committed or pushed.
@@ -254,7 +254,7 @@ func joinList(stdout, stderr io.Writer, cfg config.Config) int {
 // joinChange runs an accept or a reject under the sync lock, then pushes.
 func joinChange(stdout, stderr io.Writer, cfg config.Config, repo *gitwt.Repo, label string, do func() error, accept bool) int {
 	committed := false
-	err := withSyncLock(cfg.SyncDir, func() error {
+	err := withSyncLockStopping(stderr, cfg.SyncDir, func() error {
 		if err := agecrypt.SyncFromOrigin(repo); err != nil {
 			fmt.Fprintln(stderr, "join: could not bring in the latest remote state; working from this clone:", err)
 		}

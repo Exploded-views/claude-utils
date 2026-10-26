@@ -138,7 +138,7 @@ func recipientsCmd(stdout, stderr io.Writer, args []string) int {
 		if cfg.ReadOnly {
 			accept = agecrypt.PinCurrent // pin, but never re-encrypt and commit
 		}
-		if err := withSyncLock(cfg.SyncDir, func() error { return accept(repo) }); err != nil {
+		if err := withSyncLockStopping(stderr, cfg.SyncDir, func() error { return accept(repo) }); err != nil {
 			return recipientsFail(stderr, err)
 		}
 		fmt.Fprintln(stderr, "recipients accepted; syncing resumes on the next cycle")
@@ -147,7 +147,7 @@ func recipientsCmd(stdout, stderr io.Writer, args []string) int {
 			fmt.Fprintf(stderr, "usage: claude-memsync recipients %s <public-key>\n", args[0])
 			return 2
 		}
-		err = withSyncLock(cfg.SyncDir, func() error {
+		err = withSyncLockStopping(stderr, cfg.SyncDir, func() error {
 			if args[0] == "add" {
 				return agecrypt.AddRecipientLabelled(repo, args[1], hostLabel)
 			}
@@ -331,7 +331,7 @@ func labelSelfOne(stdout, stderr io.Writer, cfg config.Config, label string) int
 		return 1
 	}
 	committed := false
-	err := withSyncLock(cfg.SyncDir, func() error {
+	err := withSyncLockStopping(stderr, cfg.SyncDir, func() error {
 		if err := agecrypt.SyncFromOrigin(repo); err != nil {
 			fmt.Fprintln(stderr, "recipients: could not bring in the latest remote state; working from this clone:", err)
 		}
@@ -377,7 +377,7 @@ func labelRecoveryOne(stdout, stderr io.Writer, cfg config.Config, key string) i
 		return 1
 	}
 	committed := false
-	err := withSyncLock(cfg.SyncDir, func() error {
+	err := withSyncLockStopping(stderr, cfg.SyncDir, func() error {
 		if err := agecrypt.SyncFromOrigin(repo); err != nil {
 			fmt.Fprintln(stderr, "recipients: could not bring in the latest remote state; working from this clone:", err)
 		}
