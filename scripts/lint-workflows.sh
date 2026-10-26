@@ -59,20 +59,22 @@ def block(lines, i):
     return out
 
 def matrix_values(lines, key):
+    """Values of `key` inside any `matrix:` block: key: v, key: [a, b], a block
+    list under key:, and the same keys inside `include:` entries (- key: v)."""
     vals, found = [], False
     for i, l in enumerate(lines):
-        m = re.match(r"^\s*" + re.escape(key) + r":\s*(.*)$", l)
-        if not m: continue
-        # only keys that sit inside a matrix: block
-        k = i - 1
-        while k >= 0 and (not lines[k].strip() or indent(lines[k]) >= indent(l)): k -= 1
-        if k < 0 or lines[k].strip() != "matrix:": continue
-        found = True
-        if m.group(1).strip(): vals += items(m.group(1))
-        else:
-            for b in block(lines, i):
-                bm = re.match(r"^\s*-\s*(.+)$", b)
-                if bm: vals.append(unq(bm.group(1)))
+        if l.strip() != "matrix:": continue
+        mat = block(lines, i)
+        for j, ml in enumerate(mat):
+            m = re.match(r"^\s*(?:-\s+)?" + re.escape(key) + r":\s*(.*)$", ml)
+            if not m: continue
+            found = True
+            if m.group(1).strip():
+                vals += items(m.group(1))
+            else:
+                for bl in block(mat, j):
+                    bm = re.match(r"^\s*-\s*(.+)$", bl)
+                    if bm: vals.append(unq(bm.group(1)))
     return vals if found else None
 
 findings = []
