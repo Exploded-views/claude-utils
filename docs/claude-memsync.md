@@ -1695,6 +1695,9 @@ pushes is exactly one new commit on origin's tip that adds
     claude-memsync join list [--repo <name>]
     claude-memsync join accept <host-label> --repo <name> --fingerprint <fp> [--allow-unlabelled]
     claude-memsync join reject <host-label> [--repo <name>]
+    claude-memsync join accept <host-label> --all --fingerprint <fp> [--allow-unlabelled]
+    claude-memsync join reject <host-label> --all
+    claude-memsync join list --all
 
 `list` fetches and shows each pending request as label, fingerprint and time, then
 the label it asks for (`host:<label>`) and `this host` when the key is the local
@@ -1720,6 +1723,20 @@ label), so the new host compares one known line. `reject` removes the file in it
 commit and pushes. Like `recipients`, `request`, `accept` and `reject` stop a running
 service for the change and start it again; they refuse if the lock is held by
 anything else.
+
+`--all` (for `accept`, `reject` and `list`; not with `--repo` or `--config`) acts on every
+encrypted repo of the routes file. `list --all` prints one table (repo, label, fingerprint, time,
+host). `accept --all` fetches, finds the repos with a request from `<host-label>` and plans before it
+changes anything: a repo whose request has a different fingerprint is a mismatch, and **one mismatch
+anywhere refuses every repo** (a second key under one label is the likely cause); the
+mismatching repos are named. Otherwise each repo is accepted by the same code as the single-repo
+`accept` (all its refusals apply, per repo), under one stop and one start of the service for the
+set. A read-only repo, a repo with an unfinished rekey (`RekeyBlocksSync`) and an unencrypted repo are
+skipped and not touched. One line per repo reports `accepted and pushed`, `no request`,
+`fingerprint mismatch`, `refused (<reason>)` or `skipped (...)`. Exit 0 only if every repo with a
+request was accepted; 1 on a mismatch, a refusal, a skip of a repo that had a request, or when no repo has a request
+from the label; 2 for a usage error. `reject --all` removes the label's request in each such repo
+the same way (no mismatch check). `--fingerprint` with `reject` or `list` is refused (exit 2). Every encrypted repo is fetched; a repo whose origin cannot be fetched refuses all (`cannot fetch`). The mismatch check compares HEAD and the remote tip of every repo, a diverged clone included (`list` and `status` still skip a diverged tip), treats a request that does not parse as a mismatch, and is repeated under the lock for the repos that will be changed, after each is synced with origin; one that cannot be synced refuses all (`cannot sync`). Repos that are skipped (read-only, rekey-blocked) are looked at once, before the lock. The check under the lock is local: a request another host pushes afterwards is caught only by that repo's push being rejected, which is reported while earlier repos stay accepted. An interrupt stops between repos and reports what was accepted. After the report, `accept --all` prints the accepting host's own key fingerprint per accepted repo, as the single-repo form does. `list --all` with nothing pending exits 0.
 
 **Back on the new host:** its next pull brings the new `.age-recipients`. Its
 own key is then a change to the pinned set, so the existing gate applies: run

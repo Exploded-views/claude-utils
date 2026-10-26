@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -59,6 +60,11 @@ func rekeyBlockedError(syncDir, why string) error {
 	return fmt.Errorf("repo %s has an unfinished post-quantum rekey (%s): finish or roll back the rekey first (`claude-memsync recipients rekey-pq%s --apply` or `claude-memsync recipients rekey-pq%s --rollback`)", name, why, repoFlag, repoFlag)
 }
 
+// syncInterrupted is set when a SIGINT or SIGTERM arrives while a command holds
+// the stopped service's locks, so a loop over several repos can stop between
+// them. It is cleared when withSyncLocksStopping starts.
+var syncInterrupted atomic.Bool
+
 // errInterrupted means a SIGINT or SIGTERM arrived while the service was stopped.
 var errInterrupted = errors.New("interrupted")
 
@@ -106,6 +112,7 @@ func withSyncLocksStopping(stderr io.Writer, syncDirs []string, fn func() error)
 		}
 	}
 	stderr = &lockedWriter{w: stderr} // the signal goroutine and the caller both print
+	syncInterrupted.Store(false)
 	release, err := acquireAll(syncDirs)
 	if err == nil {
 		defer release()
@@ -166,6 +173,7 @@ func withSyncLocksStopping(stderr io.Writer, syncDirs []string, fn func() error)
 				mu.Lock()
 				interrupted = true
 				mu.Unlock()
+				syncInterrupted.Store(true)
 				if n == 1 {
 					fmt.Fprintln(stderr, "interrupted: finishing this change, then restarting the service (press again to restart now)")
 					continue

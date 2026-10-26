@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
+	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/lock"
 )
@@ -63,6 +64,49 @@ func TestLabelSelfAll_RekeyBlockedRepoIsRefusedAndUntouched(t *testing.T) {
 	}
 	if l, _ := agecrypt.ListLabels(good.SyncDir); len(l) != 1 || l[0] != "vm-1" {
 		t.Errorf("the good repo was not labelled: %v", l)
+	}
+	if f.did() != "stop,start" {
+		t.Errorf("service calls = %q, want one stop and one start", f.did())
+	}
+}
+
+func TestLabelRecoveryAll_RekeyBlockedRepoIsRefusedAndUntouched(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "projects"}, "personal", nil)
+	good := encryptRouted(t, cfgs["personal"])
+	bad := encryptRouted(t, cfgs["projects"])
+	// The recovery key must be a recipient of every repo it is marked in.
+	recKey := newAgeKey(t)
+	for _, c := range []config.Config{good, bad} {
+		if code, out, errs := runRcpt("add", recKey, "--config", c.Path()); code != 0 {
+			t.Fatalf("setup add: %d\n%s%s", code, out, errs)
+		}
+	}
+	rec := filepath.Join(bad.SyncDir, ".git", agecrypt.RekeyStateFile)
+	if err := os.WriteFile(rec, []byte("{garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, blocked := agecrypt.RekeyBlocksSync(gitwt.New(bad.SyncDir)); !blocked {
+		t.Fatal("setup: the repo must be blocked")
+	}
+	headBefore := headRev(t, bad.SyncDir)
+	f := runningDaemon(t, good.SyncDir, bad.SyncDir)
+
+	code, out, errs := runRcpt("label", "recovery", recKey, "--all")
+	if code == 0 {
+		t.Fatalf("a blocked repo must make --all fail:\n%s%s", out, errs)
+	}
+	if !strings.Contains(errs, "finish or roll back the rekey first") || !strings.Contains(errs, filepath.Base(bad.SyncDir)) {
+		t.Errorf("the blocked repo is not named with the rekey advice:\n%s", errs)
+	}
+	if headRev(t, bad.SyncDir) != headBefore {
+		t.Error("the blocked repo was committed to")
+	}
+	raw, err := config.Load(good.Path())
+	if err != nil || len(raw.RecoveryRecipients) != 1 || raw.RecoveryRecipients[0] != recKey {
+		t.Errorf("the good repo's recoveryRecipients = %v (%v), want [%s]", raw.RecoveryRecipients, err, recKey)
+	}
+	if raw, err := config.Load(bad.Path()); err != nil || len(raw.RecoveryRecipients) != 0 {
+		t.Errorf("the blocked repo's config was changed: %v (%v)", raw.RecoveryRecipients, err)
 	}
 	if f.did() != "stop,start" {
 		t.Errorf("service calls = %q, want one stop and one start", f.did())
@@ -188,13 +232,24 @@ func TestRetireClassic_UnreadableRelatedRootKeepsTheIdentity(t *testing.T) {
 func TestRetireClassic_BrokenRoutesFileKeepsTheIdentity(t *testing.T) {
 	c := newClassicRepo(t)
 	relatedRekeyHost(t, c, "age1someoneelse")
-	// routes.json now names a repo whose config is gone: loadRouted fails.
+	// routes.json is now unparseable. The command refuses at target selection,
+	// before the related-clone scan: the exit code and the reason say so, and
+	// the identity stays. (The scan's own failure is covered by
+	// TestRetireClassic_UnreadableRelatedRootKeepsTheIdentity.)
 	p := os.Getenv(routesEnv)
 	if err := os.WriteFile(p, []byte("{broken"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	code, out, errs := runRcpt("retire-classic", "--config", c.cfg.Path(), "--apply")
-	_ = code
+	if code != 1 {
+		t.Errorf("exit %d, want 1\n%s%s", code, out, errs)
+	}
+	if !strings.Contains(errs, "routes.json") || !strings.Contains(errs, "invalid character") {
+		t.Errorf("the refusal must name the unparseable routes file:\n%s", errs)
+	}
+	if strings.Contains(out, "retired") {
+		t.Errorf("something was retired:\n%s", out)
+	}
 	if _, err := os.Stat(c.idPath); err != nil {
 		t.Errorf("retire-classic retired the identity with an unusable routes file:\n%s%s", out, errs)
 	}

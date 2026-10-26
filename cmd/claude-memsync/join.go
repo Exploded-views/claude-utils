@@ -17,9 +17,10 @@ import (
 const joinUsage = `usage:
   claude-memsync join request --repo <name> --label <host-label>   (on the new host)
   claude-memsync join status [--repo <name>]                       (on the new host; lists each key with its label)
-  claude-memsync join list [--repo <name>]                         (on a member host; shows each request's label)
+  claude-memsync join list [--repo <name> | --all]                 (on a member host; shows each request's label; --all: one table over every repo)
   claude-memsync join accept <label> --repo <name> --fingerprint <fp> [--allow-unlabelled]
-  claude-memsync join reject <label> [--repo <name>]
+  claude-memsync join accept <label> --all --fingerprint <fp> [--allow-unlabelled]   (every repo with a request from <label>)
+  claude-memsync join reject <label> [--repo <name> | --all]
   (repo selection as for recipients: --repo <key-or-GitHub-repo-name> | --config <path>, --routes <path>)`
 
 // runJoin handles `claude-memsync join request|status|list|accept|reject`.
@@ -45,6 +46,7 @@ func joinCmd(stdout, stderr io.Writer, args []string) int {
 	flabel := flags.String("label", "", "host label (^[a-z0-9][a-z0-9-]{0,31}$)")
 	fp := flags.String("fingerprint", "", "accept: the fingerprint the requesting host printed")
 	allowUnlabelled := flags.Bool("allow-unlabelled", false, "accept: admit even though some recipient has no host label (label it first with \"recipients label self\")")
+	all := flags.Bool("all", false, "accept, reject, list: act on every routed repo of this host (not with --repo or --config)")
 	if err := flags.Parse(rest); err != nil {
 		return 2
 	}
@@ -73,6 +75,9 @@ func joinCmd(stdout, stderr io.Writer, args []string) int {
 	default:
 		fmt.Fprintf(stderr, "join: unknown action %q\n%s\n", action, joinUsage)
 		return 2
+	}
+	if *all {
+		return joinAll(stdout, stderr, action, sel, label, *fp, *allowUnlabelled)
 	}
 	if action == "list" && sel.Repo == "" && sel.Config == "" {
 		if path, ok, err := resolveRoutesPath(sel.Routes); err == nil && ok {
@@ -114,13 +119,18 @@ func joinCmd(stdout, stderr io.Writer, args []string) int {
 	}
 }
 
-// joinFetch brings in the remote's state without touching the work-tree.
-func joinFetch(repo *gitwt.Repo) {
+// joinFetch brings in the remote's state without touching the work-tree. A
+// failure is ignored: list and status then show what the clone has.
+func joinFetch(repo *gitwt.Repo) { _ = joinFetchErr(repo) }
+
+// joinFetchErr is joinFetch that says whether the remote could be read.
+func joinFetchErr(repo *gitwt.Repo) error {
 	br, err := repo.CurrentBranch()
 	if err != nil || br == "" || br == "HEAD" {
 		br = defaultBranch
 	}
-	_, _ = repo.Run("fetch", "-q", "origin", br)
+	_, err = repo.Run("fetch", "-q", "origin", br)
+	return err
 }
 
 // joinGuardHook lets tests see which push guard a join command used.

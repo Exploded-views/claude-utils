@@ -37,6 +37,7 @@ func TestLoop_WatcherEventsDispatchDeterministically(t *testing.T) {
 	flushes := make(chan error, 64)
 	f.loop.OnFlush = func(_ bool, err error) { flushes <- err }
 	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel) // a failing test must not leave the loop running
 	done := make(chan error, 1)
 	go func() { done <- f.loop.Run(ctx) }()
 
@@ -51,9 +52,13 @@ func TestLoop_WatcherEventsDispatchDeterministically(t *testing.T) {
 	writeMem(t, f.roots.Claude, "p1", "new.md", "fresh\n")
 
 	mirrored := filepath.Join(f.roots.Mirror, "p1", "memory", "new.md")
+	deadline := time.Now().Add(time.Minute) // overall bound: flushes may keep coming without the copy
 	for {
 		if _, err := os.Stat(mirrored); err == nil {
 			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the new memory file never reached the mirror")
 		}
 		awaitFlush(t, flushes, "debounced flush after a memory file was written")
 	}

@@ -376,6 +376,72 @@ the sync dir, refuses a mismatched fingerprint, and refuses
 while some recipient other than a configured recovery key has no host label.
 `join reject <host-label> --repo <repo>` discards a request.
 
+#### Accepting in every repo at once
+
+A joining host files one request per repo, always with the same key, so the
+fingerprint is the same in each. Instead of one `accept` per repo:
+
+```sh
+claude-memsync join list --all
+claude-memsync join accept <host-label> --all --fingerprint "<fp>"
+```
+
+`join list --all` prints one table over every routed repo (repo, label,
+fingerprint, time). `accept --all` looks at every encrypted repo on this host
+and accepts the request from `<host-label>` in those whose fingerprint equals
+`--fingerprint`, then prints one line per repo: `accepted and pushed`,
+`no request`, `fingerprint mismatch`, `malformed request`, `cannot fetch`,
+`cannot sync`, `refused (<reason>)`, `not run (interrupted)` (or another
+`not run (<reason>)`, such as a lock held by something else), or `skipped
+(read-only | rekey-blocked | unencrypted | missing: not a git clone)`. The
+service is stopped once and started once for the whole set; a repo with an
+unfinished rekey is skipped and left untouched. `--all` does not go with
+`--repo` or `--config`, and `accept` still needs `--fingerprint`.
+
+- **A mismatch refuses everything.** If any repo holds a request under that
+  label with a different fingerprint, or one that is not a valid request,
+  nothing is accepted in any repo (that can mean a second key under one
+  label), the repo is named, and the command exits 1. Every encrypted repo is
+  fetched first, and both the clone's copy and origin's are compared, even in
+  a clone that has diverged from origin. If origin cannot be fetched in one
+  repo (`cannot fetch`), nothing is accepted: another key could be there
+  unseen. A repo with no `origin` remote counts as `cannot fetch`, so it
+  refuses everything too. For `reject --all`, a fetch or sync failure refuses
+  only that repo. Then only the repos that would be changed (not read-only, not
+  rekey-blocked) are brought up to date with origin under the lock and
+  checked again; one that cannot be brought up to date (`cannot sync`) also
+  refuses everything. The others are looked at once, before the lock.
+  That check under the lock is local: another host can still push a request
+  between the check and a repo's own push. That push is then rejected and
+  reported, repos accepted before it stay accepted, and the other request
+  stays visible in `join list`. Look at `join list --all`, `join reject` the
+  stray one, and run it again.
+- **Exit codes.** 0 when every repo that had a request was accepted. 1 when a
+  request was refused or skipped, on a mismatch, and when no repo has a request
+  from that label (nothing was done, which a script should notice). 2 for a
+  usage error. If the command is interrupted, it stops between repos, says
+  which were accepted (and pushed) and which did not run, restarts the
+  service, and exits 1.
+- `join reject <host-label> --all` removes the label's request in every repo
+  the same way (no fingerprint; `--fingerprint` with `reject` or `list` is refused). `join list --all` with nothing pending
+  prints `no join requests pending` and exits 0.
+
+#### Naming a repo across hosts
+
+Local route keys can differ between hosts: an older host may use a short key
+such as `<name>`, while bootstrap derives `project-<name>`. Every `--repo` flag
+therefore also takes the GitHub repo name (`mem-project-<name>`) or
+`owner/name`, so a command printed on one host works on any other:
+
+```sh
+claude-memsync join accept <host-label> --repo mem-project-<name> --fingerprint "<fp>"
+claude-memsync join accept <host-label> --all --fingerprint "<fp>"
+```
+
+An exact local route key always wins over a repo name. A name that matches
+more than one routed repo is refused and the candidates are listed; give the
+route key or `owner/name`. `--all` needs no name at all.
+
 ### 4. Accept the recipient set, on the new host
 
 The new host's next pull brings the new recipient list, which it has not

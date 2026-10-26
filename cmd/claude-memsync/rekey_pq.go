@@ -499,11 +499,18 @@ func relatedCloneDirs(sel repoSel) relScan {
 	}
 	var out []string
 	for _, e := range ents {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+		if strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
 		dir := filepath.Join(root, e.Name())
-		if _, err := os.Stat(filepath.Join(dir, related.EncryptedMarker)); err == nil {
+		// A symlink may point at a clone: it counts (a dangling or non-dir
+		// target is listed too, and reads as "uses the identity" later).
+		if !e.IsDir() && e.Type()&os.ModeSymlink == 0 {
+			continue
+		}
+		// Only "the marker is not there" rules a dir out; a Stat that fails
+		// for any other reason leaves the clone possible, so it counts.
+		if _, err := os.Stat(filepath.Join(dir, related.EncryptedMarker)); err == nil || !errors.Is(err, os.ErrNotExist) {
 			out = append(out, dir)
 		}
 	}
