@@ -482,3 +482,34 @@ func TestStatus_SaysSyncingIsStoppedForAnUnfinishedRekey(t *testing.T) {
 		t.Errorf("status still says syncing is stopped after the rekey finished: %q", encryptionLines(c.cfg))
 	}
 }
+
+// N3: an unfinished park or an interrupted pull must be recovered by the
+// daemon before the history is rewritten under it.
+func TestRekeyPQ_ApplyRefusesWhileAParkOrPullIsUnfinished(t *testing.T) {
+	for _, name := range []string{"parked.json", "pull-running"} {
+		t.Run(name, func(t *testing.T) {
+			c := newClassicRepo(t)
+			_, newRec := newPQKey(t, "newrec")
+			st := filepath.Join(c.cfg.SyncDir, ".state")
+			if err := os.MkdirAll(st, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(st, name), []byte("{}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before := c.state(t)
+			code, out, errb := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root", "--apply")
+			if code == 0 {
+				t.Fatalf("apply went ahead with %s present\n%s%s", name, out, errb)
+			}
+			for _, want := range []string{name, "daemon", "rerun"} {
+				if !strings.Contains(errb, want) {
+					t.Errorf("refusal lacks %q:\n%s", want, errb)
+				}
+			}
+			if after := c.state(t); after != before {
+				t.Error("a refused apply changed the repo")
+			}
+		})
+	}
+}
