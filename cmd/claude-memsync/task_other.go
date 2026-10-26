@@ -12,6 +12,11 @@ import (
 	"github.com/kardianos/service"
 )
 
+// userOptions are the kardianos options of the user service.
+func userOptions() service.KeyValue {
+	return service.KeyValue{"UserService": true}
+}
+
 func userSvc(configPath string) (service.Service, error) {
 	if configPath == "" {
 		configPath = defaultConfigPath()
@@ -20,17 +25,25 @@ func userSvc(configPath string) (service.Service, error) {
 	if cfg.Option == nil {
 		cfg.Option = service.KeyValue{}
 	}
-	cfg.Option["UserService"] = true
+	for k, v := range userOptions() {
+		cfg.Option[k] = v
+	}
 	prg := &program{configPath: configPath}
 	return service.New(prg, cfg)
 }
+
+// The kardianos calls are variables so tests never register a real service.
+var (
+	kardianosInstall = func(svc service.Service) error { return svc.Install() }
+	kardianosStart   = func(svc service.Service) error { return svc.Start() }
+)
 
 func installTask(configPath string) error {
 	svc, err := userSvc(configPath)
 	if err != nil {
 		return err
 	}
-	return svc.Install()
+	return kardianosInstall(svc)
 }
 
 func uninstallTask() error {
@@ -47,7 +60,7 @@ func startTask() error {
 	if err != nil {
 		return err
 	}
-	return svc.Start()
+	return kardianosStart(svc)
 }
 
 func stopTask() error {
