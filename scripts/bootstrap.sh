@@ -212,7 +212,7 @@ else:
 # needs a human) before anything is changed; the same command resumes.
 check_key_pause() {
   local f="$CHECK_KEY_FILE"
-  case "$f" in /*) ;; *) die "--check-key-file must be an absolute path" ;; esac
+  case "$f" in /*) ;; *) udie "--check-key-file must be an absolute path" ;; esac
   if [ ! -e "$f" ] && [ ! -L "$f" ]; then
     {
       printf 'PAUSED: the check key %s does not exist yet. Nothing has been changed.\n' "$f"
@@ -271,7 +271,7 @@ trap 'exit 129' HUP
 # 0600, one link. Anything else is refused and left alone (it may not be ours).
 check_token_file() {
   local f="$ORG_TOKEN_FILE" m u n
-  case "$f" in /*) ;; *) die "--org-token-file must be an absolute path with --delete-org-token-file" ;; esac
+  case "$f" in /*) ;; *) udie "--org-token-file must be an absolute path with --delete-org-token-file" ;; esac
   { [ -f "$f" ] && [ ! -L "$f" ]; } || die "org token file $f is missing or not a plain file"
   m="$(stat -c %a "$f" 2>/dev/null || stat -f %Lp "$f")"
   u="$(stat -c %u "$f" 2>/dev/null || stat -f %u "$f")"
@@ -287,7 +287,7 @@ check_token_file() {
 # point: the binary says what it is.
 check_prebuilt() {
   local b got
-  [ -d "$PREBUILT_DIR" ] || die "--prebuilt-dir $PREBUILT_DIR is not a directory"
+  [ -d "$PREBUILT_DIR" ] || udie "--prebuilt-dir $PREBUILT_DIR is not a directory"
   PREBUILT_DIR="$(cd "$PREBUILT_DIR" && pwd -P)"
   for b in claude-memsync claude-memmerge; do
     { [ -f "$PREBUILT_DIR/$b" ] && [ -x "$PREBUILT_DIR/$b" ]; } || die "--prebuilt-dir: $PREBUILT_DIR/$b is missing or not executable"
@@ -345,10 +345,10 @@ while [ $# -gt 0 ]; do
 done
 [ -z "$PREBUILT_DIR" ] || BUILD_FROM_SOURCE=0   # installing given binaries: no clone, no build, no Go
 check_prereqs
-[ -n "$HOST" ] || die "--host is required"
-[ -n "$ORG" ] || die "--org <org> is required: the GitHub organisation that holds the memory repos (there is no default)"
-[ -n "$AGE_RECOVERY" ] || die "--recovery-recipient <age1pq1...> is required: your own offline post-quantum recovery PUBLIC key (generate one as docs/bootstrap.md describes; there is no default)"
-valid_pq_recipient "$AGE_RECOVERY" || die "--recovery-recipient must be a post-quantum age1pq1... public key (a classic age1... or ssh key is refused: repos are post-quantum by default)"
+[ -n "$HOST" ] || udie "--host is required"
+[ -n "$ORG" ] || udie "--org <org> is required: the GitHub organisation that holds the memory repos (there is no default)"
+[ -n "$AGE_RECOVERY" ] || udie "--recovery-recipient <age1pq1...> is required: your own offline post-quantum recovery PUBLIC key (generate one as docs/bootstrap.md describes; there is no default)"
+valid_pq_recipient "$AGE_RECOVERY" || udie "--recovery-recipient must be a post-quantum age1pq1... public key (a classic age1... or ssh key is refused: repos are post-quantum by default)"
 n_tok=0
 for v in "$ORG_TOKEN_FILE" "$ORG_TOKEN_CMD" "$ORG_APP"; do [ -z "$v" ] || n_tok=$((n_tok + 1)); done
 [ "$n_tok" -le 1 ] || udie "give only one of --org-token-file, --org-token-cmd or --org-app"
@@ -363,42 +363,42 @@ if [ "$DELETE_TOKEN_FILE" -eq 1 ]; then
   fi
 fi
 if [ -n "$ORG_APP" ]; then
-  printf '%s' "$ORG_APP" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' || die "bad --org-app '$ORG_APP'"
+  printf '%s' "$ORG_APP" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' || udie "bad --org-app '$ORG_APP'"
   case "$HOME" in *[[:space:]\'\"\\]*) die "--org-app needs a HOME without spaces or quotes (the token command is passed as one string)" ;; esac
   ORG_TOKEN_CMD="$HOME/.local/bin/claude-memsync app-token --app $ORG_APP"
 fi
 if [ -n "$ORG_APP_ID" ] || [ -n "$ORG_APP_KEY_CMD" ]; then
-  [ -n "$ORG_APP" ] || die "--org-app-id / --org-app-key-cmd go with --org-app <name>"
-  { [ -n "$ORG_APP_ID" ] && [ -n "$ORG_APP_KEY_CMD" ]; } || die "give both --org-app-id and --org-app-key-cmd"
-  printf '%s' "$ORG_APP_ID" | grep -Eq '^[0-9]{1,20}$' || die "bad --org-app-id (numeric)"
-  split_args json "$ORG_APP_KEY_CMD" >/dev/null || die "unbalanced quote in --org-app-key-cmd"
+  [ -n "$ORG_APP" ] || udie "--org-app-id / --org-app-key-cmd go with --org-app <name>"
+  { [ -n "$ORG_APP_ID" ] && [ -n "$ORG_APP_KEY_CMD" ]; } || udie "give both --org-app-id and --org-app-key-cmd"
+  printf '%s' "$ORG_APP_ID" | grep -Eq '^[0-9]{1,20}$' || udie "bad --org-app-id (numeric)"
+  split_args json "$ORG_APP_KEY_CMD" >/dev/null || udie "unbalanced quote in --org-app-key-cmd"
 fi
 if [ -n "$CHECK_APP$CHECK_APP_ID$CHECK_KEY_FILE" ]; then
-  { [ -n "$CHECK_APP" ] && [ -n "$CHECK_APP_ID" ] && [ -n "$CHECK_KEY_FILE" ]; } || die "give --check-app, --check-app-id and --check-key-file together"
-  printf '%s' "$CHECK_APP" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' || die "bad --check-app '$CHECK_APP'"
-  printf '%s' "$CHECK_APP_ID" | grep -Eq '^[0-9]{1,20}$' || die "bad --check-app-id (numeric)"
-  [ "$CHECK_APP" != "$ORG_APP" ] || die "--check-app must differ from --org-app: the admin app never serves the daemon"
+  { [ -n "$CHECK_APP" ] && [ -n "$CHECK_APP_ID" ] && [ -n "$CHECK_KEY_FILE" ]; } || udie "give --check-app, --check-app-id and --check-key-file together"
+  printf '%s' "$CHECK_APP" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' || udie "bad --check-app '$CHECK_APP'"
+  printf '%s' "$CHECK_APP_ID" | grep -Eq '^[0-9]{1,20}$' || udie "bad --check-app-id (numeric)"
+  [ "$CHECK_APP" != "$ORG_APP" ] || udie "--check-app must differ from --org-app: the admin app never serves the daemon"
   check_key_pause
 fi
 ORG_TOKEN_ARGV=()
 if [ -n "$ORG_TOKEN_CMD" ]; then
-  split_args json "$ORG_TOKEN_CMD" >/dev/null || die "unbalanced quote in --org-token-cmd"
+  split_args json "$ORG_TOKEN_CMD" >/dev/null || udie "unbalanced quote in --org-token-cmd"
   while IFS= read -r -d '' a; do ORG_TOKEN_ARGV+=("$a"); done < <(split_args nul "$ORG_TOKEN_CMD")
-  [ ${#ORG_TOKEN_ARGV[@]} -gt 0 ] || die "--org-token-cmd is empty"
+  [ ${#ORG_TOKEN_ARGV[@]} -gt 0 ] || udie "--org-token-cmd is empty"
 fi
 # Arguments that hand the same token to claude-memsync (a file path or a command, never the token).
 # An app is handed over as its app-token command, which claude-memsync runs per request.
 if [ -n "$ORG_TOKEN_FILE" ]; then ORG_TOKEN_ARGS=(--token-file "$ORG_TOKEN_FILE"); else ORG_TOKEN_ARGS=(--token-cmd "$ORG_TOKEN_CMD"); fi
-[ -n "$ROLE" ] || die "--role is required"
-printf '%s' "$HOST" | grep -Eq '^[a-z0-9][a-z0-9-]{0,31}$' || die "bad --host label '$HOST' (it is the host's label in recipients, deploy keys and join requests: 1-32 characters of a-z, 0-9 and '-', starting with a letter or digit)"
-printf '%s' "$ORG" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9-]*$' || die "bad --org '$ORG'"
+[ -n "$ROLE" ] || udie "--role is required"
+printf '%s' "$HOST" | grep -Eq '^[a-z0-9][a-z0-9-]{0,31}$' || udie "bad --host label '$HOST' (it is the host's label in recipients, deploy keys and join requests: 1-32 characters of a-z, 0-9 and '-', starting with a letter or digit)"
+printf '%s' "$ORG" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9-]*$' || udie "bad --org '$ORG'"
 for o in ${KEEP_OUT_OWNERS[@]+"${KEEP_OUT_OWNERS[@]}"}; do
-  [ "$o" != "$(lower "$ORG")" ] || die "--org '$ORG' is also a keep-out owner; refusing"
+  [ "$o" != "$(lower "$ORG")" ] || udie "--org '$ORG' is also a keep-out owner; refusing"
 done
 if [ -n "$PREBUILT_DIR" ]; then
   check_prebuilt
   if [ "$SHA_GIVEN" -eq 1 ]; then
-    printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || die "--sha must be a full 40-hex commit"
+    printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || udie "--sha must be a full 40-hex commit"
     SHORT="$(printf '%s' "$SHA" | cut -c1-12)"
     LIB_ID="$SHA"
     SRC="$HOME/.local/src/claude-utils-$SHA"
@@ -411,9 +411,9 @@ if [ -n "$PREBUILT_DIR" ]; then
 else
   if [ -z "$SHA" ]; then
     SHA="$(git -C "$(dirname "$0")" rev-parse HEAD 2>/dev/null || true)"
-    [ -n "$SHA" ] || die "--sha is required when the script is not run from a git checkout"
+    [ -n "$SHA" ] || udie "--sha is required when the script is not run from a git checkout"
   fi
-  printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || die "--sha must be a full 40-hex commit"
+  printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || udie "--sha must be a full 40-hex commit"
   SHORT="$(printf '%s' "$SHA" | cut -c1-12)"
   LIB_ID="$SHA"
   SRC="$HOME/.local/src/claude-utils-$SHA"
@@ -428,7 +428,7 @@ OWN_OWNERS+=("$(lower "$ORG")")
 case "$ROLE" in
   homelab)      ROLE_REPOS="$ROLE_homelab_REPOS"; HOME_KEY="$ROLE_homelab_HOME" ;;
   personal-dev) ROLE_REPOS="$ROLE_personal_dev_REPOS"; HOME_KEY="$ROLE_personal_dev_HOME" ;;
-  *)            die "unknown role '$ROLE' (known: homelab, personal-dev). There is no role for client or orchestrator repos." ;;
+  *)            udie "unknown role '$ROLE' (known: homelab, personal-dev). There is no role for client or orchestrator repos." ;;
 esac
 for spec in $ROLE_REPOS; do
   IFS=: read -r k kind name <<<"$spec"
@@ -630,7 +630,7 @@ admin_entry_remove() {
 # check_key_file: the per-host check key must be a plain file of ours, 0600, one link.
 check_key_file() {
   local f="$CHECK_KEY_FILE" m u n
-  case "$f" in /*) ;; *) die "--check-key-file must be an absolute path" ;; esac
+  case "$f" in /*) ;; *) udie "--check-key-file must be an absolute path" ;; esac
   { [ -f "$f" ] && [ ! -L "$f" ]; } || die "check key file $f is missing or not a plain file"
   m="$(stat -c %a "$f" 2>/dev/null || stat -f %Lp "$f")"
   u="$(stat -c %u "$f" 2>/dev/null || stat -f %u "$f")"
@@ -702,7 +702,7 @@ discover_projects() {
   fi
   for w in ${WORKSPACES[@]+"${WORKSPACES[@]}"}; do
     case "$w" in "~"*) w="$HOME${w#\~}" ;; esac
-    [ -d "$w" ] || die "workspace '$w' is not a directory"
+    [ -d "$w" ] || udie "workspace '$w' is not a directory"
     w="$(cd "$w" && pwd -P)"
     [ -e "$w/.git" ] && die "workspace '$w' is itself a git checkout; give its parent folder"
     ws="$ws$w

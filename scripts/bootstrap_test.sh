@@ -1269,12 +1269,13 @@ without() { # flag: XB minus that flag and its value, into XA
     XA+=("$a")
   done
 }
-mkdir -p "$BASE/nogit/scripts"; cp "$ROOT/scripts/bootstrap.sh" "$BASE/nogit/scripts/bootstrap.sh"
+NOGIT="$(mktemp -d)"; mkdir "$NOGIT/scripts"; cp "$ROOT/scripts/bootstrap.sh" "$NOGIT/scripts/bootstrap.sh"   # outside any git checkout
 for f in --host --role --org --recovery-recipient; do
   without "$f"; rawboot "${XA[@]}" --dry-run
   check "omitting $f exits 2 (usage), with a message naming it" bash -c "[ $RC -eq 2 ] && printf '%s\n' \"\$1\" | grep -q -- '$f'" _ "$OUT"
 done
-without --sha; RAWSCRIPT="$BASE/nogit/scripts/bootstrap.sh" rawboot "${XA[@]}" --dry-run
+without --sha; RAWSCRIPT="$NOGIT/scripts/bootstrap.sh" rawboot "${XA[@]}" --dry-run
+rm -f "$NOGIT/scripts/bootstrap.sh"; rmdir "$NOGIT/scripts" "$NOGIT"
 check "omitting --sha outside a git checkout exits 2" bash -c "[ $RC -eq 2 ] && printf '%s\n' \"\$1\" | grep -q -- '--sha is required'" _ "$OUT"
 rawboot "${XB[@]}" --host 'Bad_Host' --dry-run
 check "a malformed --host exits 2" [ "$RC" -eq 2 ]

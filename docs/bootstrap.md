@@ -7,8 +7,8 @@
 | Code | Meaning |
 |---|---|
 | 0 | ok |
-| 1 | error (a missing prerequisite, a refused input, a failed step) |
-| 2 | usage (an unknown or malformed argument) |
+| 1 | runtime error: a missing prerequisite tool, a refused file or state (a token or key file with the wrong mode, an existing key or sync dir that is not ours, a repo that is not private, a binary whose version does not match), or a failed step |
+| 2 | usage: an unknown argument; a required flag left out (`--host`, `--role`, `--org`, `--recovery-recipient`, one token source, and `--sha` when the script is not run from a git checkout); a malformed value (a bad host label, org, app name, app id, `--sha`, or a recovery key that is not a post-quantum `age1pq1...` key; an unbalanced quote in a command; a relative path where an absolute one is needed; a `--workspace` or `--prebuilt-dir` that is not a directory; an unknown role); or flags that conflict (`--org` also a keep-out owner, two token sources, `--delete-org-token-file` without `--org-token-file`, `--check-app` equal to `--org-app`, `--project` with `--skip-project`) |
 | 3 | paused: it needs a human, then run the same command again (today: the `--check-key-file` does not exist yet; the output says exactly what to do) |
 
 ## Prerequisites
