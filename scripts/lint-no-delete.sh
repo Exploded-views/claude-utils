@@ -23,11 +23,42 @@ exec python3 -I - "$DIR" <<'PY'
 import os, re, sys
 
 findings = []
+
+import shlex
+CONTROL = {";", "&&", "||", "|", "&", ")", "(", "}", "{", "|&", ";;", "\n"}
+def scan_rm(text, depth=0):
+    """(options, targets) of every rm command in the text, quoted forms and quoted command strings included"""
+    try:
+        lex = shlex.shlex(text, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        toks = list(lex)
+    except ValueError:
+        toks = re.sub(r"[\"'\\]", "", text).split()
+    found = []
+    for i, t in enumerate(toks):
+        if depth < 3 and (" " in t or "\t" in t) and re.search(r"\brm\b", t):
+            found += scan_rm(t, depth + 1)
+        if t == "rm" or t.endswith("/rm"):
+            opts, j = [], i + 1
+            while j < len(toks) and toks[j].startswith("-") and toks[j] != "--":
+                opts.append(toks[j]); j += 1
+            if j < len(toks) and toks[j] == "--":
+                j += 1
+            targets = []
+            while j < len(toks) and toks[j] not in CONTROL:
+                targets.append(toks[j].rstrip(";")); j += 1
+            found.append((opts, targets))
+    return found
 assign_mk = re.compile(r"(?:^|[\s;&|{(])(?:local\s+|declare\s+)?([A-Za-z_][A-Za-z0-9_]*)=[\"']?(?:\$\(|`)\s*mktemp\s+-d")
 assign_any = re.compile(r"(?:^|[\s;&|{(])(?:local\s+|declare\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 rm_cmd = re.compile(r"(?:^|[\s;&|{(/])rm((?:\s+-[^\s]*)+)(?:\s+(.*))?$")
-git_bad = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?(?:clean\b|reset\s+(?:\S+\s+)*--hard\b|checkout\s+(?:--\s+)?\.(?:\s|$)|restore\b)")
-trunc = re.compile(r"(?<![>&0-9])>(?!>)\s*\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?(?=[\s;&|)}]|$)")
+GLOBAL = r"(?:\s+(?:-C\s+\S+|-c\s+\S+|--[A-Za-z-]+(?:=\S+)?|--(?:git-dir|work-tree|namespace)\s+\S+))*"
+git_bad = re.compile(r"\bgit" + GLOBAL + r"\s+(?:clean\b|reset\s+(?:\S+\s+)*--hard\b|checkout\s+(?:\S+\s+)*?(?:-f\b|--force\b|--\s+\S|\.(?:\s|$))|restore\b|stash\s+(?:clear|drop)\b|worktree\s+remove\s+(?:\S+\s+)*--force\b)")
+git_src = re.compile(r"\bgit\s+-C\s+\$(?:\{SRC\}|SRC)(?![A-Za-z0-9_])")
+VAR = r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))(?=[\s;&|)]|$)"
+trunc = re.compile(r"(?<![>&0-9])(?:&>|>\||1>|>)(?!>)\s*" + VAR)
+tee_cmd = re.compile(r"\btee((?:\s+-\S+)*)\s+(.*)$")
+cp_null = re.compile(r"\bcp\s+(?:-\S+\s+)*/dev/null\s+" + VAR)
 guarded_var = re.compile(r"^(?:ROUTES|IDENTITY\w*|CFG\w*|APPS\w*|\w*_FILE)$")
 assign_tmp = re.compile(r"(?:^|[\s;&|{(])(?:local\s+|declare\s+)?([A-Za-z_][A-Za-z0-9_]*)=[\"']?(?:\$\(|`)\s*mktemp\b")
 
@@ -39,11 +70,9 @@ for name in sorted(os.listdir(sys.argv[1])):
     for raw in lines:
         if raw.strip().startswith("#"):
             continue
-        m = assign_mk.search(raw)
-        if m:
+        for m in assign_mk.finditer(raw):
             allowed.add(m.group(1))
-        m = assign_tmp.search(raw)
-        if m:
+        for m in assign_tmp.finditer(raw):
             temps.add(m.group(1))
     for n, raw in enumerate(lines, 1):
         line = raw.strip()
@@ -56,23 +85,38 @@ for name in sorted(os.listdir(sys.argv[1])):
         if re.search(r"\bfind\b.*\s-delete(\s|$)", line):
             bad("find -delete")
         norm = re.sub(r"[\"'\\]", "", line)   # escaped and quoted forms
-        if git_bad.search(norm) and "$SRC" not in norm:
-            bad("git command that discards work in place (allowed only on the bootstrap's own $SRC clone, or with no-delete-ok and a reason): %s" % line)
+        gm = git_bad.search(norm)
+        if gm:
+            sm = git_src.search(norm)
+            if not (sm and sm.start() == gm.start()):   # exempt only "git -C $SRC ..." (the clone this script made)
+                bad("git command that discards work in place (allowed only as git -C \"$SRC\" on the bootstrap's own clone, or with no-delete-ok and a reason): %s" % line)
+        def trunc_var(m):
+            return m.group(1) or m.group(2)
+        def check_trunc(var):
+            if guarded_var.match(var) and var not in temps:
+                bad("truncating write to $%s (use a temp file and a move, or mark it no-delete-ok with a reason): %s" % (var, line))
         for tm in trunc.finditer(norm):
-            if guarded_var.match(tm.group(1)) and tm.group(1) not in temps:
-                bad("truncating redirect to $%s (use a temp file and a move, or mark it no-delete-ok with a reason): %s" % (tm.group(1), line))
-        for m in rm_cmd.finditer(norm):
-            opts, rest = m.group(1).split(), (m.group(2) or "")
+            check_trunc(trunc_var(tm))
+        for tm in cp_null.finditer(norm):
+            check_trunc(trunc_var(tm))
+        tmx = tee_cmd.search(norm)
+        if tmx and not any(o == "--append" or (o.startswith("-") and not o.startswith("--") and "a" in o) for o in tmx.group(1).split()):
+            for tok in tmx.group(2).split():
+                vm = re.fullmatch(VAR, tok.rstrip(";"))
+                if vm:
+                    check_trunc(trunc_var(vm))
+        for opts, targets in scan_rm(line):
             recursive = any(o == "--recursive" or (o.startswith("-") and not o.startswith("--") and re.search(r"[rR]", o)) for o in opts)
             if not recursive:
                 continue
-            target = rest.split()[0] if rest.split() else ""
-            if target == "--" and len(rest.split()) > 1:
-                target = rest.split()[1]
-            tmatch = re.fullmatch(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?::\?)?\}|([A-Za-z_][A-Za-z0-9_]*));?", target)
-            var = (tmatch.group(1) or tmatch.group(2)) if tmatch else None
-            if var is None or var not in allowed:
-                bad("recursive rm (only a variable assigned from mktemp -d may be removed this way): %s" % line)
+            ok = bool(targets)
+            for target in targets:   # EVERY target must be a mktemp -d variable, whole
+                tmatch = re.fullmatch(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?::\?)?\}|([A-Za-z_][A-Za-z0-9_]*))", target)
+                var = (tmatch.group(1) or tmatch.group(2)) if tmatch else None
+                if var is None or var not in allowed:
+                    ok = False
+            if not ok:
+                bad("recursive rm (every target must be a variable assigned from mktemp -d): %s" % line)
         # an allow-listed temp variable must not be pointed somewhere else
         m = assign_any.search(line)
         if m and m.group(1) in allowed:

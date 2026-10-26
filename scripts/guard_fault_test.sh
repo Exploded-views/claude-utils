@@ -17,6 +17,7 @@
 # No network, no GitHub, no Go; it runs on macOS's bash 3.2 as well.
 #
 # Usage: scripts/guard_fault_test.sh
+# shellcheck disable=SC2034  # the globals below are read by the guards sourced from bootstrap.sh
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -78,7 +79,7 @@ fixture_no_predecessor_units() {
 }
 fixture_recovery_key_ok() { GA=("age1pq1$(head -c 1100 /dev/zero | tr '\0' q)"); }
 fixture_key_free() { GA=("$W/no-such-key"); }
-fixture_project_not_kept_out() { GA=(someone project); }
+fixture_project_not_kept_out() { GA=(example project); }
 
 fault_cmd() { # kind guard-name: stands in for the guard
   case "$1" in

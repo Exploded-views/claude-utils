@@ -138,6 +138,8 @@ jobs:
         run: |
           bash scripts/lint-no-delete_test.sh
           bash scripts/lint-no-delete.sh
+          bash scripts/lint-guards_test.sh
+          bash scripts/lint-guards.sh
       # Stock macOS tools only: no regex repeat bound above 255 (BSD grep and
       # bash [[ =~ ]] refuse it) and no GNU-only flags in scripts/*.sh.
       - name: portability lint
@@ -246,6 +248,11 @@ jobs:
         env:
           BOOT_BASH: ${{ matrix.bash }}
         run: '"$BOOT_BASH" scripts/jobrunner_test.sh'
+      # Fault injection into every registered guard (docs/ci.md): each fault must refuse.
+      - name: guard fault test
+        env:
+          BOOT_BASH: ${{ matrix.bash }}
+        run: '"$BOOT_BASH" scripts/guard_fault_test.sh'
 
   workflow-lint:
     name: workflow lint (hosted runners, SHA pins)
