@@ -90,6 +90,7 @@ case "$1" in
     case "$2" in
       create)
         name="$(basename "$3")"
+        case "$name" in "${STUB_SLOW:-/}") sleep 2 ;; esac   # a slow repo: output order must not follow finish order
         if [ "${STUB_PUBLIC:-0}" = 1 ]; then
           echo '{"private": false, "visibility": "public"}' >"$S/$name.json"
         else
@@ -610,6 +611,7 @@ docvalue() { # input name -> test value (the keep-out and workspace lists come f
   case "$1" in
     COMMIT) printf '%s' "$SHA" ;; HOST_LABEL) printf testhost ;; ORG) printf '%s' "$ORG" ;; RECOVERY) printf '%s' "$PQREC" ;;
     GITHUB_USER) printf example-user ;; WORKSPACES) printf '%s' "${DOC_WS:-}" ;;
+    PROJECTS) printf '%s' "${DOC_PROJECTS:-}" ;; SKIP_PROJECTS) printf '%s' "${DOC_SKIP:-}" ;;
     KEEP_OUT_OWNERS) printf '%s' "${DOC_OWNERS:-}" ;; KEEP_OUT_TERMS) printf '%s' "${DOC_TERMS:-}" ;;
     ADMIN_APP_ID) printf 12345 ;; ADMIN_KEY_CMD) printf 'cat %s' "$BASE/app.pem" ;;
     CHECK_APP_ID) printf 54321 ;; CHECK_KEY_FILE) printf '%s' "$H/.config/claude-memsync/memsync-check.pem" ;;
@@ -622,7 +624,7 @@ docsnippet() { # id mode(dry|real): the prompt as a shell snippet
   printf 'set -u\n'
   while IFS= read -r line; do
     n="${line%% = *}"
-    if [ -n "${DOC_LITERAL:-}" ] && case "$n" in KEEP_OUT_*|WORKSPACES) true ;; *) false ;; esac; then printf '%s=%s\n' "$n" "${line#* = }"   # the doc's own default
+    if [ -n "${DOC_LITERAL:-}" ] && case "$n" in KEEP_OUT_*|WORKSPACES|PROJECTS|SKIP_PROJECTS) true ;; *) false ;; esac; then printf '%s=%s\n' "$n" "${line#* = }"   # the doc's own default
     else printf '%s=%q\n' "$n" "$(docvalue "$n")"; fi
   done < <(docsec "$1" '^INPUTS' '^ALREADY SET')
   while IFS= read -r line; do printf '%s=%s\n' "${line%% = *}" "${line#* = }"; done < <(docsec "$1" '^ALREADY SET' '^STEPS')
@@ -1117,6 +1119,137 @@ assert rem=={"github.com/example-org/ownproj":"project-ownproj"}, rem
 assert set(d["repos"])=={"personal","project-code-workspace","project-ownproj"}, set(d["repos"])' "$H/.config/claude-memsync/routes.json"
 check "other owners are listed third-party and get no repo" bash -c "printf '%s' \"\$1\" | grep -q 'gitproj.*not synced (third-party)' && printf '%s' \"\$1\" | grep -q 'otherproj.*not synced (third-party)' && ! grep -qE 'gitproj|otherproj' '$STUB_DIR/gh.log'" _ "$OUT"
 check "no built-in owner name in the generated config" bash -c "! grep -rIiE 'gitgat' '$H/.config/claude-memsync'"
+
+# >>> fast-setup (#4): project selection and parallel per-repo steps
+# pjhome <name> <project>...: a fresh personal-dev HOME with one own checkout per
+# project and a bare remote for its memory repo. A "!" in front of a name leaves
+# the bare remote out, so that repo's ls-remote (and so its run) fails.
+pjhome() {
+  local n w; n="$1"; shift
+  newhome "$n"; mkdir -p "$H/code"
+  for w in "$@"; do
+    mkgit "$H/code/${w#!}" "git@github.com:gitgat/${w#!}.git"
+    case "$w" in !*) ;; *) mkbare "mem-project-$w" ;; esac
+    git config --file "$H/.gitconfig" "url.$BASE/remotes/mem-project-${w#!}.git.insteadOf" "git@gh-mem-project-${w#!}:$ORG/mem-project-${w#!}.git"
+  done
+}
+pjrun() { runboot --host testmac --role personal-dev --workspace "$H/code" --own-owner gitgat --yes "$@"; }
+created() { grep 'repo create' "$STUB_DIR/gh.log" | sed 's/.*create example-org\///; s/ --private//' | sort | tr '\n' ' '; }
+routed() { python3 -I -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(" ".join(sorted(r["remote"].split("/")[-1] for r in d["routes"] if "remote" in r)))' "$H/.config/claude-memsync/routes.json"; }
+snapshot() { set +e; # the end state of a run, in a form two runs can be diffed on
+  {
+    echo "created: $(created)"
+    echo "keys: $(find "$H/.ssh" -name '*_ed25519' | sed 's#.*/##' | sort | tr '\n' ' ')"
+    echo "sshconfig:"; cat "$H/.ssh/config"
+    echo "syncdirs: $(find "$H/.claudesync.d" -mindepth 1 -maxdepth 1 | sed 's#.*/##' | sort | tr '\n' ' ')"
+    echo "state: $(find "$H/.local/state/claude-memsync-bootstrap" -type f | sed 's#.*/##' | sort | tr '\n' ' ')"
+    echo "routes:"; cat "$H/.config/claude-memsync/routes.json"
+    echo "memsync:"; grep -v '^init-saved' "$STUB_DIR/memsync.log" | sort
+  } 2>&1 | sed -E "s#$BASE#BASE#g"; set -e
+}
+blocks() { printf '%s\n' "$1" | { grep '^-- mem-' || true; } | tr '\n' ' '; }
+
+echo "--- selection: --project / --skip-project"
+pjhome sel alpha beta gamma delta
+pjrun --dry-run --project beta --project gamma
+check "dry run with --project: the plan shows what was selected and what was skipped by choice" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -qE 'selected projects: beta gamma' && printf '%s\n' \"\$1\" | grep -qE 'skipped by choice: alpha delta' && ! printf '%s\n' \"\$1\" | grep -q 'would check example-org/mem-project-alpha'" _ "$OUT"
+check "dry run with --project changes nothing" bash -c "[ ! -e '$H/.ssh' ] && [ ! -e '$H/.claudesync.d' ] && [ ! -s '$STUB_DIR/gh.log' ]"
+pjrun --project beta --project gamma
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+check "--project: exits 0 and only the named projects (and the workspace repo) get repos" bash -c "[ $RC -eq 0 ] && [ \"$(created)\" = 'mem-project-beta mem-project-code-workspace mem-project-gamma ' ]"
+check "--project: only the named projects get routes" bash -c "[ \"$(routed)\" = 'beta gamma' ]"
+check "--project: skipped projects get no key and no sync dir" bash -c "[ ! -e '$H/.ssh/mem-project-alpha_ed25519' ] && [ ! -e '$H/.claudesync.d/project-delta' ] && [ -e '$H/.claudesync.d/project-beta' ]"
+pjhome sel2 alpha beta gamma delta
+pjrun --skip-project alpha --skip-project delta
+check "--skip-project: every project but the skipped ones gets a repo and a route" bash -c "[ $RC -eq 0 ] && [ \"$(created)\" = 'mem-project-beta mem-project-code-workspace mem-project-gamma ' ] && [ \"$(routed)\" = 'beta gamma' ] && printf '%s\n' \"\$1\" | grep -qE 'skipped by choice: alpha delta'" _ "$OUT"
+pjhome sel3 alpha beta
+pjrun --dry-run
+check "neither flag: all projects are selected, nothing is said to be skipped by choice" bash -c "[ $RC -eq 0 ] && ! printf '%s\n' \"\$1\" | grep -q 'skipped by choice' && printf '%s\n' \"\$1\" | grep -q 'own projects found: alpha beta'" _ "$OUT"
+pjrun --project nosuch --project beta
+check "an unknown --project name is an error that lists the known names, and nothing is created" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -qE \"unknown project 'nosuch' .*alpha.*beta\" && ! grep -q 'repo create' '$STUB_DIR/gh.log'" _ "$OUT"
+pjrun --skip-project nosuch
+check "an unknown --skip-project name is an error too" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -qE \"unknown project 'nosuch' .*alpha\"" _ "$OUT"
+pjrun --project alpha --skip-project beta
+check "--project with --skip-project is a usage error (exit 2)" bash -c "[ $RC -eq 2 ] && printf '%s\n' \"\$1\" | grep -q 'mutually exclusive' && ! grep -q 'repo create' '$STUB_DIR/gh.log'" _ "$OUT"
+pjrun --project Alpha --dry-run
+check "project names match case-insensitively, as repo names are lowercased" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -q 'selected projects: alpha'" _ "$OUT"
+
+echo "--- --jobs: bounds"
+pjhome jb alpha
+for J in 0 9 x -1 ''; do
+  pjrun --dry-run --jobs "$J"
+  check "--jobs '$J' is a usage error (exit 2)" bash -c "[ $RC -eq 2 ] && printf '%s\n' \"\$1\" | grep -q -- '--jobs must be'" _ "$OUT"
+done
+pjrun --dry-run --jobs 8
+check "--jobs 8 (the maximum) is accepted" [ "$RC" -eq 0 ]
+
+echo "--- parallel: --jobs 4 ends in the same state as --jobs 1"
+pjhome par alpha beta gamma delta epsilon zeta
+pjrun --jobs 1
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+OUT1="$OUT"; RC1=$RC; snapshot >"$BASE/par1.snap"
+pjhome par alpha beta gamma delta epsilon zeta
+pjrun --jobs 4
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+OUT4="$OUT"; snapshot >"$BASE/par4.snap"
+check "--jobs 1 and --jobs 4 both exit 0" bash -c "[ $RC1 -eq 0 ] && [ $RC -eq 0 ]"
+check "--jobs 4: all six projects have a repo, a key, a sync dir and a route" bash -c "grep -q '^created: mem-project-alpha mem-project-beta mem-project-code-workspace mem-project-delta mem-project-epsilon mem-project-gamma mem-project-zeta ' '$BASE/par4.snap' && [ \"$(routed)\" = 'alpha beta delta epsilon gamma zeta' ]"
+check "--jobs 4: repos, keys, ssh config, sync dirs, state marks, routes and memsync calls are identical to --jobs 1" bash -c "grep -q '^created: mem-project' '$BASE/par4.snap' && diff '$BASE/par1.snap' '$BASE/par4.snap'"
+check "--jobs 4: every project's repo is private-checked and reachable, as with --jobs 1" bash -c "[ \$(printf '%s\n' \"\$1\" | grep -c 'is private') -eq \$(printf '%s\n' \"\$2\" | grep -c 'is private') ] && [ \$(printf '%s\n' \"\$1\" | grep -c 'reachable over its deploy key') -eq 8 ]" _ "$OUT4" "$OUT1"
+CRE4="$(grep -c 'repo create' "$STUB_DIR/gh.log" || true)"; DK4="$(grep -c 'deploy-key add' "$STUB_DIR/gh.log" || true)"
+pjrun --jobs 4
+check "a re-run at --jobs 4 is idempotent: exit 0, no new repo, no new deploy key" bash -c "[ $RC -eq 0 ] && [ \$(grep -c 'repo create' '$STUB_DIR/gh.log') -eq $CRE4 ] && [ \$(grep -c 'deploy-key add' '$STUB_DIR/gh.log') -eq $DK4 ]"
+
+echo "--- parallel: output order is the plan order, whatever finishes first"
+pjhome ord alpha beta gamma delta
+STUB_SLOW=mem-project-alpha pjrun --jobs 4
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+ORD4="$(blocks "$OUT")"; OUTO4="$OUT"
+pjhome ord alpha beta gamma delta
+STUB_SLOW=mem-project-alpha pjrun --jobs 1
+ORD1="$(blocks "$OUT")"
+check "the per-repo blocks come in plan order even when the first repo is the slowest" bash -c "[ \"$ORD4\" = '-- mem-personal -- mem-project-code-workspace -- mem-project-alpha -- mem-project-beta -- mem-project-delta -- mem-project-gamma ' ]"
+check "the block order at --jobs 4 equals the order at --jobs 1" bash -c "[ -n \"$ORD4\" ] && [ \"$ORD4\" = \"$ORD1\" ]"
+check "a block is contiguous: nothing of another repo between a header and its last line" bash -c "printf '%s\n' \"\$1\" | awk '/^== / {cur=\"\"; next} /^-- mem-/ {cur=\$2; next} cur != \"\" && /mem-(personal|project-[a-z-]+)/ { for (i=1;i<=NF;i++) if (\$i ~ /^mem-(personal|project-)/ && \$i != cur) bad=1 } END {exit bad}'" _ "$OUTO4"
+check "the output of --jobs 4 and --jobs 1 is the same text (apart from generated keys)" bash -c "diff <(printf '%s\n' \"\$1\" | sed -E 's/age1[a-z0-9]+/AGE/g') <(printf '%s\n' \"\$2\" | sed -E 's/age1[a-z0-9]+/AGE/g')" _ "$OUTO4" "$OUT"
+
+echo "--- parallel: one repo fails, the others finish, every failure is reported"
+pjhome fl alpha '!bad' beta '!worse' gamma
+pjrun --jobs 4
+check "a failing repo makes the run exit nonzero" [ "$RC" -ne 0 ]
+check "every failure is reported, by repo" bash -c "printf '%s\n' \"\$1\" | grep -q 'ls-remote over gh-mem-project-bad failed' && printf '%s\n' \"\$1\" | grep -q 'ls-remote over gh-mem-project-worse failed' && printf '%s\n' \"\$1\" | grep -qE '2 repo.*failed: .*mem-project-bad.*mem-project-worse'" _ "$OUT"
+check "the repos that did not fail finished their steps (repo, deploy key, init)" bash -c "for p in alpha beta gamma; do [ -d '$H/.claudesync.d/project-'\$p ] || exit 1; done"
+check "the failed repos were not marked initialised" bash -c "[ ! -e '$H/.local/state/claude-memsync-bootstrap/testmac.init.project-bad' ] && [ ! -e '$H/.claudesync.d/project-bad' ]"
+check "a failed run does not go on to the service step" bash -c "! printf '%s\n' \"\$1\" | grep -q '== i. Service'" _ "$OUT"
+mkbare mem-project-bad; mkbare mem-project-worse
+CRE="$(grep -c 'repo create' "$STUB_DIR/gh.log" || true)"
+pjrun --jobs 4
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -20
+check "after the cause is fixed the same command completes (exit 0)" [ "$RC" -eq 0 ]
+check "... and the re-run creates nothing twice: no second repo create, no second deploy key for the ones that were done" bash -c "[ \$(grep -c 'repo create' '$STUB_DIR/gh.log') -eq $CRE ] && [ \$(grep -c 'deploy-key add' '$STUB_DIR/gh.log') -eq \$(ls '$H/.ssh' | grep -c '_ed25519\$') ] && printf '%s\n' \"\$1\" | grep -q 'project-alpha already initialised'" _ "$OUT"
+
+echo "--- paste prompt: PROJECTS and SKIP_PROJECTS expand into repeated flags"
+check "personal-dev-app: PROJECTS and SKIP_PROJECTS default to empty and are marked optional" bash -c "printf '%s\n' \"\$1\" | grep -qx -- '- PROJECTS = \"\"' && printf '%s\n' \"\$1\" | grep -qx -- '- SKIP_PROJECTS = \"\"' && [ \$(printf '%s\n' \"\$1\" | grep -A1 -E '^- (SKIP_)?PROJECTS = ' | grep -c 'optional; leave empty for none') -eq 2 ]" _ "$(docprompt personal-dev-app)"
+pjdoc() { # name: a HOME for the personal-dev prompt with three own checkouts under a workspace
+  newhome "$1"; prompt_setup; mkdir -p "$H/code"
+  for w in alpha beta gamma; do mkgit "$H/code/$w" "git@github.com:example-user/$w.git"; done
+}
+pjdoc doc-pj1
+DOC_WS="$H/code" DOC_PROJECTS="alpha beta" rundoc 3
+check "PROJECTS=\"alpha beta\" becomes two --project flags: those two are selected, the third is skipped by choice" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -q 'selected projects: alpha beta' && printf '%s\n' \"\$1\" | grep -q 'skipped by choice: gamma'" _ "$OUT"
+pjdoc doc-pj2
+DOC_WS="$H/code" DOC_SKIP="alpha" rundoc 3
+check "SKIP_PROJECTS=\"alpha\" becomes --skip-project: the other two are selected" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -q 'selected projects: beta gamma' && printf '%s\n' \"\$1\" | grep -q 'skipped by choice: alpha'" _ "$OUT"
+pjdoc doc-pj3
+DOC_WS="$H/code" DOC_PROJECTS="alpha" DOC_SKIP="beta" rundoc 3
+check "both lists set: the prompt fails with the mutual-exclusion usage error" bash -c "[ $RC -eq 2 ] && printf '%s\n' \"\$1\" | grep -q 'mutually exclusive'" _ "$OUT"
+pjdoc doc-pj4
+DOC_WS="$H/code" DOC_LITERAL=1 rundoc 3
+check "the doc's own empty defaults (PROJECTS=\"\", SKIP_PROJECTS=\"\") run as written: nothing skipped by choice" bash -c "[ $RC -eq 0 ] && ! printf '%s\n' \"\$1\" | grep -q 'skipped by choice'" _ "$OUT"
+# <<< fast-setup
 
 newhome rtdiff
 mkdir -p "$H/.config/claude-memsync"; echo '{"repos":{},"routes":[],"default":"deny"}' >"$H/.config/claude-memsync/routes.json"
