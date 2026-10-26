@@ -1641,7 +1641,7 @@ in the sync repo is neither committed nor unstaged. These actions (and
 claude-memsync service is installed and running, the command stops it
 (`stopping the claude-memsync service for this change…`), waits up to 30 s for
 the lock, makes the change and starts the service again (`restarted`), also when
-the change fails, panics or is interrupted. A first Ctrl-C lets the change finish
+the change fails, panics or is interrupted. After the start it asks the service whether it runs: a daemon that exited at once (for example refused by the foreign-writer guard) gets a `warning: ... is not running` line pointing at `status`, not `restarted`. `recipients label ... --all` stops and starts the service once for the whole loop. A first Ctrl-C lets the change finish
 and then restarts the service; a second restarts it at once and exits. If the lock
 is held and the service is not running (another command, a foreground `run`, no
 service installed) nothing is stopped or started and the command refuses. A

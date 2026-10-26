@@ -213,6 +213,7 @@ func joinStatus(stdout, stderr io.Writer, cfg config.Config, repo *gitwt.Repo) i
 		if u, _ := agecrypt.Unreviewed(repo); u {
 			fmt.Fprintln(stdout, "accepted: your key is in .age-recipients. Do NOT run `recipients accept --yes` blindly: compare the set below with `claude-memsync join list` and `recipients list` on a member host first.")
 			printPendingRecipients(stdout, repo)
+			printAttrsNotice(stdout, repo)
 		} else if agecrypt.CheckKeyed(repo) == nil {
 			fmt.Fprintln(stdout, "accepted: this host can decrypt the repo")
 		} else {
