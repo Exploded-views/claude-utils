@@ -108,3 +108,30 @@ func TestRecipientsRetireClassic_RetiresOnceNoCloneUsesIt(t *testing.T) {
 		t.Error("the classic file is still in place")
 	}
 }
+
+// A crash after the push but before the record said "published": the commit
+// the record names is an ancestor of origin/main, which is as good as done.
+func TestRekeyPQ_NewCommitAncestorOfOriginIsDone(t *testing.T) {
+	c := newClassicRepo(t)
+	_, newRec := newPQKey(t, "newrec")
+	args := []string{"--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root", "--apply"}
+	if code, o, e := rekey(t, c, args...); code != 0 {
+		t.Fatalf("%s%s", o, e)
+	}
+	commitEmpty(t, c.repo, "auto: daemon sync after the rekey")
+	if err := c.repo.Push("main"); err != nil {
+		t.Fatal(err)
+	}
+	rec := filepath.Join(c.cfg.SyncDir, ".git", "memsync-pre-pq.json")
+	b, err := os.ReadFile(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rec, []byte(strings.Replace(string(b), `"stage": "published"`, `"stage": "migrated"`, 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errb := rekey(t, c, args...)
+	if code != 0 || !strings.Contains(out, "already done") {
+		t.Fatalf("exit %d, want \"already done\":\n%s%s", code, out, errb)
+	}
+}
