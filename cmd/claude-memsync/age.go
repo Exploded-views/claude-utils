@@ -241,6 +241,18 @@ func printRecipientsDiff(w io.Writer, repo *gitwt.Repo) {
 	for _, f := range removed {
 		fmt.Fprintln(w, "  - key", f, "(pinned, gone upstream)")
 	}
+	if ch, ok := agecrypt.AttrsChanged(repo); ok {
+		dir := repo.Dir
+		switch {
+		case ch.Uncommitted:
+			fmt.Fprintf(w, "  ! the repo's .gitattributes has uncommitted changes in the work tree; review them with `git -C %s diff -- .gitattributes` (and `git -C %s status`) before accepting\n", dir, dir)
+		case ch.Commit != "":
+			fmt.Fprintf(w, "  ! the repo's .gitattributes was changed by %s; review it with `git -C %s show %s -- .gitattributes` before accepting\n", ch.Commit, dir, ch.Commit)
+		default:
+			fmt.Fprintf(w, "  ! the repo's .gitattributes differs from the one seen when the recipients were pinned; review it with `git -C %s log -p -- .gitattributes` before accepting\n", dir)
+		}
+		fmt.Fprintln(w, "    This is a change to review, not a key. It is expected on a host's first join: the repo's own filter lines arrive with the first pull. Anywhere else, find out who changed it.")
+	}
 }
 
 // labelCmd is `recipients label self --host <label> [--repo <name> | --all]`:
