@@ -58,7 +58,6 @@ R_KEYS=() R_NAMES=() R_KINDS=()   # planned repos (parallel arrays)
 RULE_LINES=""                     # "pin|folder|key" and "remote|host/owner/repo|key"
 NOT_SYNCED=""                     # human-readable list
 KEYS_CREATED=() PENDING_JOINS=() NEXT_STEPS=() CHOICE_NOTE=""
-FQ=() FQP=()                      # repo jobs in flight: plan index and pid, oldest first
 
 BIN="$HOME/.local/bin"
 XDG_CFG="${XDG_CONFIG_HOME:-$HOME/.config}"   # where claude-memsync keeps its config: $XDG_CONFIG_HOME, else ~/.config, on every OS
@@ -234,21 +233,111 @@ check_key_pause() {
 }
 
 # ---------------------------------------------------------------------------
+# Job runner: a function for each index 0..n-1 as a background job, at most
+# JR_MAX at a time, in plain bash 3.2 (background jobs and `wait <pid>`; no
+# `wait -n`, no setsid). Each job runs in its own process group (set -m around
+# the `&`), so jr_kill_all can stop a job together with everything it started
+# (claude-memsync, git, gh, ssh). Output and exit status are collected per job
+# and handed to jr_emit <index> <rc> in index order, whatever finishes first.
+# Once a job has failed (it is noticed when the next job is about to start)
+# nothing new starts; running jobs finish. scripts/jobrunner_test.sh tests this
+# section on its own. The caller defines jr_emit and sets JR_JD (a private
+# directory for the per-job files <index>.out and <index>.err).
+# >>> jobrunner
+JR_MAX=4 JR_JD="" JR_FN="" JR_L=0 JR_NEXT=0 JR_FAILED=0 JR_NOT_STARTED=""
+JR_PID=() JR_RC=()
+
+jr_collect() { # index: the job has ended (or is waited for); keep its status
+  local rc=0
+  wait "${JR_PID[$1]}" || rc=$?
+  JR_RC[$1]=$rc
+  [ "$rc" -eq 0 ] || JR_FAILED=1
+}
+
+jr_poll() { # notice jobs that have ended, without waiting for any
+  local i
+  for ((i = JR_NEXT; i < JR_L; i++)); do
+    [ -z "${JR_RC[$i]-}" ] || continue
+    if ! kill -0 "${JR_PID[$i]}" 2>/dev/null; then jr_collect "$i"; fi
+  done
+}
+
+jr_running() { # prints how many started jobs have not ended
+  local i n=0
+  for ((i = JR_NEXT; i < JR_L; i++)); do [ -n "${JR_RC[$i]-}" ] || n=$((n + 1)); done
+  printf '%s' "$n"
+}
+
+jr_wait_oldest() { # wait for the oldest job that is still running
+  local i
+  for ((i = JR_NEXT; i < JR_L; i++)); do
+    if [ -z "${JR_RC[$i]-}" ]; then jr_collect "$i"; return 0; fi
+  done
+}
+
+jr_flush() { # hand every finished job at the front to jr_emit, in order
+  while [ "$JR_NEXT" -lt "$JR_L" ] && [ -n "${JR_RC[$JR_NEXT]-}" ]; do
+    jr_emit "$JR_NEXT" "${JR_RC[$JR_NEXT]}"
+    JR_NEXT=$((JR_NEXT + 1))
+  done
+}
+
+jr_start() { # index
+  set -m
+  ( "$JR_FN" "$1" ) >"$JR_JD/$1.out" 2>"$JR_JD/$1.err" &
+  JR_PID[$1]=$!
+  set +m
+  JR_L=$(($1 + 1))
+}
+
+# jr_run <function> <count> <warm-up 0|1>: with warm-up, job 1 starts only when
+# job 0 has ended.
+jr_run() {
+  local i
+  JR_FN="$1" JR_L=0 JR_NEXT=0 JR_FAILED=0 JR_NOT_STARTED="" JR_PID=() JR_RC=()
+  for ((i = 0; i < $2; i++)); do
+    jr_poll; jr_flush
+    if [ "$3" -eq 1 ] && [ "$i" -eq 1 ]; then
+      while [ "$(jr_running)" -gt 0 ]; do jr_wait_oldest; jr_poll; jr_flush; done
+    fi
+    while [ "$(jr_running)" -ge "$JR_MAX" ]; do jr_wait_oldest; jr_poll; jr_flush; done
+    if [ "$JR_FAILED" -eq 1 ]; then JR_NOT_STARTED="${JR_NOT_STARTED:+$JR_NOT_STARTED }$i"; continue; fi
+    jr_start "$i"
+  done
+  while [ "$JR_NEXT" -lt "$JR_L" ]; do jr_wait_oldest; jr_poll; jr_flush; done
+}
+
+jr_kill_all() { # stop every job still running, with its children; wait for them
+  local i n
+  for ((i = JR_NEXT; i < JR_L; i++)); do
+    [ -z "${JR_RC[$i]-}" ] || continue
+    kill -TERM -- "-${JR_PID[$i]}" 2>/dev/null || kill -TERM "${JR_PID[$i]}" 2>/dev/null || true
+  done
+  for ((i = JR_NEXT; i < JR_L; i++)); do
+    [ -z "${JR_RC[$i]-}" ] || continue
+    for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      kill -0 "${JR_PID[$i]}" 2>/dev/null || break
+      sleep 0.25
+    done
+    kill -KILL -- "-${JR_PID[$i]}" 2>/dev/null || kill -KILL "${JR_PID[$i]}" 2>/dev/null || true
+    wait "${JR_PID[$i]}" 2>/dev/null || true
+    JR_RC[$i]=143
+  done
+}
+# <<< jobrunner
+
+# ---------------------------------------------------------------------------
 # One exit trap for everything that must happen on every exit path (success,
 # error, signal): remove the temporary admin app entry, and, with
-# --delete-org-token-file, securely delete the org token file (a real run only:
+# --delete-org-token-file, delete the org token file (a real run only:
 # a dry run leaves it, so the same token serves the dry run and the real run).
 # ---------------------------------------------------------------------------
 DELETE_TOKEN_FILE=0 TOKEN_FILE_ARMED=0
-secure_delete() { # file: shred -u if there, else overwrite with zeros and remove
-  local f="$1" n
+secure_delete() { # file: remove it; where shred exists, overwrite it first as an extra (SSDs and APFS give no guarantee)
+  local f="$1"
   [ -e "$f" ] || [ -L "$f" ] || return 0
-  if command -v shred >/dev/null 2>&1; then
-    shred -u -- "$f" 2>/dev/null && return 0
-  fi
-  if [ -f "$f" ] && [ ! -L "$f" ]; then
-    n="$(wc -c <"$f" 2>/dev/null | tr -d ' ')"
-    if command -v dd >/dev/null 2>&1; then dd if=/dev/zero of="$f" bs=1 count="${n:-0}" conv=notrunc 2>/dev/null || true; fi
+  if [ -f "$f" ] && [ ! -L "$f" ] && command -v shred >/dev/null 2>&1; then
+    shred -u -- "$f" 2>/dev/null || true
   fi
   rm -f -- "$f"
 }
@@ -260,10 +349,20 @@ token_file_remove() {
     printf 'WARNING: could not delete the org token file %s; delete it by hand\n' "$ORG_TOKEN_FILE" >&2
   fi
 }
+# run_dir_remove: the run's private temp dir (job output, the minted org token), removed on every exit path.
+RUN_DIR=""
+run_dir_remove() {
+  local f
+  [ -n "$RUN_DIR" ] || return 0
+  for f in "$RUN_DIR"/*; do [ -e "$f" ] || continue; secure_delete "$f"; done
+  rmdir "$RUN_DIR" 2>/dev/null || true
+  RUN_DIR=""
+}
 on_exit() {
-  local rc=$? p
+  local rc=$?
   trap - EXIT
-  for p in ${FQP[@]+"${FQP[@]}"}; do kill "$p" 2>/dev/null || true; done   # repo jobs still running
+  jr_kill_all   # repo jobs still running, with what they started
+  run_dir_remove
   if declare -F admin_entry_remove >/dev/null; then admin_entry_remove; fi
   token_file_remove
   exit "$rc"
@@ -352,25 +451,94 @@ while [ $# -gt 0 ]; do
     *)            udie "unknown argument: $1" ;;
   esac
 done
-if [ ${#PROJECTS_SEL[@]} -gt 0 ] && [ ${#SKIP_PROJECTS[@]} -gt 0 ]; then
-  udie "--project and --skip-project are mutually exclusive: name the projects to keep, or the ones to leave out"
-fi
-case "$JOBS" in
-  [1-8]) ;;
-  *) udie "--jobs must be an integer from 1 to 8 (got '$JOBS')" ;;
-esac
+# ---------------------------------------------------------------------------
+# Flag validation. Every missing, malformed or conflicting flag is a usage error
+# (exit 2), found before anything is read, paused on, or changed: validate_flags
+# right after parsing (bash only, so it works before the prerequisite check),
+# validate_flags2 once the tools it needs (python3, git) are known to be there.
+# Runtime failures (file modes, existing keys, non-private repos) are exit 1.
+# ---------------------------------------------------------------------------
+validate_flags() {
+  local o re n_tok=0 v
+  [ -n "$HOST" ] || udie "--host is required"
+  [ -n "$ORG" ] || udie "--org <org> is required: the GitHub organisation that holds the memory repos (there is no default)"
+  [ -n "$AGE_RECOVERY" ] || udie "--recovery-recipient <age1pq1...> is required: your own offline post-quantum recovery PUBLIC key (generate one as docs/bootstrap.md describes; there is no default)"
+  valid_pq_recipient "$AGE_RECOVERY" || udie "--recovery-recipient must be a post-quantum age1pq1... public key (a classic age1... or ssh key is refused: repos are post-quantum by default)"
+  [ -n "$ROLE" ] || udie "--role is required"
+  case "$ROLE" in
+    homelab | personal-dev) ;;
+    *) udie "unknown role '$ROLE' (known: homelab, personal-dev). There is no role for client or orchestrator repos." ;;
+  esac
+  re='^[a-z0-9][a-z0-9-]{0,31}$'
+  [[ $HOST =~ $re ]] || udie "bad --host label '$HOST' (it is the host's label in recipients, deploy keys and join requests: 1-32 characters of a-z, 0-9 and '-', starting with a letter or digit)"
+  re='^[A-Za-z0-9][A-Za-z0-9-]*$'
+  [[ $ORG =~ $re ]] || udie "bad --org '$ORG'"
+  for o in ${KEEP_OUT_OWNERS[@]+"${KEEP_OUT_OWNERS[@]}"}; do
+    [ "$o" != "$(lower "$ORG")" ] || udie "--org '$ORG' is also a keep-out owner; refusing"
+  done
+  if [ ${#PROJECTS_SEL[@]} -gt 0 ] && [ ${#SKIP_PROJECTS[@]} -gt 0 ]; then
+    udie "--project and --skip-project are mutually exclusive: name the projects to keep, or the ones to leave out"
+  fi
+  if [ "$ROLE" != personal-dev ] && [ $((${#PROJECTS_SEL[@]} + ${#SKIP_PROJECTS[@]})) -gt 0 ]; then
+    udie "--project / --skip-project choose among discovered checkouts, which only --role personal-dev has"
+  fi
+  case "$JOBS" in
+    [1-8]) ;;
+    *) udie "--jobs must be an integer from 1 to 8 (got '$JOBS')" ;;
+  esac
+  for v in "$ORG_TOKEN_FILE" "$ORG_TOKEN_CMD" "$ORG_APP"; do [ -z "$v" ] || n_tok=$((n_tok + 1)); done
+  [ "$n_tok" -le 1 ] || udie "give only one of --org-token-file, --org-token-cmd or --org-app"
+  [ "$n_tok" -eq 1 ] || udie "--org-token-file <path>, --org-token-cmd \"<argv>\" or --org-app <name> is required: every org operation uses that token, never the ambient gh login"
+  if [ "$DELETE_TOKEN_FILE" -eq 1 ]; then
+    [ -n "$ORG_TOKEN_FILE" ] || udie "--delete-org-token-file is only valid with --org-token-file <path>"
+    case "$ORG_TOKEN_FILE" in /*) ;; *) udie "--org-token-file must be an absolute path with --delete-org-token-file" ;; esac
+  fi
+  re='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
+  if [ -n "$ORG_APP" ]; then
+    [[ $ORG_APP =~ $re ]] || udie "bad --org-app '$ORG_APP'"
+  fi
+  if [ -n "$ORG_APP_ID" ] || [ -n "$ORG_APP_KEY_CMD" ]; then
+    [ -n "$ORG_APP" ] || udie "--org-app-id / --org-app-key-cmd go with --org-app <name>"
+    { [ -n "$ORG_APP_ID" ] && [ -n "$ORG_APP_KEY_CMD" ]; } || udie "give both --org-app-id and --org-app-key-cmd"
+    re='^[0-9]{1,20}$'
+    [[ $ORG_APP_ID =~ $re ]] || udie "bad --org-app-id (numeric)"
+  fi
+  if [ -n "$CHECK_APP$CHECK_APP_ID$CHECK_KEY_FILE" ]; then
+    { [ -n "$CHECK_APP" ] && [ -n "$CHECK_APP_ID" ] && [ -n "$CHECK_KEY_FILE" ]; } || udie "give --check-app, --check-app-id and --check-key-file together"
+    re='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
+    [[ $CHECK_APP =~ $re ]] || udie "bad --check-app '$CHECK_APP'"
+    re='^[0-9]{1,20}$'
+    [[ $CHECK_APP_ID =~ $re ]] || udie "bad --check-app-id (numeric)"
+    [ "$CHECK_APP" != "$ORG_APP" ] || udie "--check-app must differ from --org-app: the admin app never serves the daemon"
+    case "$CHECK_KEY_FILE" in /*) ;; *) udie "--check-key-file must be an absolute path" ;; esac
+  fi
+  if [ -n "$PREBUILT_DIR" ]; then
+    [ -d "$PREBUILT_DIR" ] || udie "--prebuilt-dir $PREBUILT_DIR is not a directory"
+    if [ "$SHA_GIVEN" -eq 1 ]; then
+      re='^[0-9a-f]{40}$'
+      [[ $SHA =~ $re ]] || udie "--sha must be a full 40-hex commit"
+    fi
+  fi
+}
+validate_flags2() { # needs python3 and git
+  if [ -n "$ORG_APP_KEY_CMD" ]; then split_args json "$ORG_APP_KEY_CMD" >/dev/null || udie "unbalanced quote in --org-app-key-cmd"; fi
+  if [ -n "$ORG_TOKEN_CMD" ]; then
+    split_args json "$ORG_TOKEN_CMD" >/dev/null || udie "unbalanced quote in --org-token-cmd"
+    [ "$(split_args json "$ORG_TOKEN_CMD")" != "[]" ] || udie "--org-token-cmd is empty"
+  fi
+  if [ -z "$PREBUILT_DIR" ]; then
+    if [ -z "$SHA" ]; then
+      SHA="$(git -C "$(dirname "$0")" rev-parse HEAD 2>/dev/null || true)"
+      [ -n "$SHA" ] || udie "--sha is required when the script is not run from a git checkout"
+    fi
+    printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || udie "--sha must be a full 40-hex commit"
+  fi
+}
+validate_flags
 [ -z "$PREBUILT_DIR" ] || BUILD_FROM_SOURCE=0   # installing given binaries: no clone, no build, no Go
 check_prereqs
-[ -n "$HOST" ] || udie "--host is required"
-[ -n "$ORG" ] || udie "--org <org> is required: the GitHub organisation that holds the memory repos (there is no default)"
-[ -n "$AGE_RECOVERY" ] || udie "--recovery-recipient <age1pq1...> is required: your own offline post-quantum recovery PUBLIC key (generate one as docs/bootstrap.md describes; there is no default)"
-valid_pq_recipient "$AGE_RECOVERY" || udie "--recovery-recipient must be a post-quantum age1pq1... public key (a classic age1... or ssh key is refused: repos are post-quantum by default)"
-n_tok=0
-for v in "$ORG_TOKEN_FILE" "$ORG_TOKEN_CMD" "$ORG_APP"; do [ -z "$v" ] || n_tok=$((n_tok + 1)); done
-[ "$n_tok" -le 1 ] || udie "give only one of --org-token-file, --org-token-cmd or --org-app"
-[ "$n_tok" -eq 1 ] || udie "--org-token-file <path>, --org-token-cmd \"<argv>\" or --org-app <name> is required: every org operation uses that token, never the ambient gh login"
+validate_flags2
 if [ "$DELETE_TOKEN_FILE" -eq 1 ]; then
-  [ -n "$ORG_TOKEN_FILE" ] || udie "--delete-org-token-file is only valid with --org-token-file <path>"
   check_token_file
   if [ "$DRY_RUN" -eq 1 ]; then
     say "dry run: the org token file would be deleted on a real run"   # a dry run changes nothing
@@ -379,42 +547,21 @@ if [ "$DELETE_TOKEN_FILE" -eq 1 ]; then
   fi
 fi
 if [ -n "$ORG_APP" ]; then
-  printf '%s' "$ORG_APP" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' || udie "bad --org-app '$ORG_APP'"
   case "$HOME" in *[[:space:]\'\"\\]*) die "--org-app needs a HOME without spaces or quotes (the token command is passed as one string)" ;; esac
   ORG_TOKEN_CMD="$HOME/.local/bin/claude-memsync app-token --app $ORG_APP"
 fi
-if [ -n "$ORG_APP_ID" ] || [ -n "$ORG_APP_KEY_CMD" ]; then
-  [ -n "$ORG_APP" ] || udie "--org-app-id / --org-app-key-cmd go with --org-app <name>"
-  { [ -n "$ORG_APP_ID" ] && [ -n "$ORG_APP_KEY_CMD" ]; } || udie "give both --org-app-id and --org-app-key-cmd"
-  printf '%s' "$ORG_APP_ID" | grep -Eq '^[0-9]{1,20}$' || udie "bad --org-app-id (numeric)"
-  split_args json "$ORG_APP_KEY_CMD" >/dev/null || udie "unbalanced quote in --org-app-key-cmd"
-fi
-if [ -n "$CHECK_APP$CHECK_APP_ID$CHECK_KEY_FILE" ]; then
-  { [ -n "$CHECK_APP" ] && [ -n "$CHECK_APP_ID" ] && [ -n "$CHECK_KEY_FILE" ]; } || udie "give --check-app, --check-app-id and --check-key-file together"
-  printf '%s' "$CHECK_APP" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' || udie "bad --check-app '$CHECK_APP'"
-  printf '%s' "$CHECK_APP_ID" | grep -Eq '^[0-9]{1,20}$' || udie "bad --check-app-id (numeric)"
-  [ "$CHECK_APP" != "$ORG_APP" ] || udie "--check-app must differ from --org-app: the admin app never serves the daemon"
-  check_key_pause
-fi
+if [ -n "$CHECK_APP$CHECK_APP_ID$CHECK_KEY_FILE" ]; then check_key_pause; fi
 ORG_TOKEN_ARGV=()
 if [ -n "$ORG_TOKEN_CMD" ]; then
-  split_args json "$ORG_TOKEN_CMD" >/dev/null || udie "unbalanced quote in --org-token-cmd"
   while IFS= read -r -d '' a; do ORG_TOKEN_ARGV+=("$a"); done < <(split_args nul "$ORG_TOKEN_CMD")
-  [ ${#ORG_TOKEN_ARGV[@]} -gt 0 ] || udie "--org-token-cmd is empty"
 fi
 # Arguments that hand the same token to claude-memsync (a file path or a command, never the token).
-# An app is handed over as its app-token command, which claude-memsync runs per request.
+# An app is handed over as its app-token command, which claude-memsync runs per request. Once the
+# run has minted the token (mint_run_token) these become a --token-file in the run's private dir.
 if [ -n "$ORG_TOKEN_FILE" ]; then ORG_TOKEN_ARGS=(--token-file "$ORG_TOKEN_FILE"); else ORG_TOKEN_ARGS=(--token-cmd "$ORG_TOKEN_CMD"); fi
-[ -n "$ROLE" ] || udie "--role is required"
-printf '%s' "$HOST" | grep -Eq '^[a-z0-9][a-z0-9-]{0,31}$' || udie "bad --host label '$HOST' (it is the host's label in recipients, deploy keys and join requests: 1-32 characters of a-z, 0-9 and '-', starting with a letter or digit)"
-printf '%s' "$ORG" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9-]*$' || udie "bad --org '$ORG'"
-for o in ${KEEP_OUT_OWNERS[@]+"${KEEP_OUT_OWNERS[@]}"}; do
-  [ "$o" != "$(lower "$ORG")" ] || udie "--org '$ORG' is also a keep-out owner; refusing"
-done
 if [ -n "$PREBUILT_DIR" ]; then
   check_prebuilt
   if [ "$SHA_GIVEN" -eq 1 ]; then
-    printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || udie "--sha must be a full 40-hex commit"
     SHORT="$(printf '%s' "$SHA" | cut -c1-12)"
     LIB_ID="$SHA"
     SRC="$HOME/.local/src/claude-utils-$SHA"
@@ -425,11 +572,6 @@ if [ -n "$PREBUILT_DIR" ]; then
     SHORT="$PB_VER"; LIB_ID="$PB_VER"; SRC=""
   fi
 else
-  if [ -z "$SHA" ]; then
-    SHA="$(git -C "$(dirname "$0")" rev-parse HEAD 2>/dev/null || true)"
-    [ -n "$SHA" ] || udie "--sha is required when the script is not run from a git checkout"
-  fi
-  printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || udie "--sha must be a full 40-hex commit"
   SHORT="$(printf '%s' "$SHA" | cut -c1-12)"
   LIB_ID="$SHA"
   SRC="$HOME/.local/src/claude-utils-$SHA"
@@ -446,14 +588,12 @@ case "$ROLE" in
   personal-dev) ROLE_REPOS="$ROLE_personal_dev_REPOS"; HOME_KEY="$ROLE_personal_dev_HOME" ;;
   *)            udie "unknown role '$ROLE' (known: homelab, personal-dev). There is no role for client or orchestrator repos." ;;
 esac
-if [ "$ROLE" != personal-dev ] && [ $((${#PROJECTS_SEL[@]} + ${#SKIP_PROJECTS[@]})) -gt 0 ]; then
-  udie "--project / --skip-project choose among discovered checkouts, which only --role personal-dev has"
-fi
 for spec in $ROLE_REPOS; do
   IFS=: read -r k kind name <<<"$spec"
   add_repo "$k" "$kind" "$name"
 done
 
+[ "$DRY_RUN" -eq 1 ] || { RUN_DIR="$(mktemp -d)"; chmod 700 "$RUN_DIR"; }   # a dry run creates nothing
 say "claude-memsync bootstrap: host=$HOST role=$ROLE org=$ORG commit=$SHORT$([ "$DRY_RUN" -eq 1 ] && echo ' (dry run)')"
 
 # ---------------------------------------------------------------------------
@@ -467,10 +607,16 @@ org_token() {
     [ -r "$ORG_TOKEN_FILE" ] || return 1
     tr -d '\r\n' <"$ORG_TOKEN_FILE"
   else
+    # minted once per run: the first call keeps the token in the run's private dir
+    if [ -n "$RUN_DIR" ] && [ -s "$RUN_DIR/org-token" ]; then tr -d '\r\n' <"$RUN_DIR/org-token"; return 0; fi
     if [ -n "$ORG_APP" ] && [ ! -x "$BIN/claude-memsync" ]; then return 1; fi
     [ ${#ORG_TOKEN_ARGV[@]} -gt 0 ] || return 1
-    "${ORG_TOKEN_ARGV[@]}" | tr -d '\r\n'
-    [ "${PIPESTATUS[0]}" -eq 0 ]
+    local out rc=0
+    out="$("${ORG_TOKEN_ARGV[@]}")" || rc=$?
+    [ "$rc" -eq 0 ] || return 1
+    out="$(printf '%s' "$out" | tr -d '\r\n')"
+    if [ -n "$RUN_DIR" ] && [ -n "$out" ]; then ( umask 077; printf '%s\n' "$out" >"$RUN_DIR/org-token" ); fi
+    printf '%s' "$out"
   fi
 }
 
@@ -695,7 +841,13 @@ check_sync_dirs() { # run after the plan is final
   for i in "${!R_KEYS[@]}"; do
     k="${R_KEYS[$i]}"
     if [ -e "$SYNC_ROOT/$k" ] && ! done_p "init.$k"; then
-      die "$SYNC_ROOT/$k already exists and was not made by this bootstrap; refusing to touch it"
+      if [ -e "$STATE/$HOST.initing.$k" ]; then   # this script began it and was interrupted
+        if [ "$DRY_RUN" -eq 1 ]; then warn "$SYNC_ROOT/$k is half-made by an interrupted run of this bootstrap; a real run would remove it and start again"
+        else warn "$SYNC_ROOT/$k is half-made by an interrupted run of this bootstrap; removing it and starting again"; fi
+        [ "$DRY_RUN" -eq 1 ] || rm -rf -- "${SYNC_ROOT:?}/${k:?}"
+      else
+        die "$SYNC_ROOT/$k already exists and was not made by this bootstrap; refusing to touch it"
+      fi
     fi
   done
 }
@@ -724,7 +876,7 @@ discover_projects() {
     case "$w" in "~"*) w="$HOME${w#\~}" ;; esac
     [ -d "$w" ] || udie "workspace '$w' is not a directory"
     w="$(cd "$w" && pwd -P)"
-    [ -e "$w/.git" ] && die "workspace '$w' is itself a git checkout; give its parent folder"
+    [ -e "$w/.git" ] && udie "workspace '$w' is itself a git checkout; give its parent folder"
     ws="$ws$w
 "
     RULE_LINES="${RULE_LINES}pin|$(esc_folder "$w")|project-code-workspace
@@ -910,7 +1062,7 @@ sys.exit(0 if d.get("private") is True and d.get("visibility") == "private" else
     || die "repo $ORG/$1 is NOT private; refusing to continue"
 }
 
-# (the per-repo steps c, d and f run together, in repo_job below)
+# (the per-repo steps c, d and f run as jobs: see repo_check and repo_keys_init below)
 
 # ---------------------------------------------------------------------------
 # d. Deploy keys
@@ -936,12 +1088,17 @@ add_known_host() { # label hostpattern scan-args...
 # Serial, before any job starts: ~/.ssh, known_hosts and ~/.ssh/config are
 # shared files, so only this one process writes them.
 step_ssh() {
-  step "d. Host keys and ssh aliases"
-  local i name key
+  step "d. Host keys"
   run mkdir -p "$HOME/.ssh"
   run chmod 700 "$HOME/.ssh"
   add_known_host "github.com:22" "github.com" github.com
   add_known_host "ssh.github.com:443" "[ssh.github.com]:443" -p 443 ssh.github.com
+}
+
+# The ssh aliases, written once every repo is known private (a refused repo gets none).
+step_ssh_aliases() {
+  step "d2. ssh aliases"
+  local i name key
   for i in "${!R_NAMES[@]}"; do
     name="${R_NAMES[$i]}"; key="$HOME/.ssh/${name}_ed25519"
     if ! grep -qE "^Host gh-$name\$" "$HOME/.ssh/config" 2>/dev/null; then
@@ -1083,9 +1240,18 @@ step_routes() {
 # The per-repo work is two phases, each over all repos: first check or create
 # every repo and require it private (a public repo stops the run before any
 # key exists), then each repo's deploy key, test and init. A job touches only
-# its own repo and no shared file; it runs in a subshell with its output in
-# files, and what the parent needs (a key made, a join to accept) goes to
-# $JD/<index>.key and .join.
+# its own repo and no shared file. In a real run it is a background job (see the
+# job runner) whose output goes to files in the run's private dir, and what the
+# parent needs (a key made, a join to accept) goes to <index>.key and .join
+# there; a dry run runs the same functions one after another in this shell.
+JOB_IDX=0 FAILED_REPOS=""
+job_note() { # key|join text: tell the parent
+  if [ -n "$RUN_DIR" ]; then
+    printf '%s\n' "$2" >>"$RUN_DIR/$JOB_IDX.$1"
+  elif [ "$1" = key ]; then KEYS_CREATED+=("$2")
+  else PENDING_JOINS+=("$2"); fi
+}
+
 repo_check() { # index
   local i="$1" name out
   name="${R_NAMES[$i]}"
@@ -1107,6 +1273,7 @@ repo_check() { # index
 
 repo_keys_init() { # index
   local i="$1" k name kind url content=0 out fp key pub
+  JOB_IDX="$i"
   k="${R_KEYS[$i]}"; name="${R_NAMES[$i]}"; kind="${R_KINDS[$i]}"
   url="git@gh-$name:$ORG/$name.git"
   key="$HOME/.ssh/${name}_ed25519"; pub="$key.pub"
@@ -1118,7 +1285,7 @@ repo_keys_init() { # index
     run ssh-keygen -q -t ed25519 -N '' -C "$HOST-$name" -f "$key"
     [ "$DRY_RUN" -eq 1 ] || chmod 600 "$key"
     mark "keygen.$name"
-    printf '%s\n' "${name}_ed25519" >>"$JD/$i.key"
+    job_note key "${name}_ed25519"
   fi
   if done_p "deploykey.$name"; then
     say "  deploy key for $name already added"
@@ -1141,13 +1308,16 @@ repo_keys_init() { # index
   else
     say "  would verify with: git ls-remote git@gh-$name:$ORG/$name.git"
   fi
-  # f. init
+  # f. init. The initing mark says a sync dir of this name was begun by this
+  # script, so an interrupted init's half-made dir can be cleared on the re-run.
   if ! done_p "init.$k"; then
     [ "$DRY_RUN" -eq 1 ] || { git ls-remote "$url" 2>/dev/null | grep -q . && content=1; }
+    mark "initing.$k"
     run "$BIN/claude-memsync" init --remote "$url" --sync-dir "$SYNC_ROOT/$k" --encrypt \
       --host-label "$HOST" --recovery-recipient "$AGE_RECOVERY" --archive-deletes --private-only \
       "${ORG_TOKEN_ARGS[@]}" --denylist "$CFG/denylist-$kind.txt"
     mark "init.$k"
+    [ "$DRY_RUN" -eq 1 ] || rm -f -- "$STATE/$HOST.initing.$k"
     [ "$content" -eq 1 ] && mark "needjoin.$k"
   else
     say "  $k already initialised"
@@ -1163,56 +1333,61 @@ repo_keys_init() { # index
     fp="$(printf '%s\n' "$out" | grep -E '^fingerprint: ([0-9a-f]{4} ){7}[0-9a-f]{4}$' | head -n1 | sed 's/^fingerprint: //' || true)"
     [ -n "$fp" ] || die "join request printed no 'fingerprint: <8 groups of 4 hex>' line; refusing to continue"
     mark "join.$k"
-    printf '%s\n' "on a member host: claude-memsync join accept $HOST --repo $k --fingerprint \"$fp\"   (check here: claude-memsync join status --repo $k)" >>"$JD/$i.join"
+    job_note join "on a member host: claude-memsync join accept $HOST --repo $k --fingerprint \"$fp\"   (check here: claude-memsync join status --repo $k)"
   fi
 }
 
-# repo_reap: wait for the oldest job in flight, print its block (header, then
-# its stdout, then its stderr), and take over what it reported.
-JD="" FAILED_REPOS=""
-repo_reap() {
-  local i="${FQ[0]}" pid="${FQP[0]}" rc=0 l f
-  if [ ${#FQ[@]} -gt 1 ]; then FQ=("${FQ[@]:1}"); FQP=("${FQP[@]:1}"); else FQ=(); FQP=(); fi
-  wait "$pid" || rc=$?
+# jr_emit <index> <rc>: print a finished job's block (header, then its stdout,
+# then its stderr) and take over what it reported.
+jr_emit() {
+  local i="$1" rc="$2" l f
   printf -- '-- %s\n' "${R_NAMES[$i]}"
-  cat "${JD:?}/$i.out"
-  cat "${JD:?}/$i.err" >&2
+  cat "$RUN_DIR/$i.out"
+  cat "$RUN_DIR/$i.err" >&2
   if [ "$rc" -ne 0 ]; then FAILED_REPOS="${FAILED_REPOS:+$FAILED_REPOS }${R_NAMES[$i]}"; fi
-  if [ -s "${JD:?}/$i.key" ]; then while IFS= read -r l; do KEYS_CREATED+=("$l"); done <"${JD:?}/$i.key"; fi
-  if [ -s "${JD:?}/$i.join" ]; then while IFS= read -r l; do PENDING_JOINS+=("$l"); done <"${JD:?}/$i.join"; fi
-  for f in out err key join; do rm -f "${JD:?}/${i:?}.$f"; done
+  if [ -s "$RUN_DIR/$i.key" ]; then while IFS= read -r l; do KEYS_CREATED+=("$l"); done <"$RUN_DIR/$i.key"; fi
+  if [ -s "$RUN_DIR/$i.join" ]; then while IFS= read -r l; do PENDING_JOINS+=("$l"); done <"$RUN_DIR/$i.join"; fi
+  for f in out err key join; do rm -f "$RUN_DIR/$i.$f"; done
 }
 
-# run_phase <title> <function> <warm-up 0|1>: the function for every repo with
-# at most $JOBS at a time (bash 3.2: background jobs and wait <pid>, no wait
-# -n). Jobs start in plan order and are reaped in plan order, so the output is
-# always the plan's order. With warm-up the first repo runs alone: the first
-# init of a host generates the shared age identity, and two inits must not race
-# to make it. After a failure nothing new starts; the jobs in flight finish,
-# every failure is reported, and the run exits 1.
+# run_phase <title> <function> <warm-up 0|1>: the function for every repo, up
+# to $JOBS at a time, blocks in plan order. With warm-up the first repo runs
+# alone: the first init of a host generates the shared age identity, and two
+# inits must not race to make it. After a failure nothing new starts; the jobs
+# running finish, every failure is reported, and the run exits 1.
 run_phase() {
   step "$1"
-  local i n=${#R_NAMES[@]} not_started=""
+  local i n=${#R_NAMES[@]} ns=""
   FAILED_REPOS=""
-  JD="$(mktemp -d)"
-  for ((i = 0; i < n; i++)); do
-    while [ ${#FQ[@]} -ge "$JOBS" ] || { [ "$3" -eq 1 ] && [ "$i" -eq 1 ] && [ ${#FQ[@]} -gt 0 ]; }; do repo_reap; done
-    if [ -n "$FAILED_REPOS" ]; then not_started="${not_started:+$not_started }${R_NAMES[$i]}"; continue; fi
-    ( "$2" "$i" ) >"$JD/$i.out" 2>"$JD/$i.err" &
-    FQ+=("$i"); FQP+=("$!")
-  done
-  while [ ${#FQ[@]} -gt 0 ]; do repo_reap; done
-  rmdir "$JD" 2>/dev/null || true
+  if [ "$DRY_RUN" -eq 1 ]; then   # nothing is created: one after another, in this shell
+    for ((i = 0; i < n; i++)); do printf -- '-- %s\n' "${R_NAMES[$i]}"; "$2" "$i"; done
+    return 0
+  fi
+  JR_MAX="$JOBS" JR_JD="$RUN_DIR"
+  jr_run "$2" "$n" "$3"
   if [ -n "$FAILED_REPOS" ]; then
-    [ -z "$not_started" ] || printf 'not attempted after the failure: %s\n' "$not_started" >&2
+    for i in $JR_NOT_STARTED; do ns="${ns:+$ns }${R_NAMES[$i]}"; done
+    [ -z "$ns" ] || printf 'not attempted after the failure: %s\n' "$ns" >&2
     # shellcheck disable=SC2086
     set -- $FAILED_REPOS
     die "$# repo(s) failed: $FAILED_REPOS"
   fi
 }
 
+# mint_run_token: the org token is minted once, in this process, before any job
+# starts (org_token keeps it in the run's private dir); init and doctor are then
+# handed that file, so a key command or app-token never runs once per job.
+mint_run_token() {
+  [ -n "$RUN_DIR" ] && [ -z "$ORG_TOKEN_FILE" ] || return 0
+  org_token >/dev/null || die "cannot read the org token; stopping"
+  [ -s "$RUN_DIR/org-token" ] || die "the org token is empty; stopping"
+  ORG_TOKEN_ARGS=(--token-file "$RUN_DIR/org-token")
+}
+
 step_repos_keys_init() {
+  mint_run_token
   run_phase "c. Repos in $ORG (must be private; up to $JOBS at once, output in plan order)" repo_check 0
+  step_ssh_aliases   # serial, and only now that every repo is known private
   run_phase "f. Per repo: deploy key and init (up to $JOBS at once, output in plan order)" repo_keys_init 1
 }
 

@@ -1247,7 +1247,7 @@ sigcase() { # name jobs signal expected-rc
     for t in $(cat "$STUB_DIR/slow.pids" 2>/dev/null); do kill -0 "$t" 2>/dev/null && alive=$((alive + 1)); done
     [ "$alive" -eq 0 ] && break; sleep 0.5
   done
-  SIG_ALIVE=$alive; SIG_RC=$rc; SIG_PIDS="$(wc -l <"$STUB_DIR/slow.pids" 2>/dev/null || echo 0)"
+  SIG_PIDS="$(wc -l <"$STUB_DIR/slow.pids" 2>/dev/null || echo 0)"
   check "$sg at --jobs $jb: exits $erc with ${SIG_PIDS//[[:space:]]/} stub processes started (at least $want)" bash -c "[ $rc -eq $erc ] && [ ${SIG_PIDS//[[:space:]]/} -ge $want ]"
   check "$sg at --jobs $jb: no job process (stub, sleep) is left running" [ "$alive" -eq 0 ]
   check "$sg at --jobs $jb: the org token file is deleted and the run's temp dir is gone" bash -c "[ ! -e '$TF' ] && [ -z \"\$(ls -A '$BASE/$nm.tmp')\" ]"
@@ -1277,8 +1277,9 @@ echo "--- parallel: one repo fails, the others finish, every failure is reported
 pjhome fl alpha '!bad' beta '!worse' gamma
 pjrun --jobs 4
 check "a failing repo makes the run exit nonzero" [ "$RC" -ne 0 ]
-check "every failure is reported, by repo" bash -c "printf '%s\n' \"\$1\" | grep -q 'ls-remote over gh-mem-project-bad failed' && printf '%s\n' \"\$1\" | grep -q 'ls-remote over gh-mem-project-worse failed' && printf '%s\n' \"\$1\" | grep -qE '2 repo.*failed: .*mem-project-bad.*mem-project-worse'" _ "$OUT"
-check "the repos that did not fail finished their steps (repo, deploy key, init)" bash -c "for p in alpha beta gamma; do [ -d '$H/.claudesync.d/project-'\$p ] || exit 1; done"
+check "the failure is reported, by repo, in the summary" bash -c "printf '%s\n' \"\$1\" | grep -q 'ls-remote over gh-mem-project-bad failed' && printf '%s\n' \"\$1\" | grep -qE 'repo\(s\) failed: .*mem-project-bad'" _ "$OUT"
+check "every repo is accounted for: finished, reported failed, or listed as not attempted" bash -c "for p in alpha beta gamma worse; do [ -d '$H/.claudesync.d/project-'\$p ] || printf '%s\n' \"\$1\" | grep -qE \"(failed:.*|not attempted after the failure:.*)mem-project-\$p\" || exit 1; done" _ "$OUT"
+check "a repo started before the failure finished its steps (repo, deploy key, init)" bash -c "[ -d '$H/.claudesync.d/project-alpha' ]"
 check "the failed repos were not marked initialised" bash -c "[ ! -e '$H/.local/state/claude-memsync-bootstrap/testmac.init.project-bad' ] && [ ! -e '$H/.claudesync.d/project-bad' ]"
 check "a failed run does not go on to the service step" bash -c "! printf '%s\n' \"\$1\" | grep -q '== i. Service'" _ "$OUT"
 mkbare mem-project-bad; mkbare mem-project-worse

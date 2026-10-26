@@ -17,6 +17,7 @@ bad()   { FAIL=$((FAIL + 1)); printf 'FAIL    %s\n' "$1"; }
 check() { if "${@:2}"; then ok "$1"; else bad "$1"; fi; }
 
 W="$(mktemp -d)"
+export W   # the driver script reads it
 cleanup() {
   local f
   for f in "$W"/* "$W"/jd/*; do [ -f "$f" ] && rm -f "$f"; done
@@ -58,7 +59,7 @@ EOF
 
 drive() { # jobs n kind: runs to completion, output in $W/out
   : >"$W/pids"; : >"$W/started"
-  set +e; W="$W" bash "$W/driver.sh" "$1" "$2" "$3" >"$W/out" 2>&1; DRC=$?; set -e
+  set +e; bash "$W/driver.sh" "$1" "$2" "$3" >"$W/out" 2>&1; DRC=$?; set -e
 }
 
 drive 2 4 order
@@ -70,22 +71,24 @@ check "after a failure nothing new starts, the running job finishes, and the exi
 # Interrupts: start the driver in its own process group (job control, as a
 # terminal does), wait until jobs are running, signal, then check nothing is left.
 interrupt() { # jobs sig expected-rc
-  local jb="$1" sg="$2" erc="$3" pid rc n alive t want
+  local jb="$1" sg="$2" erc="$3" pid rc n alive t want t0 took
   : >"$W/pids"; : >"$W/started"; want="$jb"; [ "$want" -le 3 ] || want=3
   set -m
-  (W="$W" exec bash "$W/driver.sh" "$jb" 5 hang </dev/null >"$W/out" 2>&1) &
+  (exec bash "$W/driver.sh" "$jb" 5 hang </dev/null >"$W/out" 2>&1) &
   pid=$!
   set +m
   for _ in $(seq 1 100); do n="$(wc -l <"$W/started" | tr -d ' ')"; [ "${n:-0}" -ge "$want" ] && break; sleep 0.1; done
+  t0=$SECONDS
   kill -"$sg" "$pid" 2>/dev/null || true
   set +e; wait "$pid"; rc=$?; set -e
+  took=$((SECONDS - t0))
   alive=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     alive=0
     for t in $(cat "$W/pids"); do kill -0 "$t" 2>/dev/null && alive=$((alive + 1)); done
     [ "$alive" -eq 0 ] && break; sleep 0.25
   done
-  check "$sg with $jb job(s) running: exit $erc, and every job and its child (sleep) is gone" bash -c "[ $rc -eq $erc ] && [ $alive -eq 0 ] && [ \"\$(wc -l <'$W/pids' | tr -d ' ')\" -ge $((want * 2)) ]"
+  check "$sg with $jb job(s) running: exit $erc within 3 s (TERM, not the KILL fallback), and every job and its child (sleep) is gone" bash -c "[ $rc -eq $erc ] && [ $took -le 3 ] && [ $alive -eq 0 ] && [ \"\$(wc -l <'$W/pids' | tr -d ' ')\" -ge $((want * 2)) ]"
 }
 interrupt 1 INT 130
 interrupt 3 TERM 143

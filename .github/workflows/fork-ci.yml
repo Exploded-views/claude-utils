@@ -214,6 +214,33 @@ jobs:
           BOOT_BASH: ${{ matrix.bash }}
         run: bash scripts/package-release_test.sh "$RUNNER_TEMP/package-test"
 
+  job-runner:
+    name: bootstrap job runner (${{ matrix.os }})
+    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            bash: bash
+          - os: macos-latest
+            # macOS's own bash (3.2), as a user runs bootstrap.sh; nothing newer is installed.
+            bash: /bin/bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The runner behind bootstrap.sh --jobs, on its own with slow stub jobs:
+      # order, no new job after a failure, INT/TERM stop the jobs and their children.
+      - name: job runner test
+        env:
+          BOOT_BASH: ${{ matrix.bash }}
+        run: '"$BOOT_BASH" scripts/jobrunner_test.sh'
+
   workflow-lint:
     name: workflow lint (hosted runners, SHA pins)
     if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
