@@ -209,7 +209,14 @@ func rollbackOne(stdout, stderr io.Writer, cfg config.Config, quietNone, discard
 		fmt.Fprintf(stderr, "recipients: %s: not a git repo\n", cfg.SyncDir)
 		return 1
 	}
-	if _, err := agecrypt.ReadRekeyState(repo); errors.Is(err, os.ErrNotExist) && quietNone {
+	if st, err := agecrypt.ReadRekeyState(repo); err == nil {
+		// A published repo cannot be rolled back: with --all that is reported
+		// and the run goes on.
+		if quietNone && agecrypt.SchemeOf(repo) == agecrypt.SchemePQ && (st.Finished() || st.Stage == "") {
+			fmt.Fprintf(stdout, "%s: published; nothing to roll back\n", cfg.SyncDir)
+			return 0
+		}
+	} else if errors.Is(err, os.ErrNotExist) && quietNone {
 		fmt.Fprintf(stdout, "%s: nothing to roll back\n", cfg.SyncDir)
 		return 0
 	}
@@ -375,6 +382,17 @@ func rekeyOne(stdout, stderr io.Writer, cfg config.Config, hostCfgs []config.Con
 }
 
 func rekeyPlanOne(stdout, stderr io.Writer, cfg config.Config, repo *gitwt.Repo, o agecrypt.RekeyOpts) int {
+	if st, err := agecrypt.ReadRekeyState(repo); err == nil {
+		switch {
+		case st.Finished() && agecrypt.SchemeOf(repo) == agecrypt.SchemePQ:
+			fmt.Fprintf(stdout, "%s: already done: migrated to post-quantum; nothing to plan\n", cfg.SyncDir)
+		case st.Stage == "":
+			fmt.Fprintf(stdout, "%s: an earlier rekey-pq --apply left a restore record (written by an older build, so its stage is unknown)\n  rerun it with --apply and the same --host, --recovery-recipient and --fresh-root to finish or verify it, or undo an unpublished one with `recipients rekey-pq --repo <name> --rollback`\n", cfg.SyncDir)
+		default:
+			fmt.Fprintf(stdout, "%s: an earlier rekey-pq --apply was interrupted (it got as far as %q)\n  rerun it with --apply and the same --host, --recovery-recipient and --fresh-root to finish it, or undo it with `recipients rekey-pq --repo <name> --rollback`\n", cfg.SyncDir, st.Stage)
+		}
+		return 0
+	}
 	p, err := agecrypt.PlanRekeyPQ(repo, o, false)
 	if err != nil {
 		fmt.Fprintf(stderr, "recipients: %s: %v\n", cfg.SyncDir, err)
