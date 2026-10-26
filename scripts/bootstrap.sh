@@ -228,9 +228,8 @@ LIB="$HOME/.local/lib/claude-memsync/$SHA"
 if [ ${#DENY_OWNERS[@]} -eq 0 ] && [ ${#DENY_TERMS[@]} -eq 0 ]; then
   warn "no client owners or terms configured: client repos are only protected by routing"
 fi
-[ ${#ALLOW_ORGS[@]} -gt 0 ] || ALLOW_ORGS=(exploded-views)
 ALLOW_ORGS+=("$(lower "$ORG")")
-OWN_OWNERS+=(gitgat "$(lower "$ORG")")
+OWN_OWNERS+=("$(lower "$ORG")")
 
 case "$ROLE" in
   homelab)      ROLE_REPOS="$ROLE_homelab_REPOS"; HOME_KEY="$ROLE_homelab_HOME" ;;
