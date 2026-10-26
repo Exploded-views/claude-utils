@@ -1193,6 +1193,22 @@ check "rekey: two classic repos initialised with the real binary" [ "$RKOK" -eq 
 printf '{"repos":{"alpha":{"config":"%s","kind":"personal"},"beta":{"config":"%s","kind":"project"}},"routes":[],"default":"deny","personal":"alpha"}\n' \
   "$H/.claudesync.d/alpha/config.json" "$H/.claudesync.d/beta/config.json" >"$RKROUTES"
 chmod 600 "$RKROUTES"
+recipients_labelled() { # file-text host-label recovery-key: the labels are trailing comments on the key lines
+  printf '%s\n' "$1" | awk -v host="$2" -v key="$3" '
+    $1 ~ /^age1pq1/ && $0 ~ (" # host:" host "$") { h = 1 }
+    $1 == key && $0 ~ / # recovery$/ { r = 1 }
+    END { exit !(h && r) }'
+}
+RL_GOOD="$(printf '# Public age recipients of this memory repo. Public keys only.\n%s # host:rk\n%s # recovery\n' "age1pq1hostkey" "$PQREC")"
+RL_STRIPPED="$(printf '# Public age recipients of this memory repo. Public keys only.\n%s\n%s\n' "age1pq1hostkey" "$PQREC")"
+RL_WRONGKEY="$(printf '%s # host:rk\n%s # recovery\n' "age1pq1hostkey" "age1pq1someotherkey")"
+RL_OLDSTYLE="$(printf '# host:rk\n# recovery\n%s\n' "$PQREC")"
+check "label check: a file with the trailing labels passes" recipients_labelled "$RL_GOOD" rk "$PQREC"
+not_labelled() { ! recipients_labelled "$@"; }
+check "label check: the same file with the labels stripped fails" not_labelled "$RL_STRIPPED" rk "$PQREC"
+check "label check: a recovery label on some other key fails" not_labelled "$RL_WRONGKEY" rk "$PQREC"
+check "label check: comment-line labels (not on the key lines) fail" not_labelled "$RL_OLDSTYLE" rk "$PQREC"
+check "label check: the wrong host label fails" not_labelled "$RL_GOOD" other "$PQREC"
 rkhash() { # repo: hash of every note in the repo's work-tree
   (cd "$H/.claudesync.d/$1/projects" && find . -type f | LC_ALL=C sort | while read -r f; do printf '%s ' "$f"; cksum <"$f"; done)
 }
@@ -1227,8 +1243,7 @@ for n in alpha beta; do
   # The same comparison against what origin holds: its blobs decrypted
   # (age-textconv), not the local index or work-tree.
   check "rekey $n: origin's blobs, decrypted, equal the original plaintext" [ "$(rkhash_origin "$n")" = "$WANT" ]
-  check "rekey $n: origin's .age-recipients carry the '# host:' and '# recovery' labels" bash -c "
-    r=\$(git -C '$OR' show main:.age-recipients) && printf '%s\n' \"\$r\" | grep -q '^# host:rk' && printf '%s\n' \"\$r\" | grep -q '^# recovery' && printf '%s\n' \"\$r\" | grep -q '$PQREC'"
+  check "rekey $n: origin's .age-recipients carry the host and recovery labels (trailing comments on the key lines)" recipients_labelled "$(git -C "$OR" show main:.age-recipients)" rk "$PQREC"
   check "rekey $n: the work-tree is clean" bash -c "[ -z \"\$(git -C '$SY' status --porcelain)\" ]"
 done
 # Restart the daemon (a foreground run, stopped by timeout, as in the upgrade
