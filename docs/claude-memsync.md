@@ -1113,7 +1113,9 @@ What it does, in order:
    in every argument of `--store-cmd` and `--verify-cmd` for each file; they
    never contain key material. Two different keys that would expand to the
    same store arguments are refused, and so is a `--verify-cmd` that expands
-   identically for every file (each verify would read the same item back).
+   the same for any two different keys (each verify would read the same item
+   back). Files whose parsed keys are equal are one item even if their comment
+   lines differ.
 4. Checks every file: a regular file, not a symlink (also checked on the opened
    file), no permission bits beyond 0600, owned by the current user, one hard
    link, and an age classic (`AGE-SECRET-KEY-1…`) or hybrid
@@ -1131,9 +1133,10 @@ What it does, in order:
    buffers holding the key are zeroed after use, best effort.
 7. Prints `<path>`, the public-key fingerprint (the grouped form `join`
    shows), the result and the reason. After the last store, with a
-   `--verify-cmd` and more than one item, every item is read back once more;
+   `--verify-cmd`, once more than one store was attempted, the final pass
+   re-reads the items that verified (even if a later store or verify failed);
    one that no longer matches is reported `OVERWRITTEN by a later store:
-   <path>`. Then a summary:
+   <path>` (on stderr; the result line says `OVERWRITTEN by a later store`). Then a summary:
    `N stored (M verified, K UNVERIFIED, V verify-failed), F store-failed`
    (`V`: a read-back error, a `MISMATCH` or an overwrite; `F`: a failed store
    command or a refused file).

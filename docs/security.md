@@ -218,12 +218,17 @@ your password manager's CLI. What it protects, and what it does not:
   each in turn, and each would still verify right after its own store. The
   command refuses to run unless `--store-cmd` carries `{fingerprint}` or
   `{name}`, refuses two different keys that expand to the same item, and
-  refuses a `--verify-cmd` that is identical for every file. After the last
-  store it reads every item back once more and reports any that a later store
-  replaced (`OVERWRITTEN by a later store`, exit 1). It cannot know how your
-  manager names things: an item that is shared in a way the arguments do not
-  show is only caught by that final read-back, and only if `--verify-cmd` is
-  given.
+  refuses a `--verify-cmd` that is the same for any two different keys.
+  After the last store it reads back every item that verified and reports any
+  that a later store replaced (`OVERWRITTEN by a later store`, exit 1), even
+  when that later store or its verify failed. It cannot know how your manager
+  names things: an item that is shared in a way the arguments do not show is
+  only caught by that final read-back, and only if `--verify-cmd` is given.
+- **`--verify-cmd` must read the copy back from the password manager.** A
+  command that reads the local file, or prints a constant, proves nothing and
+  will say "verified". Conversely, a stale item with identical contents (an
+  earlier backup of the same key) can satisfy the verify; that is not a loss,
+  but it does not prove this run's store worked.
 - **Verification compares digests.** The read-back is checked by SHA-256 and
   only the verdict is shown. Without `--verify-cmd` the backup is
   UNVERIFIED: the command says so up front and in its summary line, but still

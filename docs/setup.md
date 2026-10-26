@@ -333,10 +333,13 @@ file's base name) in the title in `--store-cmd`, and in `--verify-cmd` wherever
 it names the item, so each verify reads back its own item. The command refuses
 to run (exit 2, nothing stored) without a placeholder in `--store-cmd`, if two
 different keys would get the same item, or if `--verify-cmd` would be the same
-for every file. As a last check, after the final store it reads every item
-back again and reports `OVERWRITTEN by a later store: <path>` (exit 1) for one
-that no longer matches, whatever the arguments looked like. The same key at
-two paths is stored once and both paths are listed.
+for any two different keys. As a last check, after the final store it reads
+every item that verified back again and reports
+`OVERWRITTEN by a later store: <path>` (exit 1) for one that no longer
+matches, whatever the arguments looked like. The same key at two paths (even
+with different comment lines) is stored once and both paths are listed. If
+you would rather not use placeholders, back the files up one at a time with
+`--identity <path>`, with a different item title for each.
 
 For 1Password (`op`), with placeholders for your own vault:
 
