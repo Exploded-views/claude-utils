@@ -651,7 +651,7 @@ func TestIdentityBackup_FinalVerifyCatchesAnOverwrite(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit %d, want 1\n%s%s", code, out, errs)
 	}
-	if n := strings.Count(out, "OVERWRITTEN by a later store:"); n != 1 {
+	if n := strings.Count(errs, "OVERWRITTEN by a later store:"); n != 1 {
 		t.Errorf("OVERWRITTEN reported %d times, want 1 (the earlier item):\n%s%s", n, out, errs)
 	}
 	if strings.Contains(out, "2 stored (2 verified") {
@@ -772,7 +772,7 @@ func laterStoreStores(t *testing.T, mode string) (store, verify, rec string) {
 	}
 	second := `cp "$rec/in" "$rec/only"; exit 1`
 	if mode == "junk" {
-		second = `echo junk > "$rec/only"`
+		second = `echo junk > "$rec/only"; exit 0`
 	}
 	s, v := filepath.Join(d, "later-store.sh"), filepath.Join(d, "later-verify.sh")
 	os.WriteFile(s, []byte(`#!/bin/sh

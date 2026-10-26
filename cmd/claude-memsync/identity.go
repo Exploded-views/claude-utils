@@ -52,8 +52,9 @@ func runIdentity(args []string) int {
 // idFileInfo is one identity file that passed every check.
 type idFileInfo struct {
 	Path        string
-	Fingerprint string // as `join` shows it
-	data        []byte // the file's bytes; zeroed after use
+	Fingerprint string            // as `join` shows it
+	KeyID       [sha256.Size]byte // digest of the parsed keys, not of the file's comments
+	data        []byte            // the file's bytes; zeroed after use
 }
 
 // readIdentityFile checks the identity file at path and reads it. It refuses
@@ -98,28 +99,37 @@ func readIdentityFile(path string) (*idFileInfo, error) {
 		wipe(data)
 		return nil, errors.New("the identity file is too large to be an age identity")
 	}
-	rcpt, err := identityRecipientOf(data)
+	rcpt, keyID, err := identityRecipientOf(data)
 	if err != nil {
 		wipe(data)
 		return nil, err
 	}
-	return &idFileInfo{Path: path, Fingerprint: agecrypt.GroupFingerprint(agecrypt.JoinFingerprint(rcpt)), data: data}, nil
+	return &idFileInfo{Path: path, Fingerprint: agecrypt.GroupFingerprint(agecrypt.JoinFingerprint(rcpt)), KeyID: keyID, data: data}, nil
 }
 
 // identityRecipientOf parses data as an age identity file and returns the
-// public recipient of its first key.
-func identityRecipientOf(data []byte) (string, error) {
+// public recipient of its first key, with a digest of every key in it (so two
+// files that differ only in comments have the same digest).
+func identityRecipientOf(data []byte) (rcpt string, keyID [sha256.Size]byte, err error) {
 	ids, err := age.ParseIdentities(bytes.NewReader(data))
 	if err != nil || len(ids) == 0 {
-		return "", errors.New("the file does not parse as an age identity")
+		return "", keyID, errors.New("the file does not parse as an age identity")
 	}
+	h := sha256.New()
+	for _, id := range ids {
+		if st, ok := id.(fmt.Stringer); ok {
+			io.WriteString(h, st.String())
+		}
+		h.Write([]byte{0})
+	}
+	copy(keyID[:], h.Sum(nil))
 	switch x := ids[0].(type) {
 	case *age.X25519Identity:
-		return x.Recipient().String(), nil
+		return x.Recipient().String(), keyID, nil
 	case *age.HybridIdentity:
-		return x.Recipient().String(), nil
+		return x.Recipient().String(), keyID, nil
 	}
-	return "", errors.New("the file is not an age X25519 or hybrid identity")
+	return "", keyID, errors.New("the file is not an age X25519 or hybrid identity")
 }
 
 // errReason is an OS error without the path, which the caller already prints.
@@ -420,7 +430,7 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 		if err != nil {
 			continue
 		}
-		f.sum = sha256.Sum256(info.data)
+		f.sum = info.KeyID
 		for _, u := range uniq {
 			if u.sum == f.sum {
 				f.dupOf = u.path
@@ -436,7 +446,7 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 		for _, u := range uniq {
 			fmt.Fprintf(stderr, "    %s\n", u.path)
 		}
-		fmt.Fprintln(stderr, "  Add {fingerprint} (or {name}) to the item's title in --store-cmd and --verify-cmd, or back the files up one at a time with --identity <path>.")
+		fmt.Fprintln(stderr, "  Add {fingerprint} (or {name}) to the item's title in --store-cmd and --verify-cmd, or back the files up one at a time with --identity <path>, with a different item title for each.")
 		return 2
 	}
 	storeKeys, verifyKeys := map[string]string{}, map[string]string{}
@@ -463,7 +473,9 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 	} else if len(verifyArgv) == 0 {
 		fmt.Fprintln(stderr, "warning: no --verify-cmd, so the backup is UNVERIFIED: nothing reads it back to check it was stored intact; add --verify-cmd, or restore it once to be sure")
 	}
-	var stored []*loaded // items to read back again at the end
+	var stored []*loaded // items that verified, to read back again at the end
+	attempted := 0
+	wasStored := map[string]bool{} // path -> the store command succeeded
 	for _, f := range files {
 		p, info := f.path, f.info
 		why := "\t(" + f.why + ")"
@@ -474,7 +486,14 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 			continue
 		}
 		if f.dupOf != "" {
-			fmt.Fprintf(stdout, "%s\tfingerprint %s\tsame key as %s (stored once)%s\n", p, info.Fingerprint, f.dupOf, why)
+			note := "stored once"
+			switch {
+			case *dry:
+				note = "would be stored once"
+			case !wasStored[f.dupOf]:
+				note = "not stored: the store for " + f.dupOf + " failed"
+			}
+			fmt.Fprintf(stdout, "%s\tfingerprint %s\tsame key as %s (%s)%s\n", p, info.Fingerprint, f.dupOf, note, why)
 			continue
 		}
 		sArgv := substitute(storeArgv, info.Fingerprint, p)
@@ -490,7 +509,9 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 			fmt.Fprintf(stdout, "%s\tfingerprint %s\twould be stored with %s%s%s\n", p, info.Fingerprint, sArgv[0], v, why)
 			continue
 		}
+		attempted++
 		res, stage, err := storeAndVerify(stderr, info, sArgv, vArgv)
+		wasStored[p] = err == nil || stage == stageVerify
 		fmt.Fprintf(stdout, "%s\tfingerprint %s\t%s%s\n", p, info.Fingerprint, res, why)
 		if err != nil {
 			fmt.Fprintf(stderr, "identity backup: %s: %v\n", p, err)
@@ -510,7 +531,7 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 	}
 	// A later store may have replaced an earlier item whatever the argument
 	// layout: read every item back once more, after the last store.
-	if !*dry && len(stored) > 1 {
+	if !*dry && attempted > 1 && len(stored) > 0 {
 		for _, f := range stored {
 			vArgv := substitute(verifyArgv, f.info.Fingerprint, f.path)
 			got, err := secretcmd.Run(context.Background(), vArgv, secretcmd.KeyCmdTimeout())
@@ -520,11 +541,11 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 			if err == nil && subtle.ConstantTimeCompare(want[:], have[:]) == 1 {
 				continue
 			}
-			msg := "OVERWRITTEN by a later store: " + f.path
+			res, msg := "OVERWRITTEN by a later store", "OVERWRITTEN by a later store: "+f.path
 			if err != nil {
-				msg = "NOT READABLE at the end (" + err.Error() + "): " + f.path
+				res, msg = "NOT READABLE at the end", "NOT READABLE at the end ("+err.Error()+"): "+f.path
 			}
-			fmt.Fprintf(stdout, "%s\tfingerprint %s\t%s\n", f.path, f.info.Fingerprint, msg)
+			fmt.Fprintf(stdout, "%s\tfingerprint %s\t%s\n", f.path, f.info.Fingerprint, res)
 			fmt.Fprintf(stderr, "identity backup: %s\n", msg)
 			verified--
 			verifyFailed++
