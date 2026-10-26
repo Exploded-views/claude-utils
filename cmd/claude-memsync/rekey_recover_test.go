@@ -738,6 +738,9 @@ func crashedBeforeBackupRef(t *testing.T) (classicRepo, string) {
 	if _, err := c.repo.Run("config", "--unset", agecrypt.SchemeConfigKey); err != nil {
 		t.Fatal(err)
 	}
+	if err := agecrypt.PinCurrent(c.repo); err != nil { // the classic pin, as before the apply
+		t.Fatal(err)
+	}
 	setRecordStage(t, c.cfg.SyncDir, "started")
 	return c, newRec
 }

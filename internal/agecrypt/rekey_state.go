@@ -231,6 +231,9 @@ func DetectRekey(repo *gitwt.Repo, o RekeyOpts) (RekeyStage, PreRekeyState, erro
 	tip, hasBackup := revOf(repo, BackupRef)
 	scheme, _ := rawScheme(repo)
 	if !hasBackup {
+		if clearOrphanRecord(repo) {
+			return StageFresh, PreRekeyState{}, nil
+		}
 		if scheme == SchemePQ {
 			return StageDone, st, nil
 		}
@@ -523,6 +526,10 @@ func RollbackRekey(repo *gitwt.Repo, opts RollbackOpts, restoreConfig func(Prior
 		return st, err
 	}
 	tip, ok := revOf(repo, BackupRef)
+	if !ok && recordIsOrphan(repo, st) {
+		removeRekeyState(repo)
+		return st, nil
+	}
 	if !ok || tip != st.Tip {
 		return st, fmt.Errorf("nothing to roll back: %s is missing or does not match the restore record", BackupRef)
 	}
@@ -576,6 +583,27 @@ func RollbackRekey(repo *gitwt.Repo, opts RollbackOpts, restoreConfig func(Prior
 	}
 	removeRekeyState(repo)
 	return st, nil
+}
+
+// recordIsOrphan says the record belongs to an apply that died before it
+// created the backup ref: stage started (or none written yet) and HEAD still
+// on the recorded tip, so nothing was changed.
+func recordIsOrphan(repo *gitwt.Repo, st PreRekeyState) bool {
+	if st.Stage != RekeyRecStarted {
+		return false
+	}
+	head, _ := revOf(repo, "HEAD")
+	return head != "" && head == st.Tip
+}
+
+// clearOrphanRecord removes such a record; it reports whether it did.
+func clearOrphanRecord(repo *gitwt.Repo) bool {
+	st, err := ReadRekeyState(repo)
+	if err != nil || !recordIsOrphan(repo, st) {
+		return false
+	}
+	removeRekeyState(repo)
+	return true
 }
 
 // checkDropAllowed refuses to drop the backup (the rollback point) while the

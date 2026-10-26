@@ -263,6 +263,7 @@ func ApplyRekeyPQ(repo *gitwt.Repo, o RekeyOpts) (RekeyPlan, error) {
 		}
 	}
 	if _, err := repo.Run("update-ref", BackupRef, p.Tip); err != nil {
+		removeRekeyState(repo)
 		return p, err
 	}
 	if err := os.WriteFile(recPath, data, 0o600); err != nil {
