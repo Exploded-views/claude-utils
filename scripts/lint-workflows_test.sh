@@ -119,6 +119,34 @@ jobs:
     steps: [{run: echo}]
 YML
 check "a non-matrix expression is rejected" rejects expr 'runs-on'
+mk mxinc <<'YML'
+on: push
+jobs:
+  a:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux/amd64
+          - os: macos-latest
+            target: darwin/arm64
+    steps: [{run: echo}]
+YML
+check "a matrix include: list of hosted labels is accepted" accepts mxinc
+mk mxincbad <<'YML'
+on: push
+jobs:
+  a:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: self-hosted
+    steps: [{run: echo}]
+YML
+check "a matrix include: list with self-hosted is rejected" rejects mxincbad 'matrix.*self-hosted'
 mk prt <<'YML'
 on:
   pull_request_target:
