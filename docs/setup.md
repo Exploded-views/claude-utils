@@ -273,14 +273,17 @@ channel you trust (read it off both screens yourself, not from a message an
 agent relays). Only if they match:
 
 ```sh
-claude-memsync stop
 claude-memsync join accept <host-label> --repo <repo> --fingerprint "0123 4567 89ab cdef 0123 4567 89ab cdef"
-claude-memsync start
 ```
 
-`accept` adds the key with its host label, re-encrypts the current tree to the
-new set, removes the request file and pushes. It refuses while the daemon holds
-the sync dir (hence `stop`), refuses a mismatched fingerprint, and refuses
+`--repo` takes the routes key or the GitHub repo name (`mem-project-x`, or
+`owner/name`). If the daemon is running as a service, `accept` stops it, waits
+for the lock, makes the change and starts it again, on every exit path; it never
+starts a service that was not running. When it is done it prints
+`accepted by host:<label>, key fingerprint <fp>`; the new host's `join status`
+must show that key. `accept` adds the key with its host label, re-encrypts the current tree to the
+new set, removes the request file and pushes. It refuses if something other than the service holds
+the sync dir, refuses a mismatched fingerprint, and refuses
 while some recipient other than a configured recovery key has no host label.
 `join reject <host-label> --repo <repo>` discards a request.
 
@@ -290,17 +293,19 @@ The new host's next pull brings the new recipient list, which it has not
 reviewed yet, so it still holds off. Look before you accept:
 
 ```sh
-claude-memsync join status --repo <repo>       # every recipient, new ones marked
+claude-memsync join status --repo <repo>       # every recipient with its label, new ones marked
 ```
+
+Each line carries the key's label (`host:<label>`, `recovery` or `unlabelled`)
+and `this host` on your own key. A `.gitattributes` change is listed as a
+change to review, not as a key; it is expected on a first join.
 
 Compare those lines with `join list` and `recipients --repo <repo> list` on
 the member. Anyone who can push to the repo could have added a key besides
 yours. Accept only if every key is one you expect:
 
 ```sh
-claude-memsync stop
 claude-memsync recipients --repo <repo> accept --yes
-claude-memsync start
 ```
 
 The host then starts to commit and sync.

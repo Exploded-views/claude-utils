@@ -138,7 +138,7 @@ func recipientsCmd(stdout, stderr io.Writer, args []string) int {
 		if cfg.ReadOnly {
 			accept = agecrypt.PinCurrent // pin, but never re-encrypt and commit
 		}
-		if err := withSyncLock(cfg.SyncDir, func() error { return accept(repo) }); err != nil {
+		if err := withSyncLockStopping(stderr, cfg.SyncDir, func() error { return accept(repo) }); err != nil {
 			return recipientsFail(stderr, err)
 		}
 		fmt.Fprintln(stderr, "recipients accepted; syncing resumes on the next cycle")
@@ -147,7 +147,7 @@ func recipientsCmd(stdout, stderr io.Writer, args []string) int {
 			fmt.Fprintf(stderr, "usage: claude-memsync recipients %s <public-key>\n", args[0])
 			return 2
 		}
-		err = withSyncLock(cfg.SyncDir, func() error {
+		err = withSyncLockStopping(stderr, cfg.SyncDir, func() error {
 			if args[0] == "add" {
 				return agecrypt.AddRecipientLabelled(repo, args[1], hostLabel)
 			}
@@ -241,6 +241,18 @@ func printRecipientsDiff(w io.Writer, repo *gitwt.Repo) {
 	for _, f := range removed {
 		fmt.Fprintln(w, "  - key", f, "(pinned, gone upstream)")
 	}
+	if ch, ok := agecrypt.AttrsChanged(repo); ok {
+		dir := repo.Dir
+		switch {
+		case ch.Uncommitted:
+			fmt.Fprintf(w, "  ! the repo's .gitattributes has uncommitted changes in the work tree; review them with `git -C %s diff -- .gitattributes` (and `git -C %s status`) before accepting\n", dir, dir)
+		case ch.Commit != "":
+			fmt.Fprintf(w, "  ! the repo's .gitattributes was changed by %s; review it with `git -C %s show %s -- .gitattributes` before accepting\n", ch.Commit, dir, ch.Commit)
+		default:
+			fmt.Fprintf(w, "  ! the repo's .gitattributes differs from the one seen when the recipients were pinned; review it with `git -C %s log -p -- .gitattributes` before accepting\n", dir)
+		}
+		fmt.Fprintln(w, "    This is a change to review, not a key. It is expected on a host's first join: the repo's own filter lines arrive with the first pull. Anywhere else, find out who changed it.")
+	}
 }
 
 // labelCmd is `recipients label self --host <label> [--repo <name> | --all]`:
@@ -331,7 +343,7 @@ func labelSelfOne(stdout, stderr io.Writer, cfg config.Config, label string) int
 		return 1
 	}
 	committed := false
-	err := withSyncLock(cfg.SyncDir, func() error {
+	err := withSyncLockStopping(stderr, cfg.SyncDir, func() error {
 		if err := agecrypt.SyncFromOrigin(repo); err != nil {
 			fmt.Fprintln(stderr, "recipients: could not bring in the latest remote state; working from this clone:", err)
 		}
@@ -377,7 +389,7 @@ func labelRecoveryOne(stdout, stderr io.Writer, cfg config.Config, key string) i
 		return 1
 	}
 	committed := false
-	err := withSyncLock(cfg.SyncDir, func() error {
+	err := withSyncLockStopping(stderr, cfg.SyncDir, func() error {
 		if err := agecrypt.SyncFromOrigin(repo); err != nil {
 			fmt.Fprintln(stderr, "recipients: could not bring in the latest remote state; working from this clone:", err)
 		}

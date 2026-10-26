@@ -185,13 +185,44 @@ func RecipientsDiff(repo *gitwt.Repo) (added, removed []string, err error) {
 			removed = append(removed, printWithLabel(c))
 		}
 	}
-	if d, err := gitCommonDir(repo); err == nil {
-		want, _ := os.ReadFile(filepath.Join(d, pinAttrsFile))
-		if have, _ := attrsDigest(repo); strings.TrimSpace(string(want)) != have {
-			added = append(added, "(a .gitattributes changed)")
-		}
-	}
 	return added, removed, nil
+}
+
+// AttrsChange describes a .gitattributes in the work-tree that differs from the
+// one seen when the recipients were pinned.
+type AttrsChange struct {
+	// Commit is the short hash of the last commit that touched a .gitattributes
+	// ("" when there is none).
+	Commit string
+	// Uncommitted is set when a .gitattributes has changes (or is new) in the
+	// work-tree that no commit holds.
+	Uncommitted bool
+}
+
+var attrsPathspecs = []string{"--", ".gitattributes", ":(glob)**/.gitattributes"}
+
+// AttrsChanged reports whether any .gitattributes differs from the pinned
+// digest, and where the change came from. It is part of the review: a changed
+// .gitattributes can route files through a different filter. It is not a key,
+// so RecipientsDiff does not list it.
+func AttrsChanged(repo *gitwt.Repo) (AttrsChange, bool) {
+	d, err := gitCommonDir(repo)
+	if err != nil {
+		return AttrsChange{}, false
+	}
+	want, _ := os.ReadFile(filepath.Join(d, pinAttrsFile))
+	have, _ := attrsDigest(repo)
+	if strings.TrimSpace(string(want)) == have {
+		return AttrsChange{}, false
+	}
+	var ch AttrsChange
+	if out, err := repo.Run(append([]string{"status", "--porcelain"}, attrsPathspecs...)...); err == nil && strings.TrimSpace(out) != "" {
+		ch.Uncommitted = true
+	}
+	if out, err := repo.Run(append([]string{"log", "-1", "--format=%h"}, attrsPathspecs...)...); err == nil {
+		ch.Commit = strings.TrimSpace(out)
+	}
+	return ch, true
 }
 
 // printWithLabel is the short fingerprint of a reviewed entry's key, with its

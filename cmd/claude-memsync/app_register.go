@@ -162,7 +162,8 @@ func appRegister(stdout, stderr io.Writer, args []string) int {
 			fmt.Fprintln(stdout, "Private key written to", *keyOut)
 		}
 	} else {
-		if err := secretcmd.Feed(context.Background(), storeArgv, conv.PEM, secretcmd.DefaultTimeout); err != nil {
+		secretcmd.Announce()
+		if err := secretcmd.Feed(context.Background(), storeArgv, conv.PEM, secretcmd.KeyCmdTimeout()); err != nil {
 			fmt.Fprintf(stderr, "app register: the app exists (id %d) but the key store command failed (%v)\n", conv.ID, err)
 			failed = true
 		} else {

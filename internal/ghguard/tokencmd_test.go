@@ -1,6 +1,8 @@
 package ghguard
 
 import (
+	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -8,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/MarimerLLC/claude-utils/internal/secretcmd"
 )
 
 func fakeCmd(t *testing.T, body string) []string {
@@ -92,5 +96,30 @@ func TestClientTokenFnScrubsErrors(t *testing.T) {
 	_, err := c.GetRepo("o", "mem-x")
 	if err == nil || strings.Contains(err.Error(), "ghp_inurl") {
 		t.Fatalf("error must scrub token: %v", err)
+	}
+}
+
+// A token command is often a password-manager call that waits for an approval:
+// the user is told, and the daemon (which cannot be asked) stays silent.
+func TestCmdSourceAnnouncesTheWait(t *testing.T) {
+	var b bytes.Buffer
+	old := secretcmd.Notice
+	secretcmd.Notice = &b
+	defer func() { secretcmd.Notice = old }()
+	tok, err := CmdSource{Argv: fakeCmd(t, "echo ghp_x")}.Token(context.Background())
+	if err != nil || tok != "ghp_x" {
+		t.Fatalf("got %q %v", tok, err)
+	}
+	if !strings.Contains(b.String(), "waiting for your password manager (approve the prompt if one appears)") {
+		t.Errorf("no wait message: %q", b.String())
+	}
+	b.Reset()
+	secretcmd.SetDaemon(true)
+	defer secretcmd.SetDaemon(false)
+	if _, err := (CmdSource{Argv: fakeCmd(t, "echo ghp_x")}).Token(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if b.Len() != 0 {
+		t.Errorf("the daemon printed %q", b.String())
 	}
 }

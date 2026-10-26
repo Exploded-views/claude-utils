@@ -926,8 +926,11 @@ your password manager's CLI. The command is `githubTokenCmd`, a JSON array so
 that spaces survive (`["<cli>", "read", "<reference with spaces>"]`), or
 `--token-cmd "<cli> read '<reference with spaces>'"` on the command line, where
 "double" and 'single' quotes group words. It is run directly with no shell (no
-expansion of `$VAR`, backticks, globs or `;`), with a 10 second timeout, and its
-stderr is discarded. When several sources are set the first configured one is
+expansion of `$VAR`, backticks, globs or `;`), and its stderr is discarded. Run from
+a terminal it may take 120 seconds (a password manager can wait for you to approve a
+prompt; it prints `waiting for your password manager (approve the prompt if one appears)…`
+on stderr first); `CLAUDE_MEMSYNC_SECRET_TIMEOUT` (a Go duration such as `45s` or
+`3m`) changes that. The daemon, which nobody can ask, keeps 10 seconds and prints nothing. When several sources are set the first configured one is
 used, in the order file, command, env var; a configured source that fails is an
 error, never a silent fall-through to the next. The token is never written to
 `config.json`, logs or error messages.
@@ -955,7 +958,8 @@ is the fallback). One-run flags: `--token-cmd "<command>"` on
 is run). `doctor` and `repo create` do not save it; `init` saves the command
 (`githubTokenCmd`), never the token.
 
-- The command runs when a token is needed, with a 10 second timeout. Its
+- The command runs when a token is needed, with the timeout described above (120 s
+  at a terminal, 10 s in the daemon, `CLAUDE_MEMSYNC_SECRET_TIMEOUT` to change it). Its
   output is held in memory for that request only: never written to disk,
   `config.json`, logs or error text (the command's stdout and stderr are not
   put in errors either).
@@ -1066,8 +1070,10 @@ Give each entry exactly one of `keyFile` (a PEM file that must be mode 0600:
 a looser file is refused unread) or `keyCmd` (a command that prints the PEM on
 stdout). `keyCmd` is a JSON array, `["<secret-manager-cli>", "read", "<reference
 with spaces>"]`, so spaces survive; a plain string is also accepted and split
-with shell-style quotes. Either way it is run directly with no shell, a 10
-second timeout and its stderr discarded. PKCS#1 and PKCS#8 RSA keys both work.
+with shell-style quotes. Either way it is run directly with no shell, its stderr
+discarded, and the same timeout as a token command (120 seconds at a terminal so you
+can approve your password manager's prompt, 10 in the daemon;
+`CLAUDE_MEMSYNC_SECRET_TIMEOUT` overrides it). PKCS#1 and PKCS#8 RSA keys both work.
 The key is never stored in `apps.json`.
 
 `apiBase` (default `https://api.github.com`; an `https` URL, set it for GitHub
@@ -1258,7 +1264,7 @@ Install the unit as usual; with a routes file present, `run` loads every repo of
 - `stop` clears the pull marker of every repo.
 - `changes --hook` reports, for the project directory, the notes changed in each routed repo, each against its own per-session marker. A repo reports only the folders it owns.
 - `distill` and `changes` without `--config` use the personal repo's config (the primary one); an explicit `--config` always means that single repo.
-- `distill`, `archive` and `recipients` take `--repo <name>` (a key of `routes.json` `repos`) or `--config <path>`, and `--routes <path>`; giving both `--repo` and `--config` is an error. `distill` still defaults to the personal repo and still drops client folders from its worklist. `archive` without either reads every repo and labels each line `[repo]`. `recipients` never assumes a repo: with a routes file and neither flag it refuses and lists the repos. `distill --prune` and every `recipients` action that writes take that repo's sync-dir lock, so they refuse while that repo's daemon runs (other repos are unaffected).
+- `distill`, `archive` and `recipients` take `--repo <name>` (a key of `routes.json` `repos`, or else the GitHub repo name such as `mem-project-x`, or `owner/name`, matched against each routed repo's remote URL; a name that two repos share is refused with their keys listed, and an exact key always wins) or `--config <path>`, and `--routes <path>`; giving both `--repo` and `--config` is an error. `distill` still defaults to the personal repo and still drops client folders from its worklist. `archive` without either reads every repo and labels each line `[repo]`. `recipients` never assumes a repo: with a routes file and neither flag it refuses and lists the repos. `distill --prune` and every `recipients` action that writes take that repo's sync-dir lock; when the lock is held and the claude-memsync service is installed and running, they stop the service, wait up to 30 s for the lock, do the work and start the service again (see "Adding a host" below for the rules). If the lock is held by anything else they refuse.
 - `init` shows the distilled catalog path and the permissions hint only for the personal repo (or in single-repo mode).
 - `distill --prune` leaves an entry alone when the folder it came from is not in `~/.claude/projects` on this host: the entry was made on another host, and "file gone" is not the same as "folder never here".
 
@@ -1626,7 +1632,16 @@ that can read the repo:
 With several repos, name the one: `recipients --repo <name> add <public-key>` (or `--config <path>`); without it the command refuses and lists the repos. Each edits `.age-recipients`, re-encrypts every file to the new set and commits
 (the daemon pushes). The commit is built from HEAD alone: anything else staged
 in the sync repo is neither committed nor unstaged. These actions (and
-`accept --yes`) refuse to run while the daemon holds the sync dir; stop it first. The re-encryption commit is not reported by `changes --hook`: files whose text is the same at both ends are skipped, so a recipients change does not announce every note as changed. A removed key cannot read content written after the change,
+`accept --yes`) need the sync dir's lock, which the daemon holds. If the
+claude-memsync service is installed and running, the command stops it
+(`stopping the claude-memsync service for this change…`), waits up to 30 s for
+the lock, makes the change and starts the service again (`restarted`), also when
+the change fails, panics or is interrupted. A first Ctrl-C lets the change finish
+and then restarts the service; a second restarts it at once and exits. If the lock
+is held and the service is not running (another command, a foreground `run`, no
+service installed) nothing is stopped or started and the command refuses. A
+service that was not running is never started. `rekey-pq` and `host retire` still
+refuse; stop the daemon yourself for them. The re-encryption commit is not reported by `changes --hook`: files whose text is the same at both ends are skipped, so a recipients change does not announce every note as changed. A removed key cannot read content written after the change,
 but it still reads everything it already fetched; rewriting history does not
 help once a key has fetched it, so treat removal as "stop future leakage".
 
@@ -1674,7 +1689,9 @@ pushes is exactly one new commit on origin's tip that adds
     claude-memsync join accept <host-label> --repo <name> --fingerprint <fp> [--allow-unlabelled]
     claude-memsync join reject <host-label> [--repo <name>]
 
-`list` fetches and shows each pending request as label, fingerprint and time (a
+`list` fetches and shows each pending request as label, fingerprint and time, then
+the label it asks for (`host:<label>`) and `this host` when the key is the local
+host's own (a
 file that is not in the strict format is listed as INVALID and cannot be
 accepted). `status` also says `N join request(s) pending` per repo. `accept`
 requires `--fingerprint` to equal, exactly, the fingerprint in the file (the
@@ -1689,21 +1706,32 @@ recipient other than a configured recovery key (`recoveryRecipients` in config.j
 `init --recovery-recipient <key>` or `recipients label recovery <key> [--repo <name> | --all]`;
 a `# recovery` comment alone exempts nothing) has no host label (run
 `recipients label self --host <label>` on that host first, or pass `--allow-unlabelled`).
-`reject` removes the file in its own commit
-and pushes. Like `recipients`, these refuse while the daemon holds the sync dir.
+On success `accept` also prints the accepting host's own key:
+`accepted by host:<label>, key fingerprint <fp>; on the new host, join status must
+show this key` (`this host (unlabelled)` or `(recovery)` when its line has no host
+label), so the new host compares one known line. `reject` removes the file in its own
+commit and pushes. Like `recipients`, `request`, `accept` and `reject` stop a running
+service for the change and start it again; they refuse if the lock is held by
+anything else.
 
 **Back on the new host:** its next pull brings the new `.age-recipients`. Its
 own key is then a change to the pinned set, so the existing gate applies: run
 `claude-memsync recipients accept --yes`, but **do not run it blindly**: anyone
 with write access to the remote could have added keys besides yours. `join
 status` on the new host lists the pending recipient set, one `recipient:` line
-per key with its fingerprint and the key itself, marking new keys and this
-host's own. Compare those lines with `claude-memsync join list` (fingerprints)
+per key with its fingerprint, the key itself and its label (`host:<label>`,
+`recovery` or `unlabelled`), marking new keys and this host's own. Compare those lines with `claude-memsync join list` (fingerprints)
 and `claude-memsync recipients list` (keys) on a member host, and accept only
 if every key is one you expect. Only then does the host start to commit and
 sync.
 
 ### Reviewing recipient changes
+
+A review can also list a changed `.gitattributes` (marked `!`, not as a key): the
+repo's `.gitattributes` differs from the one seen when the recipients were pinned.
+The message names the commit (`git -C <dir> show <commit> -- .gitattributes`). On a
+host's first join it is expected, because the repo's own filter lines arrive with the
+first pull; anywhere else, find out who changed it before accepting.
 
 Anyone with write access to the remote could add their own key to
 `.age-recipients`. Each host therefore **pins** the recipient set it has

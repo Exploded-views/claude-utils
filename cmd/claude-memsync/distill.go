@@ -63,7 +63,7 @@ func runDistill(args []string) int {
 		// Pruning deletes or archives synced catalog files: it must not race
 		// the daemon of this repo, so it takes that sync dir's lock. (The
 		// index alone is a git-ignored derived file; rebuilding it needs none.)
-		err = withSyncLock(cfg.SyncDir, func() (e error) { res, e = distill.Run(opts, true); return })
+		err = withSyncLockStopping(os.Stderr, cfg.SyncDir, func() (e error) { res, e = distill.Run(opts, true); return })
 		if errors.Is(err, lock.ErrHeld) {
 			fmt.Fprintln(os.Stderr, "distill: the daemon is running on this sync dir; run `claude-memsync stop`, then --prune, then `claude-memsync start`")
 		}

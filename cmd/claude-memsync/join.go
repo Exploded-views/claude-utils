@@ -16,11 +16,11 @@ import (
 
 const joinUsage = `usage:
   claude-memsync join request --repo <name> --label <host-label>   (on the new host)
-  claude-memsync join status [--repo <name>]                       (on the new host)
-  claude-memsync join list [--repo <name>]                         (on a member host)
+  claude-memsync join status [--repo <name>]                       (on the new host; lists each key with its label)
+  claude-memsync join list [--repo <name>]                         (on a member host; shows each request's label)
   claude-memsync join accept <label> --repo <name> --fingerprint <fp> [--allow-unlabelled]
   claude-memsync join reject <label> [--repo <name>]
-  (repo selection as for recipients: --repo <name> | --config <path>, --routes <path>)`
+  (repo selection as for recipients: --repo <key-or-GitHub-repo-name> | --config <path>, --routes <path>)`
 
 // runJoin handles `claude-memsync join request|status|list|accept|reject`.
 func runJoin(args []string) int { return joinCmd(os.Stdout, os.Stderr, args) }
@@ -157,7 +157,7 @@ func joinPush(cfg config.Config, repo *gitwt.Repo, request bool) error {
 func joinRequest(stdout, stderr io.Writer, cfg config.Config, repo *gitwt.Repo, label string) int {
 	var j agecrypt.Join
 	var res agecrypt.JoinResult
-	err := withSyncLock(cfg.SyncDir, func() error {
+	err := withSyncLockStopping(stderr, cfg.SyncDir, func() error {
 		// A request is built on origin's tip and nothing else: if the clone
 		// cannot be brought up to date, or differs from origin in any other
 		// way, nothing is committed or pushed.
@@ -241,9 +241,14 @@ func joinList(stdout, stderr io.Writer, cfg config.Config) int {
 		fmt.Fprintln(stdout, "no join requests pending")
 		return 0
 	}
+	own, _ := agecrypt.IdentityRecipient(agecrypt.IdentityPath(repo))
 	for _, e := range es {
 		if e.Valid {
-			fmt.Fprintf(stdout, "%s\t%s\t%s\n", e.Join.Label, agecrypt.GroupFingerprint(e.Join.Fingerprint), e.Join.Requested.Format(time.RFC3339))
+			tail := "\thost:" + e.Join.Label
+			if own != "" && e.Join.Recipient == own {
+				tail += "\tthis host"
+			}
+			fmt.Fprintf(stdout, "%s\t%s\t%s%s\n", e.Join.Label, agecrypt.GroupFingerprint(e.Join.Fingerprint), e.Join.Requested.Format(time.RFC3339), tail)
 		} else {
 			fmt.Fprintf(stdout, "%s\tINVALID (will not be accepted; reject it)\t-\n", e.Join.Label)
 		}
@@ -254,7 +259,7 @@ func joinList(stdout, stderr io.Writer, cfg config.Config) int {
 // joinChange runs an accept or a reject under the sync lock, then pushes.
 func joinChange(stdout, stderr io.Writer, cfg config.Config, repo *gitwt.Repo, label string, do func() error, accept bool) int {
 	committed := false
-	err := withSyncLock(cfg.SyncDir, func() error {
+	err := withSyncLockStopping(stderr, cfg.SyncDir, func() error {
 		if err := agecrypt.SyncFromOrigin(repo); err != nil {
 			fmt.Fprintln(stderr, "join: could not bring in the latest remote state; working from this clone:", err)
 		}
@@ -275,6 +280,13 @@ func joinChange(stdout, stderr io.Writer, cfg config.Config, repo *gitwt.Repo, l
 	}
 	if accept {
 		fmt.Fprintf(stdout, "accepted %s and pushed; the new host pulls, then runs `claude-memsync recipients accept --yes`\n", label)
+		if fp, desc, ok := agecrypt.OwnKeyInfo(repo); ok {
+			who := desc
+			if !strings.HasPrefix(desc, "host:") {
+				who = "this host (" + desc + ")"
+			}
+			fmt.Fprintf(stdout, "accepted by %s, key fingerprint %s; on the new host, `join status` must show this key\n", who, fp)
+		}
 	} else {
 		fmt.Fprintf(stdout, "rejected %s and pushed\n", label)
 	}
@@ -315,7 +327,11 @@ func printPendingRecipients(w io.Writer, repo *gitwt.Repo) {
 		if len(tags) > 0 {
 			note = "  (" + strings.Join(tags, ", ") + ")"
 		}
-		fmt.Fprintf(w, "recipient: %s  %s%s\n", agecrypt.GroupFingerprint(r.Fingerprint), r.Key, note)
+		desc := r.Desc
+		if desc == "" {
+			desc = "unlabelled"
+		}
+		fmt.Fprintf(w, "recipient: %s  %s  %s%s\n", agecrypt.GroupFingerprint(r.Fingerprint), r.Key, desc, note)
 	}
 	if removed > 0 {
 		fmt.Fprintf(w, "%d pinned key(s) are gone from the new set\n", removed)
