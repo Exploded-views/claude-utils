@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
@@ -314,9 +313,7 @@ func TestHeldBackPull_TrackedFileDeletedUpstream(t *testing.T) {
 	f.requirePreserved("note.md", local, err)
 }
 
-// The same deletion, through the running daemon. propagateChanges removes the
-// Claude copy; the watcher then sees that removal as a user delete and removes
-// the mirror copy too, so the only copy left is the autostash entry.
+// The same deletion, through the running daemon's startup cycle.
 func TestHeldBackPull_TrackedFileDeletedUpstreamDaemon(t *testing.T) {
 	f := newPullFixture(t, map[string]string{"note.md": "alpha\n", "keep.md": "k\n"})
 	captureLog(t)
@@ -331,21 +328,10 @@ func TestHeldBackPull_TrackedFileDeletedUpstreamDaemon(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- f.loop.Run(ctx) }()
 
-	// Startup flush, then the debounced flush the watcher event triggers. A
-	// second flush may not come if the watcher misses nothing; stop after a
-	// short grace period either way.
-	var lastErr error
-	timeout := time.After(10 * time.Second)
-	for n := 0; n < 2; {
-		select {
-		case lastErr = <-flushes:
-			n++
-		case <-time.After(500 * time.Millisecond):
-			n = 2
-		case <-timeout:
-			n = 2
-		}
-	}
+	// The startup flush is the cycle under test: it pulls the deletion, and the
+	// held-back Claude copy survives it. No later flush is guaranteed (none
+	// comes in practice: the preserved copy raises no event), so none is awaited.
+	lastErr := awaitFlush(t, flushes, "startup flush")
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
