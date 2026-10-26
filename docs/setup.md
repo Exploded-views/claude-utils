@@ -142,20 +142,48 @@ The recommended path is the bootstrap script, which runs every step below on
 a machine with a dry run first. It is described in
 [bootstrap.md](bootstrap.md); read `scripts/bootstrap.sh` before running it.
 
+Run it in bash (not zsh). Set the inputs once, define `boot` once, dry-run,
+then run the same function with `--yes`:
+
 ```sh
-bash scripts/bootstrap.sh --host <host-label> --role personal-dev --org <your-org> \
-  --recovery-recipient <age1pq1...> \
-  --org-app memsync-admin --org-app-id <admin-app-id> --org-app-key-cmd "<password-manager read command>" \
-  --check-app memsync-check --check-app-id <check-app-id> --check-key-file ~/.config/claude-memsync/memsync-check.pem \
-  --own-owner <github-user> --deny-owner <client-org> --deny-term <client-codename> --dry-run
+# INPUTS (fill in)
+ORG=<org>                          # the GitHub organisation that holds the memory repos
+HOST_LABEL=<host-label>            # this host's label
+RECOVERY=<recovery-recipient>      # your offline post-quantum recovery PUBLIC key, age1pq1...
+GITHUB_USER=<github-user>          # your personal GitHub account
+ADMIN_APP_ID=<admin-app-id>
+ADMIN_KEY_CMD="<password-manager read command>"
+CHECK_APP_ID=<check-app-id>
+CHECK_KEY_FILE=<check-key-file>    # absolute path, mode 0600
+KEEP_OUT_OWNERS=""                 # (optional; leave empty for none) space-separated owners to keep out
+KEEP_OUT_TERMS=""                  # (optional; leave empty for none) space-separated terms to keep out
+
+boot() {
+  local a=() x
+  for x in $KEEP_OUT_OWNERS; do a+=(--keep-out-owner "$x"); done
+  for x in $KEEP_OUT_TERMS; do a+=(--keep-out-term "$x"); done
+  bash scripts/bootstrap.sh --host "$HOST_LABEL" --role personal-dev --org "$ORG" \
+    --recovery-recipient "$RECOVERY" --own-owner "$GITHUB_USER" ${a[@]+"${a[@]}"} \
+    --org-app memsync-admin --org-app-id "$ADMIN_APP_ID" --org-app-key-cmd "$ADMIN_KEY_CMD" \
+    --check-app memsync-check --check-app-id "$CHECK_APP_ID" --check-key-file "$CHECK_KEY_FILE" "$@"
+}
+boot --dry-run
+# after checking the plan, the same command with --yes instead of --dry-run:
+boot --yes
 ```
 
-Check the plan, then run the same command with `--yes` instead of `--dry-run`.
 `--org` and `--recovery-recipient` are required and have no defaults; the
 script refuses to run without them. The recovery recipient must be the
 hybrid (`age1pq1...`) public key of the recovery identity you hold.
 `--own-owner <github-user>` names your personal GitHub account so its checkouts
 get project repos; the only owner counted as yours by default is `--org`.
+`--keep-out-owner` and `--keep-out-term` are optional and repeatable: a
+checkout whose origin owner matches an owner is skipped (no repo, no route), as
+is one whose `owner/repo` contains a term; terms are also written to the
+denylists the daemon checks at commit time. If the check key file is not there
+yet the script exits 3 (paused) before changing anything and says how to create
+it. Exit codes, the token-file flow for a host without a password manager, and
+the release-archive flow are in [bootstrap.md](bootstrap.md).
 
 The manual path, for one repo (repeat per repo):
 
@@ -202,7 +230,8 @@ On the new machine, put its own `memsync-check` key file in place (step 3
 above), then paste the bootstrap prompt from [bootstrap.md](bootstrap.md)
 into a Claude Code session there, with your placeholders filled in. The
 session clones a pinned commit, reads the script, shows you the dry run, and
-runs it after you agree. The admin App's key is read from your password
+runs it after you agree. The prompts list their INPUTS first and refer to them
+by name, so each value is written once. The admin App's key is read from your password
 manager for the run only and is never written to the host.
 
 For every repo that already has content, the new host cannot decrypt anything

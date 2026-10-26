@@ -7,6 +7,7 @@ fork are upstream's own releases.
 
 ## Unreleased
 
+- **Bootstrap for homelab and crewkit hosts**: up-front prerequisite checks, exit 3 when the check key is missing, `--delete-org-token-file`, `--prebuilt-dir`, `--keep-out-owner`/`--keep-out-term` (old `--deny-*` names still work), release archives that carry `scripts/bootstrap.sh`, and `release-layout` and `workflow-lint` CI jobs; see `docs/bootstrap.md` and `docs/ci.md`. *Fork-only.*
 - **Fork CI and coverage ratchet**: a fork-only workflow (vet, gofmt, race tests, shellcheck, bootstrap harness, gitleaks, reference check) and per-package coverage floors that only rise (`make ratchet`); see `docs/ci.md`. *Fork-only.*
 - **Post-quantum encryption by default**: new repos use `encryptionScheme: pq` (hybrid ML-KEM-768 + X25519, `age1pq1…`); classic X25519 only on request; `recipients rekey-pq` converts a single-member classic repo, optionally onto one fresh root commit. *Upstream candidate.*
 - **PQ follow-ups**: related reads find `identity-pq.<ext>` (and no longer need `identity.txt`) after `rekey-pq`; `bootstrap.sh` has no built-in allowed orgs or own owners (allowed orgs are `--org` plus `--allow-org`; own owners are `--org` plus `--own-owner`, so pass `--own-owner <github-user>` for a personal account); `rekey-pq --all` without `--apply` ends with `dry run: N ok, M would fail` and exits nonzero if any would fail. *Upstream candidate.*
