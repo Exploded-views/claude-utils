@@ -391,3 +391,23 @@ func TestRekeyState_VerifyAndDropBackup(t *testing.T) {
 		t.Error("nothing left to drop")
 	}
 }
+
+func TestRekeyState_LegacyHalfMigratedRepoIsBlockedUntilPushed(t *testing.T) {
+	f := newRekeyFx(t)
+	repo := f.h.repo
+	f.apply(t)
+	f.stage(t, "")
+	if err := UpdateRekeyState(repo, func(s *PreRekeyState) { s.NewCommit = "" }); err != nil {
+		t.Fatal(err)
+	}
+	why, blocked := RekeyBlocksSync(repo)
+	if !blocked || !strings.Contains(why, "not pushed") {
+		t.Fatalf("legacy record, push never happened: blocked=%v %q", blocked, why)
+	}
+	if err := repo.Push("main"); err != nil {
+		t.Fatal(err)
+	}
+	if why, blocked := RekeyBlocksSync(repo); blocked {
+		t.Errorf("published legacy repo blocked: %s", why)
+	}
+}
