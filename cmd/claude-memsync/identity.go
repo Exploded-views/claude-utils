@@ -115,14 +115,9 @@ func identityRecipientOf(data []byte) (rcpt string, keyID [sha256.Size]byte, err
 	if err != nil || len(ids) == 0 {
 		return "", keyID, errors.New("the file does not parse as an age identity")
 	}
-	h := sha256.New()
-	for _, id := range ids {
-		if st, ok := id.(fmt.Stringer); ok {
-			io.WriteString(h, st.String())
-		}
-		h.Write([]byte{0})
+	if keyID, err = keyDigest(ids); err != nil {
+		return "", keyID, err
 	}
-	copy(keyID[:], h.Sum(nil))
 	switch x := ids[0].(type) {
 	case *age.X25519Identity:
 		return x.Recipient().String(), keyID, nil
@@ -130,6 +125,23 @@ func identityRecipientOf(data []byte) (rcpt string, keyID [sha256.Size]byte, err
 		return x.Recipient().String(), keyID, nil
 	}
 	return "", keyID, errors.New("the file is not an age X25519 or hybrid identity")
+}
+
+// keyDigest is a digest of the keys themselves. An identity that cannot be
+// rendered as a string cannot be told apart from another of its type, so it is
+// refused rather than hashed to a shared value that would group different keys.
+func keyDigest(ids []age.Identity) (sum [sha256.Size]byte, err error) {
+	h := sha256.New()
+	for _, id := range ids {
+		st, ok := id.(fmt.Stringer)
+		if !ok {
+			return sum, errors.New("cannot tell this identity apart from others; not backed up")
+		}
+		io.WriteString(h, st.String())
+		h.Write([]byte{0})
+	}
+	copy(sum[:], h.Sum(nil))
+	return sum, nil
 }
 
 // errReason is an OS error without the path, which the caller already prints.
