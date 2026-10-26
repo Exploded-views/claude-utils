@@ -225,12 +225,13 @@ func rollbackOne(stdout, stderr io.Writer, cfg config.Config, quietNone, discard
 		return 0
 	}
 	cfgFile := cfgFileOf(cfg)
-	head, _ := repo.Run("rev-parse", "HEAD")
 	if rollbackBeforeLock != nil {
 		rollbackBeforeLock()
 	}
 	var st agecrypt.PreRekeyState
 	err := withSyncLock(cfg.SyncDir, func() error {
+		// Read under the lock: a cycle that ran before it may have moved HEAD.
+		head, _ := repo.Run("rev-parse", "HEAD")
 		var rerr error
 		st, rerr = agecrypt.RollbackRekey(repo, agecrypt.RollbackOpts{DiscardLocalCommits: discard}, func(pc agecrypt.PriorConfig) error {
 			raw, err := config.Load(cfgFile)
