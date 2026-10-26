@@ -255,10 +255,27 @@ func checkMigratedRecipients(repo *gitwt.Repo, st PreRekeyState) error {
 // scheme and pin were not repointed (a crash in between). It is idempotent and
 // runs on every resume that goes on to push.
 func FinishRekeyLocal(repo *gitwt.Repo, st PreRekeyState) (RekeyPlan, error) {
+	if err := resetIndexToHead(repo); err != nil {
+		return RekeyPlan{}, err
+	}
 	if err := repointLocal(repo, st.NewIdentity); err != nil {
 		return RekeyPlan{}, err
 	}
 	return PlanFromState(repo, st), nil
+}
+
+// resetIndexToHead puts the index back on HEAD's tree when they differ. A
+// crash between the HEAD move and the index update of the rekey commit leaves
+// the classic blob ids in the index; nothing else is staged then (the apply
+// required a clean work-tree and the daemon is stopped).
+func resetIndexToHead(repo *gitwt.Repo) error {
+	if _, err := repo.Run("diff-index", "--cached", "--quiet", "HEAD"); err == nil {
+		return nil
+	}
+	if _, err := repo.Run("read-tree", "HEAD"); err != nil {
+		return fmt.Errorf("reset the index to HEAD: %w", err)
+	}
+	return nil
 }
 
 func repointLocal(repo *gitwt.Repo, newIdentity string) error {
