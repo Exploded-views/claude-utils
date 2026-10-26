@@ -114,6 +114,26 @@ jobs:
           path: ratchet/coverage-floors.json
           retention-days: 14
 
+  # macOS minutes are free only while the repository is public, so this job is
+  # skipped in a private repo.
+  macos-launchagent:
+    name: launchd plist (macOS)
+    if: github.repository_owner != 'MarimerLLC' && !github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: macos-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.2'
+      # CI=true lets the test write the runner's ~/Library/LaunchAgents.
+      - name: generated plist has RunAtLoad and KeepAlive
+        run: go test ./cmd/claude-memsync -run 'Plist|LaunchAgent'
+
   shellcheck:
     name: shellcheck (scripts/*.sh)
     if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)

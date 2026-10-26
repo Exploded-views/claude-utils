@@ -295,6 +295,9 @@ func doctorCmd(stdout, stderr io.Writer, args []string) int {
 		}
 	}
 	tokenFlags{File: *tokenFile, Cmd: *tokenCmd, App: *ghApp}.apply(&cfg)
+	if w := unitTargetWarning(); w != "" && !*timer {
+		fmt.Fprintln(stdout, w)
+	}
 	if *timer {
 		o, err := orgFor(cfg, *org)
 		if err != nil {

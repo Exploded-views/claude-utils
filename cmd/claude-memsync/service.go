@@ -310,6 +310,9 @@ func runStatus(args []string) int {
 	default:
 		fmt.Println(st)
 	}
+	if w := unitTargetWarning(); w != "" {
+		fmt.Println(w)
+	}
 	if h := legacyIdentityHint(); h != "" {
 		fmt.Println(h)
 	}

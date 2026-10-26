@@ -118,7 +118,9 @@ claude-memsync status
   requires admin even for per-user logon tasks, so the Startup folder is the
   simpler path.)
 - **Linux**: writes a systemd user unit at
-  `~/.config/systemd/user/claude-memsync.service` and enables it.
+  `~/.config/systemd/user/claude-memsync.service` (`WantedBy=default.target`)
+  and enables it. Re-running `install`, or `start`, repairs a unit an older
+  version wrote with `multi-user.target`.
 - **macOS**: writes a launchd plist at
   `~/Library/LaunchAgents/claude-memsync.plist`.
 

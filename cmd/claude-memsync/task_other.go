@@ -9,8 +9,18 @@ package main
 // keys — and can be installed/started without root.
 
 import (
+	"fmt"
+	"os"
+
 	"github.com/kardianos/service"
 )
+
+// userOptions are the kardianos options of the user service.
+func userOptions() service.KeyValue {
+	// kardianos defaults RunAtLoad to false, which leaves a launchd agent not
+	// started at login. KeepAlive defaults to true; it stays.
+	return service.KeyValue{"UserService": true, "RunAtLoad": true, "KeepAlive": true}
+}
 
 func userSvc(configPath string) (service.Service, error) {
 	if configPath == "" {
@@ -20,18 +30,48 @@ func userSvc(configPath string) (service.Service, error) {
 	if cfg.Option == nil {
 		cfg.Option = service.KeyValue{}
 	}
-	cfg.Option["UserService"] = true
+	for k, v := range userOptions() {
+		cfg.Option[k] = v
+	}
 	prg := &program{configPath: configPath}
 	return service.New(prg, cfg)
 }
+
+// The kardianos calls are variables so tests never register a real service.
+var (
+	kardianosInstall = func(svc service.Service) error { return svc.Install() }
+	kardianosStart   = func(svc service.Service) error { return svc.Start() }
+)
 
 func installTask(configPath string) error {
 	svc, err := userSvc(configPath)
 	if err != nil {
 		return err
 	}
-	return svc.Install()
+	// An existing unit is repaired in place (kardianos refuses to install
+	// over one): its autostart target, and its ExecStart when the requested
+	// config or routes differ.
+	if _, content, ok := readUserUnit(); ok {
+		cp := configPath
+		if cp == "" {
+			cp = defaultConfigPath()
+		}
+		exe, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		want := execStartLine(exe, serviceConfig(cp).Arguments)
+		if _, changed := setExecStart(content, want); changed || userUnitIsWrong() {
+			return repairUserUnit(os.Stderr, want)
+		}
+	}
+	if err := kardianosInstall(svc); err != nil {
+		return err
+	}
+	return ensureUserUnitTarget(os.Stderr)
 }
+
+func userUnitIsWrong() bool { _, _, w := userUnitWrong(); return w }
 
 func uninstallTask() error {
 	svc, err := userSvc("")
@@ -47,7 +87,10 @@ func startTask() error {
 	if err != nil {
 		return err
 	}
-	return svc.Start()
+	if err := ensureUserUnitTarget(os.Stderr); err != nil {
+		fmt.Fprintln(os.Stderr, "start: could not fix the unit's autostart target:", err)
+	}
+	return kardianosStart(svc)
 }
 
 func stopTask() error {
