@@ -156,7 +156,22 @@ func TestVis_HooksCheckOnlyOwnEdgesAndUseTheCache(t *testing.T) {
 	api.set(func() { api.hits = map[string]int{} })
 	os.RemoveAll(visCachePathOf(t))
 
+	// A hook never reaches the network: with no verdict the edge is unverified.
 	_, ctx, _ := contextFor("/proj/x")
+	if !strings.Contains(ctx, "unverified") || api.count() != 0 {
+		t.Fatalf("a hook with no cached verdict must not ask the API (%d hits):\n%s", api.count(), ctx)
+	}
+	// A non-hook command asks the API and fills the cache.
+	rc, err := loadRelCtx("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []string{"mem-project-a", "mem-project-b"} {
+		if err := rc.vis.CheckPrivate(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, ctx, _ = contextFor("/proj/x")
 	if !strings.Contains(ctx, "mem-project-b") || strings.Contains(ctx, "unverified") {
 		t.Fatalf("context:\n%s", ctx)
 	}
@@ -169,7 +184,7 @@ func TestVis_HooksCheckOnlyOwnEdgesAndUseTheCache(t *testing.T) {
 	api.mu.Unlock()
 	before := api.count()
 	if before == 0 {
-		t.Fatal("the first run should have asked the API")
+		t.Fatal("the non-hook check should have asked the API")
 	}
 	contextFor("/proj/x")
 	if api.count() != before {
