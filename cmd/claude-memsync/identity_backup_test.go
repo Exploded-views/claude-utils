@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -501,7 +502,7 @@ func TestIdentityBackup_IncludesHostDefaultsAndClassicWithReasons(t *testing.T) 
 	}
 	for path, why := range map[string]string{
 		c:       "used by: personal",
-		pq:      "related clones",
+		pq:      "host default",
 		classic: "classic history and rollback",
 		retired: "classic history and rollback",
 	} {
@@ -510,8 +511,11 @@ func TestIdentityBackup_IncludesHostDefaultsAndClassicWithReasons(t *testing.T) 
 			t.Errorf("%s: want a line saying %q, got %q\n%s", path, why, l, out)
 		}
 	}
-	if !strings.Contains(idLineWith(out, classic), "related clones") {
-		t.Errorf("the classic default is also read by related clones: %q", idLineWith(out, classic))
+	if !strings.Contains(idLineWith(out, classic), "host default") {
+		t.Errorf("the classic default is also a host default: %q", idLineWith(out, classic))
+	}
+	if strings.Contains(out, "(related clones)") {
+		t.Errorf("no related repos are configured, so the label must be plain \"host default\":\n%s", out)
 	}
 	if l := idLineWith(out, "skipped:"); !strings.Contains(l, cfgs["client"].SyncDir) {
 		t.Errorf("a clone without an identity must be reported as skipped:\n%s", out)
@@ -577,10 +581,11 @@ func TestIdentityBackup_SummaryLine(t *testing.T) {
 		want string
 		code int
 	}{
-		"verified":   {[]string{"--store-cmd", store, "--verify-cmd", verify}, "1 stored (1 verified, 0 UNVERIFIED), 0 failed", 0},
-		"unverified": {[]string{"--store-cmd", store}, "1 stored (0 verified, 1 UNVERIFIED), 0 failed", 0},
-		"store fail": {[]string{"--store-cmd", fail}, "0 stored (0 verified, 0 UNVERIFIED), 1 failed", 1},
-		"mismatch":   {[]string{"--store-cmd", store, "--verify-cmd", wrong}, "0 stored (0 verified, 0 UNVERIFIED), 1 failed", 1},
+		"verified":   {[]string{"--store-cmd", store, "--verify-cmd", verify}, "1 stored (1 verified, 0 UNVERIFIED, 0 verify-failed), 0 store-failed", 0},
+		"unverified": {[]string{"--store-cmd", store}, "1 stored (0 verified, 1 UNVERIFIED, 0 verify-failed), 0 store-failed", 0},
+		"store fail": {[]string{"--store-cmd", fail}, "0 stored (0 verified, 0 UNVERIFIED, 0 verify-failed), 1 store-failed", 1},
+		"mismatch":   {[]string{"--store-cmd", store, "--verify-cmd", wrong}, "1 stored (0 verified, 0 UNVERIFIED, 1 verify-failed), 0 store-failed", 1},
+		"verify cmd fails": {[]string{"--store-cmd", store, "--verify-cmd", "false"}, "1 stored (0 verified, 0 UNVERIFIED, 1 verify-failed), 0 store-failed", 1},
 	} {
 		code, out, errs := runIDBackup(append([]string{"--identity", path}, c.args...)...)
 		if code != c.code || !strings.Contains(out, c.want+"\n") {
@@ -683,5 +688,75 @@ func TestIdentityBackup_SameKeyAtTwoPathsIsStoredOnce(t *testing.T) {
 		if !strings.Contains(out, a) || !strings.Contains(out, b) {
 			t.Errorf("%q: both paths must be listed:\n%s", extra, out)
 		}
+	}
+}
+
+func TestIdentityBackup_HostDefaultLabelNamesRelatedClonesWhenConfigured(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal"}, "personal", nil)
+	c, _, _ := idFile(t, t.TempDir(), "c.txt", true)
+	setCloneIdentity(t, cfgs["personal"].SyncDir, c)
+	base := defaultIdentityPath()
+	if err := os.MkdirAll(filepath.Dir(base), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pq, _, _ := idFile(t, filepath.Dir(base), filepath.Base(newIdentityPath(base)), true)
+	rp := os.Getenv(routesEnv)
+	var rj map[string]any
+	b, _ := os.ReadFile(rp)
+	if err := json.Unmarshal(b, &rj); err != nil {
+		t.Fatal(err)
+	}
+	rj["registry"] = filepath.Join(t.TempDir(), "registry")
+	b, _ = json.Marshal(rj)
+	os.WriteFile(rp, b, 0o600)
+	store, _, _ := fakeStores(t)
+	code, out, errs := runIDBackup("--all", "--dry-run", "--store-cmd", store+" {fingerprint}")
+	if code != 0 || !strings.Contains(idLineWith(out, pq), "host default (related clones)") {
+		t.Fatalf("exit %d: want the label \"host default (related clones)\":\n%s%s", code, out, errs)
+	}
+}
+
+func TestClassicOf_OnlyTheExactRekeyNaming(t *testing.T) {
+	for in, want := range map[string]string{
+		"/k/identity-pq.txt":    "/k/identity.txt",
+		"/k/identity-pq":        "/k/identity",
+		"/k/identity.txt":       "/k/identity.txt",
+		"/k/work-pq.txt":        "/k/work-pq.txt",
+		"/k/my-identity-pq.txt": "/k/my-identity-pq.txt",
+		"/k/identity-pq.txt.x":  "/k/identity-pq.txt.x",
+	} {
+		if got := classicOf(in); got != want {
+			t.Errorf("classicOf(%q) = %q, want %q", in, got, want)
+		}
+	}
+	for in, want := range map[string][]string{
+		"/k/identity-pq.txt": {"/k/identity-pq.txt.classic-retired", "/k/identity.txt.classic-retired"},
+		"/k/work-pq.txt":     {"/k/work-pq.txt.classic-retired", "/k/work.txt.classic-retired"},
+		"/k/work.txt":        {"/k/work.txt.classic-retired"},
+	} {
+		if got := retiredCandidates(in); strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("retiredCandidates(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// A file that merely sits beside a "-pq" one is not that host's classic.
+func TestIdentityBackup_DoesNotAdoptANeighbourOfACustomPQName(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal"}, "personal", nil)
+	dir := t.TempDir()
+	pq, _, _ := idFile(t, dir, "work-pq.txt", true)
+	neighbour, _, _ := idFile(t, dir, "work.txt", false)
+	retired, _, _ := idFile(t, dir, "work.txt.classic-retired", false)
+	setCloneIdentity(t, cfgs["personal"].SyncDir, pq)
+	store, _, _ := fakeStores(t)
+	code, out, errs := runIDBackup("--repo", "personal", "--dry-run", "--store-cmd", store+" {fingerprint}")
+	if code != 0 {
+		t.Fatalf("exit %d: %s%s", code, out, errs)
+	}
+	if strings.Contains(out, neighbour+"\t") {
+		t.Errorf("an unrelated neighbour was adopted:\n%s", out)
+	}
+	if !strings.Contains(out, retired) {
+		t.Errorf("the retired classic of a custom-named identity is missing:\n%s", out)
 	}
 }
