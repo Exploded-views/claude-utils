@@ -296,6 +296,18 @@ check_prebuilt() {
   printf '%s' "$PB_VER" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._+-]*$' || die "--prebuilt-dir: unexpected version output from $PREBUILT_DIR/claude-memsync"
 }
 
+# valid_pq_recipient <key>: a hybrid post-quantum age public key, age1pq1 plus
+# at least 1000 more bech32 characters (real ones are about 1,960). No regex
+# repeat count anywhere: macOS's grep and bash [[ =~ ]] stop at 255. Parameter
+# expansion only, so it works in bash 3.2.
+valid_pq_recipient() {
+  local k="$1" rest
+  case "$k" in age1pq1?*) ;; *) return 1 ;; esac
+  [ "${#k}" -ge 1000 ] || return 1
+  rest="${k#age1pq1}"
+  [ -z "${rest//[023456789acdefghjklmnpqrstuvwxyz]/}" ]
+}
+
 # ---------------------------------------------------------------------------
 # Arguments
 # ---------------------------------------------------------------------------
@@ -335,7 +347,7 @@ check_prereqs
 [ -n "$HOST" ] || die "--host is required"
 [ -n "$ORG" ] || die "--org <org> is required: the GitHub organisation that holds the memory repos (there is no default)"
 [ -n "$AGE_RECOVERY" ] || die "--recovery-recipient <age1pq1...> is required: your own offline post-quantum recovery PUBLIC key (generate one as docs/bootstrap.md describes; there is no default)"
-printf '%s' "$AGE_RECOVERY" | grep -Eq '^age1pq1[023456789acdefghjklmnpqrstuvwxyz]{1000,}$' || die "--recovery-recipient must be a post-quantum age1pq1... public key (a classic age1... or ssh key is refused: repos are post-quantum by default)"
+valid_pq_recipient "$AGE_RECOVERY" || die "--recovery-recipient must be a post-quantum age1pq1... public key (a classic age1... or ssh key is refused: repos are post-quantum by default)"
 n_tok=0
 for v in "$ORG_TOKEN_FILE" "$ORG_TOKEN_CMD" "$ORG_APP"; do [ -z "$v" ] || n_tok=$((n_tok + 1)); done
 [ "$n_tok" -le 1 ] || udie "give only one of --org-token-file, --org-token-cmd or --org-app"

@@ -456,7 +456,7 @@ for how in old new; do
   newhome "ko-$how"
   if [ "$how" = old ]; then KOF=(--deny-owner Some-Owner --deny-term 'a.b' --deny-term other); else KOF=(--keep-out-owner Some-Owner --keep-out-term 'a.b' --keep-out-term other); fi
   runboot --host testhost --role homelab --yes "${KOF[@]}"
-  cp "$H/.config/claude-memsync/routes.json" "$BASE/ko-$how.routes" 2>/dev/null && sed -i "s#$H#HOME#g; s#ko-$how#ko#g" "$BASE/ko-$how.routes" || : >"$BASE/ko-$how.routes.missing"
+  sed "s#$H#HOME#g; s#ko-$how#ko#g" "$XDG_CONFIG_HOME/claude-memsync/routes.json" >"$BASE/ko-$how.routes" 2>/dev/null || : >"$BASE/ko-$how.routes.missing"
   for k in personal infra; do cp "$H/.config/claude-memsync/denylist-$k.txt" "$BASE/ko-$how.deny-$k" 2>/dev/null || :; done
 done
 check "--keep-out-owner/-term and --deny-owner/-term give an identical routes.json" bash -c "[ -s '$BASE/ko-old.routes' ] && cmp -s '$BASE/ko-old.routes' '$BASE/ko-new.routes'"
