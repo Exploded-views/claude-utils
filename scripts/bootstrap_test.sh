@@ -518,17 +518,19 @@ docsnippet() { # id mode(dry|real): the prompt as a shell snippet
   docfunc "$1"
   if [ "$2" = dry ]; then docprompt "$1" | grep -x 'boot --dry-run'; else docprompt "$1" | grep -x 'boot --yes'; fi
 }
-doc_unused() { # id: every INPUTS name is used (as $NAME or ${NAME}) in the steps
-  local n
+doc_unused() { # id: every INPUTS name is used (as $NAME or ${NAME}) in the steps or in an ALREADY SET derivation
+  local n text
+  text="$( { docsec "$1" '^ALREADY SET' '^STEPS'; docsteps "$1"; } )"   # a variable, not a pipe: grep -q under pipefail can SIGPIPE its writer
   for n in $(docsec "$1" '^INPUTS' '^ALREADY SET' | sed 's/ = .*//'); do
-    { docsec "$1" '^ALREADY SET' '^STEPS'; docsteps "$1"; } | grep -qE "\\\$\{?$n([^A-Za-z0-9_]|\$)" || { echo "unused input $n"; return 1; }
+    grep -qE "\\\$\{?$n([^A-Za-z0-9_]|\$)" <<<"$text" || { echo "unused input $n"; return 1; }
   done
 }
 doc_undefined() { # id: every $NAME in the steps is defined by INPUTS or ALREADY SET
-  local def n
+  local def n used
   def="$( { docsec "$1" '^INPUTS' '^ALREADY SET'; docsec "$1" '^ALREADY SET' '^STEPS'; } | sed 's/ = .*//')"
-  for n in $(docsteps "$1" | grep -o '\$[A-Z][A-Z_]*' | tr -d '$' | sort -u); do
-    printf '%s\n' "$def" | grep -qx "$n" || { echo "undefined $n"; return 1; }
+  used="$(docsteps "$1" | grep -o '\$[A-Z][A-Z_]*' | tr -d '$' | sort -u)"
+  for n in $used; do
+    grep -qx "$n" <<<"$def" || { echo "undefined $n"; return 1; }
   done
 }
 DOC_IDS=(homelab-app personal-dev-app homelab-tokenfile crewkit)
