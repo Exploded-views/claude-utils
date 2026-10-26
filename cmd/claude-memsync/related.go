@@ -119,10 +119,7 @@ func loadRelCtx(routesFlag string) (*relCtx, error) {
 	if n := set.File.RelatedFetchTimeoutSec; n > 0 {
 		rc.timeout = time.Duration(n) * time.Second
 	}
-	rc.root = route.ExpandHome(set.File.RelatedRoot)
-	if rc.root == "" {
-		rc.root = filepath.Join(filepath.Dir(filepath.Clean(regDir)), "related")
-	}
+	rc.root = set.relatedRoot()
 	if err := rc.checkRoot(); err != nil {
 		return nil, err
 	}
@@ -131,6 +128,18 @@ func loadRelCtx(routesFlag string) (*relCtx, error) {
 	}
 	vis.cachePath = filepath.Join(rc.root, ".state", "visibility.json")
 	return rc, nil
+}
+
+// relatedRoot is where the read clones of related repos live: relatedRoot of
+// routes.json, else a "related" dir beside the registry; "" with neither.
+func (s *routedSet) relatedRoot() string {
+	if root := route.ExpandHome(s.File.RelatedRoot); root != "" {
+		return root
+	}
+	if s.File.Registry == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(filepath.Clean(route.ExpandHome(s.File.Registry))), "related")
 }
 
 // loadRelCtxHook is loadRelCtx for the hook paths: the visibility check is

@@ -1589,7 +1589,7 @@ beside the sync directories still names it in `memage.identity`: every
 sync dir) is checked (a clone whose git config git cannot read counts as using the file), paths compared after `~` expansion and symlink resolution,
 including clones that are not routed (such as a `*.incident-*` copy). A clone
 whose restore record names the file as its classic identity and is not finished
-keeps it too (a rollback of that clone would need it). If one is found, the
+keeps it too (a rollback of that clone would need it). So does a related read clone (under the related root) whose `.age-recipients` still lists the classic identity's recipient, or cannot be read: those decrypt with the host's default identity. If one is found, the
 file stays, the clone is named in the output, and a rerun retires it once
 nothing uses it. `recipients retire-classic [--repo <name> | --all] [--apply]`
 does just that step with no rekey flags and the same scan of all clones: it
