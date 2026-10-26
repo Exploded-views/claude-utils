@@ -294,7 +294,7 @@ func TestRekeyState_RekeyBlocksSync(t *testing.T) {
 		blocked bool
 	}{
 		{RekeyRecStarted, true}, {RekeyRecCommitted, true}, {RekeyRecMigrated, true},
-		{RekeyRecPublished, false}, {RekeyRecDone, false}, {"", true}, // legacy and not pushed
+		{RekeyRecPublished, false}, {"done", true}, {"", true}, // legacy and not pushed
 	} {
 		f.stage(t, tc.stage)
 		why, blocked := RekeyBlocksSync(repo)

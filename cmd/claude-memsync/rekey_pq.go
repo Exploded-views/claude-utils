@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -451,10 +452,10 @@ func rekeyPush(repo *gitwt.Repo, p agecrypt.RekeyPlan, fresh bool) error {
 // sync dir (siblings such as ~/.claudesync.d/<name>.incident-1 included, routed
 // or not) whose repo-local memage.identity names the file old.
 func clonesUsingIdentity(old string, hostCfgs []config.Config) []string {
-	want := filepath.Clean(filepath.FromSlash(old))
+	want := normIdentityPath(old)
 	var out []string
 	for _, dir := range cloneDirs(hostCfgs) {
-		if id := identityInGitConfig(filepath.Join(dir, ".git", "config")); id != "" && filepath.Clean(filepath.FromSlash(id)) == want {
+		if id := identityInGitConfig(filepath.Join(dir, ".git", "config")); id != "" && normIdentityPath(id) == want {
 			out = append(out, dir)
 		}
 	}
@@ -467,7 +468,7 @@ func clonesUsingIdentity(old string, hostCfgs []config.Config) []string {
 // counts unless the clone is already post-quantum; one that cannot be read
 // counts too.
 func clonesWithPendingRecord(old string, hostCfgs []config.Config) []string {
-	want := filepath.Clean(filepath.FromSlash(old))
+	want := normIdentityPath(old)
 	var out []string
 	for _, dir := range cloneDirs(hostCfgs) {
 		st, err := agecrypt.ReadRekeyStateAt(dir)
@@ -478,7 +479,7 @@ func clonesWithPendingRecord(old string, hostCfgs []config.Config) []string {
 			out = append(out, dir)
 			continue
 		}
-		if filepath.Clean(filepath.FromSlash(st.ClassicIdentity)) != want || st.Finished() {
+		if normIdentityPath(st.ClassicIdentity) != want || st.Finished() {
 			continue
 		}
 		if st.Stage == "" && gitConfigValue(filepath.Join(dir, ".git", "config"), "memage", "scheme") == agecrypt.SchemePQ {
@@ -506,7 +507,7 @@ func cloneDirs(hostCfgs []config.Config) []string {
 		seen[dir] = true
 		out = append(out, dir)
 	}
-	for _, c := range hostCfgs {
+	for _, c := range append(append([]config.Config{}, hostCfgs...), config.Defaults()) {
 		check(filepath.Join(c.SyncDir, ".git", "config"))
 	}
 	for p := range parents {
@@ -519,32 +520,42 @@ func cloneDirs(hostCfgs []config.Config) []string {
 	return out
 }
 
-// identityInGitConfig reads memage.identity out of a git config file without
-// running git (the file may belong to any clone).
+// identityInGitConfig reads memage.identity out of the git config file of any clone.
 func identityInGitConfig(path string) string { return gitConfigValue(path, "memage", "identity") }
 
-// gitConfigValue reads [section] key out of a git config file.
+// gitConfigValue reads section.key out of a git config file with git itself
+// (inline comments, quoting and case rules included); "" when unset.
 func gitConfigValue(path, section, key string) string {
-	b, err := os.ReadFile(path)
+	if _, err := os.Stat(path); err != nil {
+		return ""
+	}
+	out, err := exec.Command("git", "config", "--file", path, "--get", section+"."+key).Output()
 	if err != nil {
 		return ""
 	}
-	in := false
-	for _, l := range strings.Split(string(b), "\n") {
-		l = strings.TrimSpace(l)
-		if strings.HasPrefix(l, "[") {
-			f := strings.Fields(strings.Trim(l, "[]"))
-			in = len(f) > 0 && strings.EqualFold(f[0], section)
-			continue
-		}
-		if !in {
-			continue
-		}
-		if k, v, ok := strings.Cut(l, "="); ok && strings.EqualFold(strings.TrimSpace(k), key) {
-			return strings.Trim(strings.TrimSpace(v), `"`)
+	return strings.TrimSpace(string(out))
+}
+
+// normIdentityPath makes identity paths comparable: ~ expanded, absolute,
+// symlinks resolved where the file exists.
+func normIdentityPath(p string) string {
+	p = filepath.FromSlash(strings.TrimSpace(p))
+	if p == "~" || strings.HasPrefix(p, "~"+string(filepath.Separator)) {
+		if home, err := os.UserHomeDir(); err == nil {
+			p = filepath.Join(home, strings.TrimPrefix(p, "~"))
 		}
 	}
-	return ""
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	// the file may be gone: resolve its directory
+	if r, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
+		return filepath.Join(r, filepath.Base(p))
+	}
+	return filepath.Clean(p)
 }
 
 // retireClassicIdentity renames the old classic identity to
@@ -556,6 +567,9 @@ func retireClassicIdentity(stdout io.Writer, old string, done config.Config, hos
 		return
 	}
 	if _, err := os.Stat(old); err != nil {
+		if _, rerr := os.Stat(old + agecrypt.RetiredSuffix); rerr == nil {
+			fmt.Fprintf(stdout, "  the classic identity is already retired (%s)\n", old+agecrypt.RetiredSuffix)
+		}
 		return // already retired (a rerun)
 	}
 	cfgs := append(append([]config.Config{}, hostCfgs...), done)

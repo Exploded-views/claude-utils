@@ -51,12 +51,11 @@ const (
 	RekeyRecCommitted = "committed" // the migrated commit exists (HEAD moves to it next)
 	RekeyRecMigrated  = "migrated"  // identity, scheme and pin are repointed; not pushed
 	RekeyRecPublished = "published" // the remote holds it and config.json follows
-	RekeyRecDone      = "done"
 )
 
 // Finished reports whether the record says the migration was published.
 func (st PreRekeyState) Finished() bool {
-	return st.Stage == RekeyRecPublished || st.Stage == RekeyRecDone
+	return st.Stage == RekeyRecPublished
 }
 
 func rekeyStatePath(repo *gitwt.Repo) (string, error) {
@@ -457,7 +456,20 @@ func restoreClassicIdentityFile(path string) error {
 // directory); os.ErrNotExist when there is none.
 func ReadRekeyStateAt(dir string) (PreRekeyState, error) {
 	var st PreRekeyState
-	b, err := os.ReadFile(filepath.Join(dir, ".git", RekeyStateFile))
+	gd := filepath.Join(dir, ".git")
+	fi, err := os.Stat(gd)
+	if err != nil {
+		return st, err
+	}
+	if !fi.IsDir() {
+		// A gitfile (linked work-tree, submodule): ask git, as the writes do.
+		p, perr := rekeyStatePath(gitwt.New(dir))
+		if perr != nil {
+			return st, os.ErrNotExist
+		}
+		gd = filepath.Dir(p)
+	}
+	b, err := os.ReadFile(filepath.Join(gd, RekeyStateFile))
 	if err != nil {
 		return st, err
 	}
