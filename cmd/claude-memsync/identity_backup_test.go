@@ -973,7 +973,7 @@ func TestIdentityBackup_SameKeyLineFollowsTheFirstCopysFinalStatus(t *testing.T)
 			t.Errorf("the same-key line must say the first copy was OVERWRITTEN later, got %q", l)
 		}
 		// printed after the final pass: the OVERWRITTEN line of the first copy comes first
-		if strings.Index(out, first+"\tfingerprint") > strings.Index(out, "same key as") || strings.LastIndex(out, "OVERWRITTEN") > strings.Index(out, "same key as") {
+		if i, j := strings.Index(out, "\tOVERWRITTEN by a later store"), strings.Index(out, "same key as"); i < 0 || i > j {
 			t.Errorf("the same-key line must follow the final pass:\n%s", out)
 		}
 	})

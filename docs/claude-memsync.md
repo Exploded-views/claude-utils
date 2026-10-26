@@ -1115,7 +1115,11 @@ What it does, in order:
    same store arguments are refused, and so is a `--verify-cmd` that expands
    the same for any two different keys (each verify would read the same item
    back). Files whose parsed keys are equal are one item even if their comment
-   lines differ.
+   lines differ: only the first file's bytes (and so its comment lines) are
+   stored, and the other file's comments are not kept. The `same key as <first>`
+   line of the second path is printed after the final read-back and says how the
+   first copy ended (`stored once`, or `stored once, but <first> ended as
+   MISMATCH` / `OVERWRITTEN by a later store`).
 4. Checks every file: a regular file, not a symlink (also checked on the opened
    file), no permission bits beyond 0600, owned by the current user, one hard
    link, and an age classic (`AGE-SECRET-KEY-1…`) or hybrid

@@ -351,7 +351,11 @@ for any two different keys. As a last check, after the final store it reads
 every item that verified back again and reports
 `OVERWRITTEN by a later store: <path>` (exit 1) for one that no longer
 matches, whatever the arguments looked like. The same key at two paths (even
-with different comment lines) is stored once and both paths are listed. If
+with different comment lines) is stored once and both paths are listed; only the
+first file's bytes, and so only its comment lines, are stored (the other file's
+comments are not kept), and the second path's `same key as <first>` line is
+printed after the final read-back, so it says if the first copy ended as
+`MISMATCH` or `OVERWRITTEN by a later store`. If
 you would rather not use placeholders, back the files up one at a time with
 `--identity <path>`, with a different item title for each.
 

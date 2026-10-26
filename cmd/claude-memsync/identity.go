@@ -423,7 +423,7 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 		why   string
 		info  *idFileInfo
 		err   error
-		dupOf string // the first path holding the same bytes
+		dupOf string // the first path holding the same key (its comment lines may differ; only that first file is stored)
 		sum   [sha256.Size]byte
 	}
 	files := make([]*loaded, 0, len(paths))
@@ -434,7 +434,7 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 			}
 		}
 	}()
-	var uniq []*loaded // one per distinct content
+	var uniq []*loaded // one per distinct key
 	for _, t := range paths {
 		info, err := readIdentityFn(t.Path)
 		f := &loaded{path: t.Path, why: t.why(), info: info, err: err}
@@ -485,7 +485,9 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 	} else if len(verifyArgv) == 0 {
 		fmt.Fprintln(stderr, "warning: no --verify-cmd, so the backup is UNVERIFIED: nothing reads it back to check it was stored intact; add --verify-cmd, or restore it once to be sure")
 	}
-	var stored []*loaded // items that verified, to read back again at the end
+	var stored []*loaded            // items that verified, to read back again at the end
+	var dups []*loaded              // same-key lines, printed last: they report how the first copy ended up
+	finalRes := map[string]string{} // path -> what the last line printed for it said
 	attempted := 0
 	wasStored := map[string]bool{} // path -> the store command succeeded
 	for _, f := range files {
@@ -498,14 +500,7 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 			continue
 		}
 		if f.dupOf != "" {
-			note := "stored once"
-			switch {
-			case *dry:
-				note = "would be stored once"
-			case !wasStored[f.dupOf]:
-				note = "not stored: the store for " + f.dupOf + " failed"
-			}
-			fmt.Fprintf(stdout, "%s\tfingerprint %s\tsame key as %s (%s)%s\n", p, info.Fingerprint, f.dupOf, note, why)
+			dups = append(dups, f)
 			continue
 		}
 		sArgv := substitute(storeArgv, info.Fingerprint, p)
@@ -524,6 +519,7 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 		attempted++
 		res, stage, err := storeAndVerify(stderr, info, sArgv, vArgv)
 		wasStored[p] = err == nil || stage == stageVerify
+		finalRes[p] = res
 		fmt.Fprintf(stdout, "%s\tfingerprint %s\t%s%s\n", p, info.Fingerprint, res, why)
 		if err != nil {
 			fmt.Fprintf(stderr, "identity backup: %s: %v\n", p, err)
@@ -559,9 +555,24 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 			}
 			fmt.Fprintf(stdout, "%s\tfingerprint %s\t%s\n", f.path, f.info.Fingerprint, res)
 			fmt.Fprintf(stderr, "identity backup: %s\n", msg)
+			finalRes[f.path] = res
 			verified--
 			verifyFailed++
 		}
+	}
+	// A same-key line says what became of the first copy, which is only known
+	// now: it may have MISMATCHed, or a later store may have OVERWRITTEN it.
+	for _, f := range dups {
+		note := "stored once"
+		switch first := finalRes[f.dupOf]; {
+		case *dry:
+			note = "would be stored once"
+		case !wasStored[f.dupOf]:
+			note = "not stored: the store for " + f.dupOf + " failed"
+		case first != "verified (sha256 matches)" && first != "stored (unverified)":
+			note = "stored once, but " + f.dupOf + " ended as " + first
+		}
+		fmt.Fprintf(stdout, "%s\tfingerprint %s\tsame key as %s (%s)\t(%s)\n", f.path, f.info.Fingerprint, f.dupOf, note, f.why)
 	}
 	if !*dry {
 		fmt.Fprintf(stdout, "%d stored (%d verified, %d UNVERIFIED, %d verify-failed), %d store-failed\n", verified+unverified+verifyFailed, verified, unverified, verifyFailed, failed)
