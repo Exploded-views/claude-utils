@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"filippo.io/age"
 	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
@@ -238,30 +240,73 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 		return 1
 	}
 
+	if len(paths) > 1 && !hasPlaceholder(storeArgv) {
+		fmt.Fprintf(stderr, "identity backup: %d identities would go through one fixed --store-cmd, and a manager that replaces an item by name would keep only the last key while every one still verified. Nothing was run.\n  files:\n", len(paths))
+		for _, p := range paths {
+			fmt.Fprintf(stderr, "    %s\n", p)
+		}
+		fmt.Fprintln(stderr, "  Add {fingerprint} (or {name}) to the item's title in --store-cmd and --verify-cmd, or back the files up one at a time with --identity <path>.")
+		return 2
+	}
+
+	// Read and check every file first, so a collision between item names is
+	// found before anything is stored.
+	type loaded struct {
+		path string
+		info *idFileInfo
+		err  error
+	}
+	files := make([]loaded, 0, len(paths))
+	defer func() {
+		for _, f := range files {
+			if f.info != nil {
+				wipe(f.info.data)
+			}
+		}
+	}()
+	items := map[string]string{} // substituted store argv -> path
+	for _, p := range paths {
+		info, err := readIdentityFile(p)
+		files = append(files, loaded{p, info, err})
+		if err != nil {
+			continue
+		}
+		key := strings.Join(substitute(storeArgv, info.Fingerprint, p), "\x00")
+		if other, dup := items[key]; dup {
+			fmt.Fprintf(stderr, "identity backup: %s and %s would be stored under the same item (%s expands to the same arguments for both). Nothing was run; add {fingerprint} to the title.\n", other, p, "--store-cmd")
+			return 2
+		}
+		items[key] = p
+	}
+
 	failed := 0
 	if *dry {
 		fmt.Fprintln(stdout, "dry run: nothing is run or stored")
 	} else if len(verifyArgv) == 0 {
 		fmt.Fprintln(stderr, "warning: no --verify-cmd, so the backup is UNVERIFIED: nothing reads it back to check it was stored intact; add --verify-cmd, or restore it once to be sure")
 	}
-	for _, p := range paths {
-		info, err := readIdentityFile(p)
-		if err != nil {
+	for _, f := range files {
+		p, info := f.path, f.info
+		if f.err != nil {
 			fmt.Fprintf(stdout, "%s\tREFUSED\n", p)
-			fmt.Fprintf(stderr, "identity backup: %s: %v\n", p, err)
+			fmt.Fprintf(stderr, "identity backup: %s: %v\n", p, f.err)
 			failed++
 			continue
 		}
+		sArgv := substitute(storeArgv, info.Fingerprint, p)
+		var vArgv []string
+		if len(verifyArgv) > 0 {
+			vArgv = substitute(verifyArgv, info.Fingerprint, p)
+		}
 		if *dry {
 			v := ""
-			if len(verifyArgv) > 0 {
-				v = ", then read back with " + verifyArgv[0]
+			if len(vArgv) > 0 {
+				v = ", then read back with " + vArgv[0]
 			}
-			fmt.Fprintf(stdout, "%s\tfingerprint %s\twould be stored with %s%s\n", p, info.Fingerprint, storeArgv[0], v)
-			wipe(info.data)
+			fmt.Fprintf(stdout, "%s\tfingerprint %s\twould be stored with %s%s\n", p, info.Fingerprint, sArgv[0], v)
 			continue
 		}
-		res, err := storeAndVerify(stderr, info, storeArgv, verifyArgv)
+		res, err := storeAndVerify(stderr, info, sArgv, vArgv)
 		wipe(info.data)
 		fmt.Fprintf(stdout, "%s\tfingerprint %s\t%s\n", p, info.Fingerprint, res)
 		if err != nil {
@@ -273,6 +318,35 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// Placeholders, replaced in every element of --store-cmd and --verify-cmd for
+// each file. They carry only public values, never key material.
+const (
+	phFingerprint = "{fingerprint}"
+	phName        = "{name}"
+)
+
+func hasPlaceholder(argv []string) bool {
+	for _, a := range argv {
+		if strings.Contains(a, phFingerprint) || strings.Contains(a, phName) {
+			return true
+		}
+	}
+	return false
+}
+
+// substitute returns argv with {fingerprint} (the grouped fingerprint with
+// dashes for spaces, safe in a title) and {name} (the file's base name)
+// replaced. argv itself is left alone.
+func substitute(argv []string, fingerprint, path string) []string {
+	fp := strings.ReplaceAll(fingerprint, " ", "-")
+	r := strings.NewReplacer(phFingerprint, fp, phName, filepath.Base(path))
+	out := make([]string, len(argv))
+	for i, a := range argv {
+		out[i] = r.Replace(a)
+	}
+	return out
 }
 
 // storeAndVerify stores info's bytes and, with a verify command, reads them
