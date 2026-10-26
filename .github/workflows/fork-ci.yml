@@ -165,12 +165,25 @@ jobs:
         run: bash scripts/bootstrap_test.sh
 
   release-layout:
-    name: release archive layout (linux/amd64)
+    name: release archive layout (${{ matrix.target }})
     if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # GitHub-hosted runners only. Each builds its own archive.
+          - os: ubuntu-latest
+            target: linux/amd64
+            bash: bash
+          - os: macos-latest
+            target: darwin/arm64
+            # macOS's own bash (3.2): the extracted bootstrap.sh must run on it,
+            # as it does for a user; nothing newer is installed.
+            bash: /bin/bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -180,12 +193,16 @@ jobs:
           # Same toolchain as the dev container, newer than go.mod's 1.25.0 floor,
           # so CI sees what a local run sees. Bump both together.
           go-version: '1.27.2'
-      # Runs scripts/package-release.sh (the script release.yml calls) for
-      # linux/amd64 and asserts: the archive holds the binaries, LICENSE,
-      # README.md and scripts/bootstrap.sh; SHA256SUMS verifies; and the
+      # Runs scripts/package-release.sh (the script release.yml calls) for this
+      # runner's own target and asserts: the archive holds the binaries,
+      # LICENSE, README.md and scripts/bootstrap.sh; SHA256SUMS verifies; the
       # extracted bootstrap.sh with --prebuilt-dir --dry-run (fake required
-      # flags, throwaway HOME) gets past argument parsing.
+      # flags, throwaway HOME) gets past argument parsing and the prerequisite
+      # checks, under ${{ matrix.bash }}.
       - name: package and check the archive
+        env:
+          TARGET: ${{ matrix.target }}
+          BOOT_BASH: ${{ matrix.bash }}
         run: bash scripts/package-release_test.sh "$RUNNER_TEMP/package-test"
 
   workflow-lint:

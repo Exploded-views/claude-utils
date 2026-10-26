@@ -51,5 +51,7 @@ for target in "${TARGETS[@]}"; do
   rm -rf "$stage"
 done
 
-(cd "$OUT" && sha256sum -- "${ARCHIVES[@]}" > SHA256SUMS)
+# sha256sum on Linux, shasum on macOS: the same "<hash>  <file>" lines either way.
+if command -v sha256sum >/dev/null 2>&1; then SUM=(sha256sum --); else SUM=(shasum -a 256 --); fi
+(cd "$OUT" && "${SUM[@]}" "${ARCHIVES[@]}" > SHA256SUMS)
 ls -lh "$OUT"

@@ -518,6 +518,19 @@ docsnippet() { # id mode(dry|real): the prompt as a shell snippet
   docfunc "$1"
   if [ "$2" = dry ]; then docprompt "$1" | grep -x 'boot --dry-run'; else docprompt "$1" | grep -x 'boot --yes'; fi
 }
+doc_unused() { # id: every INPUTS name is used (as $NAME or ${NAME}) in the steps
+  local n
+  for n in $(docsec "$1" '^INPUTS' '^ALREADY SET' | sed 's/ = .*//'); do
+    { docsec "$1" '^ALREADY SET' '^STEPS'; docsteps "$1"; } | grep -qE "\\\$\{?$n([^A-Za-z0-9_]|\$)" || { echo "unused input $n"; return 1; }
+  done
+}
+doc_undefined() { # id: every $NAME in the steps is defined by INPUTS or ALREADY SET
+  local def n
+  def="$( { docsec "$1" '^INPUTS' '^ALREADY SET'; docsec "$1" '^ALREADY SET' '^STEPS'; } | sed 's/ = .*//')"
+  for n in $(docsteps "$1" | grep -o '\$[A-Z][A-Z_]*' | tr -d '$' | sort -u); do
+    printf '%s\n' "$def" | grep -qx "$n" || { echo "undefined $n"; return 1; }
+  done
+}
 DOC_IDS=(homelab-app personal-dev-app homelab-tokenfile crewkit)
 docnum() { case "$1" in 1) echo "homelab-app dry" ;; 2) echo "homelab-app real" ;; 3) echo "personal-dev-app dry" ;; 4) echo "personal-dev-app real" ;; esac; }
 rundoc() { # n | "id mode": run that prompt in the fake HOME; sets RC and OUT
@@ -543,10 +556,8 @@ echo "--- paste prompts: structure, and the doc against the script's flags"
 for id in "${DOC_IDS[@]}"; do
   check "$id: prompt found, with INPUTS, ALREADY SET, STEPS and a boot() function" bash -c "[ -n \"\$1\" ] && printf '%s\n' \"\$2\" | grep -q '^boot() {'" _ "$(docsec "$id" '^INPUTS' '^ALREADY SET')" "$(docfunc "$id")"
   check "$id: the real run line is 'boot --yes' and the dry run line is 'boot --dry-run'" bash -c "printf '%s\n' \"\$1\" | grep -qx 'boot --dry-run' && printf '%s\n' \"\$1\" | grep -qx 'boot --yes'" _ "$(docprompt "$id")"
-  check "$id: every input is used by the steps" bash -c "
-    for n in \$(printf '%s\n' \"\$1\" | sed 's/ = .*//'); do printf '%s\n' \"\$2\" | grep -qE \"\\\$\{?\$n\\b\" || { echo \"unused input \$n\"; exit 1; }; done" _ "$(docsec "$id" '^INPUTS' '^ALREADY SET')" "$(docsteps "$id")"
-  check "$id: the steps use only names that INPUTS or ALREADY SET define" bash -c "
-    def=\$( (printf '%s\n' \"\$1\"; printf '%s\n' \"\$2\") | sed 's/ = .*//'); for n in \$(printf '%s\n' \"\$3\" | grep -o '\\\$[A-Z][A-Z_]*' | tr -d '\$' | sort -u); do printf '%s\n' \"\$def\" | grep -qx \"\$n\" || { echo \"undefined \$n\"; exit 1; }; done" _ "$(docsec "$id" '^INPUTS' '^ALREADY SET')" "$(docsec "$id" '^ALREADY SET' '^STEPS')" "$(docsteps "$id")"
+  check "$id: every input is used by the steps" doc_unused "$id"
+  check "$id: the steps use only names that INPUTS or ALREADY SET define" doc_undefined "$id"
   check "$id: every flag in boot() is one the script knows" bash -c "
     for f in \$(printf '%s\n' \"\$1\" | grep -o -- '--[a-z][a-z-]*' | sort -u); do grep -qE -- \"(^|[ |])\$f[ |)]\" '$ROOT/scripts/bootstrap.sh' || { echo \"unknown flag \$f\"; exit 1; }; done" _ "$(docfunc "$id")"
   check "$id: both keep-out lists default to empty and are marked optional" bash -c "printf '%s\n' \"\$1\" | grep -qx -- '- KEEP_OUT_OWNERS = \"\"' && printf '%s\n' \"\$1\" | grep -qx -- '- KEEP_OUT_TERMS = \"\"' && [ \$(printf '%s\n' \"\$1\" | grep -c '(optional; leave empty for none)') -ge 2 ]" _ "$(docprompt "$id")"
@@ -597,7 +608,9 @@ prompt_setup
 DOC_OWNERS="Acme-Client other-owner" DOC_TERMS="acmeclient other.term" rundoc 4
 [ "$RC" -eq 0 ] || echo "$OUT" | tail -20
 check "two-item lists: the real run succeeds" [ "$RC" -eq 0 ]
-check "two-item lists: both terms are in every denylist (regex-escaped), no owner is" bash -c "for k in personal; do grep -qx acmeclient '$H/.config/claude-memsync/denylist-\$k.txt' && grep -qxF 'other\\.term' '$H/.config/claude-memsync/denylist-\$k.txt' && ! grep -qi 'acme-client\|other-owner' '$H/.config/claude-memsync/denylist-\$k.txt' || exit 1; done"
+DL="$H/.config/claude-memsync/denylist-personal.txt"
+check "two-item lists: both terms are in the denylist (regex-escaped)" bash -c "grep -qx acmeclient '$DL' && grep -qxF 'other\\.term' '$DL'"
+check "two-item lists: no keep-out owner is in the denylist" bash -c "! grep -qiE 'acme-client|other-owner' '$DL'"
 check "two-item lists: no keep-out note about empty lists" bash -c "! printf '%s\n' \"\$1\" | grep -q 'keep-out lists: none'" _ "$OUT"
 newhome doc-ws
 prompt_setup
