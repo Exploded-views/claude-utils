@@ -93,6 +93,8 @@ case "$1" in
     case "$2" in
       create)
         name="$(basename "$3")"
+        # STUB_SWAP_TOKEN=<file>: the org token file is replaced by a symlink mid-run (it is no longer a plain file of ours)
+        if [ -n "${STUB_SWAP_TOKEN:-}" ]; then rm -f "$STUB_SWAP_TOKEN"; ln -s "$STUB_SWAP_TO" "$STUB_SWAP_TOKEN"; fi
         case "$name" in "${STUB_SLOW:-/}") sleep 2 ;; esac   # a slow repo: output order must not follow finish order
         if [ "${STUB_PUBLIC:-0}" = 1 ]; then
           echo '{"private": false, "visibility": "public"}' >"$S/$name.json"
@@ -203,6 +205,30 @@ echo "secret-tool $*" >>"$STUB_DIR/tool.log"
 echo "secret-tool:$(env | grep -v '^STUB_' | grep -cF -- "$STUB_ORG_TOKEN")" >>"$STUB_DIR/env.log"
 echo "$STUB_ORG_TOKEN"
 EOF
+REAL_GIT="$(command -v git)"; REAL_PY="$(command -v python3)"
+# git: STUB_GIT_LS2=fail|huge makes the SECOND ls-remote of a url (the bootstrap's "does the repo have content?") fail, or answer with a huge list
+cat >"$STUBS/git" <<GITEOF
+#!/bin/sh
+if [ -n "\${STUB_GIT_LS2:-}" ] && [ "\$1" = ls-remote ]; then
+  f="\$STUB_DIR/ls.\$(printf %s "\$2" | cksum | cut -d' ' -f1)"
+  echo x >>"\$f"
+  if [ "\$(wc -l <"\$f" | tr -d ' ')" = 2 ]; then
+    case "\$STUB_GIT_LS2" in
+      fail) echo "fatal: simulated ls-remote failure" >&2; exit 1 ;;
+      huge) awk 'BEGIN { for (i = 0; i < 40000; i++) print "0123456789abcdef0123456789abcdef01234567\trefs/heads/b" i }'; exit \$? ;;
+    esac
+  fi
+fi
+exec "$REAL_GIT" "\$@"
+GITEOF
+# python3: STUB_PY_FAIL_REGISTRY=1 fails the one-line registry probe
+cat >"$STUBS/python3" <<PYEOF2
+#!/bin/sh
+case "\$*" in
+  *'.get("registry")'*) [ "\${STUB_PY_FAIL_REGISTRY:-0}" = 1 ] && exit 1 ;;
+esac
+exec "$REAL_PY" "\$@"
+PYEOF2
 chmod +x "$STUBS"/*
 ssh-keygen -q -t ed25519 -N '' -f "$BASE/other" && awk '{print $2}' "$BASE/other.pub" >"$BASE/otherkey"
 
@@ -1540,6 +1566,57 @@ check "a refused (public) repo gets no ssh alias" bash -c "! grep -qs 'Host gh-m
 pjhome wsg alpha; mkgit "$H/wsrepo" "git@github.com:gitgat/wsrepo.git"
 runboot --host testmac --role personal-dev --workspace "$H/wsrepo" --own-owner gitgat --dry-run
 check "a --workspace that is itself a git checkout (a bad flag value) exits 2" bash -c "[ $RC -eq 2 ] && printf '%s\n' \"\$1\" | grep -q 'is itself a git checkout'" _ "$OUT"
+
+echo "--- positive confirmation: the same shape, everywhere"
+PVB="$BASE/pvprebuilt"; mkdir -p "$PVB/twoline"; cp "$REAL/claude-memmerge" "$PVB/twoline/"
+printf '#!/bin/sh\necho "claude-memsync v0.0.1"\necho "claude-memsync v9.9.9"\n' >"$PVB/twoline/claude-memsync"; chmod +x "$PVB/twoline/claude-memsync"
+newhome pv1
+NO_SHA=1 runboot --host testhost --role homelab --yes --prebuilt-dir "$PVB/twoline"
+check "a prebuilt claude-memsync that prints more than one version line is refused" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'exactly one line' && [ ! -e '$H/.local/lib' ]" _ "$OUT"
+newhome pv2
+STUB_GIT_LS2=fail runboot --host testhost --role homelab --yes
+check "an ls-remote that fails when the bootstrap asks if the repo has content stops the run (it is not read as empty)" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'cannot tell whether'" _ "$OUT"
+newhome pv3
+STUB_GIT_LS2=huge runboot --host testhost --role homelab --yes
+check "an ls-remote with a long answer (SIGPIPE for a head-of-pipe reader) still means the repo has content: a join is requested" bash -c "[ $RC -eq 0 ] && grep -q 'join request --repo personal' '$STUB_DIR/memsync.log'" _ "$OUT"
+newhome pv4
+prompt_setup
+STUB_PY_FAIL_REGISTRY=1 rundoc 2
+check "a python error reading the registry from routes.json is a refusal, not 'no registry'" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -qi 'registry'" _ "$OUT"
+newhome pv5
+mkdir -p "$H/.config/claude-memsync"; printf 'pat\n' >"$BASE/realpat"; chmod 600 "$BASE/realpat"; ln -s "$BASE/realpat" "$H/.config/claude-memsync/github-token"
+runboot --host testhost --role homelab --yes
+check "a Metadata-read PAT file that is a symlink is not used (same checks as the other secret files)" bash -c "[ $RC -eq 0 ] && ! grep -rq githubTokenFile '$H/.claudesync.d' && printf '%s\n' \"\$1\" | grep -q 'no Metadata-read PAT'" _ "$OUT"
+newhome pv6; TF="$BASE/pv6tok"; printf '%s\n' "$ORGTOK" >"$TF"; chmod 600 "$TF"
+ORGARGS=(--org-token-file "$TF" --delete-org-token-file)
+STUB_SWAP_TOKEN="$TF" STUB_SWAP_TO="$BASE/orgtoken" runboot --host testhost --role homelab --yes
+ORGARGS=(--org-token-file "$BASE/orgtoken")
+check "an org token file that was swapped for a symlink during the run is not deleted at exit (it is no longer ours)" bash -c "[ -L '$TF' ] && [ -f '$BASE/orgtoken' ] && printf '%s\n' \"\$1\" | grep -q 'not deleting'" _ "$OUT"
+newhome pv7
+mkdir -p "$H/.config/claude-memsync"; ln -s "$H/not-created" "$H/.config/claude-memsync/denylist-personal.txt"
+runboot --host testhost --role homelab --yes
+check "a denylist that is a dangling symlink is refused and not written through" bash -c "[ $RC -ne 0 ] && [ ! -e '$H/not-created' ]" _ "$OUT"
+newhome pv8
+mkdir -p "$H/.config/claude-memsync"; printf 'this is not json\n' >"$H/.config/claude-memsync/apps.json"; chmod 600 "$H/.config/claude-memsync/apps.json"
+ORGARGS=(--org-app memsync-admin --org-app-id 12345 --org-app-key-cmd "cat $BASE/app.pem")
+runboot --host testhost --role homelab --yes
+ORGARGS=(--org-token-file "$BASE/orgtoken")
+check "an apps.json that cannot be read is a refusal that says so (not 'no entry')" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'cannot read .*apps.json' && ! grep -q Traceback <<<\"\$1\"" _ "$OUT"
+if [ "$(id -u)" -ne 0 ]; then
+  pjhome sd alpha; D="$H/.claudesync.d/project-alpha"
+  mkdir -p "$D" "$H/.local/state/claude-memsync-bootstrap"; : >"$H/.local/state/claude-memsync-bootstrap/testmac.initing.project-alpha"; chmod 000 "$D"
+  pjrun --jobs 2
+  chmod 755 "$D"
+  check "a half-made dir that is mode 000 (its .git cannot be looked at) is not moved: all the guards run, one refuses" bash -c "[ $RC -ne 0 ] && [ -d '$D' ] && ! ls -d '$H/.claudesync.d'/project-alpha.half-made.* >/dev/null 2>&1" _ "$OUT"
+else
+  echo "SKIP    mode-000 half-made dir: chmod 000 does not block root"
+fi
+newhome pv9
+BOOT_PATH="$(minipath sleep)"   # every tool but sleep; then a sleep that refuses fractions
+printf '#!/bin/sh\ncase "$1" in *.*) echo "sleep: invalid time interval" >&2; exit 1 ;; esac\nexec "%s" "$@"\n' "$(type -P sleep)" >"$BOOT_PATH/sleep"; chmod +x "$BOOT_PATH/sleep"
+runboot --host testhost --role homelab --dry-run
+check "a sleep that cannot do fractional seconds is a missing prerequisite (the guard runner polls with sleep 0.05)" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'missing prerequisite: sleep'" _ "$OUT"
+BOOT_PATH=""
 # <<< fast-setup
 
 newhome rtdiff
