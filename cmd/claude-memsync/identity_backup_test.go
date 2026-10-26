@@ -1004,3 +1004,106 @@ func TestIdentityBackup_SameKeyLineFollowsTheFirstCopysFinalStatus(t *testing.T)
 		}
 	})
 }
+
+// A read-back that works once and fails at the end: the item is "NOT READABLE
+// at the end", and a same-key line says so for the first copy.
+func TestIdentityBackup_NotReadableAtTheEndIsShownOnTheSameKeyLine(t *testing.T) {
+	threeClonesTwoSharing(t)
+	d := t.TempDir()
+	rec := filepath.Join(d, "rec")
+	if err := os.Mkdir(rec, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, verify := filepath.Join(d, "store.sh"), filepath.Join(d, "verify.sh")
+	os.WriteFile(store, []byte("#!/bin/sh\ncat > \"$1/item.$2\"\n"), 0o700)
+	// the first read of an item works, the next one (the final pass) fails
+	os.WriteFile(verify, []byte("#!/bin/sh\nif [ -e \"$1/seen.$2\" ]; then exit 1; fi\n: > \"$1/seen.$2\"\ncat \"$1/item.$2\"\n"), 0o700)
+	code, out, errs := runIDBackup("--all", "--store-cmd", store+" "+rec+" {fingerprint}", "--verify-cmd", verify+" "+rec+" {fingerprint}")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1\n%s%s", code, out, errs)
+	}
+	if !strings.Contains(out, "NOT READABLE at the end") {
+		t.Errorf("no NOT READABLE line:\n%s", out)
+	}
+	_, first, l := sameKeyLine(t, out)
+	if !strings.Contains(l, "stored once, but "+first+" ended as NOT READABLE at the end") {
+		t.Errorf("the same-key line must carry the final status, got %q", l)
+	}
+}
+
+func TestIdentityBackup_MoreUsageErrors(t *testing.T) {
+	store, _, _ := fakeStores(t)
+	for name, args := range map[string][]string{
+		"an unknown flag":                {"--no-such-flag"},
+		"an unusable --verify-cmd":       {"--identity", "x", "--store-cmd", store, "--verify-cmd", "'unterminated"},
+		"--all with --repo":              {"--all", "--repo", "x", "--store-cmd", store},
+		"--identity with --all":          {"--identity", "x", "--all", "--store-cmd", store},
+		"an argument that is not a flag": {"--store-cmd", store, "stray"},
+		"an unusable --store-cmd":        {"--store-cmd", "'unterminated"},
+		"no --store-cmd":                 {"--identity", "x"},
+		"--identity with --repo":         {"--identity", "x", "--repo", "r", "--store-cmd", store},
+		"--identity with --config":       {"--identity", "x", "--config", "c", "--store-cmd", store},
+		"--all with --config":            {"--all", "--config", "c", "--store-cmd", store},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if code, out, errs := runIDBackup(args...); code != 2 {
+				t.Errorf("exit %d, want 2\n%s%s", code, out, errs)
+			}
+		})
+	}
+	if code, _, _ := runIDBackup("-h"); code != 0 {
+		t.Errorf("-h exit %d, want 0", code)
+	}
+}
+
+func TestRunIdentity_HelpAndBackupHelp(t *testing.T) {
+	if got := runIdentity(nil); got != 2 {
+		t.Errorf("no subcommand: exit %d, want 2", got)
+	}
+	if got := runIdentity([]string{"help"}); got != 0 {
+		t.Errorf("help: exit %d, want 0", got)
+	}
+	if got := runIdentity([]string{"nope"}); got != 2 {
+		t.Errorf("unknown subcommand: exit %d, want 2", got)
+	}
+	if got := runIdentity([]string{"backup", "-h"}); got != 0 {
+		t.Errorf("backup -h: exit %d, want 0", got)
+	}
+}
+
+func TestReadIdentityFile_RefusesWhatIsNotAnIdentity(t *testing.T) {
+	dir := t.TempDir()
+	big := filepath.Join(dir, "big.txt")
+	if err := os.WriteFile(big, bytes.Repeat([]byte("# filler\n"), maxIdentityBytes/9+10), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readIdentityFile(big); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Errorf("a huge file: %v", err)
+	}
+	junk := filepath.Join(dir, "junk.txt")
+	os.WriteFile(junk, []byte("not an identity\n"), 0o600)
+	if _, err := readIdentityFile(junk); err == nil || !strings.Contains(err.Error(), "does not parse") {
+		t.Errorf("a junk file: %v", err)
+	}
+	if _, _, err := identityRecipientOf([]byte("")); err == nil {
+		t.Error("an empty file parsed as an identity")
+	}
+}
+
+func TestExpandIdentityPathAndErrReason(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if got, want := expandIdentityPath("~/id.txt"), filepath.Join(home, "id.txt"); got != want {
+		t.Errorf("~/id.txt expanded to %q, want %q", got, want)
+	}
+	if got := expandIdentityPath("~"); got != home {
+		t.Errorf("~ expanded to %q, want %q", got, home)
+	}
+	if got := errReason(os.ErrInvalid); got != os.ErrInvalid.Error() {
+		t.Errorf("errReason of a plain error: %q", got)
+	}
+	_, err := os.Open(filepath.Join(home, "missing"))
+	if got := errReason(err); strings.Contains(got, home) {
+		t.Errorf("errReason must not carry the path: %q", got)
+	}
+}
