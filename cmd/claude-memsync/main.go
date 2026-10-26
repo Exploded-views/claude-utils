@@ -43,6 +43,8 @@ func main() {
 		os.Exit(runRecipients(os.Args[2:]))
 	case "join":
 		os.Exit(runJoin(os.Args[2:]))
+	case "identity":
+		os.Exit(runIdentity(os.Args[2:]))
 	case "route":
 		os.Exit(runRoute(os.Args[2:]))
 	case "changes":
@@ -106,6 +108,7 @@ Subcommands:
   unrelate    Remove a relation
   related     List relations; "related sync" fetches read clones, "related context" prints a session index, "related suggest" offers edges from this host's data
   recipients  add | remove | list | accept the age recipients of an encrypted repo
+  identity    identity backup: store this host's age identity through a password-manager command, and verify it
   join        join request|status|list|accept|reject: add a new host as an age recipient of an existing repo
   host        list | check-key: the machines that share these repos (deploy keys, recipients, expiry)
   install     Install as a system service (Windows Service / systemd unit / launchd plist)
