@@ -672,3 +672,50 @@ func TestRekeyPQ_SyncedButUnfinishedStageRunsThePublishTail(t *testing.T) {
 		t.Errorf("the daemon stays blocked: %s", why)
 	}
 }
+
+func dropBackup(t *testing.T, c classicRepo) (int, string) {
+	t.Helper()
+	var o, e bytes.Buffer
+	code := recipientsCmd(&o, &e, []string{"rekey-pq", "--config", c.cfg.Path(), "--drop-backup"})
+	return code, o.String() + e.String()
+}
+
+// S3: the backup is the rollback point; it goes only once the rekey is published.
+func TestRekeyPQ_DropBackupRefusesAnUnpublishedRekey(t *testing.T) {
+	c, _, _ := unpublishedRekey(t)
+	code, out := dropBackup(t, c)
+	if code == 0 {
+		t.Fatalf("drop-backup succeeded on an unpublished rekey\n%s", out)
+	}
+	if _, err := c.repo.Run("rev-parse", "--verify", "--quiet", agecrypt.BackupRef); err != nil {
+		t.Error("the backup ref was dropped")
+	}
+	if _, blocked := agecrypt.RekeyBlocksSync(c.repo); !blocked {
+		t.Error("the daemon was unblocked")
+	}
+	// the same for a legacy record whose push never happened
+	makeLegacyRecord(t, c.cfg.SyncDir)
+	if code, out := dropBackup(t, c); code == 0 {
+		t.Fatalf("drop-backup succeeded on an unpublished legacy rekey\n%s", out)
+	}
+}
+
+func TestRekeyPQ_DropBackupAllowsAPublishedRekeyLegacyOrNot(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		c := newClassicRepo(t)
+		_, newRec := newPQKey(t, "newrec")
+		if code, o, e := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root", "--apply"); code != 0 {
+			t.Fatalf("%s%s", o, e)
+		}
+		commitEmpty(t, c.repo, "auto: daemon sync")
+		if err := c.repo.Push("main"); err != nil {
+			t.Fatal(err)
+		}
+		if legacy {
+			makeLegacyRecord(t, c.cfg.SyncDir)
+		}
+		if code, out := dropBackup(t, c); code != 0 {
+			t.Errorf("legacy=%v: published rekey refused: %s", legacy, out)
+		}
+	}
+}
