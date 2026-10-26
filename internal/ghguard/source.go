@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/MarimerLLC/claude-utils/internal/secretcmd"
 )
 
 // TokenSource yields a GitHub API token. Implementations may mint or fetch a
@@ -38,12 +40,13 @@ func (s FileSource) Token(context.Context) (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
-// CmdSource runs a command (an argv: no shell, 10 s timeout) that prints the
+// CmdSource runs a command (an argv: no shell; 120 s when a person is waiting, 10 s in the daemon) that prints the
 // token on stdout.
 type CmdSource struct{ Argv []string }
 
 func (s CmdSource) Token(context.Context) (string, error) {
-	return RunTokenCmd(s.Argv, TokenCmdTimeout)
+	secretcmd.Announce()
+	return RunTokenCmd(s.Argv, secretcmd.KeyCmdTimeout())
 }
 
 // SelectSource returns the first configured source, in the order app, file,

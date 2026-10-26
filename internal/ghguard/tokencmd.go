@@ -9,8 +9,9 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/secretcmd"
 )
 
-// TokenCmdTimeout bounds one run of a token command.
-const TokenCmdTimeout = 10 * time.Second
+// TokenCmdTimeout is the daemon's bound on one run of a token command; a
+// person at the terminal gets secretcmd.KeyCmdTimeout.
+const TokenCmdTimeout = secretcmd.DefaultTimeout
 
 // RunTokenCmd runs argv directly (no shell) and returns its trimmed stdout as
 // a token. The token is only returned, never stored. Errors are fixed strings:

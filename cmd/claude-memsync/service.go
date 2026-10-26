@@ -16,6 +16,7 @@ import (
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/route"
+	"github.com/MarimerLLC/claude-utils/internal/secretcmd"
 	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
 
@@ -32,6 +33,7 @@ type program struct {
 }
 
 func (p *program) Start(s service.Service) error {
+	secretcmd.SetDaemon(true) // unattended: key commands keep the short timeout
 	if p.routes != "" {
 		set, err := loadRouted(p.routes)
 		if err != nil {

@@ -10,16 +10,63 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/proc"
 )
 
-// DefaultTimeout is how long a secret command may run.
+// DefaultTimeout is how long a secret command may run when nobody can answer a
+// prompt (the daemon's loop) and the fallback of Run and Feed.
 const DefaultTimeout = 10 * time.Second
+
+// InteractiveTimeout is how long a key or token command may run when a person
+// is at the terminal: a password manager may wait for them to approve a prompt.
+const InteractiveTimeout = 120 * time.Second
+
+// TimeoutEnv overrides the key and token command timeout (a Go duration, such
+// as "45s" or "3m"). An unusable or non-positive value is ignored.
+const TimeoutEnv = "CLAUDE_MEMSYNC_SECRET_TIMEOUT"
+
+// WaitMessage is printed once before an interactive key command runs.
+const WaitMessage = "waiting for your password manager (approve the prompt if one appears)…"
+
+// Notice is where WaitMessage goes.
+var Notice io.Writer = os.Stderr
+
+var daemon atomic.Bool
+
+// SetDaemon marks this process as the sync daemon, whose commands run
+// unattended: they keep the short timeout and print nothing.
+func SetDaemon(on bool) { daemon.Store(on) }
+
+// KeyCmdTimeout is the timeout for a key or token command: TimeoutEnv when set,
+// else DefaultTimeout in the daemon and InteractiveTimeout everywhere else.
+func KeyCmdTimeout() time.Duration {
+	if v := os.Getenv(TimeoutEnv); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	if daemon.Load() {
+		return DefaultTimeout
+	}
+	return InteractiveTimeout
+}
+
+// Announce tells the person a password manager may be waiting for them. It is
+// silent in the daemon.
+func Announce() {
+	if !daemon.Load() {
+		fmt.Fprintln(Notice, WaitMessage)
+	}
+}
 
 // MaxOutput bounds what is read from the command.
 const MaxOutput = 64 << 10

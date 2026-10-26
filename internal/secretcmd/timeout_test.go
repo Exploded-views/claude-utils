@@ -44,7 +44,7 @@ func TestKeyCmdTimeoutDaemonStaysShort(t *testing.T) {
 	resetMode(t)
 	t.Setenv(TimeoutEnv, "")
 	SetDaemon(true)
-	if got := KeyCmdTimeout(); got != DefaultTimeout || got != 10*time.Second {
+	if got := KeyCmdTimeout(); got != 10*time.Second {
 		t.Fatalf("daemon KeyCmdTimeout() = %v, want 10s", got)
 	}
 }

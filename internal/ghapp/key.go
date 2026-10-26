@@ -6,12 +6,21 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/secretcmd"
 )
 
-// keyCmdTimeout is how long a key command may run; tests shorten it.
-var keyCmdTimeout = secretcmd.DefaultTimeout
+// keyCmdTimeout, when positive, replaces the timeout of a key command (tests
+// shorten it); otherwise secretcmd.KeyCmdTimeout decides.
+var keyCmdTimeout time.Duration
+
+func effectiveKeyTimeout() time.Duration {
+	if keyCmdTimeout > 0 {
+		return keyCmdTimeout
+	}
+	return secretcmd.KeyCmdTimeout()
+}
 
 const maxKeyFile = 64 << 10
 
@@ -42,10 +51,11 @@ func LoadKeyFile(path string) ([]byte, error) {
 	return b, nil
 }
 
-// LoadKeyCmd runs a command (an argv: no shell, 10 s timeout) that prints the
+// LoadKeyCmd runs a command (an argv: no shell; 120 s when a person is waiting, 10 s in the daemon) that prints the
 // PEM key on stdout.
 func LoadKeyCmd(ctx context.Context, argv []string) ([]byte, error) {
-	b, err := secretcmd.Run(ctx, argv, keyCmdTimeout)
+	secretcmd.Announce()
+	b, err := secretcmd.Run(ctx, argv, effectiveKeyTimeout())
 	if err != nil {
 		return nil, errors.New("app key command: " + err.Error())
 	}
