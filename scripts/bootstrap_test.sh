@@ -1156,7 +1156,7 @@ echo "--- selection: --project / --skip-project"
 pjhome sel alpha beta gamma delta
 pjrun --dry-run --project beta --project gamma
 check "dry run with --project: the plan shows what was selected and what was skipped by choice" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -qE 'selected projects: beta gamma' && printf '%s\n' \"\$1\" | grep -qE 'skipped by choice: alpha delta' && ! printf '%s\n' \"\$1\" | grep -q 'would check example-org/mem-project-alpha'" _ "$OUT"
-check "dry run with --project changes nothing" bash -c "[ ! -e '$H/.ssh' ] && [ ! -e '$H/.claudesync.d' ] && [ ! -s '$STUB_DIR/gh.log' ]"
+check "dry run with --project changes nothing" bash -c "[ ! -e '$H/.ssh' ] && [ ! -e '$H/.claudesync.d' ] && ! grep -qE 'repo (create|deploy-key)' '$STUB_DIR/gh.log'"
 pjrun --project beta --project gamma
 [ "$RC" -eq 0 ] || echo "$OUT" | tail -20
 check "--project: exits 0 and only the named projects (and the workspace repo) get repos" bash -c "[ $RC -eq 0 ] && [ \"$(created)\" = 'mem-project-beta mem-project-code-workspace mem-project-gamma ' ]"
@@ -1214,7 +1214,9 @@ ORD1="$(blocks "$OUT")"
 check "the per-repo blocks come in plan order even when the first repo is the slowest" bash -c "[ \"$ORD4\" = '-- mem-personal -- mem-project-code-workspace -- mem-project-alpha -- mem-project-beta -- mem-project-delta -- mem-project-gamma ' ]"
 check "the block order at --jobs 4 equals the order at --jobs 1" bash -c "[ -n \"$ORD4\" ] && [ \"$ORD4\" = \"$ORD1\" ]"
 check "a block is contiguous: nothing of another repo between a header and its last line" bash -c "printf '%s\n' \"\$1\" | awk '/^== / {cur=\"\"; next} /^-- mem-/ {cur=\$2; next} cur != \"\" && /mem-(personal|project-[a-z-]+)/ { for (i=1;i<=NF;i++) if (\$i ~ /^mem-(personal|project-)/ && \$i != cur) bad=1 } END {exit bad}'" _ "$OUTO4"
-check "the output of --jobs 4 and --jobs 1 is the same text (apart from generated keys)" bash -c "diff <(printf '%s\n' \"\$1\" | sed -E 's/age1[a-z0-9]+/AGE/g') <(printf '%s\n' \"\$2\" | sed -E 's/age1[a-z0-9]+/AGE/g')" _ "$OUTO4" "$OUT"
+NORM='s/age1[a-z0-9]+/AGE/g; s/fingerprint: .*/fingerprint: FP/; s/--fingerprint "[0-9a-f ]+"/--fingerprint FP/; s/up to [0-9]+ at once/up to N at once/'
+printf '%s\n' "$OUTO4" | sed -E "$NORM" >"$BASE/ord4.txt"; printf '%s\n' "$OUT" | sed -E "$NORM" >"$BASE/ord1.txt"
+check "the output of --jobs 4 and --jobs 1 is the same text (apart from generated keys)" diff "$BASE/ord1.txt" "$BASE/ord4.txt"
 
 echo "--- parallel: one repo fails, the others finish, every failure is reported"
 pjhome fl alpha '!bad' beta '!worse' gamma

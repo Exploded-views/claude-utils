@@ -54,6 +54,7 @@ Paste one into a Claude Code session on the new host after replacing every `<pla
 | `ORG` | the GitHub organisation that holds the memory repos (required; there is no default) |
 | `RECOVERY` | your own offline post-quantum recovery PUBLIC key, `age1pq1...` (required; see "Make a recovery key") |
 | `KEEP_OUT_OWNERS`, `KEEP_OUT_TERMS` | optional space-separated lists, see above |
+| `PROJECTS`, `SKIP_PROJECTS` | optional space-separated checkout names (personal-dev prompt only; not both), see `--project` / `--skip-project` below |
 | `ADMIN_APP_ID` | numeric App ID of `memsync-admin` |
 | `ADMIN_KEY_CMD` | command that prints the `memsync-admin` private key (reads the owner's password manager at run time) |
 | `CHECK_APP_ID` | numeric App ID of `memsync-check` |
@@ -133,6 +134,10 @@ INPUTS (fill these in; nothing else changes)
     my personal GitHub account; checkouts it owns get a mem-project repo
 - WORKSPACES = ""
     (optional; leave empty for none) space-separated folders (no spaces in the paths) that hold code checkouts; each is pinned to the workspace repo
+- PROJECTS = ""
+    (optional; leave empty for none) space-separated checkout names (the repo name, as the plan shows it) that get a mem-project repo; empty means every own checkout. Not together with SKIP_PROJECTS
+- SKIP_PROJECTS = ""
+    (optional; leave empty for none) space-separated checkout names that get no mem-project repo. Not together with PROJECTS
 - KEEP_OUT_OWNERS = ""
     (optional; leave empty for none) space-separated GitHub owners to keep out
 - KEEP_OUT_TERMS = ""
@@ -160,6 +165,8 @@ boot() {
   for x in $KEEP_OUT_OWNERS; do a+=(--keep-out-owner "$x"); done
   for x in $KEEP_OUT_TERMS; do a+=(--keep-out-term "$x"); done
   for x in $WORKSPACES; do a+=(--workspace "$x"); done
+  for x in $PROJECTS; do a+=(--project "$x"); done
+  for x in $SKIP_PROJECTS; do a+=(--skip-project "$x"); done
   bash "$SRC/scripts/bootstrap.sh" --host "$HOST_LABEL" --role personal-dev --sha "$COMMIT" \
     --org "$ORG" --own-owner "$GITHUB_USER" --recovery-recipient "$RECOVERY" ${a[@]+"${a[@]}"} \
     --org-app memsync-admin --org-app-id "$ADMIN_APP_ID" --org-app-key-cmd "$ADMIN_KEY_CMD" \
@@ -362,6 +369,7 @@ scripts/bootstrap.sh --host <label> --role <role> --org <org> --recovery-recipie
                      [--sha <commit>] [--prebuilt-dir <dir>]
                      [--workspace <dir>]... [--own-owner <owner>]...
                      [--keep-out-owner <owner>]... [--keep-out-term <term>]...
+                     [--project <name>]... | [--skip-project <name>]...   [--jobs <1-8>]
                      [--repo-url <url>] [--allow-org <org>]...
                      --org-token-file <path> [--delete-org-token-file]
                        | --org-token-cmd "<argv>" | --org-app <name>
@@ -385,6 +393,10 @@ Roles (table at the top of the script):
 | `homelab` | `mem-personal`, `mem-infra-homelab` | pinned to infra-homelab |
 | `personal-dev` | `mem-personal`, `mem-project-code-workspace`, one `mem-project-<name>` per own checkout | pinned to personal |
 
+`--project <name>` (repeatable) limits the project repos to the named checkouts, `--skip-project <name>` (repeatable) leaves the named ones out; the two are mutually exclusive (exit 2). A name is the checkout's repo name as the plan prints it in `own projects found:` (case-insensitive). An unknown name is an error that lists the known ones. The plan shows `selected projects:` and `skipped by choice:`, and a project that is skipped gets no repo, key, sync dir or route (default deny applies). With neither flag every own checkout is used, as before. Both flags are for `--role personal-dev`; the paste prompt takes them as the optional lists `PROJECTS` and `SKIP_PROJECTS`. A re-run with a different selection regenerates `routes.json` (the old one is kept as `.bak`); repos made earlier are left alone.
+
+`--jobs <N>` (1 to 8, default 4) is how many repos are handled at once. For each repo the script checks or creates it (private), makes and registers its deploy key, tests it with `git ls-remote`, and runs `init`; those per-repo steps run in parallel, up to N at a time. Everything shared stays serial and happens before the jobs start: `~/.ssh/config`, `known_hosts`, `routes.json` and the denylists, the `apps.json` edits, the confirmation prompt, and the summary. Each repo's output is buffered and printed as one block headed `-- <repo>`, in plan order, whatever finishes first. The first repo of the plan runs alone before the others start, because the first `init` of a host generates the shared age identity. If a repo fails, nothing new is started, the jobs in flight finish, every failure is reported, and the run exits 1 (no service step); run the same command again once the cause is fixed: finished repos are skipped by their state marks, as on any re-run. `--jobs 1` is the old one-at-a-time behaviour. It uses background jobs and `wait <pid>` only, so stock macOS bash 3.2 is enough.
+
 Unknown roles are refused. No `mem-client-*` or `mem-orch-*` repo can be created or joined by this script.
 
 `personal-dev` also takes `--workspace <dir>` (repeatable; prompted for on a terminal). Each workspace folder that is not itself a git repo is pinned to `mem-project-code-workspace`. Git checkouts directly under a workspace and under `~` (depth 1 to 2) are discovered; those whose origin owner is an own owner (the `--org` org, plus each `--own-owner`; there are no built-in defaults, so pass `--own-owner <github-user>` for your personal GitHub account) get a `mem-project-<repo>` repo and a remote route. Other owners are listed as third-party and get nothing. Owners in `--keep-out-owner` (repeatable, no default, case-insensitive) are refused, as is any remote whose owner/repo contains a `--keep-out-term`. With neither flag the script prints the note `keep-out lists: none (routing alone decides what syncs)` and continues. Folders that are neither pinned nor matched are denied.
@@ -397,7 +409,7 @@ Unknown roles are refused. No `mem-client-*` or `mem-orch-*` repo can be created
 1b. Org scope (checked separately for the ambient gh login and for the org token; for `--org-app` the token's reach is the owners of `installation/repositories`): if the gh login can see orgs outside the allow list (the `--org` org alone, with no built-in extras; `--allow-org` adds more), a loud WARNING names them, calls out keep-out owners, and repeats in the plan and the summary. It proceeds, and only ever touches repos in `--org`.
 2. Plan: lists the repos to create, keys to add and routes. You type `yes`, or pass `--yes`.
 3. Clone the pinned commit (from `--repo-url`, default `https://github.com/Exploded-views/claude-utils`) to `~/.local/src/claude-utils-<sha>`, verify `HEAD`, build `claude-memsync` and `claude-memmerge` into `~/.local/lib/claude-memsync/<sha>/`, symlink into `~/.local/bin`. With `--prebuilt-dir`: install the given binaries instead (see Usage); no clone, no build.
-4. Create missing repos with `gh repo create --private`, then require `private: true` and `visibility: private` from the API. Non `mem-*` names are refused.
+4. (Per repo, in parallel, see `--jobs`.) Create missing repos with `gh repo create --private`, then require `private: true` and `visibility: private` from the API. Non `mem-*` names are refused.
 5. Deploy keys: `~/.ssh/<repo>_ed25519` (no passphrase, 0600), a `Host gh-<repo>` alias on ssh.github.com:443, GitHub's host key only if its fingerprint is `SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU`, `gh repo deploy-key add ... -w -t <host>`, then `git ls-remote`. If the org has deploy keys disabled the script says how to enable them and stops.
 6. `routes.json` (0600, default deny, `foreignWriters` for the old memsync) and a `denylist-<kind>.txt` per kind containing each `--keep-out-term`, one per line (terms only, never owners).
 7. `claude-memsync init` for each repo (post-quantum age encryption with the `--recovery-recipient` key, archive-deletes, private-only, `--token-cmd "gh auth token"`). A repo that already has content leaves this host without a key, so the script runs `join request` and prints the one-liner a member host runs: `claude-memsync join accept <host> --repo <key> --fingerprint "<8 groups of 4 hex>"`; `claude-memsync join status --repo <key>` shows pending or accepted. The fingerprint is parsed from the `fingerprint: xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx` line `join request` prints (128 bits, grouped); a missing or differently shaped line stops the script.

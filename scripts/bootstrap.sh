@@ -5,6 +5,9 @@
 #                [--sha <commit>] [--prebuilt-dir <dir>]
 #                [--workspace <dir>]... [--own-owner <owner>]...
 #                [--keep-out-owner <owner>]... [--keep-out-term <term>]...   (optional)
+#                [--project <name>]... | [--skip-project <name>]...   (optional, personal-dev: which
+#                  checkouts get a mem-project repo, by repo name as the plan shows it; not both)
+#                [--jobs <1-8>]   (per-repo steps at once; default 4)
 #                [--repo-url <url>]
 #                --org-token-file <path> [--delete-org-token-file]
 #                  | --org-token-cmd "<argv>" | --org-app <name>
@@ -47,13 +50,15 @@ GITHUB_FP="SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU"
 UTILS_URL="${CLAUDE_UTILS_URL:-https://github.com/Exploded-views/claude-utils}"
 
 HOST="" ROLE="" SHA="" SHA_GIVEN=0 PREBUILT_DIR="" PB_VER="" ORG="" AGE_RECOVERY="" DRY_RUN=0 YES=0
+PROJECTS_SEL=() SKIP_PROJECTS=() JOBS=4
 WORKSPACES=() OWN_OWNERS=() KEEP_OUT_OWNERS=() KEEP_OUT_TERMS=() ALLOW_ORGS=() ORG_TOKEN_FILE="" ORG_TOKEN_CMD="" ORG_APP=""
 ORG_APP_ID="" ORG_APP_KEY_CMD="" CHECK_APP="" CHECK_APP_ID="" CHECK_KEY_FILE="" APP_API_BASE="${BOOTSTRAP_APP_API_BASE:-}" ADMIN_WRITTEN=0
 
 R_KEYS=() R_NAMES=() R_KINDS=()   # planned repos (parallel arrays)
 RULE_LINES=""                     # "pin|folder|key" and "remote|host/owner/repo|key"
 NOT_SYNCED=""                     # human-readable list
-KEYS_CREATED=() PENDING_JOINS=() NEXT_STEPS=()
+KEYS_CREATED=() PENDING_JOINS=() NEXT_STEPS=() CHOICE_NOTE=""
+FQ=() FQP=()                      # repo jobs in flight: plan index and pid, oldest first
 
 BIN="$HOME/.local/bin"
 XDG_CFG="${XDG_CONFIG_HOME:-$HOME/.config}"   # where claude-memsync keeps its config: $XDG_CONFIG_HOME, else ~/.config, on every OS
@@ -256,8 +261,9 @@ token_file_remove() {
   fi
 }
 on_exit() {
-  local rc=$?
+  local rc=$? p
   trap - EXIT
+  for p in ${FQP[@]+"${FQP[@]}"}; do kill "$p" 2>/dev/null || true; done   # repo jobs still running
   if declare -F admin_entry_remove >/dev/null; then admin_entry_remove; fi
   token_file_remove
   exit "$rc"
@@ -324,6 +330,9 @@ while [ $# -gt 0 ]; do
     --own-owner)  [ $# -ge 2 ] || usage; OWN_OWNERS+=("$(lower "$2")"); shift 2 ;;
     --keep-out-owner | --deny-owner) [ $# -ge 2 ] || usage; KEEP_OUT_OWNERS+=("$(lower "$2")"); shift 2 ;;
     --keep-out-term | --deny-term) [ $# -ge 2 ] || usage; KEEP_OUT_TERMS+=("$(lower "$2")"); shift 2 ;;
+    --project)    [ $# -ge 2 ] || usage; PROJECTS_SEL+=("$(lower "$2")"); shift 2 ;;
+    --skip-project) [ $# -ge 2 ] || usage; SKIP_PROJECTS+=("$(lower "$2")"); shift 2 ;;
+    --jobs)       [ $# -ge 2 ] || usage; JOBS="$2"; shift 2 ;;
     --repo-url)   [ $# -ge 2 ] || usage; UTILS_URL="$2"; shift 2 ;;
     --org-token-file) [ $# -ge 2 ] || usage; ORG_TOKEN_FILE="$2"; shift 2 ;;
     --org-token-cmd)  [ $# -ge 2 ] || usage; ORG_TOKEN_CMD="$2"; shift 2 ;;
@@ -343,6 +352,13 @@ while [ $# -gt 0 ]; do
     *)            udie "unknown argument: $1" ;;
   esac
 done
+if [ ${#PROJECTS_SEL[@]} -gt 0 ] && [ ${#SKIP_PROJECTS[@]} -gt 0 ]; then
+  udie "--project and --skip-project are mutually exclusive: name the projects to keep, or the ones to leave out"
+fi
+case "$JOBS" in
+  [1-8]) ;;
+  *) udie "--jobs must be an integer from 1 to 8 (got '$JOBS')" ;;
+esac
 [ -z "$PREBUILT_DIR" ] || BUILD_FROM_SOURCE=0   # installing given binaries: no clone, no build, no Go
 check_prereqs
 [ -n "$HOST" ] || udie "--host is required"
@@ -430,6 +446,9 @@ case "$ROLE" in
   personal-dev) ROLE_REPOS="$ROLE_personal_dev_REPOS"; HOME_KEY="$ROLE_personal_dev_HOME" ;;
   *)            udie "unknown role '$ROLE' (known: homelab, personal-dev). There is no role for client or orchestrator repos." ;;
 esac
+if [ "$ROLE" != personal-dev ] && [ $((${#PROJECTS_SEL[@]} + ${#SKIP_PROJECTS[@]})) -gt 0 ]; then
+  udie "--project / --skip-project choose among discovered checkouts, which only --role personal-dev has"
+fi
 for spec in $ROLE_REPOS; do
   IFS=: read -r k kind name <<<"$spec"
   add_repo "$k" "$kind" "$name"
@@ -695,7 +714,8 @@ in_list() { # needle items...
 
 discover_projects() {
   step "Plan: workspaces and project discovery"
-  local w ws="" d p remote owner repo rest key name
+  local w ws="" d p remote owner repo rest key name x
+  local c_repo=() c_name=() c_key=() c_rule=() i sel skipped="" chose=0
   if [ ${#WORKSPACES[@]} -eq 0 ] && [ -t 0 ]; then
     say "  Workspace parent folders (not git repos), one per line, empty line to finish:"
     while printf '  workspace> ' && IFS= read -r w && [ -n "$w" ]; do WORKSPACES+=("$w"); done
@@ -745,12 +765,35 @@ $ws" seen="" checkouts
 "; continue
     fi
     in_list "$key" ${R_KEYS[@]+"${R_KEYS[@]}"} && continue
-    add_repo "$key" project "$name"
-    RULE_LINES="${RULE_LINES}remote|github.com/$owner/$repo|$key
-"
+    in_list "$repo" ${c_repo[@]+"${c_repo[@]}"} && continue
+    c_repo+=("$repo"); c_name+=("$name"); c_key+=("$key"); c_rule+=("remote|github.com/$owner/$repo|$key")
     seen="$seen $repo"
   done <<<"$checkouts"
   say "  own projects found:${seen:- none}"
+  # --project / --skip-project: every name must be one of the checkouts found.
+  for x in ${PROJECTS_SEL[@]+"${PROJECTS_SEL[@]}"} ${SKIP_PROJECTS[@]+"${SKIP_PROJECTS[@]}"}; do
+    chose=1
+    in_list "$x" ${c_repo[@]+"${c_repo[@]}"} || die "unknown project '$x' (known:${seen:- none})"
+  done
+  seen=""
+  for i in ${c_repo[@]+"${!c_repo[@]}"}; do
+    sel=1
+    if [ ${#PROJECTS_SEL[@]} -gt 0 ]; then in_list "${c_repo[$i]}" "${PROJECTS_SEL[@]}" || sel=0; fi
+    if [ ${#SKIP_PROJECTS[@]} -gt 0 ]; then ! in_list "${c_repo[$i]}" "${SKIP_PROJECTS[@]}" || sel=0; fi
+    if [ "$sel" -eq 1 ]; then
+      add_repo "${c_key[$i]}" project "${c_name[$i]}"
+      RULE_LINES="${RULE_LINES}${c_rule[$i]}
+"
+      seen="$seen ${c_repo[$i]}"
+    else
+      skipped="$skipped ${c_repo[$i]}"
+    fi
+  done
+  if [ "$chose" -eq 1 ]; then
+    say "  selected projects:${seen:- none}"
+    say "  skipped by choice:${skipped:- none}"
+    CHOICE_NOTE="projects: ${#R_KEYS[@]} repos planned; skipped by choice:${skipped:- none}"
+  fi
   if [ -n "$NOT_SYNCED" ]; then say "  not synced:"; printf '%s' "$NOT_SYNCED"; fi
   say "  related suggestions: not built yet"
 }
@@ -768,6 +811,7 @@ confirm_plan() {
     [ -n "$t" ] || continue
     if [ "$t" = pin ]; then say "    folder $a -> $b"; else say "    remote $a -> $b"; fi
   done
+  [ -z "$CHOICE_NOTE" ] || say "  $CHOICE_NOTE"
   say "  encryption: age on every repo, recovery recipient $AGE_RECOVERY"
   if [ ${#REACH_ORGS[@]} -gt 0 ] && [ ${#KEEP_OUT_OWNERS[@]} -eq 0 ]; then
     say "  suggestion: these orgs are reachable and none is kept out; to keep any out, set KEEP_OUT_OWNERS=\"${REACH_ORGS[*]}\" (or pass --keep-out-owner <org>)"
@@ -866,27 +910,7 @@ sys.exit(0 if d.get("private") is True and d.get("visibility") == "private" else
     || die "repo $ORG/$1 is NOT private; refusing to continue"
 }
 
-step_repos() {
-  step "c. Repos in $ORG (must be private)"
-  local i name out
-  for i in "${!R_NAMES[@]}"; do
-    name="${R_NAMES[$i]}"
-    valid_name "$name" || die "refusing repo name $name"
-    if [ "$DRY_RUN" -eq 1 ]; then
-      say "  would check $ORG/$name, create it with --private if missing, and verify private=true"
-      continue
-    fi
-    if out="$(org_gh api "repos/$ORG/$name" 2>&1)"; then
-      say "  $name exists"
-    elif printf '%s' "$out" | grep -qiE 'not found|404'; then
-      run org_gh repo create "$ORG/$name" --private
-    else
-      die "cannot look up $ORG/$name: $out"
-    fi
-    check_private "$name"
-    say "  $name is private"
-  done
-}
+# (the per-repo steps c, d and f run together, in repo_job below)
 
 # ---------------------------------------------------------------------------
 # d. Deploy keys
@@ -909,24 +933,17 @@ add_known_host() { # label hostpattern scan-args...
   say "  added $label to known_hosts (fingerprint verified)"
 }
 
-step_keys() {
-  step "d. Deploy keys"
-  local i name key pub out
+# Serial, before any job starts: ~/.ssh, known_hosts and ~/.ssh/config are
+# shared files, so only this one process writes them.
+step_ssh() {
+  step "d. Host keys and ssh aliases"
+  local i name key
   run mkdir -p "$HOME/.ssh"
   run chmod 700 "$HOME/.ssh"
   add_known_host "github.com:22" "github.com" github.com
   add_known_host "ssh.github.com:443" "[ssh.github.com]:443" -p 443 ssh.github.com
   for i in "${!R_NAMES[@]}"; do
-    name="${R_NAMES[$i]}"; key="$HOME/.ssh/${name}_ed25519"; pub="$key.pub"
-    if done_p "keygen.$name"; then
-      say "  key for $name already generated"
-    else
-      [ ! -e "$key" ] || die "$key already exists and was not made by this bootstrap; refusing to overwrite"
-      run ssh-keygen -q -t ed25519 -N '' -C "$HOST-$name" -f "$key"
-      [ "$DRY_RUN" -eq 1 ] || chmod 600 "$key"
-      mark "keygen.$name"
-      KEYS_CREATED+=("${name}_ed25519")
-    fi
+    name="${R_NAMES[$i]}"; key="$HOME/.ssh/${name}_ed25519"
     if ! grep -qE "^Host gh-$name\$" "$HOME/.ssh/config" 2>/dev/null; then
       say "  adding ssh alias gh-$name (ssh.github.com:443)"
       if [ "$DRY_RUN" -eq 0 ]; then
@@ -935,27 +952,6 @@ step_keys() {
           printf '\nHost gh-%s\n  HostName ssh.github.com\n  Port 443\n  User git\n  IdentityFile %s\n  IdentitiesOnly yes\n' "$name" "$key"
         } >>"$HOME/.ssh/config"
       fi
-    fi
-    if done_p "deploykey.$name"; then
-      say "  deploy key for $name already added"
-    else
-      printf '  $ gh repo deploy-key add %s -R %s/%s -w -t %s\n' "$pub" "$ORG" "$name" "$HOST"
-      if [ "$DRY_RUN" -eq 0 ]; then
-        if ! out="$(org_gh repo deploy-key add "$pub" -R "$ORG/$name" -w -t "$HOST" 2>&1)"; then
-          if printf '%s' "$out" | grep -qiE '422|forbidden|disabled|not allowed'; then
-            die "deploy keys look disabled for $ORG. One-time org setting: Organization settings > Repository > (Member privileges / Deploy keys) allow deploy keys on repositories (API field deploy_keys_enabled_for_repositories). Then re-run; this script resumes."
-          fi
-          die "gh repo deploy-key add failed for $name: $out"
-        fi
-        mark "deploykey.$name"
-      fi
-    fi
-    if [ "$DRY_RUN" -eq 0 ]; then
-      git ls-remote "git@gh-$name:$ORG/$name.git" >/dev/null 2>&1 \
-        || die "git ls-remote over gh-$name failed; is the deploy key accepted?"
-      say "  $name reachable over its deploy key"
-    else
-      say "  would verify with: git ls-remote git@gh-$name:$ORG/$name.git"
     fi
   done
 }
@@ -1084,37 +1080,127 @@ step_routes() {
 # ---------------------------------------------------------------------------
 # f. init each repo
 # ---------------------------------------------------------------------------
-step_init() {
-  step "f. Init each repo (age-encrypted, private-only)"
-  local i k name kind url content out fp
-  for i in "${!R_KEYS[@]}"; do
-    k="${R_KEYS[$i]}"; name="${R_NAMES[$i]}"; kind="${R_KINDS[$i]}"
-    url="git@gh-$name:$ORG/$name.git"
-    content=0
-    if ! done_p "init.$k"; then
-      [ "$DRY_RUN" -eq 1 ] || { git ls-remote "$url" 2>/dev/null | grep -q . && content=1; }
-      run "$BIN/claude-memsync" init --remote "$url" --sync-dir "$SYNC_ROOT/$k" --encrypt \
-        --host-label "$HOST" --recovery-recipient "$AGE_RECOVERY" --archive-deletes --private-only \
-        "${ORG_TOKEN_ARGS[@]}" --denylist "$CFG/denylist-$kind.txt"
-      mark "init.$k"
-      [ "$content" -eq 1 ] && mark "needjoin.$k"
+# repo_job <index>: everything for one repo that touches only that repo: check
+# or create it (private), its deploy key and test, and its init. It runs in a
+# subshell with its output in files; what the parent needs (a key made, a join
+# to accept) goes to $JD/<index>.key and .join. It touches no shared file.
+repo_job() {
+  local i="$1" k name kind url content=0 out fp key pub
+  k="${R_KEYS[$i]}"; name="${R_NAMES[$i]}"; kind="${R_KINDS[$i]}"
+  url="git@gh-$name:$ORG/$name.git"
+  key="$HOME/.ssh/${name}_ed25519"; pub="$key.pub"
+  valid_name "$name" || die "refusing repo name $name"
+  # c. the repo, private
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  would check $ORG/$name, create it with --private if missing, and verify private=true"
+  else
+    if out="$(org_gh api "repos/$ORG/$name" 2>&1)"; then
+      say "  $name exists"
+    elif printf '%s' "$out" | grep -qiE 'not found|404'; then
+      run org_gh repo create "$ORG/$name" --private
     else
-      say "  $k already initialised"
+      die "cannot look up $ORG/$name: $out"
     fi
-    if done_p "needjoin.$k" && ! done_p "join.$k"; then
-      say "  $name already had content: this host has no decryption key there yet. Requesting to join."
-      if [ "$DRY_RUN" -eq 1 ]; then
-        say "  would run: claude-memsync join request --repo $k --label $HOST"
-        continue
+    check_private "$name"
+    say "  $name is private"
+  fi
+  # d. the deploy key
+  if done_p "keygen.$name"; then
+    say "  key for $name already generated"
+  else
+    [ ! -e "$key" ] || die "$key already exists and was not made by this bootstrap; refusing to overwrite"
+    run ssh-keygen -q -t ed25519 -N '' -C "$HOST-$name" -f "$key"
+    [ "$DRY_RUN" -eq 1 ] || chmod 600 "$key"
+    mark "keygen.$name"
+    printf '%s\n' "${name}_ed25519" >>"$JD/$i.key"
+  fi
+  if done_p "deploykey.$name"; then
+    say "  deploy key for $name already added"
+  else
+    printf '  $ gh repo deploy-key add %s -R %s/%s -w -t %s\n' "$pub" "$ORG" "$name" "$HOST"
+    if [ "$DRY_RUN" -eq 0 ]; then
+      if ! out="$(org_gh repo deploy-key add "$pub" -R "$ORG/$name" -w -t "$HOST" 2>&1)"; then
+        if printf '%s' "$out" | grep -qiE '422|forbidden|disabled|not allowed'; then
+          die "deploy keys look disabled for $ORG. One-time org setting: Organization settings > Repository > (Member privileges / Deploy keys) allow deploy keys on repositories (API field deploy_keys_enabled_for_repositories). Then re-run; this script resumes."
+        fi
+        die "gh repo deploy-key add failed for $name: $out"
       fi
-      out="$("$BIN/claude-memsync" join request --repo "$k" --label "$HOST" 2>&1)" || die "join request failed: $out"
-      printf '%s\n' "$out"
-      fp="$(printf '%s\n' "$out" | grep -E '^fingerprint: ([0-9a-f]{4} ){7}[0-9a-f]{4}$' | head -n1 | sed 's/^fingerprint: //' || true)"
-      [ -n "$fp" ] || die "join request printed no 'fingerprint: <8 groups of 4 hex>' line; refusing to continue"
-      mark "join.$k"
-      PENDING_JOINS+=("on a member host: claude-memsync join accept $HOST --repo $k --fingerprint \"$fp\"   (check here: claude-memsync join status --repo $k)")
+      mark "deploykey.$name"
     fi
+  fi
+  if [ "$DRY_RUN" -eq 0 ]; then
+    git ls-remote "git@gh-$name:$ORG/$name.git" >/dev/null 2>&1 \
+      || die "git ls-remote over gh-$name failed; is the deploy key accepted?"
+    say "  $name reachable over its deploy key"
+  else
+    say "  would verify with: git ls-remote git@gh-$name:$ORG/$name.git"
+  fi
+  # f. init
+  if ! done_p "init.$k"; then
+    [ "$DRY_RUN" -eq 1 ] || { git ls-remote "$url" 2>/dev/null | grep -q . && content=1; }
+    run "$BIN/claude-memsync" init --remote "$url" --sync-dir "$SYNC_ROOT/$k" --encrypt \
+      --host-label "$HOST" --recovery-recipient "$AGE_RECOVERY" --archive-deletes --private-only \
+      "${ORG_TOKEN_ARGS[@]}" --denylist "$CFG/denylist-$kind.txt"
+    mark "init.$k"
+    [ "$content" -eq 1 ] && mark "needjoin.$k"
+  else
+    say "  $k already initialised"
+  fi
+  if done_p "needjoin.$k" && ! done_p "join.$k"; then
+    say "  $name already had content: this host has no decryption key there yet. Requesting to join."
+    if [ "$DRY_RUN" -eq 1 ]; then
+      say "  would run: claude-memsync join request --repo $k --label $HOST"
+      return 0
+    fi
+    out="$("$BIN/claude-memsync" join request --repo "$k" --label "$HOST" 2>&1)" || die "join request failed: $out"
+    printf '%s\n' "$out"
+    fp="$(printf '%s\n' "$out" | grep -E '^fingerprint: ([0-9a-f]{4} ){7}[0-9a-f]{4}$' | head -n1 | sed 's/^fingerprint: //' || true)"
+    [ -n "$fp" ] || die "join request printed no 'fingerprint: <8 groups of 4 hex>' line; refusing to continue"
+    mark "join.$k"
+    printf '%s\n' "on a member host: claude-memsync join accept $HOST --repo $k --fingerprint \"$fp\"   (check here: claude-memsync join status --repo $k)" >>"$JD/$i.join"
+  fi
+}
+
+# repo_reap: wait for the oldest job in flight, print its block (header, then
+# its stdout, then its stderr), and take over what it reported.
+JD="" FAILED_REPOS=""
+repo_reap() {
+  local i="${FQ[0]}" pid="${FQP[0]}" rc=0 l f
+  if [ ${#FQ[@]} -gt 1 ]; then FQ=("${FQ[@]:1}"); FQP=("${FQP[@]:1}"); else FQ=(); FQP=(); fi
+  wait "$pid" || rc=$?
+  printf -- '-- %s\n' "${R_NAMES[$i]}"
+  cat "${JD:?}/$i.out"
+  cat "${JD:?}/$i.err" >&2
+  if [ "$rc" -ne 0 ]; then FAILED_REPOS="${FAILED_REPOS:+$FAILED_REPOS }${R_NAMES[$i]}"; fi
+  if [ -s "${JD:?}/$i.key" ]; then while IFS= read -r l; do KEYS_CREATED+=("$l"); done <"${JD:?}/$i.key"; fi
+  if [ -s "${JD:?}/$i.join" ]; then while IFS= read -r l; do PENDING_JOINS+=("$l"); done <"${JD:?}/$i.join"; fi
+  for f in out err key join; do rm -f "${JD:?}/${i:?}.$f"; done
+}
+
+# The per-repo steps with at most $JOBS at a time (bash 3.2: background jobs
+# and wait <pid>, no wait -n). Jobs start in plan order and are reaped in plan
+# order, so the output is always the plan's order. The first repo runs alone:
+# the first init of a host generates the shared age identity, and two inits
+# must not race to make it. After a failure nothing new starts; the jobs in
+# flight finish, every failure is reported, and the run exits 1.
+step_repos_keys_init() {
+  step "f. Per repo: private repo, deploy key, init (up to $JOBS at once; output in plan order)"
+  local i n=${#R_NAMES[@]} not_started=""
+  JD="$(mktemp -d)"
+  for ((i = 0; i < n; i++)); do
+    while [ ${#FQ[@]} -ge "$JOBS" ] || { [ "$i" -eq 1 ] && [ ${#FQ[@]} -gt 0 ]; }; do repo_reap; done
+    if [ -n "$FAILED_REPOS" ]; then not_started="${not_started:+$not_started }${R_NAMES[$i]}"; continue; fi
+    ( repo_job "$i" ) >"$JD/$i.out" 2>"$JD/$i.err" &
+    FQ+=("$i"); FQP+=("$!")
   done
+  while [ ${#FQ[@]} -gt 0 ]; do repo_reap; done
+  rmdir "$JD" 2>/dev/null || true
+  if [ -n "$FAILED_REPOS" ]; then
+    [ -z "$not_started" ] || printf 'not attempted after the failure: %s\n' "$not_started" >&2
+    # shellcheck disable=SC2086
+    set -- $FAILED_REPOS
+    die "$# repo(s) failed: $FAILED_REPOS"
+  fi
 }
 
 # Token split: the bootstrap uses the org token (init, repo create, doctor).
@@ -1251,9 +1337,8 @@ confirm_plan
 step_build
 check_app_scope
 step_routes
-step_repos
-step_keys
-step_init
+step_ssh
+step_repos_keys_init
 step_token_split
 step_home
 step_plugin
