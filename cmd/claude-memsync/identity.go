@@ -201,6 +201,9 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 	fs.StringVar(&sel.Config, "config", "", "back up the identity of the repo of this config.json")
 	fs.StringVar(&sel.Routes, "routes", "", "routes file")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 	usage := func(msg string) int {

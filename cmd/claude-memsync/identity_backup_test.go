@@ -368,7 +368,7 @@ func TestIdentityBackup_HelpExitsZeroAndPrintsUsage(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("-h exit %d, want 0", code)
 	}
-	if !strings.Contains(out+errs, "--store-cmd") {
-		t.Errorf("-h does not describe --store-cmd: %q %q", out, errs)
+	if !strings.Contains(out+errs, "-store-cmd") {
+		t.Errorf("-h does not describe -store-cmd: %q %q", out, errs)
 	}
 }
