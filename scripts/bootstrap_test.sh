@@ -302,6 +302,21 @@ quick_exit() { # after the new-flag sections, when BT_QUICK is set
   echo; echo "passed=$PASS failed=$FAIL pending=$PENDING (BT_QUICK: stopped early)"; [ "$FAIL" -eq 0 ]; exit $?
 }
 
+# ============================ recovery key validation ==========================
+echo "--- valid_pq_recipient: no regex repeat count (BSD grep refuses anything above 255)"
+eval "$(sed -n '/^valid_pq_recipient() {/,/^}/p' "$ROOT/scripts/bootstrap.sh")"
+invalid() { ! valid_pq_recipient "$1"; }
+check "the key made by the real binary is real length (over 1,900 characters)" [ "${#PQREC}" -gt 1900 ]
+check "a real-length post-quantum key is accepted" valid_pq_recipient "$PQREC"
+check "a wrong prefix is refused" invalid "age1xx${PQREC#age1pq1}"
+check "a classic age1 key is refused" invalid "age1$(printf 'q%.0s' $(seq 1 58))"
+check "a character outside the bech32 set is refused (uppercase)" invalid "${PQREC%?}Q"
+check "a character outside the bech32 set is refused (the digit 1, in the middle)" invalid "${PQREC:0:900}1${PQREC:901}"
+check "a short key is refused" invalid "${PQREC:0:500}"
+check "the bare prefix is refused" invalid "age1pq1"
+check "an empty value is refused" invalid ""
+check "no script under scripts/ has a regex repeat bound above 255 or a GNU-only flag" bash "$ROOT/scripts/lint-portability.sh"
+
 # ============================ prerequisites ====================================
 echo "--- prerequisites: one line per missing tool, exit 1, nothing changed (also in --dry-run)"
 newhome pq0

@@ -44,7 +44,17 @@ check "the binary reports the release version" bash -c "[ \"\$('$D/claude-memsyn
 # Past argument parsing: fake required flags, throwaway HOME, stub gh that is not logged in.
 printf '#!/bin/sh\nexit 1\n' >"$W/stubs/gh"; chmod +x "$W/stubs/gh"
 printf 'fake-token\n' >"$W/tok"; chmod 600 "$W/tok"
-REC="age1pq1$(printf 'q%.0s' $(seq 1 1100))"
+# A REAL-length post-quantum recovery key (about 1,960 characters), made by the
+# extracted binary itself: a stub key would not catch a validator that stops at
+# a regex repeat count of 255, as macOS's grep does.
+mkdir -p "$W/keyhome" "$W/keyrepo.git"
+printf '[init]\n\tdefaultBranch = main\n' >"$W/keyhome/.gitconfig"
+git init -q --bare -b main "$W/keyrepo.git"
+HOME="$W/keyhome" GIT_CONFIG_NOSYSTEM=1 "$D/claude-memsync" init --remote "$W/keyrepo.git" --sync-dir "$W/keyhome/sync" \
+  --claude-dir "$W/keyhome/claude" --encrypt --identity "$W/keyhome/id.txt" >/dev/null 2>&1 || bad "the extracted binary makes a post-quantum key"
+REC="$(sed -n 's/^# public key: //p' "$W/keyhome/id.txt")"
+check "the recovery key is a real-length age1pq1 key (${#REC} characters)" bash -c "case '$REC' in age1pq1*) [ ${#REC} -gt 1900 ] ;; *) false ;; esac"
+
 set +e
 OUT="$(HOME="$W/home" PATH="$W/stubs:$PATH" "$BOOT_BASH" "$D/scripts/bootstrap.sh" --prebuilt-dir "$D" --dry-run \
   --host ci --role homelab --org example-org --recovery-recipient "$REC" --org-token-file "$W/tok" </dev/null 2>&1)"
