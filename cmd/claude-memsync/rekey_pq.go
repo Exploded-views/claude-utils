@@ -145,6 +145,11 @@ func rekeyPQCmd(stdout, stderr io.Writer, sel repoSel, args []string, hostLabel 
 			fmt.Fprintln(stderr, "  fix the cause and rerun the same command to resume (finished repos are skipped), or undo an unpublished repo with `recipients rekey-pq --repo <name> --rollback`")
 		}
 	}
+	if all && !apply && !drop && !rollback {
+		// A window script reads this line (and the exit code) to decide
+		// whether it is safe to go on to --apply.
+		fmt.Fprintf(stderr, "dry run: %d ok, %d would fail\n", len(done), len(failed))
+	}
 	return code
 }
 
