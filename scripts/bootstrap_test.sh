@@ -84,6 +84,7 @@ case "$1" in
     need_org
     # STUB_401=1: the token has expired
     if [ "${STUB_401:-0}" = 1 ]; then echo "HTTP 401: Bad credentials" >&2; exit 1; fi
+    if [ "${STUB_401:-0}" = 2 ]; then echo "error: connection reset by peer, port 4010" >&2; exit 1; fi
     f="$S/$(basename "$2").json"
     [ -f "$f" ] && { cat "$f"; exit 0; }
     echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
@@ -174,6 +175,7 @@ case "$1" in
   join)
     # STUB_JOINREQ_ALREADY=1: this host is already a recipient (an earlier run was interrupted after its push)
     if [ "$2" = request ] && [ "${STUB_JOINREQ_ALREADY:-0}" = 1 ]; then echo "this host is already a recipient of this repo; nothing to request"; exit 0; fi
+    if [ "$2" = request ] && [ "${STUB_JOINREQ_ALREADY:-0}" = 2 ]; then echo "warning: this host is already a recipient of this repo (not the real message)"; exit 0; fi
     if [ "$2" = request ] && { [ "${STUB_NOFP:-0}" = 1 ] || [ "${STUB_OLDFP:-0}" = 1 ]; }; then
       "$REAL_DIR/claude-memsync" "$@" | if [ "${STUB_NOFP:-0}" = 1 ]; then grep -v '^fingerprint:'; else sed 's/^fingerprint: .*/fingerprint: 0123456789abcdef/'; fi
       exit 0
@@ -1111,7 +1113,7 @@ d=json.load(open(sys.argv[1]))
 rem={r["remote"]:r["repo"] for r in d["routes"] if "remote" in r}
 assert rem=={"github.com/gitgat/ownproj":"project-ownproj","github.com/gitgat/extra":"project-extra"}, rem
 assert set(d["repos"])=={"personal","project-code-workspace","project-ownproj","project-extra"}, set(d["repos"])
-assert os.path.exists(sys.argv[1]+".bak")' "$H/.config/claude-memsync/routes.json"
+import glob; assert glob.glob(sys.argv[1]+".bak.*")' "$H/.config/claude-memsync/routes.json"
 check "the home pin is back after the regeneration" jsonok '
 import json,sys,re,os
 d=json.load(open(sys.argv[1]))
@@ -1298,6 +1300,75 @@ mkdir -p "$H/.claudesync.d/project-alpha/half" "$H/.local/state/claude-memsync-b
 printf '{"repos":{"project-alpha":{"config":"%s/.claudesync.d/project-alpha/config.json","kind":"project","remote":"mem-project-alpha"}},"routes":[],"default":"deny"}\n' "$H" >"$H/.config/claude-memsync/routes.json"
 pjrun --jobs 2
 check "a dir that a routes.json this script did not write refers to: refused, left alone" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'routes.json' && [ -d '$H/.claudesync.d/project-alpha/half' ]" _ "$OUT"
+
+echo "--- a half-made sync dir: the guard fails closed"
+hmprep() { # name: a HOME with a stale initing mark for project-alpha; sets D
+  pjhome "$1" alpha; D="$H/.claudesync.d/project-alpha"
+  mkdir -p "$H/.claudesync.d" "$H/.local/state/claude-memsync-bootstrap"
+  : >"$H/.local/state/claude-memsync-bootstrap/testmac.initing.project-alpha"
+}
+hmrefused() { # label: the run was refused and the dir is still where it was
+  check "$1" bash -c "[ $RC -ne 0 ] && [ -d '$D' ] && ! ls -d '$H/.claudesync.d'/project-alpha.half-made.* >/dev/null 2>&1 && ! grep -q 'repo create' '$STUB_DIR/gh.log'"
+}
+gitq() { git -C "$D" -c user.name=t -c user.email=t@example.invalid "$@"; }
+hmprep hc1; mkdir -p "$D/.git"; : >"$D/note"
+pjrun --jobs 2
+hmrefused "a corrupt .git (git cannot read it; an enclosing repo must not be consulted): refused, dir left alone"
+check "... with a message that says why" bash -c "printf '%s\n' \"\$1\" | grep -q 'cannot read its git state'" _ "$OUT"
+hmprep hc2; git init -q -b main "$D"; echo a >"$D/f"; gitq add f; gitq commit -q -m c; git -C "$D" remote add origin "$BASE/remotes/mem-project-alpha.git"
+git -C "$D" push -q origin main 2>/dev/null; git -C "$D" fetch -q origin 2>/dev/null; echo b >"$D/f"; gitq stash -q
+pjrun --jobs 2
+hmrefused "a stash (work that only exists there): refused, dir left alone"
+check "... naming the stash" bash -c "printf '%s\n' \"\$1\" | grep -qi 'stash'" _ "$OUT"
+hmprep hc3; git clone -q "$BASE/remotes/mem-project-alpha.git" "$D" 2>/dev/null; echo x >"$D/untracked"
+pjrun --jobs 2
+hmrefused "an uncommitted file in the dir: refused, dir left alone"
+check "... naming the uncommitted changes" bash -c "printf '%s\n' \"\$1\" | grep -qi 'uncommitted'" _ "$OUT"
+hmprep hc4; mkdir -p "$D/.state"; : >"$D/.state/daemon.lock"
+python3 -I -c 'import fcntl, sys, time; f = open(sys.argv[1], "w"); fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); print("held", flush=True); time.sleep(120)' "$D/.state/daemon.lock" >"$BASE/lockheld.out" &
+LKPID=$!
+for _ in $(seq 1 50); do [ -s "$BASE/lockheld.out" ] && break; sleep 0.1; done
+pjrun --jobs 2
+kill "$LKPID" 2>/dev/null || true; wait "$LKPID" 2>/dev/null || true
+hmrefused "a sync dir whose daemon lock is held: refused, dir left alone"
+check "... naming the lock" bash -c "printf '%s\n' \"\$1\" | grep -qi 'lock'" _ "$OUT"
+hmprep hc5; git clone -q "$BASE/remotes/mem-project-alpha.git" "$D" 2>/dev/null
+pjrun --jobs 2
+check "a clean clone with nothing unpushed is moved aside (not deleted) and the run completes" bash -c "[ $RC -eq 0 ] && ls -d '$H/.claudesync.d'/project-alpha.half-made.* >/dev/null 2>&1 && [ -d '$H/.claudesync.d/project-alpha' ]"
+for form in tilde symlink; do
+  hmprep "hr$form"; mkdir -p "$D/half"
+  mkdir -p "$H/.config/claude-memsync"
+  if [ "$form" = tilde ]; then ref='~/.claudesync.d/project-alpha/config.json'; else ln -s "$H/.claudesync.d" "$H/linkd"; ref="$H/linkd/project-alpha/config.json"; fi
+  printf '{"repos":{"project-alpha":{"config":"%s","kind":"project","remote":"mem-project-alpha"}},"routes":[],"default":"deny"}\n' "$ref" >"$H/.config/claude-memsync/routes.json"
+  pjrun --jobs 2
+  hmrefused "a routes.json that names the dir as $form is recognised: refused, dir left alone"
+done
+hmprep hr3; mkdir -p "$D/half" "$H/.config/claude-memsync"
+printf '%s\n' "{ not json" >"$H/.config/claude-memsync/routes.json"
+pjrun --jobs 2
+hmrefused "a routes.json that cannot be parsed (not written by this script) is not trusted: refused, dir left alone"
+
+echo "--- routes.json backups are timestamped and never overwritten"
+pjhome rb alpha
+BOOTSTRAP_ASIDE_STAMP=20260101T000000Z pjrun --jobs 4
+mkgit "$H/code/beta" "git@github.com:gitgat/beta.git"; mkbare mem-project-beta
+git config --file "$H/.gitconfig" "url.$BASE/remotes/mem-project-beta.git.insteadOf" "git@gh-mem-project-beta:$ORG/mem-project-beta.git"
+BOOTSTRAP_ASIDE_STAMP=20260101T000000Z pjrun --jobs 4
+mkgit "$H/code/gamma" "git@github.com:gitgat/gamma.git"; mkbare mem-project-gamma
+git config --file "$H/.gitconfig" "url.$BASE/remotes/mem-project-gamma.git.insteadOf" "git@gh-mem-project-gamma:$ORG/mem-project-gamma.git"
+BOOTSTRAP_ASIDE_STAMP=20260101T000000Z pjrun --jobs 4
+RB="$H/.config/claude-memsync/routes.json"
+check "two regenerations leave two backups, the second never overwriting the first, and no bare routes.json.bak" bash -c "[ -f '$RB.bak.20260101T000000Z' ] && [ -f '$RB.bak.20260101T000000Z.1' ] && [ ! -e '$RB.bak' ] && ! grep -q project-beta '$RB.bak.20260101T000000Z' && grep -q project-beta '$RB.bak.20260101T000000Z.1' && ! grep -q project-gamma '$RB.bak.20260101T000000Z.1'"
+
+echo "--- patterns are anchored"
+newhome an1
+STUB_JOINREQ_ALREADY=2 runboot --host testhost --role homelab --yes
+check "a line that merely contains the already-a-recipient words is not taken for the real message" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'printed no .fingerprint'" _ "$OUT"
+newhome an2
+ORGARGS=(--org-token-cmd "secret-tool read vault://vault/item/field")
+STUB_401=2 BOOTSTRAP_TOKEN_AGE_BONUS=3600 runboot --host testhost --role homelab --yes
+ORGARGS=(--org-token-file "$BASE/orgtoken")
+check "a failure that merely contains 401 inside another number (port 4010) is not an expired token" bash -c "[ $RC -ne 0 ] && ! printf '%s\n' \"\$1\" | grep -q 'probably expired'" _ "$OUT"
 
 echo "--- an init interrupted after its push: the re-run finds the host already a recipient"
 newhome jr
