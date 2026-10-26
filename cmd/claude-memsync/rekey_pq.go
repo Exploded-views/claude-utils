@@ -15,7 +15,7 @@ import (
 	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
 
-const rekeyUsage = "usage: claude-memsync recipients rekey-pq (--repo <name> | --all | --config <path>) --recovery-recipient <age1pq1...> --host <label> [--fresh-root] [--apply]\n       claude-memsync recipients rekey-pq (--repo <name> | --all) --rollback\n       claude-memsync recipients rekey-pq (--repo <name> | --all) --drop-backup"
+const rekeyUsage = "usage: claude-memsync recipients rekey-pq (--repo <name> | --all | --config <path>) --recovery-recipient <age1pq1...> --host <label> [--fresh-root] [--apply]\n       claude-memsync recipients rekey-pq (--repo <name> | --all) --rollback [--discard-local-commits]\n       claude-memsync recipients rekey-pq (--repo <name> | --all) --drop-backup"
 
 // rekeyTarget is one repo of a rekey-pq run and the name it is reported under.
 type rekeyTarget struct {
@@ -33,7 +33,7 @@ type rekeyTarget struct {
 // that was not pushed.
 func rekeyPQCmd(stdout, stderr io.Writer, sel repoSel, args []string, hostLabel string) int {
 	args, recovery := extractFlag(args, "--recovery-recipient")
-	var all, fresh, apply, drop, rollback bool
+	var all, fresh, apply, drop, rollback, discard bool
 	for _, a := range args {
 		switch a {
 		case "--all":
@@ -46,12 +46,18 @@ func rekeyPQCmd(stdout, stderr io.Writer, sel repoSel, args []string, hostLabel 
 			drop = true
 		case "--rollback":
 			rollback = true
+		case "--discard-local-commits":
+			discard = true
 		default:
 			fmt.Fprintf(stderr, "recipients rekey-pq: unexpected argument %q\n%s\n", a, rekeyUsage)
 			return 2
 		}
 	}
 	recovery = strings.TrimSpace(recovery)
+	if discard && !rollback {
+		fmt.Fprintln(stderr, "recipients rekey-pq: --discard-local-commits goes only with --rollback")
+		return 2
+	}
 	if drop || rollback {
 		if drop && rollback {
 			fmt.Fprintln(stderr, "recipients rekey-pq: --drop-backup and --rollback are separate runs")
@@ -77,7 +83,7 @@ func rekeyPQCmd(stdout, stderr io.Writer, sel repoSel, args []string, hostLabel 
 		case drop:
 			c = dropBackupOne(stdout, stderr, t.cfg)
 		case rollback:
-			c = rollbackOne(stdout, stderr, t.cfg, all)
+			c = rollbackOne(stdout, stderr, t.cfg, all, discard)
 		default:
 			c = rekeyOne(stdout, stderr, t.cfg, all2, agecrypt.RekeyOpts{
 				Label: hostLabel, Recovery: recovery, ConfiguredRecovery: t.cfg.RecoveryRecipients, FreshRoot: fresh,
@@ -197,7 +203,7 @@ func cfgFileOf(cfg config.Config) string {
 
 // rollbackOne undoes an unpublished migration of one repo. With quietNone a
 // repo that has nothing to roll back is only mentioned (for --all).
-func rollbackOne(stdout, stderr io.Writer, cfg config.Config, quietNone bool) int {
+func rollbackOne(stdout, stderr io.Writer, cfg config.Config, quietNone, discard bool) int {
 	repo := gitwt.New(cfg.SyncDir)
 	if !repo.IsRepo() {
 		fmt.Fprintf(stderr, "recipients: %s: not a git repo\n", cfg.SyncDir)
@@ -212,7 +218,7 @@ func rollbackOne(stdout, stderr io.Writer, cfg config.Config, quietNone bool) in
 	var st agecrypt.PreRekeyState
 	err := withSyncLock(cfg.SyncDir, func() error {
 		var rerr error
-		st, rerr = agecrypt.RollbackRekey(repo, func(pc agecrypt.PriorConfig) error {
+		st, rerr = agecrypt.RollbackRekey(repo, agecrypt.RollbackOpts{DiscardLocalCommits: discard}, func(pc agecrypt.PriorConfig) error {
 			raw, err := config.Load(cfgFile)
 			if err != nil {
 				return err

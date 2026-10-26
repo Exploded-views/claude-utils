@@ -255,12 +255,57 @@ func PlanFromState(repo *gitwt.Repo, st PreRekeyState) RekeyPlan {
 	return RekeyPlan{Tip: st.Tip, NewCommit: head, NewRecipient: st.NewRecipient, IdentityPath: st.ClassicIdentity}
 }
 
+// RollbackOpts says what a rollback may do beyond the plain undo.
+type RollbackOpts struct {
+	// DiscardLocalCommits lets the rollback drop commits made after the
+	// rekey (HEAD past the migrated commit). Without it they are refused.
+	DiscardLocalCommits bool
+}
+
+// maxListedSubjects bounds the commit subjects a refusal prints.
+const maxListedSubjects = 10
+
+// localCommitsError lists the commits a rollback would drop: their count and
+// subjects, nothing else.
+func localCommitsError(repo *gitwt.Repo, st PreRekeyState) error {
+	if st.NewCommit == "" {
+		return errors.New("the restore record does not name the migrated commit (an older build wrote it), so commits made after the rekey cannot be told apart; if there are none, rerun with --discard-local-commits")
+	}
+	out, _ := repo.Run("log", "--format=%s", st.NewCommit+"..HEAD")
+	var subs []string
+	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			subs = append(subs, strings.Map(func(r rune) rune {
+				if r < 0x20 || r == 0x7f {
+					return -1
+				}
+				return r
+			}, l))
+		}
+	}
+	noun := "commits"
+	if len(subs) == 1 {
+		noun = "commit"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "HEAD is not the migrated commit: %d %s made since the rekey would be dropped by a rollback:", len(subs), noun)
+	for i, l := range subs {
+		if i == maxListedSubjects {
+			fmt.Fprintf(&b, "\n  ... and %d more", len(subs)-maxListedSubjects)
+			break
+		}
+		fmt.Fprintf(&b, "\n  - %s", l)
+	}
+	b.WriteString("\nrerun with --discard-local-commits to drop them anyway")
+	return errors.New(b.String())
+}
+
 // RollbackRekey puts a repo back that rekey-pq migrated locally but never
 // published: the branch returns to the backup, and memage.identity,
 // memage.scheme and the pin to their classic values. restoreConfig puts
 // config.json back from the recorded values. It refuses when origin/main is no
 // longer the backup tip. It returns the restore record.
-func RollbackRekey(repo *gitwt.Repo, restoreConfig func(PriorConfig) error) (PreRekeyState, error) {
+func RollbackRekey(repo *gitwt.Repo, opts RollbackOpts, restoreConfig func(PriorConfig) error) (PreRekeyState, error) {
 	st, err := ReadRekeyState(repo)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -280,6 +325,9 @@ func RollbackRekey(repo *gitwt.Repo, restoreConfig func(PriorConfig) error) (Pre
 	}
 	if remote, _ := revOf(repo, "refs/remotes/origin/main"); remote != tip {
 		return st, errors.New("the remote has moved off the backup (the migrated history was pushed, or someone else pushed); a local rollback would diverge from it, so it is refused")
+	}
+	if head, _ := revOf(repo, "HEAD"); (st.NewCommit == "" || head != st.NewCommit) && !opts.DiscardLocalCommits {
+		return st, localCommitsError(repo, st)
 	}
 	if repo.MergeInProgress() || repo.RebaseInProgress() || repo.HasUnmerged() {
 		return st, errors.New("a merge or rebase is in progress")
