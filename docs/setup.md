@@ -376,6 +376,55 @@ the sync dir, refuses a mismatched fingerprint, and refuses
 while some recipient other than a configured recovery key has no host label.
 `join reject <host-label> --repo <repo>` discards a request.
 
+#### Accepting in every repo at once
+
+A joining host files one request per repo, always with the same key, so the
+fingerprint is the same in each. Instead of one `accept` per repo:
+
+```sh
+claude-memsync join list --all
+claude-memsync join accept <host-label> --all --fingerprint "<fp>"
+```
+
+`join list --all` prints one table over every routed repo (repo, label,
+fingerprint, time). `accept --all` looks at every encrypted repo on this host
+that has a request from `<host-label>` and accepts those whose fingerprint
+equals `--fingerprint`, then prints one line per repo: `accepted and pushed`,
+`no request`, `fingerprint mismatch`, `refused (<reason>)`, or `skipped
+(read-only | rekey-blocked | unencrypted)`. The service is stopped once and
+started once for the whole set; a repo with an unfinished rekey is skipped and
+left untouched. `--all` does not go with `--repo` or `--config`, and `accept`
+still needs `--fingerprint`.
+
+- **A mismatch refuses everything.** If any repo holds a request under that
+  label with a different fingerprint, nothing is accepted in any repo (that
+  can mean a second key under one label), the repo is named, and the command
+  exits 1. Look at `join list --all`, `join reject` the stray one, and run it
+  again.
+- **Exit codes.** 0 when every repo that had a request was accepted. 1 when a
+  request was refused or skipped, on a mismatch, and when no repo has a request
+  from that label (nothing was done, which a script should notice). 2 for a
+  usage error.
+- `join reject <host-label> --all` removes the label's request in every repo
+  the same way (no fingerprint needed). `join list --all` with nothing pending
+  prints `no join requests pending` and exits 0.
+
+#### Naming a repo across hosts
+
+Local route keys can differ between hosts: an older host may use a short key
+such as `bitc`, while bootstrap derives `project-bitc`. Every `--repo` flag
+therefore also takes the GitHub repo name (`mem-project-bitc`) or
+`owner/name`, so a command printed on one host works on any other:
+
+```sh
+claude-memsync join accept <host-label> --repo mem-project-<name> --fingerprint "<fp>"
+claude-memsync join accept <host-label> --all --fingerprint "<fp>"
+```
+
+An exact local route key always wins over a repo name. A name that matches
+more than one routed repo is refused and the candidates are listed; give the
+route key or `owner/name`. `--all` needs no name at all.
+
 ### 4. Accept the recipient set, on the new host
 
 The new host's next pull brings the new recipient list, which it has not

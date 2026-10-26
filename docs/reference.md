@@ -459,9 +459,10 @@ usage: claude-memsync recipients add <public-key> [--host <label>] | remove <pub
 usage:
   claude-memsync join request --repo <name> --label <host-label>   (on the new host)
   claude-memsync join status [--repo <name>]                       (on the new host; lists each key with its label)
-  claude-memsync join list [--repo <name>]                         (on a member host; shows each request's label)
+  claude-memsync join list [--repo <name> | --all]                 (on a member host; shows each request's label; --all: one table over every repo)
   claude-memsync join accept <label> --repo <name> --fingerprint <fp> [--allow-unlabelled]
-  claude-memsync join reject <label> [--repo <name>]
+  claude-memsync join accept <label> --all --fingerprint <fp> [--allow-unlabelled]   (every repo with a request from <label>)
+  claude-memsync join reject <label> [--repo <name> | --all]
   (repo selection as for recipients: --repo <key-or-GitHub-repo-name> | --config <path>, --routes <path>)
 ```
 
@@ -469,6 +470,8 @@ usage:
 
 ```text
 Usage of join request:
+  -all
+    	accept, reject, list: act on every routed repo of this host (not with --repo or --config)
   -allow-unlabelled
     	accept: admit even though some recipient has no host label (label it first with "recipients label self")
   -fingerprint string
