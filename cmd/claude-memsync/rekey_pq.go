@@ -392,6 +392,9 @@ func rekeyPlanOne(stdout, stderr io.Writer, cfg config.Config, repo *gitwt.Repo,
 			fmt.Fprintf(stdout, "%s: an earlier rekey-pq --apply was interrupted (it got as far as %q)\n  rerun it with --apply and the same --host, --recovery-recipient and --fresh-root to finish it, or undo it with `recipients rekey-pq --repo <name> --rollback`\n", cfg.SyncDir, st.Stage)
 		}
 		return 0
+	} else if errors.Is(err, agecrypt.ErrRecordUnreadable) {
+		fmt.Fprintf(stderr, "recipients: %s: %v\n", cfg.SyncDir, err)
+		return 1
 	}
 	p, err := agecrypt.PlanRekeyPQ(repo, o, false)
 	if err != nil {

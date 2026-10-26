@@ -76,11 +76,46 @@ func writeRekeyState(repo *gitwt.Repo, st PreRekeyState) error {
 	if err != nil {
 		return err
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
+	return writeFileDurably(p, append(b, '\n'))
+}
+
+// writeFileDurably writes data to path through a temp file that is fsynced,
+// renamed over path, and then the directory is fsynced, so a power loss leaves
+// the old record or the whole new one, never a torn file.
+func writeFileDurably(path string, data []byte) error {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, p)
+	_, werr := f.Write(data)
+	if werr == nil {
+		werr = f.Sync()
+	}
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		_ = os.Remove(tmp)
+		return werr
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	// Best effort: a directory cannot be opened or synced on every platform.
+	if d, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = d.Sync()
+		d.Close()
+	}
+	return nil
+}
+
+// ErrRecordUnreadable marks a restore record that exists but cannot be parsed.
+var ErrRecordUnreadable = errors.New("the restore record is unreadable")
+
+func unreadableRecord(err error) error {
+	return fmt.Errorf("%w (%s: %v): the pre-migration history is still at %s, so do NOT drop the backup; inspect the repo, then finish or undo the migration by hand (see the rekey section of docs/setup.md)", ErrRecordUnreadable, RekeyStateFile, err, BackupRef)
 }
 
 // ReadRekeyState reads the restore record; os.ErrNotExist when there is none.
@@ -95,7 +130,7 @@ func ReadRekeyState(repo *gitwt.Repo) (PreRekeyState, error) {
 		return st, err
 	}
 	if err := json.Unmarshal(b, &st); err != nil {
-		return st, fmt.Errorf("%s: %w", RekeyStateFile, err)
+		return st, unreadableRecord(err)
 	}
 	return st, nil
 }
@@ -167,6 +202,9 @@ func DetectRekey(repo *gitwt.Repo, o RekeyOpts) (RekeyStage, PreRekeyState, erro
 		return StageFresh, st, nil
 	}
 	st, err := ReadRekeyState(repo)
+	if errors.Is(err, ErrRecordUnreadable) {
+		return StageFresh, st, err
+	}
 	if err != nil {
 		return StageFresh, st, fmt.Errorf("a backup ref %s exists but its restore record %s does not (%v); inspect the repo, then drop the backup with `recipients rekey-pq --drop-backup` or delete the ref", BackupRef, RekeyStateFile, err)
 	}
@@ -328,7 +366,7 @@ func ReadRekeyStateAt(dir string) (PreRekeyState, error) {
 		return st, err
 	}
 	if err := json.Unmarshal(b, &st); err != nil {
-		return st, fmt.Errorf("%s: %w", RekeyStateFile, err)
+		return st, unreadableRecord(err)
 	}
 	return st, nil
 }
