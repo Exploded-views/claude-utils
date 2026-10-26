@@ -352,6 +352,235 @@ foo_check () {
 }
 # <<< guards
 guard foo"
+# ---- heredoc detection: only a real <<WORD operator outside quotes, $(( )) and <<< ----
+SQ="'"
+BAD='[ -e x ] && echo hi'
+# flagged_msg <message regex> <script...>: flagged, and the output says it
+flagged_msg() { local re="$1"; shift; flagged "$@" && grep -q -- "$re" "$W/$n/out"; }
+# flagged_after: the forbidden test that follows the trigger is flagged as a file test, and no heredoc was assumed
+flagged_after() { flagged "$@" && grep -q 'a file test reads a stat error' "$W/$n/out" && ! grep -q 'never closed' "$W/$n/out"; }
+check "a << inside a double-quoted string does not start a heredoc (a forbidden test after it is still flagged)" flagged_after "$G1
+echo \"<<EOF\"
+$BAD"
+check "a << inside a single-quoted string does not start a heredoc" flagged_after "$G1
+echo '<<EOF'
+$BAD"
+check "\$((1<<X)) is arithmetic, not a heredoc" flagged_after "$G1
+y=\$((1<<X))
+$BAD"
+check "(( n = 1<<3 )) is arithmetic, not a heredoc" flagged_after "$G1
+(( n = 1<<3 ))
+$BAD"
+check "a <<<word here-string is not a heredoc" flagged_after "$G1
+cat <<<word
+$BAD"
+check "a <<<\"\$x\" here-string is not a heredoc" flagged_after "$G1
+read -r a <<<\"\$x\"
+$BAD"
+check "a # comment mentioning <<EOF does not start a heredoc" flagged_after "$G1
+echo hi # cat <<EOF
+$BAD"
+check "a real heredoc body is skipped and the line after the terminator is checked" flagged_after "$G1
+cat <<EOF
+$BAD
+EOF
+$BAD"
+check "a real heredoc body is skipped (clean)" clean "$G1
+cat <<EOF
+$BAD
+EOF"
+check "<<- ends at a tab-indented terminator" flagged_after "$G1
+cat <<-EOF
+	body
+	EOF
+$BAD"
+check "<<- body is skipped (clean)" clean "$G1
+cat <<-EOF
+	$BAD
+	EOF"
+check "<<'EOF' (quoted delimiter): body skipped, line after flagged" flagged_after "$G1
+cat <<${SQ}EOF${SQ}
+$BAD
+EOF
+$BAD"
+check "<<'EOF' body is skipped (clean)" clean "$G1
+cat <<${SQ}EOF${SQ}
+$BAD
+EOF"
+check "<<\"EOF\" body is skipped and the line after flagged" flagged_after "$G1
+cat <<\"EOF\"
+$BAD
+EOF
+$BAD"
+check "<<\\EOF body is skipped (clean)" clean "$G1
+cat <<\\EOF
+$BAD
+EOF"
+check "two heredocs on one line are both skipped (clean)" clean "$G1
+cat <<A <<B
+$BAD
+A
+$BAD
+B"
+check "a heredoc with a command after the operator: body skipped" clean "$G1
+cat <<EOF | sed s/a/b/
+$BAD
+EOF"
+check "a heredoc that never closes is an error, not a silent skip" flagged "$G1
+cat <<EOF
+$BAD"
+check "... and the error says so" flagged_msg 'never closed' "$G1
+cat <<EOF
+body"
+check "an unclosed <<- heredoc (terminator not tab-indented only) still closes" clean "$G1
+cat <<-EOF
+	body
+EOF"
+check "a plain << heredoc whose terminator is indented never closes" flagged_msg 'never closed' "$G1
+cat <<EOF
+body
+  EOF"
+# ---- more spellings of a file test ----
+check "a case arm a) [ -e x ] ;; is a file test" flagged "$G1
+case x in
+  a) [ -e x ] ;;
+esac"
+check "a case arm with alternatives a|b) test -f x is a file test" flagged "$G1
+case x in
+  a|b) test -f x ;;
+esac"
+check "command test -e x is a file test" flagged "$G1
+command test -e x && echo hi"
+check "builtin test -e x is a file test" flagged "$G1
+builtin test -e x && echo hi"
+check "env test -e x is a file test" flagged "$G1
+env test -e x && echo hi"
+check "/bin/test -e x is a file test" flagged "$G1
+/bin/test -e x && echo hi"
+check "/usr/bin/test -e x is a file test" flagged "$G1
+/usr/bin/test -e x && echo hi"
+check "/usr/bin/[ -e x ] is a file test" flagged "$G1
+/usr/bin/[ -e x ] && echo hi"
+check "time [ -e x ] is a file test" flagged "$G1
+time [ -e x ] && echo hi"
+check "a backtick [ -e x ] is a file test" flagged "$G1
+y=\`[ -e x ] && echo hi\`"
+check "a quoted operator [ \"-e\" x ] is a file test" flagged "$G1
+[ \"-e\" x ] && echo hi"
+check "a single-quoted operator [ ${SQ}-f${SQ} x ] is a file test" flagged "$G1
+[ ${SQ}-f${SQ} x ] && echo hi"
+check "a variable operator [ \$op x ] is flagged" flagged "$G1
+[ \$op x ] && echo hi"
+check "a quoted variable operator [ \"\$op\" x ] is flagged" flagged "$G1
+[ \"\$op\" x ] && echo hi"
+check "a variable operator in test is flagged" flagged "$G1
+test \$op x && echo hi"
+check "a variable operator in the binary position [ a \$op b ] is flagged" flagged "$G1
+[ a \$op b ] && echo hi"
+check "a variable operator can say why with fs-ok" clean "$G1
+[ \$op x ] && echo hi # fs-ok: the operator is fixed by the caller"
+check "string and number comparisons with variables are not flagged" clean "$G1
+a=1; b=2
+[ \"\$a\" = \"\$b\" ] && [ -z \"\$a\" ] && [ \"\$a\" ] && [ \$# -gt 0 ] && [ \"\$a\" != x ] && [[ \$a == b ]] && echo hi"
+for op in S p b c g u k; do
+  check "-$op is a file test (stat based)" flagged "$G1
+[ -$op x ] && echo hi"
+done
+for op in nt ot ef; do
+  check "a -$op b is a file test (stat based)" flagged "$G1
+[ a -$op b ] && echo hi"
+done
+# ---- the fs-ok reason must say something ----
+check "fs-ok with a one-letter reason is flagged" flagged "$G1
+[ -e x ] && echo hi # fs-ok: x"
+check "fs-ok with a short one-word reason is flagged" flagged "$G1
+[ -e x ] && echo hi # fs-ok: because"
+check "fs-ok with two short words is flagged" flagged "$G1
+[ -e x ] && echo hi # fs-ok: no harm"
+check "fs-ok with three words is clean" clean "$G1
+[ -e x ] && echo hi # fs-ok: no harm here"
+check "fs-ok with a 12-character word is clean" clean "$G1
+[ -e x ] && echo hi # fs-ok: twelve-chars"
+# ---- @helper ----
+HELPREG='foo -
+@helper org_gh'
+check "an @helper without a definition in guard_fault_test.sh is flagged" flagged "$BASE" "$HELPREG" "$DEFFIX"
+check "... the finding names the helper" flagged_msg 'org_gh' "$BASE" "$HELPREG" "$DEFFIX"
+check "an @helper defined in guard_fault_test.sh is clean" clean "$BASE" "$HELPREG" "$DEFFIX
+org_gh() { gh \"\$@\"; }"
+check "an @helper that is only mentioned (not defined) in guard_fault_test.sh is flagged" flagged "$BASE" "$HELPREG" "$DEFFIX
+# org_gh() is not here"
+# ---- a call through a variable from a guard path ----
+for call in '$f x' '"$f" x' '${f} x' 'x=1 $f x' '"${f}" x'; do
+  check "a guard path calling a function through a variable ($call) is flagged" flagged "# >>> guards
+foo_check() {
+  $call || return 1
+  echo SAFE:foo
+}
+# <<< guards
+guard foo"
+done
+check "a guard path calling \$(\$f x) is flagged" flagged "# >>> guards
+foo_check() {
+  local o
+  o=\"\$(\$f x)\" || return 1
+  echo SAFE:foo
+}
+# <<< guards
+guard foo"
+check "a variable as an argument in a guard path is fine" clean "# >>> guards
+foo_check() {
+  local o
+  o=\"\$(echo \"\$f\")\" || return 1
+  echo \"\$f\" \$f >/dev/null
+  echo SAFE:foo
+}
+# <<< guards
+guard foo"
+check "a call through a variable outside a guard path is fine" clean "$BASE
+f=echo
+\$f hi"
+# ---- existence decisions read from command output, outside the guard paths ----
+check "[ -z \"\$(cat f 2>/dev/null)\" ] is flagged" flagged "$G1
+[ -z \"\$(cat f 2>/dev/null)\" ] && echo hi"
+check "[ -n \"\$(cat f 2>/dev/null)\" ] is flagged" flagged "$G1
+if [ -n \"\$(cat f 2>/dev/null)\" ]; then echo hi; fi"
+check "o=\$(cat f 2>/dev/null) then [ -z \"\$o\" ] is flagged" flagged "$G1
+f() {
+  o=\"\$(cat f 2>/dev/null)\"
+  [ -z \"\$o\" ] && echo hi
+}"
+check "read ... < f || is flagged" flagged "$G1
+read -r l < f || echo none"
+check "[ -z \"\$(ls d)\" ] is flagged" flagged "$G1
+[ -z \"\$(ls d)\" ] && echo hi"
+check "[ -n \"\$(stat -c %s f)\" ] is flagged" flagged "$G1
+[ -n \"\$(stat -c %s f)\" ] && echo hi"
+check "[ -z \"\$(find d -name x)\" ] is flagged" flagged "$G1
+[ -z \"\$(find d -name x)\" ] && echo hi"
+check "o=\$(ls d) then [ -z \"\$o\" ] is flagged" flagged "$G1
+f() {
+  o=\"\$(ls d)\"
+  [ -z \"\$o\" ] && echo hi
+}"
+check "... a marker with a reason on the test allows it" clean "$G1
+[ -z \"\$(cat f 2>/dev/null)\" ] && echo hi # fs-ok: only picks a message to print"
+check "... and so does one on read < f ||" clean "$G1
+read -r l < f || echo none # fs-ok: only picks a message to print"
+check "[ -z \"\$o\" ] on output of something else is fine" clean "$G1
+f() {
+  o=\"\$(echo hi)\"
+  [ -z \"\$o\" ] && echo hi
+}"
+check "the same variable name in another function is not tracked" clean "$G1
+f() {
+  o=\"\$(ls d)\"
+  echo \"\$o\"
+}
+g() {
+  o=\"\$(echo hi)\"
+  [ -z \"\$o\" ] && echo hi
+}"
 check "the repo's own scripts/ pass" bash "$ROOT/scripts/lint-guards.sh"
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
