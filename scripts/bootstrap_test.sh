@@ -1344,6 +1344,34 @@ for form in tilde symlink; do
   pjrun --jobs 2
   hmrefused "a routes.json that names the dir as $form is recognised: refused, dir left alone"
 done
+hmprep hr4; mkdir -p "$D/half" "$H/.config/claude-memsync"
+printf '{"x":"/\\u0000bad","repos":{"project-alpha":{"config":"%s/.claudesync.d/project-alpha/config.json"}}}\n' "$H" >"$H/.config/claude-memsync/routes.json"
+pjrun --jobs 2
+hmrefused "a routes.json with a string Python cannot resolve (a null byte) still names the dir: refused, dir left alone"
+hmprep hr5; mkdir -p "$D/half" "$H/.config/claude-memsync"
+printf '{"repos":{"project-alpha":{"config":"project-alpha/config.json"}}}\n' >"$H/.config/claude-memsync/routes.json"
+pjrun --jobs 2
+hmrefused "a relative config path (resolved against the daemon's directory, so unknowable here): refused, dir left alone"
+hmprep hr6; mkdir -p "$D/half" "$H/.config/claude-memsync"; ln -s "$H/no-such-routes" "$H/.config/claude-memsync/routes.json"
+pjrun --jobs 2
+hmrefused "a dangling symlink as routes.json is not skipped: refused, dir left alone"
+hmprep hl2; mkdir -p "$D/.state"; ln -s "$H/no-such-lock" "$D/.state/daemon.lock"
+pjrun --jobs 2
+hmrefused "a dangling symlink as daemon.lock is not skipped: refused, dir left alone"
+hmprep hl3; mkdir -p "$D/.state/daemon.lock"
+pjrun --jobs 2
+hmrefused "a daemon.lock that cannot be opened: refused, dir left alone"
+check "... saying the lock could not be checked" bash -c "printf '%s\n' \"\$1\" | grep -q 'could not check the daemon lock'" _ "$OUT"
+hmprep hd1; git init -q -b main "$D"; echo a >"$D/f"; gitq add f; gitq commit -q -m c1; git -C "$D" remote add origin "$BASE/remotes/mem-project-alpha.git"
+git -C "$D" push -q origin main 2>/dev/null; git -C "$D" fetch -q origin 2>/dev/null; gitq checkout -q --detach; echo b >>"$D/f"; gitq commit -q -am c2
+pjrun --jobs 2
+hmrefused "a detached HEAD with a commit on no branch and no remote: refused, dir left alone"
+for st in rebase-merge rebase-apply MERGE_HEAD; do
+  hmprep "hs$st"; git clone -q "$BASE/remotes/mem-project-alpha.git" "$D" 2>/dev/null
+  if [ "$st" = MERGE_HEAD ]; then : >"$D/.git/MERGE_HEAD"; else mkdir -p "$D/.git/$st"; fi
+  pjrun --jobs 2
+  hmrefused "a dir in the middle of a $st: refused, dir left alone"
+done
 hmprep hr3; mkdir -p "$D/half" "$H/.config/claude-memsync"
 printf '%s\n' "{ not json" >"$H/.config/claude-memsync/routes.json"
 pjrun --jobs 2
