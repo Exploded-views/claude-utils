@@ -11,7 +11,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 W="${1:-$ROOT/.bin/package-test}"
-VER=v0.0.0-ci
+VER=v0.3.0-ev.1   # the planned first tag: package-release.sh and bootstrap.sh must both accept it
 if [ -z "${TARGET:-}" ]; then
   case "$(uname -s)" in Darwin) tos=darwin ;; *) tos=linux ;; esac
   case "$(uname -m)" in arm64 | aarch64) tarch=arm64 ;; *) tarch=amd64 ;; esac
@@ -40,6 +40,15 @@ check "no stray top-level entries" bash -c "[ \"\$(tar -tzf '$A' | cut -d/ -f1 |
 check "SHA256SUMS lists the archive" grep -q "$NAME.tar.gz" "$W/out/SHA256SUMS"
 check "SHA256SUMS verifies" bash -c "cd '$W/out' && ${SUMC[*]} SHA256SUMS >/dev/null"
 check "the binary reports the release version" bash -c "[ \"\$('$D/claude-memsync' version)\" = 'claude-memsync $VER' ]"
+
+# One release-version rule everywhere: package-release.sh refuses what bootstrap.sh
+# --prebuilt-dir would refuse, and release.yml's tag check is the same rule.
+VRE='^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'
+for badv in v1 v1.2 v1.2.3x v1.2.3+meta vfoo v1.2.3-; do
+  set +e; "$ROOT/scripts/package-release.sh" "$badv" "$W/badout" bogus/none >"$W/bad.log" 2>&1; brc=$?; set -e
+  check "package-release.sh refuses version $badv (rc=$brc)" bash -c "[ $brc -eq 2 ] && grep -q 'version must look like' '$W/bad.log'"
+done
+check "package-release.sh, bootstrap.sh and release.yml use the same version rule" bash -c "grep -qF -e '$VRE' '$ROOT/scripts/package-release.sh' && grep -qF -e '$VRE' '$ROOT/scripts/bootstrap.sh' && grep -qF -e '$VRE' '$ROOT/.github/workflows/release.yml'"
 
 # Past argument parsing: fake required flags, throwaway HOME, stub gh that is not logged in.
 printf '#!/bin/sh\nexit 1\n' >"$W/stubs/gh"; chmod +x "$W/stubs/gh"

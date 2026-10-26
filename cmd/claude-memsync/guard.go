@@ -281,8 +281,12 @@ func doctorCmd(stdout, stderr io.Writer, args []string) int {
 	routes := flags.String("routes", "", "path to routes.json: check every repo it routes (default: as for run, unless --config is given)")
 	timer := flags.Bool("install-timer", false, "write a daily user timer (systemd) or launchd agent for doctor; does not enable it")
 	unitDir := flags.String("unit-dir", "", "with --install-timer: directory to write units into")
+	unattended := flags.Bool("unattended", false, "run without a person at the keyboard (the timer sets this): token commands keep the short timeout and print no prompt text")
 	if err := flags.Parse(args); err != nil {
 		return 2
+	}
+	if *unattended {
+		secretcmd.SetDaemon(true)
 	}
 	cfg := loadCfgOptional(*cfgPath)
 	if *tokenFile != "" {

@@ -85,6 +85,16 @@ func TestStatus_LegacyIdentityHintOnce(t *testing.T) {
 	if !strings.Contains(out, "hint:") || !strings.Contains(out, legacy) {
 		t.Fatalf("first status has no legacy-identity hint:\n%s", out)
 	}
+	// Every clone's git config holds this absolute path, so the hint must
+	// never suggest moving or removing the file.
+	for _, bad := range []string{"move the", "move it", "remove", "delete", "copy"} {
+		if strings.Contains(strings.ToLower(out), bad) {
+			t.Fatalf("hint tells the user to %q the identity:\n%s", bad, out)
+		}
+	}
+	if !strings.Contains(out, "stays where it is") {
+		t.Fatalf("hint does not say the identity stays put:\n%s", out)
+	}
 	_, out = captureStdout(t, func() int { return runStatus(nil) })
 	if strings.Contains(out, "hint:") {
 		t.Fatalf("hint repeated:\n%s", out)

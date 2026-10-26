@@ -45,7 +45,8 @@ clone), see [releases.md](releases.md).
   approve), the command prints `waiting for your password manager (approve the
   prompt if one appears)…` and waits up to 120 s at a terminal; set
   `CLAUDE_MEMSYNC_SECRET_TIMEOUT` (a Go duration such as `3m`) to change that.
-  The daemon, which nobody can answer, keeps 10 s.
+  The daemon, which nobody can answer, keeps 10 s; hooks and the doctor timer
+  never wait either (they use cached verdicts and the short limit).
 - The same project paths on every machine: Claude names a project's memory
   folder after its absolute path.
 
@@ -58,9 +59,9 @@ and key files) lives in one directory on every OS:
 in the OS's own config directory, `~/Library/Application Support/claude-memsync`
 on macOS and `%AppData%\claude-memsync` on Windows. An identity still there is
 read in place (a second one is never created), and `status` prints one hint
-that you may move it; nothing is moved or copied for you. To move it, copy the
-`identity*.txt` files (mode 0600) into the new directory and delete the old
-ones. Details: "The config directory" in [claude-memsync.md](claude-memsync.md#the-config-directory).
+saying so. The identity stays where it is and keeps working; do not move it by
+hand, because each clone's git config holds its absolute path (a safe
+`identity move` is planned). Details: "The config directory" in [claude-memsync.md](claude-memsync.md#the-config-directory).
 
 ## macOS notes
 
@@ -86,7 +87,7 @@ ones. Details: "The config directory" in [claude-memsync.md](claude-memsync.md#t
 - **Where the identity lives.** New installs: `~/.config/claude-memsync/`
   (or `$XDG_CONFIG_HOME/claude-memsync/`), same as `routes.json`. A Mac set up
   before that rule has it in `~/Library/Application Support/claude-memsync/`; it
-  keeps working there and `status` hints once at moving it (above).
+  keeps working there; leave it in place (above).
 
 ## First machine
 

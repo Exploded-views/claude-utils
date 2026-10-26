@@ -2,7 +2,8 @@
 # moves that loop into scripts/package-release.sh so every archive also carries
 # scripts/bootstrap.sh (claude-utils-<tag>-<os>-<arch>/scripts/bootstrap.sh) and
 # SHA256SUMS covers it; fork-ci.yml's release-layout job tests the same script.
-# Do not propose this file's change upstream as is.
+# Do not propose this file's change upstream as is. Also fork-only: the Go
+# toolchain is pinned to the one CI tests with, as fork-ci.yml does.
 name: Release
 
 on:
@@ -34,12 +35,9 @@ jobs:
         env:
           VERSION: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
-          case "${VERSION}" in
-            v[0-9]*) ;;
-            *) echo "::error::tag must look like vX.Y.Z"; exit 1 ;;
-          esac
-          if printf '%s' "${VERSION}" | grep -q '[^A-Za-z0-9._+-]'; then
-            echo "::error::tag has unexpected characters"; exit 1
+          # The same rule as scripts/package-release.sh and bootstrap.sh --prebuilt-dir.
+          if ! printf '%s' "${VERSION}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'; then
+            echo "::error::tag must look like vX.Y.Z or vX.Y.Z-suffix (e.g. v0.3.0-ev.1)"; exit 1
           fi
 
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -49,7 +47,9 @@ jobs:
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version-file: go.mod
+          # Same toolchain as the dev container, newer than go.mod's 1.25.0 floor,
+          # so CI sees what a local run sees. Bump both together.
+          go-version: '1.27.2'
           # No build cache for release artifacts: a poisoned cache must not reach a release.
           cache: false
 

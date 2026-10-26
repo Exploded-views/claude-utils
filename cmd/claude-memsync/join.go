@@ -213,6 +213,7 @@ func joinStatus(stdout, stderr io.Writer, cfg config.Config, repo *gitwt.Repo) i
 		if u, _ := agecrypt.Unreviewed(repo); u {
 			fmt.Fprintln(stdout, "accepted: your key is in .age-recipients. Do NOT run `recipients accept --yes` blindly: compare the set below with `claude-memsync join list` and `recipients list` on a member host first.")
 			printPendingRecipients(stdout, repo)
+			printAttrsNotice(stdout, repo)
 		} else if agecrypt.CheckKeyed(repo) == nil {
 			fmt.Fprintln(stdout, "accepted: this host can decrypt the repo")
 		} else {
@@ -261,7 +262,9 @@ func joinChange(stdout, stderr io.Writer, cfg config.Config, repo *gitwt.Repo, l
 	committed := false
 	err := withSyncLockStopping(stderr, cfg.SyncDir, func() error {
 		if err := agecrypt.SyncFromOrigin(repo); err != nil {
-			fmt.Fprintln(stderr, "join: could not bring in the latest remote state; working from this clone:", err)
+			// A decision on a stale view of the recipients is the one thing
+			// accept and reject must not make.
+			return fmt.Errorf("could not bring this clone up to date with origin (nothing was changed): %w", err)
 		}
 		if err := agecrypt.WriteInfoAttributes(repo); err != nil {
 			return err

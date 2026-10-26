@@ -241,6 +241,12 @@ func printRecipientsDiff(w io.Writer, repo *gitwt.Repo) {
 	for _, f := range removed {
 		fmt.Fprintln(w, "  - key", f, "(pinned, gone upstream)")
 	}
+	printAttrsNotice(w, repo)
+}
+
+// printAttrsNotice says when the repo's .gitattributes changed since the
+// recipients were pinned: a change to review, not a key.
+func printAttrsNotice(w io.Writer, repo *gitwt.Repo) {
 	if ch, ok := agecrypt.AttrsChanged(repo); ok {
 		dir := repo.Dir
 		switch {
@@ -314,21 +320,55 @@ func labelCmd(stdout, stderr io.Writer, sel repoSel, args []string, label string
 		cfgs = append(cfgs, cfg)
 	}
 	code := 0
+	locker := withSyncLockStopping
+	runAll := func() {
+		for _, cfg := range cfgs {
+			var c int
+			if recovery != "" {
+				c = labelRecoveryOne(stdout, stderr, cfg, recovery, locker)
+			} else {
+				c = labelSelfOne(stdout, stderr, cfg, label, locker)
+			}
+			if c > code {
+				code = c
+			}
+		}
+	}
+	if !all || len(cfgs) < 2 {
+		runAll()
+		return code
+	}
+	// --all: the service is stopped once and started once for the whole loop.
+	// Repos this command would refuse anyway (not encrypted, read-only, in the
+	// middle of a rekey) are reported by the loop and not locked here.
+	var dirs []string
 	for _, cfg := range cfgs {
-		var c int
-		if recovery != "" {
-			c = labelRecoveryOne(stdout, stderr, cfg, recovery)
-		} else {
-			c = labelSelfOne(stdout, stderr, cfg, label)
+		repo := gitwt.New(cfg.SyncDir)
+		if !repo.IsRepo() || !agecrypt.Enabled(repo) || cfg.ReadOnly {
+			continue
 		}
-		if c > code {
-			code = c
+		if _, blocked := agecrypt.RekeyBlocksSync(repo); blocked {
+			continue
 		}
+		dirs = append(dirs, cfg.SyncDir)
+	}
+	locker = func(_ io.Writer, _ string, fn func() error) error { return fn() } // the locks are held below
+	if len(dirs) == 0 {
+		locker = withSyncLockStopping // nothing to hold: each repo reports its own refusal
+		runAll()
+		return code
+	}
+	if err := withSyncLocksStopping(stderr, dirs, func() error { runAll(); return nil }); err != nil {
+		return recipientsFail(stderr, err)
 	}
 	return code
 }
 
-func labelSelfOne(stdout, stderr io.Writer, cfg config.Config, label string) int {
+// syncLocker runs fn under a repo's sync lock (withSyncLockStopping, or a
+// no-op when the caller already holds the locks of every repo it loops over).
+type syncLocker func(stderr io.Writer, syncDir string, fn func() error) error
+
+func labelSelfOne(stdout, stderr io.Writer, cfg config.Config, label string, locker syncLocker) int {
 	repo := gitwt.New(cfg.SyncDir)
 	if !repo.IsRepo() || !agecrypt.Enabled(repo) {
 		fmt.Fprintf(stderr, "recipients: %s: the sync repo is not encrypted\n", cfg.SyncDir)
@@ -338,12 +378,16 @@ func labelSelfOne(stdout, stderr io.Writer, cfg config.Config, label string) int
 		fmt.Fprintln(stderr, "recipients: this host is read-only and never commits; label it from a writable host")
 		return 1
 	}
+	if why, blocked := agecrypt.RekeyBlocksSync(repo); blocked {
+		fmt.Fprintln(stderr, "recipients:", rekeyBlockedError(cfg.SyncDir, why))
+		return 1
+	}
 	if cfg.HostLabel != "" && cfg.HostLabel != label {
 		fmt.Fprintf(stderr, "recipients: this host's hostLabel is already %q\n", cfg.HostLabel)
 		return 1
 	}
 	committed := false
-	err := withSyncLockStopping(stderr, cfg.SyncDir, func() error {
+	err := locker(stderr, cfg.SyncDir, func() error {
 		if err := agecrypt.SyncFromOrigin(repo); err != nil {
 			fmt.Fprintln(stderr, "recipients: could not bring in the latest remote state; working from this clone:", err)
 		}
@@ -378,7 +422,7 @@ func labelSelfOne(stdout, stderr io.Writer, cfg config.Config, label string) int
 
 // labelRecoveryOne marks the recipient line for key as the recovery key in one
 // repo and records the key in that repo's config as a recoveryRecipient.
-func labelRecoveryOne(stdout, stderr io.Writer, cfg config.Config, key string) int {
+func labelRecoveryOne(stdout, stderr io.Writer, cfg config.Config, key string, locker syncLocker) int {
 	repo := gitwt.New(cfg.SyncDir)
 	if !repo.IsRepo() || !agecrypt.Enabled(repo) {
 		fmt.Fprintf(stderr, "recipients: %s: the sync repo is not encrypted\n", cfg.SyncDir)
@@ -388,8 +432,12 @@ func labelRecoveryOne(stdout, stderr io.Writer, cfg config.Config, key string) i
 		fmt.Fprintln(stderr, "recipients: this host is read-only and never commits; mark the key from a writable host")
 		return 1
 	}
+	if why, blocked := agecrypt.RekeyBlocksSync(repo); blocked {
+		fmt.Fprintln(stderr, "recipients:", rekeyBlockedError(cfg.SyncDir, why))
+		return 1
+	}
 	committed := false
-	err := withSyncLockStopping(stderr, cfg.SyncDir, func() error {
+	err := locker(stderr, cfg.SyncDir, func() error {
 		if err := agecrypt.SyncFromOrigin(repo); err != nil {
 			fmt.Fprintln(stderr, "recipients: could not bring in the latest remote state; working from this clone:", err)
 		}

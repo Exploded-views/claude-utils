@@ -932,7 +932,7 @@ expansion of `$VAR`, backticks, globs or `;`), and its stderr is discarded. Run 
 a terminal it may take 120 seconds (a password manager can wait for you to approve a
 prompt; it prints `waiting for your password manager (approve the prompt if one appears)…`
 on stderr first); `CLAUDE_MEMSYNC_SECRET_TIMEOUT` (a Go duration such as `45s` or
-`3m`) changes that. The daemon, which nobody can ask, keeps 10 seconds and prints nothing. When several sources are set the first configured one is
+`3m`) changes that. The daemon, which nobody can ask, keeps 10 seconds and prints nothing; so do hooks (`changes --hook`, `related context`) and the doctor timer (`doctor --unattended`): 120 s is for a terminal only, and hooks and timers never wait on a password manager. A hook never runs a token or key command and never uses the network (it may still run local `ssh -G`/`git config` lookups to resolve a host alias): it uses only cached related-repo visibility verdicts, and a stale or missing one hides that related repo for the run (one stderr line says so) until a command run by hand refreshes it. When several sources are set the first configured one is
 used, in the order file, command, env var; a configured source that fails is an
 error, never a silent fall-through to the next. The token is never written to
 `config.json`, logs or error messages.
@@ -1004,7 +1004,7 @@ the remote. `--token-file` names a file holding the GitHub token for this run, a
 `claude-memsync doctor --install-timer` writes a daily systemd user timer
 (Linux) or launchd agent (macOS) into `~/.config/systemd/user` or
 `~/Library/LaunchAgents` (override with `--unit-dir`). It does not enable it;
-it prints the command. The timer needs `githubTokenFile`.
+it prints the command. The timer needs `githubTokenFile`, and runs `doctor --unattended`, so it never waits for a password manager (10 s limit, no prompt text).
 
 Remotes must also be on the allowed git host: `github.com`, or `githubHost`
 (or the host of `githubApiUrl`) for GitHub Enterprise. https must name it
@@ -1052,8 +1052,10 @@ too: `%USERPROFILE%\.config\claude-memsync`). Earlier builds kept the age
 identity under the OS's own config dir: `~/Library/Application Support/claude-memsync`
 on macOS, `%AppData%\claude-memsync` on Windows. An identity still there keeps
 being used (a second one is never created) and `status` prints a one-time hint
-suggesting you move it. Nothing is moved automatically; to move it, copy the
-`identity*.txt` files (mode 0600) to the new directory and remove the old ones.
+saying so. The identity stays where it is and keeps working: each clone's git
+config holds the identity's absolute path (`memage.identity`), so moving the
+file would leave every repo keyless. Do not move or copy it by hand; a safe
+`identity move` that rewrites every clone is planned.
 
 ### apps.json
 
@@ -1429,6 +1431,8 @@ If the copy is encrypted (`.age-recipients`) and this host cannot decrypt it, it
 - No edge to or from a `mem-client-*` repo from anything else, and none between different clients.
 - `mem-orch-all` may read `mem-orch-<client>`, and nothing else; never join. Every other orch edge is refused.
 
+**Visibility cache.** A cached verdict that says a repo is not private hides it from every command and hook, whatever the token setup, while it is younger than `relatedMaxStaleHours` (default 24, at most 24: a larger value is clamped). Hooks never ask GitHub; the daemon refreshes the verdicts in the background, and a stale or missing one hides the related repo until it does.
+
 **Session context.** Put `claude-memsync related context --project "$CLAUDE_PROJECT_DIR"` in a SessionStart hook. It prints, for the repo that owns the project, one entry per read relation: the repo name, note count, read-only path and the headings of its `MEMORY.md` (never note bodies), within `--per-relation` (default 2000) and `--total` (default 6000) characters. Headings and changed paths that match the owning repo's denylist are counted, never printed. It prints nothing for a project without relations and never fails the session. `changes --hook` also lists, under a "related, read-only repos" label, the paths that changed in those clones since the session last looked. Allow `Read(<relatedRoot>/**)` and nothing wider.
 ## Related-project suggestions
 
@@ -1567,7 +1571,7 @@ place and reused by a later `rekey-pq`.
 While a repo's record is not `published`, or the repo is not post-quantum
 yet, the daemon does not sync it: each cycle logs
 `rekey-pq: not syncing this repo this cycle` and `status` prints a
-`rekey-pq: not syncing` line. A record written by an older build (no stage, no
+`rekey-pq: not syncing` line. The interactive changes (`join accept|reject|request`, `recipients add|remove|accept|label`, `distill --prune`) refuse such a repo before they stop the service or take the lock, name it, and say to finish or roll back the rekey first. `join accept` and `join reject` also stop when the clone cannot be brought up to date with origin (a divergence, an unreachable remote) rather than deciding on a stale view. A record written by an older build (no stage, no
 `newCommit`) blocks while the repo is not pq, while the cached
 `origin/main` is still the backup tip (the push never happened), and while the
 migrated commit cannot be established as below. For such a
@@ -1587,7 +1591,7 @@ beside the sync directories still names it in `memage.identity`: every
 sync dir) is checked (a clone whose git config git cannot read counts as using the file), paths compared after `~` expansion and symlink resolution,
 including clones that are not routed (such as a `*.incident-*` copy). A clone
 whose restore record names the file as its classic identity and is not finished
-keeps it too (a rollback of that clone would need it). If one is found, the
+keeps it too (a rollback of that clone would need it). So does a related read clone (under the related root) whose `.age-recipients` still lists the classic identity's recipient, or cannot be read: those decrypt with the host's default identity. If one is found, the
 file stays, the clone is named in the output, and a rerun retires it once
 nothing uses it. `recipients retire-classic [--repo <name> | --all] [--apply]`
 does just that step with no rekey flags and the same scan of all clones: it
@@ -1639,7 +1643,7 @@ in the sync repo is neither committed nor unstaged. These actions (and
 claude-memsync service is installed and running, the command stops it
 (`stopping the claude-memsync service for this change…`), waits up to 30 s for
 the lock, makes the change and starts the service again (`restarted`), also when
-the change fails, panics or is interrupted. A first Ctrl-C lets the change finish
+the change fails, panics or is interrupted. After the start it asks the service whether it runs: a daemon that exited at once (for example refused by the foreign-writer guard) gets a `warning: ... is not running` line pointing at `status`, not `restarted`. `recipients label ... --all` stops and starts the service once for the whole loop. A first Ctrl-C lets the change finish
 and then restarts the service; a second restarts it at once and exits. If the lock
 is held and the service is not running (another command, a foreground `run`, no
 service installed) nothing is stopped or started and the command refuses. A

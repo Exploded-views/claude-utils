@@ -405,7 +405,7 @@ func TimerUnits(goos, exe, org, home, cfgPath string) (map[string]string, error)
 	if !orgRE.MatchString(org) {
 		return nil, errors.New("org must match [A-Za-z0-9-]+")
 	}
-	args := []string{exe, "doctor", "--org", org, "--config", cfgPath}
+	args := []string{exe, "doctor", "--unattended", "--org", org, "--config", cfgPath}
 	if goos == "darwin" {
 		const label = "claude-memsync-doctor"
 		var pa strings.Builder

@@ -12,7 +12,9 @@ set -euo pipefail
 
 [ $# -ge 2 ] || { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 VERSION="$1"; OUT="$2"; shift 2
-case "$VERSION" in v[0-9]*) ;; *) echo "version must look like vX.Y.Z" >&2; exit 2 ;; esac
+# The same rule as bootstrap.sh --prebuilt-dir and release.yml (v0.3.0, v0.3.0-ev.1).
+printf '%s' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' \
+  || { echo "version must look like vX.Y.Z or vX.Y.Z-suffix (e.g. v0.3.0-ev.1)" >&2; exit 2; }
 if printf '%s' "$VERSION" | grep -q '[^A-Za-z0-9._+-]'; then echo "version has unexpected characters" >&2; exit 2; fi
 if [ $# -gt 0 ]; then TARGETS=("$@"); else TARGETS=(linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64); fi
 

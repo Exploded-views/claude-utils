@@ -13,6 +13,7 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
+	"github.com/MarimerLLC/claude-utils/internal/related"
 	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
 
@@ -76,6 +77,7 @@ func rekeyPQCmd(stdout, stderr io.Writer, sel repoSel, args []string, hostLabel 
 	if rc != 0 {
 		return rc
 	}
+	rel := relatedCloneDirs(sel)
 	code := 0
 	var done, failed, notStarted []string
 	for i, t := range targets {
@@ -86,7 +88,7 @@ func rekeyPQCmd(stdout, stderr io.Writer, sel repoSel, args []string, hostLabel 
 		case rollback:
 			c = rollbackOne(stdout, stderr, t.cfg, all, discard)
 		default:
-			c = rekeyOne(stdout, stderr, t.cfg, all2, agecrypt.RekeyOpts{
+			c = rekeyOne(stdout, stderr, t.cfg, all2, rel, agecrypt.RekeyOpts{
 				Label: hostLabel, Recovery: recovery, ConfiguredRecovery: t.cfg.RecoveryRecipients, FreshRoot: fresh,
 			}, apply)
 		}
@@ -266,7 +268,7 @@ func shortRev(r string) string {
 	return r
 }
 
-func rekeyOne(stdout, stderr io.Writer, cfg config.Config, hostCfgs []config.Config, o agecrypt.RekeyOpts, apply bool) int {
+func rekeyOne(stdout, stderr io.Writer, cfg config.Config, hostCfgs []config.Config, rel relScan, o agecrypt.RekeyOpts, apply bool) int {
 	repo := gitwt.New(cfg.SyncDir)
 	if cfg.ReadOnly {
 		fmt.Fprintln(stderr, "recipients: this host is read-only and never commits; run it on a writable member host")
@@ -387,7 +389,7 @@ func rekeyOne(stdout, stderr io.Writer, cfg config.Config, hostCfgs []config.Con
 	}
 	if stage == agecrypt.StageSynced {
 		fmt.Fprintf(stdout, "%s: already done: migrated to post-quantum and synced since; nothing to redo\n", cfg.SyncDir)
-		retireClassicIdentity(stdout, synced.ClassicIdentity, cfg, hostCfgs, true)
+		retireClassicIdentity(stdout, synced.ClassicIdentity, cfg, hostCfgs, rel, true)
 		return 0
 	}
 	if pushed && verr != nil {
@@ -401,7 +403,7 @@ func rekeyOne(stdout, stderr io.Writer, cfg config.Config, hostCfgs []config.Con
 		fmt.Fprintf(stdout, "  re-encrypted and pushed; origin/main verified: %d files, all hybrid ciphertext\n", vb)
 	}
 	fmt.Fprintf(stdout, "  rollback point kept at %s; delete it later with `recipients rekey-pq --drop-backup`\n", agecrypt.BackupRef)
-	retireClassicIdentity(stdout, plan.IdentityPath, cfg, hostCfgs, true)
+	retireClassicIdentity(stdout, plan.IdentityPath, cfg, hostCfgs, rel, true)
 	return 0
 }
 
@@ -462,6 +464,79 @@ func clonesUsingIdentity(old string, hostCfgs []config.Config) []string {
 		id, ok := identityInGitConfig(filepath.Join(dir, ".git", "config"))
 		// A config git cannot read counts as using the file: keeping it is the safe side.
 		if !ok || (id != "" && normIdentityPath(id) == want) {
+			out = append(out, dir)
+		}
+	}
+	return out
+}
+
+// relatedCloneDirs lists the encrypted read clones of related repos under this
+// host's related root (routes.json relatedRoot, else beside the registry). They
+// are not sync dirs, so cloneDirs never sees them, yet they decrypt with the
+// host's default identities.
+func relatedCloneDirs(sel repoSel) relScan {
+	path, ok, err := resolveRoutesPath(sel.Routes)
+	if err != nil {
+		return relScan{err: err}
+	}
+	if !ok {
+		return relScan{} // no routes file: no related clones
+	}
+	set, err := loadRouted(path)
+	if err != nil {
+		return relScan{err: err}
+	}
+	root := set.relatedRoot()
+	if root == "" {
+		return relScan{}
+	}
+	ents, err := os.ReadDir(root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return relScan{} // nothing fetched yet
+		}
+		return relScan{err: fmt.Errorf("related root %s: %w", root, err)}
+	}
+	var out []string
+	for _, e := range ents {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		dir := filepath.Join(root, e.Name())
+		if _, err := os.Stat(filepath.Join(dir, related.EncryptedMarker)); err == nil {
+			out = append(out, dir)
+		}
+	}
+	return relScan{dirs: out}
+}
+
+// relScan is what relatedCloneDirs found. A scan that failed (an unusable
+// routes file, an unreadable related root) is not "no clones": the classic
+// identity is kept.
+type relScan struct {
+	dirs []string
+	err  error
+}
+
+// relatedClonesUsingIdentity lists the related read clones whose recipients
+// still include old's recipient. What cannot be established (the identity
+// unreadable, the recipients unreadable) counts as using it: keeping the file
+// is the safe side.
+func relatedClonesUsingIdentity(old string, rel []string) []string {
+	if len(rel) == 0 {
+		return nil
+	}
+	mine, merr := agecrypt.IdentityRecipient(old)
+	var out []string
+	for _, dir := range rel {
+		keys, err := agecrypt.ListRecipients(dir)
+		use := merr != nil || err != nil
+		for _, k := range keys {
+			if f := strings.Fields(k); len(f) > 0 && f[0] == mine {
+				use = true
+			}
+		}
+		if use {
 			out = append(out, dir)
 		}
 	}
@@ -576,7 +651,7 @@ func normIdentityPath(p string) string {
 // <name>.classic-retired once no clone on this host still points at it: every
 // git clone beside the sync dirs counts, routed or not. Without apply it only
 // says what it would do.
-func retireClassicIdentity(stdout io.Writer, old string, done config.Config, hostCfgs []config.Config, apply bool) {
+func retireClassicIdentity(stdout io.Writer, old string, done config.Config, hostCfgs []config.Config, rel relScan, apply bool) {
 	if old == "" {
 		return
 	}
@@ -590,6 +665,16 @@ func retireClassicIdentity(stdout io.Writer, old string, done config.Config, hos
 	if users := clonesUsingIdentity(old, cfgs); len(users) > 0 {
 		fmt.Fprintf(stdout, "  the classic identity %s is kept: still used by %s\n", old, strings.Join(users, ", "))
 		fmt.Fprintln(stdout, "  rekey those clones (or remove them), then run this command again to retire it")
+		return
+	}
+	if rel.err != nil {
+		fmt.Fprintf(stdout, "  the classic identity %s is kept: the related read clones could not be checked (%v)\n", old, rel.err)
+		fmt.Fprintln(stdout, "  fix that, then run this command again to retire it")
+		return
+	}
+	if users := relatedClonesUsingIdentity(old, rel.dirs); len(users) > 0 {
+		fmt.Fprintf(stdout, "  the classic identity %s is kept: related read clone(s) %s still list its recipient and decrypt with it\n", old, strings.Join(users, ", "))
+		fmt.Fprintln(stdout, "  once those repos are rekeyed (or the relation is dropped) and their clones re-fetched, run this command again to retire it")
 		return
 	}
 	if pend := clonesWithPendingRecord(old, cfgs); len(pend) > 0 {
@@ -629,6 +714,7 @@ func retireClassicCmd(stdout, stderr io.Writer, sel repoSel, args []string) int 
 	if rc != 0 {
 		return rc
 	}
+	rel := relatedCloneDirs(sel)
 	for _, t := range targets {
 		repo := gitwt.New(t.cfg.SyncDir)
 		if !repo.IsRepo() {
@@ -642,7 +728,7 @@ func retireClassicCmd(stdout, stderr io.Writer, sel repoSel, args []string) int 
 		}
 		fmt.Fprintf(stdout, "%s:\n", t.cfg.SyncDir)
 		for _, old := range cands {
-			retireClassicIdentity(stdout, old, t.cfg, all2, apply)
+			retireClassicIdentity(stdout, old, t.cfg, all2, rel, apply)
 		}
 	}
 	if !apply {

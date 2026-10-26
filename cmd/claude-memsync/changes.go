@@ -13,6 +13,7 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/scrub"
+	"github.com/MarimerLLC/claude-utils/internal/secretcmd"
 	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
 
@@ -62,6 +63,8 @@ func changesCmd(stdin io.Reader, stdout, stderr io.Writer, args []string) (code 
 			fmt.Fprintln(stderr, "changes: --hook takes only --config, --routes, --project, --limit and --deadline")
 			return 0
 		}
+		// A hook never waits on a password manager: short secret timeout, no prompt text.
+		secretcmd.SetDaemon(true)
 		d := hookDeadlineFromEnv()
 		if flagsSet(flags, "deadline") {
 			d = *deadline

@@ -6,10 +6,13 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
+	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/lock"
 	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
@@ -19,6 +22,9 @@ import (
 var (
 	lockWait = 30 * time.Second
 	lockPoll = 200 * time.Millisecond
+	// How long after the automatic restart before the service is asked
+	// whether it is still running.
+	restartSettle = time.Second
 )
 
 // notifySignals reports SIGINT and SIGTERM until the returned func is called;
@@ -43,6 +49,16 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 	return l.w.Write(p)
 }
 
+// rekeyBlockedError refuses an interactive change to a half-migrated repo.
+func rekeyBlockedError(syncDir, why string) error {
+	name := filepath.Base(syncDir)
+	repoFlag := " --repo " + name
+	if name == ".claudesync" || name == "." || name == string(filepath.Separator) {
+		repoFlag = "" // the single default repo needs no --repo
+	}
+	return fmt.Errorf("repo %s has an unfinished post-quantum rekey (%s): finish or roll back the rekey first (`claude-memsync recipients rekey-pq%s --apply` or `claude-memsync recipients rekey-pq%s --rollback`)", name, why, repoFlag, repoFlag)
+}
+
 // errInterrupted means a SIGINT or SIGTERM arrived while the service was stopped.
 var errInterrupted = errors.New("interrupted")
 
@@ -54,10 +70,45 @@ var errInterrupted = errors.New("interrupted")
 // ordinary refusal (lock.ErrHeld) is returned. A service that was not running
 // is never started.
 func withSyncLockStopping(stderr io.Writer, syncDir string, fn func() error) error {
+	return withSyncLocksStopping(stderr, []string{syncDir}, fn)
+}
+
+// acquireAll takes every dir's lock or none: the first one that cannot be
+// taken releases the ones already held and returns its error.
+func acquireAll(dirs []string) (release func(), err error) {
+	var held []*lock.Lock
+	release = func() {
+		for _, l := range held {
+			l.Release()
+		}
+	}
+	for _, d := range dirs {
+		l, err := lock.Acquire(d)
+		if err != nil {
+			release()
+			return nil, err
+		}
+		held = append(held, l)
+	}
+	return release, nil
+}
+
+// withSyncLocksStopping is withSyncLockStopping over several sync dirs: the
+// service is stopped once and started once for the whole change, whatever the
+// number of repos (a command that loops over every repo of the routes file).
+func withSyncLocksStopping(stderr io.Writer, syncDirs []string, fn func() error) error {
+	// Before the service is stopped or any lock taken: a repo in the middle of
+	// a post-quantum migration must not be changed or pushed by anything but
+	// the rekey itself (the daemon is blocked on it for the same reason).
+	for _, d := range syncDirs {
+		if why, blocked := agecrypt.RekeyBlocksSync(gitwt.New(d)); blocked {
+			return rekeyBlockedError(d, why)
+		}
+	}
 	stderr = &lockedWriter{w: stderr} // the signal goroutine and the caller both print
-	l, err := lock.Acquire(syncDir)
+	release, err := acquireAll(syncDirs)
 	if err == nil {
-		defer l.Release()
+		defer release()
 		return fn()
 	}
 	if !errors.Is(err, lock.ErrHeld) {
@@ -76,6 +127,13 @@ func withSyncLockStopping(stderr io.Writer, syncDir string, fn func() error) err
 		once.Do(func() {
 			if err := startFn(); err != nil {
 				fmt.Fprintln(stderr, "could not restart the claude-memsync service:", err, "- run `claude-memsync start`")
+				return
+			}
+			// The service may have refused to start (the foreign-writer guard,
+			// a config error): look before saying it is back.
+			time.Sleep(restartSettle)
+			if st, serr := statusFn(); serr != nil || st != "running" {
+				fmt.Fprintln(stderr, "warning: the claude-memsync service was started but is not running; see `claude-memsync status` and the service log, then run `claude-memsync start`")
 				return
 			}
 			fmt.Fprintln(stderr, "claude-memsync service restarted")
@@ -122,11 +180,13 @@ func withSyncLockStopping(stderr io.Writer, syncDir string, fn func() error) err
 	}()
 	wasInterrupted := func() bool { mu.Lock(); defer mu.Unlock(); return interrupted }
 
-	_ = syncpkg.ClearStalePullMarker(syncDir)
+	for _, d := range syncDirs {
+		_ = syncpkg.ClearStalePullMarker(d)
+	}
 
 	deadline := time.Now().Add(lockWait)
 	for {
-		l, err = lock.Acquire(syncDir)
+		release, err = acquireAll(syncDirs)
 		if err == nil {
 			break
 		}
@@ -141,7 +201,7 @@ func withSyncLockStopping(stderr io.Writer, syncDir string, fn func() error) err
 		}
 		time.Sleep(lockPoll)
 	}
-	defer l.Release()
+	defer release()
 
 	ferr := fn()
 	if ferr == nil && wasInterrupted() {

@@ -26,11 +26,11 @@ type fakeSvc struct {
 func installFakeSvc(t *testing.T, f *fakeSvc) {
 	t.Helper()
 	oS, oP, oT := startFn, stopFn, statusFn
-	oW, oL := lockWait, lockPoll
+	oW, oL, oRS := lockWait, lockPoll, restartSettle
 	oN, oE := notifySignals, exitFn
 	t.Cleanup(func() {
 		startFn, stopFn, statusFn = oS, oP, oT
-		lockWait, lockPoll = oW, oL
+		lockWait, lockPoll, restartSettle = oW, oL, oRS
 		notifySignals, exitFn = oN, oE
 	})
 	statusFn = func() (string, error) { f.calls = append(f.calls, "status"); return f.status, f.err }
@@ -42,7 +42,7 @@ func installFakeSvc(t *testing.T, f *fakeSvc) {
 		return f.stopEr
 	}
 	startFn = func() error { f.calls = append(f.calls, "start"); return nil }
-	lockWait, lockPoll = 2*time.Second, 5*time.Millisecond
+	lockWait, lockPoll, restartSettle = 2*time.Second, 5*time.Millisecond, 0
 	notifySignals = func() (<-chan os.Signal, func()) { return make(chan os.Signal), func() {} }
 	exitFn = func(int) { t.Error("exitFn called unexpectedly") }
 }

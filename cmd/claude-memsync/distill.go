@@ -65,7 +65,9 @@ func runDistill(args []string) int {
 		// index alone is a git-ignored derived file; rebuilding it needs none.)
 		err = withSyncLockStopping(os.Stderr, cfg.SyncDir, func() (e error) { res, e = distill.Run(opts, true); return })
 		if errors.Is(err, lock.ErrHeld) {
-			fmt.Fprintln(os.Stderr, "distill: the daemon is running on this sync dir; run `claude-memsync stop`, then --prune, then `claude-memsync start`")
+			// The service, when it runs, is stopped and restarted for us; a lock
+			// still held means something other than the service has it.
+			fmt.Fprintln(os.Stderr, "distill: this sync dir's lock is held by something other than the claude-memsync service (another claude-memsync command, or a daemon started by hand); end that process, then run --prune again")
 		}
 	default:
 		res, err = distill.Run(opts, false)

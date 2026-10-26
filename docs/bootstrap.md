@@ -26,7 +26,7 @@ Every flow below has the same shape, so a value is written once and used by name
 
 Run the steps in **bash**, not zsh: the keep-out lists are space-separated and are split into repeated flags by bash's word splitting, which zsh does not do. (On macOS run `bash` first.)
 
-A key or token command that waits for your password manager (an approval prompt) prints `waiting for your password manager (approve the prompt if one appears)…` and is given 120 s at a terminal, so keep the password manager unlocked and in view while the run goes (`CLAUDE_MEMSYNC_SECRET_TIMEOUT` changes the limit; the daemon keeps 10 s).
+A key or token command that waits for your password manager (an approval prompt) prints `waiting for your password manager (approve the prompt if one appears)…` and is given 120 s at a terminal, so keep the password manager unlocked and in view while the run goes (`CLAUDE_MEMSYNC_SECRET_TIMEOUT` changes the limit; the daemon, hooks and timers keep 10 s and never wait).
 
 `scripts/bootstrap_test.sh` extracts each prompt from this file, substitutes test values for the inputs, and runs it as a shell snippet, so this file and the script cannot drift: a flag the script does not know, an input the steps do not use, or a name the steps use but INPUTS does not list fails the test.
 
