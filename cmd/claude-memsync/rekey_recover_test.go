@@ -719,3 +719,61 @@ func TestRekeyPQ_DropBackupAllowsAPublishedRekeyLegacyOrNot(t *testing.T) {
 		}
 	}
 }
+
+// crashedBeforeBackupRef leaves what a crash between writing the restore
+// record and creating the backup ref leaves: a "started" record, no ref, HEAD
+// still on the classic tip.
+func crashedBeforeBackupRef(t *testing.T) (classicRepo, string) {
+	t.Helper()
+	c, newRec, oldTip := unpublishedRekey(t)
+	if _, err := c.repo.Run("reset", "--hard", "-q", oldTip); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.repo.Run("update-ref", "-d", agecrypt.BackupRef); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.repo.ConfigSet(agecrypt.IdentityConfigKey, filepath.ToSlash(c.idPath)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.repo.Run("config", "--unset", agecrypt.SchemeConfigKey); err != nil {
+		t.Fatal(err)
+	}
+	setRecordStage(t, c.cfg.SyncDir, "started")
+	return c, newRec
+}
+
+func TestRekeyPQ_RecordWithoutBackupRefIsNotADeadEnd(t *testing.T) {
+	c, newRec := crashedBeforeBackupRef(t)
+	unblockPush(t, c.origin)
+	if code, o, e := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root", "--apply"); code != 0 {
+		t.Fatalf("apply after the crash: %d\n%s%s", code, o, e)
+	}
+	if agecrypt.SchemeOf(c.repo) != agecrypt.SchemePQ {
+		t.Error("not migrated")
+	}
+}
+
+func TestRekeyPQ_RollbackOfARecordWithoutBackupRefClearsIt(t *testing.T) {
+	c, _ := crashedBeforeBackupRef(t)
+	if code, o, e := rollbackCmd(t, c); code != 0 {
+		t.Fatalf("rollback: %d\n%s%s", code, o, e)
+	}
+	if _, err := os.Stat(filepath.Join(c.cfg.SyncDir, ".git", "memsync-pre-pq.json")); err == nil {
+		t.Error("the record is still there")
+	}
+}
+
+func TestRekeyPQ_FailedBackupRefLeavesNoRecord(t *testing.T) {
+	c := newClassicRepo(t)
+	_, newRec := newPQKey(t, "newrec")
+	// a file where the ref's directory should be makes update-ref fail
+	if err := os.WriteFile(filepath.Join(c.cfg.SyncDir, ".git", "refs", "memsync"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, _ := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--fresh-root", "--apply"); code == 0 {
+		t.Fatal("apply must fail")
+	}
+	if _, err := os.Stat(filepath.Join(c.cfg.SyncDir, ".git", "memsync-pre-pq.json")); err == nil {
+		t.Error("a failed apply left a restore record")
+	}
+}
