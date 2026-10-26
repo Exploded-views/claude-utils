@@ -73,8 +73,8 @@ type Options struct {
 
 	// DeferMarker leaves the final marker rewrite to the caller (WriteMarker),
 	// for callers that must not advance it until the report was delivered.
-	// A marker that has to be created or reset is still written by Compute,
-	// since nothing is reported then.
+	// A marker that has to be created or reset is deferred too (SaveMarker
+	// writes it), so Compute itself never touches a marker file with this set.
 	DeferMarker bool
 }
 
@@ -133,6 +133,8 @@ type Result struct {
 	// (WriteMarker, not AdvanceMarker), or the same diff repeats on every run.
 	MovedBack bool `json:"movedBack"`
 
+	baseline bool // the marker is to be created or reset to Head (DeferMarker)
+
 	hideAll bool // Hidden counts everything because the rules were unusable
 }
 
@@ -140,7 +142,7 @@ type Result struct {
 // forward when history moved back, otherwise never backwards (see
 // AdvanceMarker), so two hooks racing cannot rewind each other.
 func SaveMarker(repo *gitwt.Repo, path string, res Result) error {
-	if res.MovedBack {
+	if res.MovedBack || res.baseline {
 		return WriteMarker(path, res.Head)
 	}
 	return AdvanceMarker(repo, path, res.Head)
@@ -198,6 +200,10 @@ func Compute(opts Options) (Result, error) {
 		// baseline.
 		res.Since = head
 		res.Reset = opts.Marker != "" && markerExists(opts.Marker)
+		if opts.DeferMarker {
+			res.baseline = true
+			return res, nil
+		}
 		return res, WriteMarker(opts.Marker, head)
 	}
 	res.Since = since

@@ -333,6 +333,8 @@ Usage of route inherit:
 Usage of changes:
   -config string
     	path to config.json (default: ~/.claudesync/config.json)
+  -deadline duration
+    	with --hook: give up after this long, print nothing and move no marker (0 = none; $CLAUDE_MEMSYNC_HOOK_DEADLINE_MS, in ms, sets the default) (default 1.5s)
   -hook
     	run as a Claude Code hook: read its JSON from stdin, keep a per-session marker, print additionalContext JSON
   -json

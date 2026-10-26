@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -674,5 +675,127 @@ func TestHook_LocalCopyKeptIsAnnotated(t *testing.T) {
 	}
 	if !strings.Contains(reply.HookSpecificOutput.AdditionalContext, "held.md "+want) {
 		t.Errorf("held.md not annotated: %q", reply.HookSpecificOutput.AdditionalContext)
+	}
+}
+
+// slowHook makes the hook's first step take d while *slow is true, as a git
+// process does under host IO contention. Its cleanup waits for every worker
+// the hook left behind before it clears the seams, so none races with it.
+func slowHook(t *testing.T, d time.Duration) *atomic.Bool {
+	t.Helper()
+	var slow atomic.Bool
+	slow.Store(true)
+	var live atomic.Int32 // workers between their first step and their end
+	hookTestHook = func() {
+		live.Add(1)
+		if slow.Load() {
+			time.Sleep(d)
+		}
+	}
+	hookWorkDone = func() { live.Add(-1) }
+	t.Cleanup(func() {
+		for live.Load() > 0 {
+			time.Sleep(10 * time.Millisecond)
+		}
+		hookTestHook, hookWorkDone = nil, nil
+	})
+	return &slow
+}
+
+// A hook that overruns its deadline prints nothing, exits 0, moves no marker,
+// says so in one stderr line, and returns at the deadline, not when the work
+// ends.
+func TestHook_DeadlineExceededPrintsNothingAndMovesNoMarker(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	in := hookJSON("sess-d", "/home/alice/src/app", "UserPromptSubmit")
+	runHook(t, in, "--config", cfgPath, "--hook") // baseline
+	addNotes(t, cfgPath, map[string]string{"-home-alice-src-app/memory/new.md": "n"})
+	m := markerPath(t, cfgPath, "sess-d")
+	before, err := os.ReadFile(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("CLAUDE_MEMSYNC_HOOK_DEADLINE_MS", "100")
+	slow := slowHook(t, 1500*time.Millisecond)
+	start := time.Now()
+	code, out, errs := runHook(t, in, "--config", cfgPath, "--hook")
+	if took := time.Since(start); took > 100*time.Millisecond+200*time.Millisecond {
+		t.Errorf("returned after %v, want within deadline + 200ms", took)
+	}
+	if code != 0 || out != "" {
+		t.Errorf("exit %d stdout %q", code, out)
+	}
+	if want := "changes: hook deadline exceeded; notices deferred to the next prompt\n"; errs != want {
+		t.Errorf("stderr %q, want %q", errs, want)
+	}
+	if after, _ := os.ReadFile(m); string(after) != string(before) {
+		t.Errorf("marker moved: %q -> %q", before, after)
+	}
+
+	// The notice was deferred, not lost: the next prompt reports it.
+	slow.Store(false)
+	if _, out, _ := runHook(t, in, "--config", cfgPath, "--hook", "--deadline", "0"); !strings.Contains(out, "new.md") {
+		t.Errorf("next prompt did not report the deferred change: %q", out)
+	}
+}
+
+// The --deadline flag works like the env var.
+func TestHook_DeadlineFlag(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	in := hookJSON("sess-f", "/home/alice/src/app", "UserPromptSubmit")
+	runHook(t, in, "--config", cfgPath, "--hook")
+	addNotes(t, cfgPath, map[string]string{"-home-alice-src-app/memory/new.md": "n"})
+	slowHook(t, 1500*time.Millisecond)
+	start := time.Now()
+	code, out, errs := runHook(t, in, "--config", cfgPath, "--hook", "--deadline", "100ms")
+	if took := time.Since(start); took > 300*time.Millisecond || code != 0 || out != "" || !strings.Contains(errs, "hook deadline exceeded") {
+		t.Errorf("took %v exit %d stdout %q stderr %q", took, code, out, errs)
+	}
+}
+
+// Under the deadline nothing changes: the report is printed and the marker
+// moves.
+func TestHook_UnderDeadlineReportsAndMovesMarker(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	in := hookJSON("sess-u", "/home/alice/src/app", "UserPromptSubmit")
+	runHook(t, in, "--config", cfgPath, "--hook")
+	addNotes(t, cfgPath, map[string]string{"-home-alice-src-app/memory/new.md": "n"})
+	t.Setenv("CLAUDE_MEMSYNC_HOOK_DEADLINE_MS", "5000")
+	slowHook(t, 50*time.Millisecond)
+	code, out, errs := runHook(t, in, "--config", cfgPath, "--hook")
+	if code != 0 || errs != "" || !strings.Contains(out, "new.md") {
+		t.Fatalf("exit %d stdout %q stderr %q", code, out, errs)
+	}
+	if code, out, _ := runHook(t, in, "--config", cfgPath, "--hook"); code != 0 || out != "" {
+		t.Errorf("marker did not move: stdout %q", out)
+	}
+}
+
+// A worker that finishes after the deadline must not write a marker, not even
+// the baseline of a session that has none yet.
+func TestHook_LateFinisherNeverWritesAMarker(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	in := hookJSON("sess-l", "/home/alice/src/app", "UserPromptSubmit")
+	m := markerPath(t, cfgPath, "sess-l")
+
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	hookTestHook = func() { <-release }
+	hookWorkDone = func() { close(finished) }
+	t.Cleanup(func() { hookTestHook, hookWorkDone = nil, nil })
+
+	code, out, errs := runHook(t, in, "--config", cfgPath, "--hook", "--deadline", "50ms")
+	if code != 0 || out != "" || !strings.Contains(errs, "hook deadline exceeded") {
+		t.Fatalf("exit %d stdout %q stderr %q", code, out, errs)
+	}
+	close(release)
+	select {
+	case <-finished:
+	case <-time.After(10 * time.Second):
+		t.Fatal("late worker never finished")
+	}
+	if _, err := os.Stat(m); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("late worker left a marker (stat err %v)", err)
 	}
 }

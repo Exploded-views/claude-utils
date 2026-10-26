@@ -942,3 +942,26 @@ func TestCompute_LocalCopyKeptIsFlagged(t *testing.T) {
 		t.Error("compared with HEAD instead of the upper bound")
 	}
 }
+
+// With DeferMarker, even the baseline (a missing marker) is left to the
+// caller: Compute writes nothing, SaveMarker writes it.
+func TestCompute_DeferMarkerDefersTheBaselineToo(t *testing.T) {
+	f := newFixture(t)
+	head := f.commit(map[string]string{mem(appHash, "a.md"): "a"})
+	marker := filepath.Join(t.TempDir(), "m")
+	o := f.opts("")
+	o.Marker, o.UpdateMarker, o.DeferMarker = marker, true, true
+	res, err := Compute(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("Compute wrote the marker despite DeferMarker")
+	}
+	if err := SaveMarker(f.repo, marker, res); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(marker); strings.TrimSpace(string(b)) != head {
+		t.Errorf("marker %q, want %q", b, head)
+	}
+}

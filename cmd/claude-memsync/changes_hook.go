@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,31 +39,118 @@ const hookFraming = "Memory notes changed in the sync repo (this or another mach
 // markerMaxAge is how long a session's marker survives without being touched.
 const markerMaxAge = 30 * 24 * time.Hour
 
+// defaultHookDeadline is how long the hook may run before it gives up: well
+// inside Claude Code's 10 s hook timeout, which discards the output of a hook
+// that overruns.
+const defaultHookDeadline = 1500 * time.Millisecond
+
+// hookDeadlineEnv overrides defaultHookDeadline, in milliseconds (0: none).
+const hookDeadlineEnv = "CLAUDE_MEMSYNC_HOOK_DEADLINE_MS"
+
+// hookDeadlineFromEnv is the deadline $CLAUDE_MEMSYNC_HOOK_DEADLINE_MS names,
+// or the default when it is unset or not a non-negative integer.
+func hookDeadlineFromEnv() time.Duration {
+	ms, err := strconv.Atoi(strings.TrimSpace(os.Getenv(hookDeadlineEnv)))
+	if err != nil || ms < 0 {
+		return defaultHookDeadline
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+// hookWorkDone, if set, runs when the hook's worker goroutine ends; tests use
+// it to wait for a worker that outlived the deadline.
+var hookWorkDone func()
+
 // changesHook implements `changes --hook`. A hook that fails or prints
 // garbage can block the user's prompt, so every error here is one line on
 // stderr, nothing on stdout, and exit 0.
-func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag, project string, limit int) int {
-	fail := func(err error) int {
-		fmt.Fprintln(stderr, "changes:", err)
+//
+// The work runs in a goroutine that touches no marker and writes to no shared
+// stream. If it is not done within deadline (0: no limit), the hook prints
+// nothing, moves nothing and returns; the worker (and any git process it
+// started) dies with the process. Only the caller's goroutine prints the
+// report and moves markers, and only after the worker finished in time, so a
+// late finisher can never move one.
+func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag, project string, limit int, deadline time.Duration) int {
+	type outcome struct {
+		out      []byte
+		commit   func() error
+		err      error
+		panicked bool
+		panicVal any
+	}
+	var errBuf bytes.Buffer // the worker's until it reports back
+	done := make(chan outcome, 1)
+	go func() {
+		var o outcome
+		defer func() {
+			if r := recover(); r != nil {
+				o.panicked, o.panicVal = true, r
+			}
+			if hookWorkDone != nil {
+				hookWorkDone()
+			}
+			done <- o
+		}()
+		o.out, o.commit, o.err = hookWork(stdin, &errBuf, cfgPath, routesFlag, project, limit)
+	}()
+	var expired <-chan time.Time
+	if deadline > 0 {
+		t := time.NewTimer(deadline)
+		defer t.Stop()
+		expired = t.C
+	}
+	select {
+	case o := <-done:
+		if o.panicked {
+			panic(o.panicVal) // changesCmd turns it into one stderr line
+		}
+		stderr.Write(errBuf.Bytes())
+		if o.err != nil {
+			fmt.Fprintln(stderr, "changes:", o.err)
+			return 0
+		}
+		if len(o.out) > 0 {
+			if _, err := stdout.Write(o.out); err != nil {
+				fmt.Fprintln(stderr, "changes:", err)
+				return 0
+			}
+		}
+		// Only now that the report went out does a marker move; otherwise the
+		// next prompt reports the same changes again.
+		if o.commit != nil {
+			if err := o.commit(); err != nil {
+				fmt.Fprintln(stderr, "changes:", err)
+			}
+		}
+		return 0
+	case <-expired:
+		fmt.Fprintln(stderr, "changes: hook deadline exceeded; notices deferred to the next prompt")
 		return 0
 	}
+}
+
+// hookWork computes the hook's report. It returns the bytes to print (nil:
+// nothing) and a function that moves the markers, which the caller runs once
+// the output was written. It moves no marker itself.
+func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project string, limit int) (out []byte, commit func() error, err error) {
 	if hookTestHook != nil {
 		hookTestHook()
 	}
 	var in hookInput
 	if err := json.NewDecoder(io.LimitReader(stdin, 1<<20)).Decode(&in); err != nil {
-		return fail(fmt.Errorf("read hook input: %w", err))
+		return nil, nil, fmt.Errorf("read hook input: %w", err)
 	}
 	if !sessionIDPattern.MatchString(in.SessionID) {
-		return 0
+		return nil, nil, nil
 	}
 	targets, err := hookTargets(cfgPath, routesFlag)
 	if err != nil {
-		return fail(err)
+		return nil, nil, err
 	}
 
 	if in.Event == "" {
-		return fail(fmt.Errorf("hook input has no hook_event_name"))
+		return nil, nil, fmt.Errorf("hook input has no hook_event_name")
 	}
 	// Claude's cwd follows its `cd`, so the project it was started in is the
 	// better default.
@@ -101,7 +190,7 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 		})
 		if err != nil {
 			if len(targets) == 1 {
-				return fail(err)
+				return nil, nil, err
 			}
 			fmt.Fprintf(stderr, "changes: repo %s: %v\n", tg.name, err)
 			continue
@@ -152,7 +241,9 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 		lines = append(lines, relLines...)
 		reported = true
 	}
-	if reported {
+	if !reported {
+		out = nil
+	} else {
 		var reply struct {
 			Out struct {
 				Event   string `json:"hookEventName"`
@@ -161,21 +252,24 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 		}
 		reply.Out.Event = in.Event
 		reply.Out.Context = strings.Join(lines, "\n")
-		if err := json.NewEncoder(stdout).Encode(reply); err != nil {
-			return fail(err)
+		var buf bytes.Buffer
+		if err := json.NewEncoder(&buf).Encode(reply); err != nil {
+			return nil, nil, err
 		}
+		out = buf.Bytes()
 	}
-	// Only now that the report went out does a marker move; otherwise the
-	// next prompt reports the same changes again.
-	if relCommit != nil {
-		relCommit()
-	}
-	for _, r := range reports {
-		if err := changes.SaveMarker(gitwt.New(r.cfg.SyncDir), r.marker, r.res); err != nil {
-			return fail(err)
+	commit = func() error {
+		if relCommit != nil {
+			relCommit()
 		}
+		for _, r := range reports {
+			if err := changes.SaveMarker(gitwt.New(r.cfg.SyncDir), r.marker, r.res); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
-	return 0
+	return out, commit, nil
 }
 
 // hookTarget is one repo a hook reports on, and the gate on its folders.

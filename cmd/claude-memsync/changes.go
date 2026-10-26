@@ -49,6 +49,7 @@ func changesCmd(stdin io.Reader, stdout, stderr io.Writer, args []string) (code 
 	update := flags.Bool("update-marker", false, "with --marker, rewrite the file to the current HEAD afterwards (a missing or stale marker only records the baseline)")
 	synced := flags.Bool("synced", false, "compare with the commit last copied into ~/.claude (.state/synced-head) instead of HEAD")
 	routesFlag := flags.String("routes", "", "with --hook: path to routes.json, to report across several repos (default: $"+routesEnv+", then ~/.config/claude-memsync/routes.json if it exists)")
+	deadline := flags.Duration("deadline", defaultHookDeadline, "with --hook: give up after this long, print nothing and move no marker (0 = none; $"+hookDeadlineEnv+", in ms, sets the default)")
 	hook := flags.Bool("hook", false, "run as a Claude Code hook: read its JSON from stdin, keep a per-session marker, print additionalContext JSON")
 	if err := flags.Parse(args); err != nil {
 		if hookRequested(args) {
@@ -58,10 +59,17 @@ func changesCmd(stdin io.Reader, stdout, stderr io.Writer, args []string) (code 
 	}
 	if *hook {
 		if flagsSet(flags, "since", "marker", "update-marker", "json", "synced") || *limit < 0 {
-			fmt.Fprintln(stderr, "changes: --hook takes only --config, --routes, --project and --limit")
+			fmt.Fprintln(stderr, "changes: --hook takes only --config, --routes, --project, --limit and --deadline")
 			return 0
 		}
-		return changesHook(stdin, stdout, stderr, *cfgPath, *routesFlag, *project, *limit)
+		d := hookDeadlineFromEnv()
+		if flagsSet(flags, "deadline") {
+			d = *deadline
+		}
+		if d < 0 {
+			d = defaultHookDeadline
+		}
+		return changesHook(stdin, stdout, stderr, *cfgPath, *routesFlag, *project, *limit, d)
 	}
 	if (*since == "") == (*marker == "") {
 		fmt.Fprintln(stderr, "changes: exactly one of --since and --marker is required")
