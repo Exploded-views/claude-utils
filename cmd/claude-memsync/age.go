@@ -378,6 +378,10 @@ func labelSelfOne(stdout, stderr io.Writer, cfg config.Config, label string, loc
 		fmt.Fprintln(stderr, "recipients: this host is read-only and never commits; label it from a writable host")
 		return 1
 	}
+	if why, blocked := agecrypt.RekeyBlocksSync(repo); blocked {
+		fmt.Fprintln(stderr, "recipients:", rekeyBlockedError(cfg.SyncDir, why))
+		return 1
+	}
 	if cfg.HostLabel != "" && cfg.HostLabel != label {
 		fmt.Fprintf(stderr, "recipients: this host's hostLabel is already %q\n", cfg.HostLabel)
 		return 1
@@ -426,6 +430,10 @@ func labelRecoveryOne(stdout, stderr io.Writer, cfg config.Config, key string, l
 	}
 	if cfg.ReadOnly {
 		fmt.Fprintln(stderr, "recipients: this host is read-only and never commits; mark the key from a writable host")
+		return 1
+	}
+	if why, blocked := agecrypt.RekeyBlocksSync(repo); blocked {
+		fmt.Fprintln(stderr, "recipients:", rekeyBlockedError(cfg.SyncDir, why))
 		return 1
 	}
 	committed := false

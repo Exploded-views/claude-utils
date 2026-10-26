@@ -932,7 +932,7 @@ expansion of `$VAR`, backticks, globs or `;`), and its stderr is discarded. Run 
 a terminal it may take 120 seconds (a password manager can wait for you to approve a
 prompt; it prints `waiting for your password manager (approve the prompt if one appears)…`
 on stderr first); `CLAUDE_MEMSYNC_SECRET_TIMEOUT` (a Go duration such as `45s` or
-`3m`) changes that. The daemon, which nobody can ask, keeps 10 seconds and prints nothing; so do hooks (`changes --hook`, `related context`) and the doctor timer (`doctor --unattended`): 120 s is for a terminal only, and hooks and timers never wait on a password manager. A hook never runs a token or key command and never reaches the network: it uses only cached related-repo visibility verdicts, and a stale or missing one hides that related repo for the run (one stderr line says so) until a command run by hand refreshes it. When several sources are set the first configured one is
+`3m`) changes that. The daemon, which nobody can ask, keeps 10 seconds and prints nothing; so do hooks (`changes --hook`, `related context`) and the doctor timer (`doctor --unattended`): 120 s is for a terminal only, and hooks and timers never wait on a password manager. A hook never runs a token or key command and never uses the network (it may still run local `ssh -G`/`git config` lookups to resolve a host alias): it uses only cached related-repo visibility verdicts, and a stale or missing one hides that related repo for the run (one stderr line says so) until a command run by hand refreshes it. When several sources are set the first configured one is
 used, in the order file, command, env var; a configured source that fails is an
 error, never a silent fall-through to the next. The token is never written to
 `config.json`, logs or error messages.
@@ -1430,6 +1430,8 @@ If the copy is encrypted (`.age-recipients`) and this host cannot decrypt it, it
 - Join needs both ends to be the same kind.
 - No edge to or from a `mem-client-*` repo from anything else, and none between different clients.
 - `mem-orch-all` may read `mem-orch-<client>`, and nothing else; never join. Every other orch edge is refused.
+
+**Visibility cache.** A cached verdict that says a repo is not private hides it from every command and hook, whatever the token setup, while it is younger than `relatedMaxStaleHours` (default 24, at most 24: a larger value is clamped). Hooks never ask GitHub; the daemon refreshes the verdicts in the background, and a stale or missing one hides the related repo until it does.
 
 **Session context.** Put `claude-memsync related context --project "$CLAUDE_PROJECT_DIR"` in a SessionStart hook. It prints, for the repo that owns the project, one entry per read relation: the repo name, note count, read-only path and the headings of its `MEMORY.md` (never note bodies), within `--per-relation` (default 2000) and `--total` (default 6000) characters. Headings and changed paths that match the owning repo's denylist are counted, never printed. It prints nothing for a project without relations and never fails the session. `changes --hook` also lists, under a "related, read-only repos" label, the paths that changed in those clones since the session last looked. Allow `Read(<relatedRoot>/**)` and nothing wider.
 ## Related-project suggestions

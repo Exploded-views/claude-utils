@@ -171,6 +171,14 @@ func (v *ghVisibility) verify(repo, owner, name string) error {
 	if limit <= 0 {
 		limit = visMaxStale
 	}
+	// A recent verdict that says "not private" counts whatever the token setup
+	// and whether or not the API can be asked: the repo is hidden.
+	if have && !cached.Private && v.now().Sub(cached.At) < limit {
+		return privateErr(repo, false)
+	}
+	if !v.tokenConfigured() {
+		return nil // no token: names only
+	}
 	if v.offline {
 		if have && v.now().Sub(cached.At) < limit {
 			return privateErr(repo, cached.Private)
@@ -205,13 +213,17 @@ func (v *ghVisibility) CheckPrivate(repo string) error {
 	if err := v.names.CheckPrivate(repo); err != nil {
 		return err
 	}
-	if !v.tokenConfigured() {
-		return nil // no token: names only
-	}
+	// Without a token source the check is names only, except that a recent
+	// cached "not private" verdict still hides the repo (see verify). Problems
+	// resolving the repo's owner matter only when a token makes the check real.
+	tok := v.tokenConfigured()
 	if v.remote != nil {
 		if url := v.remote(repo); url != "" {
 			owner, name, err := ghguard.ValidateRemote(url, allowedHost(v.cfg), hostResolver)
 			if err != nil {
+				if !tok {
+					return nil
+				}
 				return fmt.Errorf("remote refused: %w", err)
 			}
 			return v.verify(repo, owner, name)
@@ -219,6 +231,9 @@ func (v *ghVisibility) CheckPrivate(repo string) error {
 	}
 	org, err := orgFor(v.cfg, "")
 	if err != nil {
+		if !tok {
+			return nil
+		}
 		return fmt.Errorf("cannot check visibility: %w", err)
 	}
 	return v.verify(repo, org, repo)
@@ -259,9 +274,6 @@ func (v *ghVisibility) CheckCloneURL(repo, url string, owners []string) error {
 	}
 	if !ok {
 		return fmt.Errorf("the URL for %s is owned by %q, which is not this host's org; list it in relatedOwners to allow it", repo, owner)
-	}
-	if !v.tokenConfigured() {
-		return nil
 	}
 	return v.verify(repo, owner, name)
 }

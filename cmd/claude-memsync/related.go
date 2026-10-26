@@ -124,6 +124,9 @@ func loadRelCtx(routesFlag string) (*relCtx, error) {
 		return nil, err
 	}
 	if h := set.File.RelatedMaxStaleHours; h > 0 {
+		if h > 24 {
+			h = 24 // the cap: an older verdict never serves
+		}
 		vis.maxStale = time.Duration(h) * time.Hour
 	}
 	vis.cachePath = filepath.Join(rc.root, ".state", "visibility.json")
@@ -555,7 +558,11 @@ func (rc *relCtx) readBlocks(owner string) []related.Block {
 	var out []related.Block
 	for _, r := range refused {
 		if r.Edge.From == owner && r.Edge.Mode == related.ModeRead && errors.Is(r.Err, errUnverified) {
-			out = append(out, related.Block{Repo: r.Edge.To, Skipped: "visibility unverified (GitHub could not be asked); not shown"})
+			why := "visibility unverified (GitHub could not be asked); not shown"
+			if rc.vis.offline {
+				why = "visibility unverified: not checked this time (hooks never ask GitHub; the daemon refreshes verdicts in the background); not shown"
+			}
+			out = append(out, related.Block{Repo: r.Edge.To, Skipped: why})
 		}
 	}
 	for _, e := range ok {

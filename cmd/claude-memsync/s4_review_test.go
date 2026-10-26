@@ -79,12 +79,14 @@ func TestVis_CachedNotPrivateVerdictHidesTheRepoWithoutAToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeVerdicts(t, rc.vis.cachePath, 10*time.Minute, false)
-	if err := rc.vis.CheckPrivate("mem-project-b"); err == nil || !strings.Contains(err.Error(), "not private") {
-		t.Fatalf("a fresh not-private verdict must win over names-only: %v", err)
-	}
-	if err := rc.vis.CheckCloneURL("mem-project-b", "git@github.com:Org/mem-project-b.git", nil); err == nil || !strings.Contains(err.Error(), "not private") {
-		t.Fatalf("CheckCloneURL ignored the cached verdict: %v", err)
+	for _, age := range []time.Duration{10 * time.Minute, 2 * time.Hour} { // within the TTL, and beyond it
+		writeVerdicts(t, rc.vis.cachePath, age, false)
+		if err := rc.vis.CheckPrivate("mem-project-b"); err == nil || !strings.Contains(err.Error(), "not private") {
+			t.Fatalf("a %v old not-private verdict must win over names-only: %v", age, err)
+		}
+		if err := rc.vis.CheckCloneURL("mem-project-b", "git@github.com:Org/mem-project-b.git", nil); err == nil || !strings.Contains(err.Error(), "not private") {
+			t.Fatalf("CheckCloneURL ignored the %v old cached verdict: %v", age, err)
+		}
 	}
 	// With no verdict at all, the old names-only rule stands.
 	os.Remove(rc.vis.cachePath)

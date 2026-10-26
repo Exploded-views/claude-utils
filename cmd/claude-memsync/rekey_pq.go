@@ -268,7 +268,7 @@ func shortRev(r string) string {
 	return r
 }
 
-func rekeyOne(stdout, stderr io.Writer, cfg config.Config, hostCfgs []config.Config, rel []string, o agecrypt.RekeyOpts, apply bool) int {
+func rekeyOne(stdout, stderr io.Writer, cfg config.Config, hostCfgs []config.Config, rel relScan, o agecrypt.RekeyOpts, apply bool) int {
 	repo := gitwt.New(cfg.SyncDir)
 	if cfg.ReadOnly {
 		fmt.Fprintln(stderr, "recipients: this host is read-only and never commits; run it on a writable member host")
@@ -474,20 +474,29 @@ func clonesUsingIdentity(old string, hostCfgs []config.Config) []string {
 // host's related root (routes.json relatedRoot, else beside the registry). They
 // are not sync dirs, so cloneDirs never sees them, yet they decrypt with the
 // host's default identities.
-func relatedCloneDirs(sel repoSel) []string {
+func relatedCloneDirs(sel repoSel) relScan {
 	path, ok, err := resolveRoutesPath(sel.Routes)
-	if err != nil || !ok {
-		return nil
+	if err != nil {
+		return relScan{err: err}
+	}
+	if !ok {
+		return relScan{} // no routes file: no related clones
 	}
 	set, err := loadRouted(path)
 	if err != nil {
-		return nil
+		return relScan{err: err}
 	}
 	root := set.relatedRoot()
 	if root == "" {
-		return nil
+		return relScan{}
 	}
-	ents, _ := os.ReadDir(root)
+	ents, err := os.ReadDir(root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return relScan{} // nothing fetched yet
+		}
+		return relScan{err: fmt.Errorf("related root %s: %w", root, err)}
+	}
 	var out []string
 	for _, e := range ents {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
@@ -498,7 +507,15 @@ func relatedCloneDirs(sel repoSel) []string {
 			out = append(out, dir)
 		}
 	}
-	return out
+	return relScan{dirs: out}
+}
+
+// relScan is what relatedCloneDirs found. A scan that failed (an unusable
+// routes file, an unreadable related root) is not "no clones": the classic
+// identity is kept.
+type relScan struct {
+	dirs []string
+	err  error
 }
 
 // relatedClonesUsingIdentity lists the related read clones whose recipients
@@ -634,7 +651,7 @@ func normIdentityPath(p string) string {
 // <name>.classic-retired once no clone on this host still points at it: every
 // git clone beside the sync dirs counts, routed or not. Without apply it only
 // says what it would do.
-func retireClassicIdentity(stdout io.Writer, old string, done config.Config, hostCfgs []config.Config, rel []string, apply bool) {
+func retireClassicIdentity(stdout io.Writer, old string, done config.Config, hostCfgs []config.Config, rel relScan, apply bool) {
 	if old == "" {
 		return
 	}
@@ -650,7 +667,12 @@ func retireClassicIdentity(stdout io.Writer, old string, done config.Config, hos
 		fmt.Fprintln(stdout, "  rekey those clones (or remove them), then run this command again to retire it")
 		return
 	}
-	if users := relatedClonesUsingIdentity(old, rel); len(users) > 0 {
+	if rel.err != nil {
+		fmt.Fprintf(stdout, "  the classic identity %s is kept: the related read clones could not be checked (%v)\n", old, rel.err)
+		fmt.Fprintln(stdout, "  fix that, then run this command again to retire it")
+		return
+	}
+	if users := relatedClonesUsingIdentity(old, rel.dirs); len(users) > 0 {
 		fmt.Fprintf(stdout, "  the classic identity %s is kept: related read clone(s) %s still list its recipient and decrypt with it\n", old, strings.Join(users, ", "))
 		fmt.Fprintln(stdout, "  once those repos are rekeyed (or the relation is dropped) and their clones re-fetched, run this command again to retire it")
 		return

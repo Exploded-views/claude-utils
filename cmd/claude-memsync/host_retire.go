@@ -303,6 +303,13 @@ func (hc *hostCtx) applyRetire(c *ghguard.Client, plan retirePlan, stdout, stder
 			}
 		}
 	}
+	// No lock, no commit, no API call for a repo in the middle of a rekey.
+	for dir := range dirs {
+		if why, blocked := agecrypt.RekeyBlocksSync(gitwt.New(dir)); blocked {
+			fmt.Fprintln(stderr, "host retire:", rekeyBlockedError(dir, why), "Nothing was changed.")
+			return 1
+		}
+	}
 	var held []*lock.Lock
 	defer func() {
 		for _, lk := range held {
