@@ -317,7 +317,7 @@ jr_kill_all() { # stop every job still running, with its children; wait for them
     [ -z "${JR_RC[$i]-}" ] || continue
     for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
       kill -0 "${JR_PID[$i]}" 2>/dev/null || break
-      sleep 0.25
+      sleep 0.25 || true
     done
     kill -KILL -- "-${JR_PID[$i]}" 2>/dev/null || kill -KILL "${JR_PID[$i]}" 2>/dev/null || true
     wait "${JR_PID[$i]}" 2>/dev/null || true
@@ -361,6 +361,7 @@ run_dir_remove() {
 on_exit() {
   local rc=$?
   trap - EXIT
+  set +e   # clean up as much as possible, whatever fails on the way
   jr_kill_all   # repo jobs still running, with what they started
   run_dir_remove
   if declare -F admin_entry_remove >/dev/null; then admin_entry_remove; fi

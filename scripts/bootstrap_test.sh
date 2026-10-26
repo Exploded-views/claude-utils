@@ -1234,11 +1234,12 @@ sigcase() { # name jobs signal expected-rc
   set -m
   (HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_SLOW_INIT=60 STUB_SLOW_MATCH=project- TMPDIR="$BASE/$nm.tmp" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" GIT_CONFIG_NOSYSTEM=1 \
     BOOTSTRAP_APP_API_BASE="http://127.0.0.1:$APIPORT" CLAUDE_UTILS_URL="https://example.invalid/claude-utils.git" \
-    exec "$BASH" "$ROOT/scripts/bootstrap.sh" --sha "$SHA" "${REQ[@]}" --host testmac --role personal-dev --workspace "$H/code" --own-owner gitgat \
+    exec python3 -I -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$BASH" "$ROOT/scripts/bootstrap.sh" --sha "$SHA" "${REQ[@]}" --host testmac --role personal-dev --workspace "$H/code" --own-owner gitgat \
     --yes --jobs "$jb" --org-token-file "$TF" --delete-org-token-file </dev/null >"$BASE/$nm.out" 2>&1) &
   pid=$!
   set +m
-  for _ in $(seq 1 480); do n="$(wc -l <"$STUB_DIR/slow.pids" 2>/dev/null || echo 0)"; [ "${n:-0}" -ge "$want" ] && break; sleep 0.5; done
+  for _ in $(seq 1 480); do n="$({ wc -l <"$STUB_DIR/slow.pids"; } 2>/dev/null || echo 0)"; [ "${n:-0}" -ge "$want" ] && break; sleep 0.5; done
   kill -"$sg" "$pid" 2>/dev/null || true
   set +e; wait "$pid"; rc=$?; set -e
   alive=0

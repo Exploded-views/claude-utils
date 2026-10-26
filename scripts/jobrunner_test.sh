@@ -74,7 +74,10 @@ interrupt() { # jobs sig expected-rc
   local jb="$1" sg="$2" erc="$3" pid rc n alive t want t0 took
   : >"$W/pids"; : >"$W/started"; want="$jb"; [ "$want" -le 3 ] || want=3
   set -m
-  (exec bash "$W/driver.sh" "$jb" 5 hang </dev/null >"$W/out" 2>&1) &
+  # python3 resets SIGINT to its default first: a shell started in the background of another shell
+  # inherits "ignore SIGINT" and cannot trap it (a terminal's Ctrl-C does not start that way)
+  (exec python3 -I -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
+    bash "$W/driver.sh" "$jb" 5 hang </dev/null >"$W/out" 2>&1) &
   pid=$!
   set +m
   for _ in $(seq 1 100); do n="$(wc -l <"$W/started" | tr -d ' ')"; [ "${n:-0}" -ge "$want" ] && break; sleep 0.1; done
