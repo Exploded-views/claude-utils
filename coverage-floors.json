@@ -18,7 +18,7 @@
   "github.com/MarimerLLC/claude-utils/internal/route": 90.5,
   "github.com/MarimerLLC/claude-utils/internal/scrub": 93.2,
   "github.com/MarimerLLC/claude-utils/internal/secretcmd": 95.5,
-  "github.com/MarimerLLC/claude-utils/internal/sync": 83.8,
+  "github.com/MarimerLLC/claude-utils/internal/sync": 84.5,
   "github.com/MarimerLLC/claude-utils/internal/testenv": 25.4,
   "github.com/MarimerLLC/claude-utils/internal/version": 0.0,
   "github.com/MarimerLLC/claude-utils/tools/coverfloors": 94.4
