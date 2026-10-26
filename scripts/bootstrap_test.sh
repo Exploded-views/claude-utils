@@ -446,6 +446,65 @@ runboot --host testhost --role homelab --yes
 check "XDG_CONFIG_HOME set: the old memsync config is looked for there too, and refused" bash -c "[ $RC -ne 0 ] && printf '%s' \"\$1\" | grep -q 'old memsync is configured'" _ "$OUT"
 newhome xdg3
 
+# ============================ Mac UX: move-aside, denylist merge, tally ========
+echo "--- an existing standalone binary in ~/.local/bin is moved aside, never overwritten or refused"
+newhome mv1
+mkdir -p "$H/.local/bin"
+printf '#!/bin/sh\necho standalone-sync\n' >"$H/.local/bin/claude-memsync"; chmod +x "$H/.local/bin/claude-memsync"
+printf '#!/bin/sh\necho standalone-merge\n' >"$H/.local/bin/claude-memmerge"; chmod +x "$H/.local/bin/claude-memmerge"
+runboot --host testhost --role homelab --dry-run
+check "dry run: the planned move-aside is listed, both files, with a UTC time" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -qE 'mv .*/claude-memsync .*/claude-memsync\.pre-bootstrap-[0-9]{8}T[0-9]{6}Z' && printf '%s\n' \"\$1\" | grep -qE 'claude-memmerge\.pre-bootstrap-'" _ "$OUT"
+check "dry run: the standalone binaries are untouched" bash -c "[ ! -L '$H/.local/bin/claude-memsync' ] && grep -q standalone-sync '$H/.local/bin/claude-memsync'"
+runboot --host testhost --role homelab --yes
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -8
+check "real run: exits 0 and says it moved them aside" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -q 'moving it aside'" _ "$OUT"
+check "real run: the originals are kept as <name>.pre-bootstrap-<UTC time>, content intact" bash -c "cat '$H'/.local/bin/claude-memsync.pre-bootstrap-* | grep -q standalone-sync && cat '$H'/.local/bin/claude-memmerge.pre-bootstrap-* | grep -q standalone-merge"
+check "real run: ~/.local/bin now has symlinks into the lib dir" bash -c "[ -L '$H/.local/bin/claude-memsync' ] && [ -L '$H/.local/bin/claude-memmerge' ]"
+runboot --host testhost --role homelab --yes
+check "a re-run (symlinks now) moves nothing" bash -c "[ $RC -eq 0 ] && [ \$(ls '$H'/.local/bin/claude-memsync.pre-bootstrap-* | wc -l) -eq 1 ]"
+newhome mv2
+mkdir -p "$H/.local/bin" "$H/elsewhere"; printf 'x\n' >"$H/elsewhere/old"; ln -s "$H/elsewhere/old" "$H/.local/bin/claude-memsync"
+runboot --host testhost --role homelab --yes
+check "a symlink is replaced as before: nothing moved aside, its target untouched" bash -c "[ $RC -eq 0 ] && ! ls '$H'/.local/bin/*.pre-bootstrap-* >/dev/null 2>&1 && [ \"\$(cat '$H/elsewhere/old')\" = x ] && [ \"\$(readlink '$H/.local/bin/claude-memsync')\" != '$H/elsewhere/old' ]"
+newhome mv3
+mkdir -p "$H/.local/bin/claude-memsync"
+runboot --host testhost --role homelab --yes
+check "anything else (a directory) is still refused" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'is not a regular file or a symlink'" _ "$OUT"
+
+echo "--- a re-run adds new keep-out terms to the existing denylists (never removes a line)"
+newhome dn
+runboot --host testhost --role homelab --yes --keep-out-term alpha
+DLF="$H/.config/claude-memsync/denylist-personal.txt"
+printf 'hand-added-line\n' >>"$DLF"
+runboot --host testhost --role homelab --yes --keep-out-term alpha --keep-out-term 'beta.x'
+check "rerun with A and B: the file holds both, A once, the hand-added line kept" bash -c "[ \$(grep -cx alpha '$DLF') -eq 1 ] && grep -qxF 'beta\\.x' '$DLF' && grep -qx hand-added-line '$DLF'"
+check "rerun: says how many terms it added" bash -c "printf '%s\n' \"\$1\" | grep -q 'added 1 keep-out term' " _ "$OUT"
+runboot --host testhost --role homelab --yes --keep-out-term alpha --keep-out-term 'beta.x'
+check "a second rerun adds nothing and says so" bash -c "[ \$(wc -l <'$DLF') -eq 3 ] && printf '%s\n' \"\$1\" | grep -q 'denylist-personal.txt: no new keep-out terms'" _ "$OUT"
+check "the file stays 0600" mode "$DLF" 600
+
+echo "--- a reachable org with empty keep-out owners: the plan suggests KEEP_OUT_OWNERS"
+newhome sug
+set +e
+SUGOUT="$(HOME="$H" PATH="$STUBS:$PATH" STUB_DIR="$STUB_DIR" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="$REAL" GIT_CONFIG_NOSYSTEM=1 STUB_ORGS="$(printf 'example-org\nAcme-Client\nSomeOther')" \
+  "$BASH" "$ROOT/scripts/bootstrap.sh" --sha "$SHA" --org-token-file "$BASE/orgtoken" "${REQ[@]}" --host testhost --role homelab --dry-run </dev/null 2>&1)"
+set -e
+check "the dry-run plan suggests KEEP_OUT_OWNERS naming the reachable orgs" bash -c "printf '%s\n' \"\$1\" | sed -n '/== Plan/,\$p' | grep -qF 'KEEP_OUT_OWNERS=\"Acme-Client SomeOther\"'" _ "$SUGOUT"
+runboot --host testhost --role homelab --dry-run
+check "with a keep-out owner given there is no suggestion" bash -c "! printf '%s\n' \"\$1\" | grep -q 'KEEP_OUT_OWNERS='" _ "$OUT"
+
+echo "--- the plan's repo list is the list the real run creates"
+newhome tl
+runboot --host testhost --role homelab --dry-run
+PLANN="$(printf '%s\n' "$OUT" | sed -n '/repos (private, in/,/deploy keys/p' | grep -c '^    mem-')"
+runboot --host testhost --role homelab --yes
+REALPLAN="$(printf '%s\n' "$OUT" | sed -n '/repos (private, in/,/deploy keys/p' | grep -c '^    mem-')"
+REALN2="$(printf '%s\n' "$OUT" | grep -c '^  mem-.* is private$')"
+check "dry-run plan tally ($PLANN) = real-run plan tally ($REALPLAN) = repos checked private ($REALN2)" bash -c "[ $PLANN -ge 2 ] && [ $PLANN -eq $REALPLAN ] && [ $PLANN -eq $REALN2 ]"
+check "no stale 'host check-key' note when there is no registry; the summary names /reload-plugins" bash -c "! printf '%s\n' \"\$1\" | grep -q 'when a registry is configured' && printf '%s\n' \"\$1\" | grep -q '/reload-plugins'" _ "$OUT"
+check "the docs: step 0 asks to keep the password manager unlocked, in both app prompts" bash -c "[ \$(grep -c 'keep your password manager unlocked and in view' '$ROOT/docs/bootstrap.md') -ge 2 ]"
+check "the docs: the app-registration build uses bootstrap's own layout" bash -c "sed -n '/## Register the GitHub Apps/,/## Usage/p' '$ROOT/docs/bootstrap.md' | grep -q '.local/lib/claude-memsync/'"
+
 # ============================ keep-out (was: client) ===========================
 echo "--- keep-out flags: new names, old names, wording"
 newhome ko0
