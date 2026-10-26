@@ -147,13 +147,15 @@ bash scripts/bootstrap.sh --host <host-label> --role personal-dev --org <your-or
   --recovery-recipient <age1pq1...> \
   --org-app memsync-admin --org-app-id <admin-app-id> --org-app-key-cmd "<password-manager read command>" \
   --check-app memsync-check --check-app-id <check-app-id> --check-key-file ~/.config/claude-memsync/memsync-check.pem \
-  --deny-owner <client-org> --deny-term <client-codename> --dry-run
+  --own-owner <github-user> --deny-owner <client-org> --deny-term <client-codename> --dry-run
 ```
 
 Check the plan, then run the same command with `--yes` instead of `--dry-run`.
 `--org` and `--recovery-recipient` are required and have no defaults; the
 script refuses to run without them. The recovery recipient must be the
 hybrid (`age1pq1...`) public key of the recovery identity you hold.
+`--own-owner <github-user>` names your personal GitHub account so its checkouts
+get project repos; the only owner counted as yours by default is `--org`.
 
 The manual path, for one repo (repeat per repo):
 
