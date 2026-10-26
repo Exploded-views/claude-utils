@@ -395,7 +395,7 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 		items[key] = p
 	}
 
-	failed := 0
+	failed, verified, unverified := 0, 0, 0
 	if *dry {
 		fmt.Fprintln(stdout, "dry run: nothing is run or stored")
 	} else if len(verifyArgv) == 0 {
@@ -429,7 +429,16 @@ func identityBackupCmd(stdout, stderr io.Writer, args []string) int {
 		if err != nil {
 			fmt.Fprintf(stderr, "identity backup: %s: %v\n", p, err)
 			failed++
+			continue
 		}
+		if len(vArgv) > 0 {
+			verified++
+		} else {
+			unverified++
+		}
+	}
+	if !*dry {
+		fmt.Fprintf(stdout, "%d stored (%d verified, %d UNVERIFIED), %d failed\n", verified+unverified, verified, unverified, failed)
 	}
 	if failed > 0 {
 		return 1

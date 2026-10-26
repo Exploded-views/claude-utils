@@ -174,7 +174,7 @@ func TestIdentityBackup_VerifyMismatchIsExit1(t *testing.T) {
 	if !strings.Contains(out, "MISMATCH") {
 		t.Errorf("stdout lacks MISMATCH: %q", out)
 	}
-	if strings.Contains(out, "verified") || strings.Contains(out+errs, secret) || strings.Contains(out+errs, "not-the-key") {
+	if strings.Contains(out, "verified (sha256") || strings.Contains(out+errs, secret) || strings.Contains(out+errs, "not-the-key") {
 		t.Errorf("unexpected output: %q %q", out, errs)
 	}
 }
@@ -551,7 +551,7 @@ func TestIdentityBackup_RefusesASymlinkedConfiguredIdentity(t *testing.T) {
 	if code != 1 || !strings.Contains(errs, "symlink") {
 		t.Fatalf("exit %d, stderr %q: want 1 and a symlink refusal", code, errs)
 	}
-	if len(recorded(t, rec, "stdin")) != 0 || strings.Contains(out, "verified") {
+	if len(recorded(t, rec, "stdin")) != 0 || strings.Contains(out, "verified (sha256") {
 		t.Fatal("a symlinked identity was stored")
 	}
 }
