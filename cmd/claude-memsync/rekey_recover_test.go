@@ -862,10 +862,10 @@ func TestIdentityInGitConfig_HandlesCommentsAndTilde(t *testing.T) {
 	if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := identityInGitConfig(cfg); got != "~/keys/id.txt" && got != filepath.Join(home, "keys", "id.txt") {
+	if got, _ := identityInGitConfig(cfg); got != "~/keys/id.txt" && got != filepath.Join(home, "keys", "id.txt") {
 		t.Errorf("identity %q", got)
 	}
-	if got := gitConfigValue(cfg, "memage", "scheme"); got != "pq" {
+	if got, _ := gitConfigValue(cfg, "memage", "scheme"); got != "pq" {
 		t.Errorf("scheme %q", got)
 	}
 }

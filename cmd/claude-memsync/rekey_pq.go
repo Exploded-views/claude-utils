@@ -234,7 +234,7 @@ func rollbackOne(stdout, stderr io.Writer, cfg config.Config, quietNone, discard
 		// Read under the lock: a cycle that ran before it may have moved HEAD.
 		head, _ := repo.Run("rev-parse", "HEAD")
 		var rerr error
-		st, rerr = agecrypt.RollbackRekey(repo, agecrypt.RollbackOpts{DiscardLocalCommits: discard}, func(pc agecrypt.PriorConfig) error {
+		st, rerr = agecrypt.RollbackRekey(repo, agecrypt.RollbackOpts{DiscardLocalCommits: discard, Out: stderr}, func(pc agecrypt.PriorConfig) error {
 			raw, err := config.Load(cfgFile)
 			if err != nil {
 				return err
@@ -249,6 +249,10 @@ func rollbackOne(stdout, stderr io.Writer, cfg config.Config, quietNone, discard
 	})
 	if err != nil {
 		return recipientsFail(stderr, fmt.Errorf("%s: %w", cfg.SyncDir, err))
+	}
+	if st.Cleared {
+		fmt.Fprintf(stdout, "%s: cleared a stale restore record (nothing had changed)\n", cfg.SyncDir)
+		return 0
 	}
 	fmt.Fprintf(stdout, "%s: rolled back to the classic repo at %s (identity, scheme, pin and config.json restored)\n", cfg.SyncDir, shortRev(st.Tip))
 	fmt.Fprintf(stdout, "  the hybrid identity %s is kept; a later rekey-pq reuses it\n", st.NewIdentity)
@@ -455,7 +459,9 @@ func clonesUsingIdentity(old string, hostCfgs []config.Config) []string {
 	want := normIdentityPath(old)
 	var out []string
 	for _, dir := range cloneDirs(hostCfgs) {
-		if id := identityInGitConfig(filepath.Join(dir, ".git", "config")); id != "" && normIdentityPath(id) == want {
+		id, ok := identityInGitConfig(filepath.Join(dir, ".git", "config"))
+		// A config git cannot read counts as using the file: keeping it is the safe side.
+		if !ok || (id != "" && normIdentityPath(id) == want) {
 			out = append(out, dir)
 		}
 	}
@@ -482,7 +488,7 @@ func clonesWithPendingRecord(old string, hostCfgs []config.Config) []string {
 		if normIdentityPath(st.ClassicIdentity) != want || st.Finished() {
 			continue
 		}
-		if st.Stage == "" && gitConfigValue(filepath.Join(dir, ".git", "config"), "memage", "scheme") == agecrypt.SchemePQ {
+		if st.Stage == "" && schemeOf(dir) == agecrypt.SchemePQ {
 			continue
 		}
 		out = append(out, dir)
@@ -521,19 +527,27 @@ func cloneDirs(hostCfgs []config.Config) []string {
 }
 
 // identityInGitConfig reads memage.identity out of the git config file of any clone.
-func identityInGitConfig(path string) string { return gitConfigValue(path, "memage", "identity") }
+func identityInGitConfig(path string) (string, bool) {
+	return gitConfigValue(path, "memage", "identity")
+}
 
 // gitConfigValue reads section.key out of a git config file with git itself
-// (inline comments, quoting and case rules included); "" when unset.
-func gitConfigValue(path, section, key string) string {
+// (inline comments, quoting and case rules included). ok is false when git
+// failed for any reason other than the key being unset (a corrupt file, no git):
+// the caller must then assume the worst.
+func gitConfigValue(path, section, key string) (val string, ok bool) {
 	if _, err := os.Stat(path); err != nil {
-		return ""
+		return "", true
 	}
 	out, err := exec.Command("git", "config", "--file", path, "--get", section+"."+key).Output()
 	if err != nil {
-		return ""
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() == 1 {
+			return "", true // the key is not set
+		}
+		return "", false
 	}
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(string(out)), true
 }
 
 // normIdentityPath makes identity paths comparable: ~ expanded, absolute,
@@ -662,4 +676,9 @@ func classicCandidates(repo *gitwt.Repo) []string {
 		add(strings.TrimSuffix(base, "-pq") + ext)
 	}
 	return out
+}
+
+func schemeOf(dir string) string {
+	v, _ := gitConfigValue(filepath.Join(dir, ".git", "config"), "memage", "scheme")
+	return v
 }

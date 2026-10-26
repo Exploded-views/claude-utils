@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
+	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
 
@@ -134,5 +135,125 @@ func TestRetireClassic_UnreadableCloneConfigKeepsTheIdentity(t *testing.T) {
 	}
 	if !strings.Contains(out, "incident-3") {
 		t.Errorf("the hint must name the clone:\n%s", out)
+	}
+}
+
+// The new set is always exactly the new hybrid key labelled with --host and the
+// recovery key labelled "# recovery", whatever labels the old set had.
+func TestRekeyPQ_NewRecipientsAreLabelledFromTheFlags(t *testing.T) {
+	for _, fresh := range []bool{true, false} {
+		cfgs := rekeyHost(t, "alpha", "beta")
+		// the old sets carry no labels at all
+		for n, c := range cfgs {
+			unlabel(t, c)
+			_ = n
+		}
+		_, rec := newPQKey(t, "rec")
+		args := []string{"rekey-pq", "--all", "--recovery-recipient", rec, "--host", "rk", "--apply"}
+		if fresh {
+			args = append(args, "--fresh-root")
+		}
+		if code, o, e := runRcpt(args...); code != 0 {
+			t.Fatalf("fresh=%v: %s%s", fresh, o, e)
+		}
+		for n, c := range cfgs {
+			og := gitwt.New(c.RemoteURL)
+			got, err := og.Run("show", "main:.age-recipients")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var keys []string
+			for _, l := range strings.Split(got, "\n") {
+				if strings.HasPrefix(l, "age1pq1") {
+					keys = append(keys, l)
+				}
+			}
+			if len(keys) != 2 {
+				t.Fatalf("fresh=%v %s: %d keys on origin:\n%s", fresh, n, len(keys), got)
+			}
+			var host, recov int
+			for _, k := range keys {
+				if strings.HasSuffix(k, " # host:rk") {
+					host++
+				}
+				if k == rec+" # recovery" {
+					recov++
+				}
+			}
+			if host != 1 || recov != 1 {
+				t.Errorf("fresh=%v %s: labels wrong on origin:\n%s", fresh, n, got)
+			}
+			work, _ := os.ReadFile(filepath.Join(c.SyncDir, ".age-recipients"))
+			if string(work) != got && strings.TrimSpace(string(work)) != strings.TrimSpace(got) {
+				t.Errorf("fresh=%v %s: work-tree .age-recipients differs from origin's:\n%s\nvs\n%s", fresh, n, work, got)
+			}
+		}
+	}
+}
+
+// unlabel strips every "# ..." label from the committed .age-recipients of the
+// repo (and re-pins), as a repo made before labels existed would look.
+func unlabel(t *testing.T, c config.Config) {
+	t.Helper()
+	r := gitwt.New(c.SyncDir)
+	p := filepath.Join(c.SyncDir, ".age-recipients")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(l, "age1") {
+			l = strings.Fields(l)[0]
+		}
+		out = append(out, l)
+	}
+	if err := os.WriteFile(p, []byte(strings.Join(out, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := agecrypt.PinCurrent(r); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Run("add", ".age-recipients"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Run("diff", "--cached", "--quiet"); err == nil {
+		return // nothing carried a label
+	}
+	if _, err := r.Run("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "unlabel"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Push("main"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Even when this clone has merged the other host's commit (so HEAD contains
+// it), that commit is not the migration: its recipients are not the migrated set.
+func TestLegacyRecord_AClassicCommitThatHeadContainsIsStillNotTheMigration(t *testing.T) {
+	c := newClassicRepo(t)
+	_, newRec := newPQKey(t, "newrec")
+	args := []string{"--recovery-recipient", newRec, "--host", "vm-1", "--apply"}
+	blockPush(t, c.origin)
+	if code, o, e := rekey(t, c, args...); code == 0 {
+		t.Fatalf("push was blocked yet exit 0\n%s%s", o, e)
+	}
+	unblockPush(t, c.origin)
+	pushFromElsewhere(t, c.origin, func(g func(args ...string)) {
+		g("commit", "-q", "--allow-empty", "-m", "classic commit of another host")
+	})
+	if _, err := c.repo.Run("fetch", "-q", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.repo.Run("-c", "user.name=t", "-c", "user.email=t@example.com", "merge", "-q", "--no-edit", "origin/main"); err != nil {
+		t.Fatal(err)
+	}
+	makeLegacyRecord(t, c.cfg.SyncDir)
+	code, out, errb := rekey(t, c, args...)
+	if code != 1 || !strings.Contains(out+errb, "cannot tell which commit was the migration") {
+		t.Fatalf("exit %d:\n%s%s", code, out, errb)
+	}
+	if _, blocked := agecrypt.RekeyBlocksSync(c.repo); !blocked {
+		t.Error("the daemon was unblocked")
 	}
 }

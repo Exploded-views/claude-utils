@@ -411,13 +411,19 @@ If something fails part way:
   on such a repo says the earlier apply was interrupted and how to finish or
   undo it.
 - A rerun after the daemon has synced on top of the migration reports
-  `already done` and only retires the classic identity (the record names the
-  migrated commit; an origin/main that contains it counts as published). It
-  never fails the commit-count check. A record from an older build names no
-  commit and no stage: for a repo that is already post-quantum, with
-  origin/main past the backup tip, the migrated commit is inferred from the
-  history (the single root with `--fresh-root`, else the first commit after the
-  backup tip), the record is completed, and the flags and `config.json` are
+  `already done` and retires the classic identity (the record names the
+  migrated commit; an origin/main that contains it counts as published). If
+  the crash came before `config.json` and the stage were saved, the rerun
+  writes both. It never fails the commit-count check. A record from an older
+  build names no commit and no stage: for a repo that is already post-quantum,
+  with origin/main past the backup tip, the migrated commit is inferred from
+  the history (with `--fresh-root`: the roots origin/main has that the backup
+  tip does not; otherwise the commits right after the backup tip), but only a
+  commit whose `.age-recipients` is exactly this host's new key and the
+  recovery key counts, exactly one must, and this clone's HEAD must contain it.
+  If that cannot be established the rerun stops with "cannot tell which commit
+  was the migration; nothing changed" (exit 1) and the daemon stays held. Then
+  the record is completed, and the flags and `config.json` are
   not touched.
 - To give up on a repo that was **not pushed**, run
   `claude-memsync recipients rekey-pq --repo <repo> --rollback`: it resets the

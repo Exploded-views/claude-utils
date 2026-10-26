@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,6 +44,9 @@ type PreRekeyState struct {
 	// Stage is how far the apply got (the RekeyRec* values). A record from an
 	// older build has none.
 	Stage string `json:"stage,omitempty"`
+	// Cleared is set on the record RollbackRekey returns when it only removed a
+	// stale record and restored nothing. Not stored.
+	Cleared bool `json:"-"`
 }
 
 // The Stage values of the restore record, in the order an apply passes them.
@@ -167,11 +171,20 @@ func RekeyBlocksSync(repo *gitwt.Repo) (string, bool) {
 	case scheme != SchemePQ:
 		return "an unfinished rekey-pq left this repo before the post-quantum scheme (stage " + stageName(st) + "); finish it with `recipients rekey-pq --apply` or undo it with `--rollback`", true
 	case st.Stage == "":
-		// A record from an older build: unpublished while the cached
-		// origin/main (no fetch here) is still the backup tip.
-		if remote, _ := revOf(repo, "refs/remotes/origin/main"); remote != "" && remote == st.Tip {
+		// A record from an older build (cached refs only, no fetch): published
+		// only if origin/main has moved off the backup tip to a commit that
+		// is the migration, which this clone contains.
+		remote, _ := revOf(repo, "refs/remotes/origin/main")
+		if remote != "" && remote == st.Tip {
 			return "an unfinished rekey-pq (stage unknown, not pushed); finish it with `recipients rekey-pq --apply` or undo it with `--rollback`", true
 		}
+		mc, ok := InferMigrated(repo, st, "refs/remotes/origin/main")
+		if remote != "" && ok {
+			if _, err := repo.Run("merge-base", "--is-ancestor", mc, "HEAD"); err == nil {
+				return "", false
+			}
+		}
+		return "an unfinished rekey-pq (stage unknown): " + ErrCannotTellMigration.Error(), true
 	case !st.Finished():
 		return "an unfinished rekey-pq (stage " + stageName(st) + "); finish it with `recipients rekey-pq --apply` or undo it with `--rollback`", true
 	}
@@ -259,13 +272,20 @@ func DetectRekey(repo *gitwt.Repo, o RekeyOpts) (RekeyStage, PreRekeyState, erro
 			return StageFresh, st, fmt.Errorf("cannot fetch origin: %w", err)
 		}
 		if remote, _ := revOf(repo, "refs/remotes/origin/main"); remote != "" && remote != tip {
-			if mc, ok := InferMigrated(repo, st, "refs/remotes/origin/main"); ok {
-				st.NewCommit, st.Stage = mc, RekeyRecPublished
-				if err := writeRekeyState(repo, st); err != nil {
-					return StageFresh, st, err
+			mc, ok := InferMigrated(repo, st, "refs/remotes/origin/main")
+			if ok {
+				if _, err := repo.Run("merge-base", "--is-ancestor", mc, "HEAD"); err != nil {
+					ok = false
 				}
-				return StageSynced, st, nil
 			}
+			if !ok {
+				return StageFresh, st, ErrCannotTellMigration
+			}
+			st.NewCommit, st.Stage = mc, RekeyRecPublished
+			if err := writeRekeyState(repo, st); err != nil {
+				return StageFresh, st, err
+			}
+			return StageSynced, st, nil
 		}
 	}
 	head, _ := revOf(repo, "HEAD")
@@ -322,6 +342,10 @@ func DetectRekey(repo *gitwt.Repo, o RekeyOpts) (RekeyStage, PreRekeyState, erro
 	return StageFresh, st, errors.New("origin/main is neither the backup tip nor the migrated tip (someone pushed since?); not touching it. Inspect it, or drop the backup if the migration is complete")
 }
 
+// ErrCannotTellMigration: the restore record is from an older build and the
+// history does not show which commit was the migration. Nothing is changed.
+var ErrCannotTellMigration = errors.New("cannot tell which commit was the migration (the restore record names none and origin/main does not show a commit with exactly the migrated recipients that this clone contains); nothing changed. Inspect origin/main and the backup ref " + BackupRef + " by hand")
+
 // InferMigrated names the migrated commit of a record that does not say (one
 // from an older build), as found in the history of target (origin/main or
 // HEAD). With a fresh root it is the single root of target when that differs
@@ -331,7 +355,7 @@ func InferMigrated(repo *gitwt.Repo, st PreRekeyState, target string) (string, b
 	if st.NewCommit != "" {
 		return st.NewCommit, true
 	}
-	if st.Tip == "" {
+	if st.Tip == "" || st.NewRecipient == "" {
 		return "", false
 	}
 	lines := func(args ...string) []string {
@@ -341,26 +365,63 @@ func InferMigrated(repo *gitwt.Repo, st PreRekeyState, target string) (string, b
 		}
 		return strings.Fields(out)
 	}
+	var cands []string
 	if st.FreshRoot {
-		roots := lines("rev-list", "--max-parents=0", target)
-		if len(roots) != 1 {
-			return "", false
-		}
+		// The roots target has and the backup tip does not.
+		old := map[string]bool{}
 		for _, r := range lines("rev-list", "--max-parents=0", st.Tip) {
-			if r == roots[0] {
-				return "", false
+			old[r] = true
+		}
+		for _, r := range lines("rev-list", "--max-parents=0", target) {
+			if !old[r] {
+				cands = append(cands, r)
 			}
 		}
-		return roots[0], true
+	} else {
+		for _, c := range lines("rev-list", "--reverse", "--topo-order", "--ancestry-path", st.Tip+".."+target) {
+			if parent, ok := revOf(repo, c+"^"); ok && parent == st.Tip {
+				cands = append(cands, c)
+			}
+		}
 	}
-	l := lines("rev-list", "--reverse", "--ancestry-path", st.Tip+".."+target)
-	if len(l) == 0 {
+	// Only a commit whose recipients are exactly the migrated set is the
+	// migration: a commit another host made on top of the tip is not.
+	var found []string
+	for _, c := range cands {
+		if recipientsAreMigrated(repo, c, st) {
+			found = append(found, c)
+		}
+	}
+	if len(found) != 1 {
 		return "", false
 	}
-	if parent, ok := revOf(repo, l[0]+"^"); !ok || parent != st.Tip {
-		return "", false
+	return found[0], true
+}
+
+// recipientsAreMigrated says whether .age-recipients at commit is exactly this
+// host's new key and the recovery key.
+func recipientsAreMigrated(repo *gitwt.Repo, commit string, st PreRekeyState) bool {
+	out, err := repo.Run("show", commit+":"+RecipientsFile)
+	if err != nil {
+		return false
 	}
-	return l[0], true
+	var keys []string
+	for _, l := range strings.Split(out, "\n") {
+		if isKeyLine(l) {
+			keys = append(keys, strings.TrimSpace(l))
+		}
+	}
+	have := canonSet(keys)
+	want := canonSet([]string{st.NewRecipient, st.Recovery})
+	if len(have) != len(want) {
+		return false
+	}
+	for k := range want {
+		if !have[k] {
+			return false
+		}
+	}
+	return true
 }
 
 // checkMigratedRecipients says whether .age-recipients is the migrated set
@@ -484,6 +545,8 @@ type RollbackOpts struct {
 	// DiscardLocalCommits lets the rollback drop commits made after the
 	// rekey (HEAD past the migrated commit). Without it they are refused.
 	DiscardLocalCommits bool
+	// Out receives the list of commits a discard drops (nil: not written).
+	Out io.Writer
 }
 
 // maxListedSubjects bounds the commit subjects a refusal prints.
@@ -537,6 +600,7 @@ func RollbackRekey(repo *gitwt.Repo, opts RollbackOpts, restoreConfig func(Prior
 	tip, ok := revOf(repo, BackupRef)
 	if !ok && recordIsOrphan(repo, st) {
 		removeRekeyState(repo)
+		st.Cleared = true
 		return st, nil
 	}
 	if !ok || tip != st.Tip {
@@ -564,7 +628,9 @@ func RollbackRekey(repo *gitwt.Repo, opts RollbackOpts, restoreConfig func(Prior
 		case head != mc:
 			// listed in the log so the discard is not silent
 			if out, _ := repo.Run("log", "--format=%s", mc+"..HEAD"); strings.TrimSpace(out) != "" {
-				fmt.Fprintf(os.Stderr, "rollback drops these commits:\n%s\n", strings.TrimSpace(out))
+				if opts.Out != nil {
+					fmt.Fprintf(opts.Out, "rollback drops these commits:\n%s\n", strings.TrimSpace(out))
+				}
 			}
 		}
 	}

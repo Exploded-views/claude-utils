@@ -1508,8 +1508,9 @@ its push retried, and a crash between moving HEAD and repointing
 `--host`, `--recovery-recipient` and `--fresh-root`. The record also holds the
 migrated commit (`newCommit`) and a stage (`started`, `committed`, `migrated`,
 `published`). A finished record, or an origin/main that contains `newCommit`
-(the daemon synced on top), makes a rerun print `already done` and only retire
-the classic identity, whatever the flags; a dry run on a finished repo says the
+(the daemon synced on top), makes a rerun print `already done`, write
+`config.json` and the stage if the crash came before they were saved, and
+retire the classic identity, whatever the flags; a dry run on a finished repo says the
 same and exits 0. Every resume stage repoints `memage.identity`,
 `memage.scheme` and the pin again and resets an index that differs from HEAD
 (a crash between moving HEAD and updating the index). The record is written
@@ -1522,7 +1523,9 @@ remote still equals `refs/memsync/pre-pq` it resets the branch to it and
 restores `memage.identity`, `memage.scheme`, the pin, `config.json` and the
 synced-head record (HEAD is read under the sync lock); it refuses when the
 remote has already moved off the backup (or the work-tree is dirty). It
-requires HEAD to be `newCommit`: otherwise it lists the commits made since
+requires HEAD to be `newCommit` (or the backup tip, when there is nothing to
+discard; for an older record without `newCommit` the inferred migrated commit
+is used): otherwise it lists the commits made since
 (count and subjects) and needs `--discard-local-commits`. It first loads the
 classic identity, renaming `<name>.classic-retired` back if needed, and refuses
 if neither file exists. With `--all`, a published repo is reported as
@@ -1533,11 +1536,15 @@ While a repo's record is not `published`, or the repo is not post-quantum
 yet, the daemon does not sync it: each cycle logs
 `rekey-pq: not syncing this repo this cycle` and `status` prints a
 `rekey-pq: not syncing` line. A record written by an older build (no stage, no
-`newCommit`) blocks only while the repo is not pq, or while the cached
-`origin/main` is still the backup tip (the push never happened). For such a
+`newCommit`) blocks while the repo is not pq, while the cached
+`origin/main` is still the backup tip (the push never happened), and while the
+migrated commit cannot be established as below. For such a
 record the migrated commit is inferred from the history when origin/main has
-moved off the backup tip (the single root with `--fresh-root`, else the first
-commit after the tip), and a rerun completes the record (`newCommit`,
+moved off the backup tip (with `--fresh-root` the roots origin/main has that
+the tip does not, else the commits right after the tip), accepting exactly one
+whose `.age-recipients` is this host's new key plus the recovery key and which
+HEAD contains. A repo where that fails stays held and a rerun says "cannot tell
+which commit was the migration; nothing changed". A rerun completes the record (`newCommit`,
 `published`) and prints `already done` without touching `config.json`;
 `--rollback --discard-local-commits` lists the commits since that commit, and
 refuses if it cannot be inferred.
@@ -1545,7 +1552,7 @@ refuses if it cannot be inferred.
 The classic identity is renamed `<name>.classic-retired` only when no git clone
 beside the sync directories still names it in `memage.identity`: every
 `*/.git/config` under the parent directory of each sync dir (and the default
-sync dir) is checked, paths compared after `~` expansion and symlink resolution,
+sync dir) is checked (a clone whose git config git cannot read counts as using the file), paths compared after `~` expansion and symlink resolution,
 including clones that are not routed (such as a `*.incident-*` copy). A clone
 whose restore record names the file as its classic identity and is not finished
 keeps it too (a rollback of that clone would need it). If one is found, the
@@ -1557,8 +1564,10 @@ finds the file in the repo's record or as the current identity's name without
 
 The pre-migration tip stays at `refs/memsync/pre-pq`; `rekey-pq --drop-backup`
 refuses while the rekey is unpublished (a finished record, or for an older
-record origin/main off the tip with HEAD descending from the inferred migrated
-commit), because the backup is the rollback point. Then it deletes it and its record, expires the reflogs of HEAD, `main` and
+record the inferred migrated commit must be on origin/main, which has moved
+off the backup tip, and HEAD must contain it), because the backup is the
+rollback point. Dropping it is irreversible for that clone: the classic
+history is then unreachable here and no rollback is possible. It deletes the ref and its record, expires the reflogs of HEAD, `main` and
 `origin/main` (not the stash) and runs `gc --prune=now`, so the classic
 ciphertext leaves the local clone. This removes classic ciphertext locally
 only after a `--fresh-root` run: without it the classic history is still the
