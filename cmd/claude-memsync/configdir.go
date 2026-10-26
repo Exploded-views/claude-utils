@@ -29,5 +29,5 @@ func legacyIdentityHint() string {
 	if os.MkdirAll(dir, 0o700) == nil {
 		_ = os.WriteFile(marker, nil, 0o600)
 	}
-	return "hint: the age identity is at " + path + ", the old location; it keeps working. To keep it with routes.json and apps.json in " + dir + ", move the identity*.txt files there yourself (nothing is moved automatically)."
+	return "hint: the age identity is at " + path + ", the old location. It stays where it is and keeps working: every clone's git config points at that exact path, so leave the file alone (a safe `identity move` is planned)."
 }

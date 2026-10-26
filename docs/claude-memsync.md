@@ -1052,8 +1052,10 @@ too: `%USERPROFILE%\.config\claude-memsync`). Earlier builds kept the age
 identity under the OS's own config dir: `~/Library/Application Support/claude-memsync`
 on macOS, `%AppData%\claude-memsync` on Windows. An identity still there keeps
 being used (a second one is never created) and `status` prints a one-time hint
-suggesting you move it. Nothing is moved automatically; to move it, copy the
-`identity*.txt` files (mode 0600) to the new directory and remove the old ones.
+saying so. The identity stays where it is and keeps working: each clone's git
+config holds the identity's absolute path (`memage.identity`), so moving the
+file would leave every repo keyless. Do not move or copy it by hand; a safe
+`identity move` that rewrites every clone is planned.
 
 ### apps.json
 
