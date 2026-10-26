@@ -44,7 +44,7 @@ func joinCmd(stdout, stderr io.Writer, args []string) int {
 	flags.SetOutput(stderr)
 	flabel := flags.String("label", "", "host label (^[a-z0-9][a-z0-9-]{0,31}$)")
 	fp := flags.String("fingerprint", "", "accept: the fingerprint the requesting host printed")
-	allowUnlabelled := flags.Bool("allow-unlabelled", false, "accept: admit even though some recipient has no host label (label it first with `recipients label self`)")
+	allowUnlabelled := flags.Bool("allow-unlabelled", false, "accept: admit even though some recipient has no host label (label it first with \"recipients label self\")")
 	if err := flags.Parse(rest); err != nil {
 		return 2
 	}

@@ -36,7 +36,7 @@ GitHub to see.
 
 | Key | Where | Can |
 |---|---|---|
-| Host age identity (`AGE-SECRET-KEY-PQ-1…`) | one per host, mode 0600 | decrypt every repo this host is a recipient of, including all history it can fetch |
+| Host age identity (`AGE-SECRET-KEY-PQ-1…`) | one per host, mode 0600, in `${XDG_CONFIG_HOME:-~/.config}/claude-memsync` (an older install may still have it in `~/Library/Application Support/claude-memsync` or `%AppData%\claude-memsync`; it is read there in place) | decrypt every repo this host is a recipient of, including all history it can fetch |
 | Deploy key, write | one per host per repo, titled `<host-label>` | push to that one repo; nothing else |
 | Deploy key, read-only | read-only members, related-repo read copies | fetch that one repo; GitHub refuses pushes |
 | `memsync-check` App key | one per host | mint an hour-long token with Metadata: read (is a repo private?) |
@@ -142,6 +142,27 @@ not erase them: GitHub keeps unreachable objects fetchable **by SHA** until its
 own garbage collection removes them (and cached views, forks or other clones
 may keep them indefinitely). Ask GitHub support to purge them if it matters,
 and assume anything already fetched is kept.
+
+Three more consequences of a `--fresh-root` rekey:
+
+- **The force-push is the point of no return for the remote.** After it, every
+  other clone of that repo (other hosts' clones, a `*.incident-*` copy) holds
+  history the remote no longer has. Hosts that were members of the old repo must
+  re-clone; `rekey-pq` refuses a repo with more than one member host for this
+  reason.
+- **`--drop-backup` is irreversible.** The pre-migration tip is kept at
+  `refs/memsync/pre-pq` as the rollback point. `rekey-pq --drop-backup` deletes
+  it, expires the reflogs and prunes, so the classic ciphertext leaves that
+  clone and no rollback is possible afterwards. It refuses while the rekey is
+  unpublished. If the restore record (`.git/memsync-pre-pq.json`) is unreadable,
+  do not drop the backup: it is all that is left of the classic history. A
+  record written by an older build is finished from the history when that can
+  be established unambiguously, and otherwise the daemon stays held.
+- **A half-migrated repo is held, not synced.** While a rekey is unfinished the
+  daemon syncs nothing in that repo and `status` says so; nothing is pushed in
+  the old or the new scheme until the rerun (or `--rollback`) finishes it. The
+  classic identity file is kept (renamed `*.classic-retired` only once no clone
+  uses it, then by `recipients retire-classic`) until then.
 
 ## The recovery key
 

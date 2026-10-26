@@ -74,8 +74,8 @@ Usage of init:
     	read-only member: pull and apply notes into the Claude tree, never commit or push (the remote must already hold the repo); saved to config
   -recipient value
     	with --encrypt: extra age/ssh public key, e.g. an offline recovery key (repeatable)
-  -recovery-recipient join accept
-    	with --encrypt: the owner's offline recovery key (an age1pq1... public key under the pq scheme, repeatable): a recipient like --recipient, marked "# recovery", saved as recoveryRecipients, and the only kind of recipient join accept lets go unlabelled
+  -recovery-recipient value
+    	with --encrypt: the owner's offline recovery key (an age1pq1... public key under the pq scheme, repeatable): a recipient like --recipient, marked "# recovery", saved as recoveryRecipients, and the only kind of recipient "join accept" lets go unlabelled
   -remote string
     	git remote URL to sync against (e.g. git@github.com:user/claude-memories.git)
   -skip-quiet-window
@@ -467,8 +467,8 @@ usage:
 
 ```text
 Usage of join request:
-  -allow-unlabelled recipients label self
-    	accept: admit even though some recipient has no host label (label it first with recipients label self)
+  -allow-unlabelled
+    	accept: admit even though some recipient has no host label (label it first with "recipients label self")
   -fingerprint string
     	accept: the fingerprint the requesting host printed
   -label string

@@ -1,11 +1,11 @@
 # Setting up claude-memsync
 
 This guide takes you from nothing to several machines sharing encrypted,
-layered memory. Read [the README](../README.md) first for the model (repo
-kinds, routing, default deny) and [security.md](security.md) for what each
-key can do. Every flag shown here is in [reference.md](reference.md).
+layered memory. Read [fork.md](fork.md) first for the model (repo kinds,
+routing, default deny) and [security.md](security.md) for what each key can do.
+Every flag shown here is in [reference.md](reference.md).
 
-Placeholders: `<your-org>` is the GitHub org you create for memory,
+Placeholders: `<org>` is the GitHub org you create for memory,
 `<host-label>` the name you give a machine (1 to 32 of `a-z`, `0-9`, `-`,
 never its real host name), `<client-codename>` a neutral name for a client,
 `<password-manager store command>` / `<password-manager read command>` your
@@ -15,6 +15,8 @@ back.
 Contents:
 
 - [What you need](#what-you-need)
+- [The config directory](#the-config-directory)
+- [macOS notes](#macos-notes)
 - [First machine](#first-machine)
 - [Each extra machine](#each-extra-machine)
 - [Throwaway VMs](#throwaway-vms)
@@ -23,16 +25,68 @@ Contents:
 - [Upgrading the binary](#upgrading-the-binary)
 - [Converting a classic repo to post-quantum](#converting-a-classic-repo-to-post-quantum)
 
+To install from a downloaded release archive instead of building (no Go, no
+clone), see [releases.md](releases.md).
+
 ## What you need
 
-- git 2.26 or later, Go 1.25 or later (to build), `gh` logged in, `ssh-keygen`,
+- git 2.26 or later, Go 1.25 or later (to build; not needed when installing a
+  [release archive](releases.md)), `gh` logged in, `ssh-keygen`, `ssh-keyscan`,
   `python3` (the bootstrap uses it), and `age-keygen` 1.3 or later (for
-  `-pq`; `go install filippo.io/age/cmd/age-keygen@v1.3.2`).
+  `-pq`; `go install filippo.io/age/cmd/age-keygen@v1.3.2`). On a host the
+  bootstrap also needs `systemctl` (Linux) or `launchctl` (macOS) to register
+  the service. The bootstrap checks all of this first and in a dry run, names
+  every missing tool, and changes nothing ([bootstrap.md](bootstrap.md#prerequisites)).
 - A password manager with a CLI that can store a secret read from stdin and
   print it back. The recovery key and the admin App's key live there and
-  nowhere else.
+  nowhere else. A host without one can use a short-lived token file instead
+  ([bootstrap.md](bootstrap.md#c-homelab-host-without-a-password-manager-token-file)).
+  When a key or token command waits for the password manager (a prompt to
+  approve), the command prints `waiting for your password manager (approve the
+  prompt if one appears)…` and waits up to 120 s at a terminal; set
+  `CLAUDE_MEMSYNC_SECRET_TIMEOUT` (a Go duration such as `3m`) to change that.
+  The daemon, which nobody can answer, keeps 10 s.
 - The same project paths on every machine: Claude names a project's memory
   folder after its absolute path.
+
+## The config directory
+
+What is per host and never synced (`routes.json`, `apps.json`, the age identity
+and key files) lives in one directory on every OS:
+`${XDG_CONFIG_HOME:-~/.config}/claude-memsync`, on Windows too
+(`%USERPROFILE%\.config\claude-memsync`). Earlier builds kept the age identity
+in the OS's own config directory, `~/Library/Application Support/claude-memsync`
+on macOS and `%AppData%\claude-memsync` on Windows. An identity still there is
+read in place (a second one is never created), and `status` prints one hint
+that you may move it; nothing is moved or copied for you. To move it, copy the
+`identity*.txt` files (mode 0600) into the new directory and delete the old
+ones. Details: "The config directory" in [claude-memsync.md](claude-memsync.md#the-config-directory).
+
+## macOS notes
+
+- **Nothing to install beyond git, `gh`, `python3` and Go (or a release
+  archive).** The stock `/bin/bash` 3.2 and the BSD tools (`grep`, `sed`, `awk`,
+  `stat`, `find`) are enough; no GNU coreutils, no Homebrew bash. CI runs the
+  bootstrap's checks under `/bin/bash` 3.2 on a macOS runner and a lint keeps
+  GNU-only flags out of `scripts/` ([ci.md](ci.md)).
+- **Run the paste prompts' commands in bash, not zsh.** The keep-out lists are
+  split into repeated flags by bash's word splitting, which zsh does not do.
+  Type `bash` first.
+- **Keep the password manager unlocked and in view** while the bootstrap or an
+  `app` command runs: the admin key is read from it at run time and its prompt
+  can need you. The command waits 120 s for it (above).
+- **A standalone binary in `~/.local/bin` is moved aside automatically.** If
+  `claude-memsync` or `claude-memmerge` there is a regular file (not a link),
+  the bootstrap renames it to `<name>.pre-bootstrap-<UTC time>` (a taken name
+  gets `.1`, `.2`, …) and links its own build in its place. A link is simply
+  re-pointed; anything else is refused. The dry run lists the move.
+- **`/reload-plugins` after install.** The bootstrap installs the
+  `memory-notices` plugin; run `/reload-plugins` in each open Claude session,
+  or restart the sessions, so its hooks load. The summary says so.
+- **Where the identity lives.** New installs: `~/.config/claude-memsync/`
+  (or `$XDG_CONFIG_HOME/claude-memsync/`), same as `routes.json`. A Mac set up
+  before that rule has it in `~/Library/Application Support/claude-memsync/`; it
+  keeps working there and `status` hints once at moving it (above).
 
 ## First machine
 
@@ -41,7 +95,7 @@ Do this once, on a machine you own and trust (not an agent host).
 ### 1. Create the org and its settings
 
 Create a GitHub organization used only for memory, for example
-`<your-org>`. Some of the settings below are only offered on paid plans;
+`<org>`. Some of the settings below are only offered on paid plans;
 set the ones your plan has. In the org's settings:
 
 - Base permission: **No permission**.
@@ -75,7 +129,7 @@ read). It creates repos and adds and deletes deploy keys. Its private key goes
 straight into your password manager and never touches disk:
 
 ```sh
-claude-memsync app register --name memsync-admin --org <your-org> --url <homepage-url> \
+claude-memsync app register --name memsync-admin --org <org> --url <homepage-url> \
   --perm administration:write --perm metadata:read \
   --key-cmd-store "<password-manager store command>" \
   --key-cmd "<password-manager read command>"
@@ -86,7 +140,7 @@ private-only checks; it can change nothing. Each host gets its **own** private
 key, so a lost host is cut off by deleting one key:
 
 ```sh
-claude-memsync app register --name memsync-check --org <your-org> --url <homepage-url> \
+claude-memsync app register --name memsync-check --org <org> --url <homepage-url> \
   --perm metadata:read --key-out ~/.config/claude-memsync/memsync-check.pem
 ```
 
@@ -142,76 +196,110 @@ The recommended path is the bootstrap script, which runs every step below on
 a machine with a dry run first. It is described in
 [bootstrap.md](bootstrap.md); read `scripts/bootstrap.sh` before running it.
 
-Run it in bash (not zsh). Set the inputs once, define `boot` once, dry-run,
-then run the same function with `--yes`:
+Run it in bash (not zsh). The same shape is used by the paste prompts in
+[bootstrap.md](bootstrap.md): INPUTS first, then what is already set, then steps
+that use only the names. The command that runs twice is defined once.
+
+INPUTS (fill in; nothing else changes)
 
 ```sh
-# INPUTS (fill in)
 ORG=<org>                          # the GitHub organisation that holds the memory repos
 HOST_LABEL=<host-label>            # this host's label
 RECOVERY=<recovery-recipient>      # your offline post-quantum recovery PUBLIC key, age1pq1...
 GITHUB_USER=<github-user>          # your personal GitHub account
-ADMIN_APP_ID=<admin-app-id>
-ADMIN_KEY_CMD="<password-manager read command>"
-CHECK_APP_ID=<check-app-id>
-CHECK_KEY_FILE=<check-key-file>    # absolute path, mode 0600
-KEEP_OUT_OWNERS=""                 # (optional; leave empty for none) space-separated owners to keep out
-KEEP_OUT_TERMS=""                  # (optional; leave empty for none) space-separated terms to keep out
-
-boot() {
-  local a=() x
-  for x in $KEEP_OUT_OWNERS; do a+=(--keep-out-owner "$x"); done
-  for x in $KEEP_OUT_TERMS; do a+=(--keep-out-term "$x"); done
-  bash scripts/bootstrap.sh --host "$HOST_LABEL" --role personal-dev --org "$ORG" \
-    --recovery-recipient "$RECOVERY" --own-owner "$GITHUB_USER" ${a[@]+"${a[@]}"} \
-    --org-app memsync-admin --org-app-id "$ADMIN_APP_ID" --org-app-key-cmd "$ADMIN_KEY_CMD" \
-    --check-app memsync-check --check-app-id "$CHECK_APP_ID" --check-key-file "$CHECK_KEY_FILE" "$@"
-}
-boot --dry-run
-# after checking the plan, the same command with --yes instead of --dry-run:
-boot --yes
+ADMIN_APP_ID=<admin-app-id>        # numeric App ID of memsync-admin
+ADMIN_KEY_CMD="<password-manager read command>"   # prints the memsync-admin private key
+CHECK_APP_ID=<check-app-id>        # numeric App ID of memsync-check
+CHECK_KEY_FILE=<check-key-file>    # absolute path of this host's memsync-check key, mode 0600
+KEEP_OUT_OWNERS=""                 # optional, empty for none: space-separated GitHub owners to keep out
+KEEP_OUT_TERMS=""                  # optional, empty for none: space-separated terms to keep out
 ```
+
+ALREADY SET: nothing; the script is the checkout you are in.
+
+STEPS
+
+1. Define the command once.
+
+   ```sh
+   boot() {
+     local a=() x
+     for x in $KEEP_OUT_OWNERS; do a+=(--keep-out-owner "$x"); done
+     for x in $KEEP_OUT_TERMS; do a+=(--keep-out-term "$x"); done
+     bash scripts/bootstrap.sh --host "$HOST_LABEL" --role personal-dev --org "$ORG" \
+       --recovery-recipient "$RECOVERY" --own-owner "$GITHUB_USER" ${a[@]+"${a[@]}"} \
+       --org-app memsync-admin --org-app-id "$ADMIN_APP_ID" --org-app-key-cmd "$ADMIN_KEY_CMD" \
+       --check-app memsync-check --check-app-id "$CHECK_APP_ID" --check-key-file "$CHECK_KEY_FILE" "$@"
+   }
+   ```
+
+2. Dry run and read the plan.
+
+   ```sh
+   boot --dry-run
+   ```
+
+3. Wait for your go. Then the same command with `--yes`.
+
+   ```sh
+   boot --yes
+   ```
 
 `--org` and `--recovery-recipient` are required and have no defaults; the
 script refuses to run without them. The recovery recipient must be the
 hybrid (`age1pq1...`) public key of the recovery identity you hold.
 `--own-owner <github-user>` names your personal GitHub account so its checkouts
 get project repos; the only owner counted as yours by default is `--org`.
-`--keep-out-owner` and `--keep-out-term` are optional and repeatable: a
-checkout whose origin owner matches an owner is skipped (no repo, no route), as
-is one whose `owner/repo` contains a term; terms are also written to the
-denylists the daemon checks at commit time. If the check key file is not there
-yet the script exits 3 (paused) before changing anything and says how to create
-it. Exit codes, the token-file flow for a host without a password manager, and
-the release-archive flow are in [bootstrap.md](bootstrap.md).
+
+**Keep-out lists are optional.** `--keep-out-owner` and `--keep-out-term` are
+repeatable, and both may be left out. An owner makes a discovered checkout whose
+origin owner matches it (case-insensitive) get no repo and no route, so default
+deny applies. A term does the same for a checkout whose `owner/repo` contains
+it (case-insensitive substring), and is also written, regex-escaped, to the
+`denylist-<kind>.txt` files the daemon checks at commit time: a note whose
+content or repo-relative path matches is held back (it stays local and is never
+committed or pushed). Owners are **not** written to the denylist; only terms
+are. With neither flag the script prints the calm note
+`keep-out lists: none (routing alone decides what syncs)` and goes on; that is
+not a warning. (`--deny-owner` and `--deny-term` are the old names and still
+work.)
+
+**Exit codes:** 0 ok, 1 error (a missing prerequisite, a refused input, a
+failed step), 2 usage (an unknown or malformed argument), 3 paused. Exit 3
+means it needs a human before it can go on, today because the
+`--check-key-file` does not exist yet; it says exactly what to do and changes
+nothing. Do that and run the same command again. A host without a password
+manager uses a token file instead of `--org-app` (`--org-token-file <path>
+--delete-org-token-file`; a dry run keeps the file, a real run deletes it, the
+token expires about an hour after it was minted); the flow, the full prerequisite
+list and the release-archive flow are in [bootstrap.md](bootstrap.md) and
+[releases.md](releases.md).
 
 The manual path, for one repo (repeat per repo):
 
 ```sh
 # a private mem-* repo, verified private after creation
-claude-memsync repo create --org <your-org> \
+claude-memsync repo create --org <org> \
   --token-cmd "claude-memsync app-token --app memsync-admin" mem-personal
 
 # a deploy key for this host and repo (write access), behind its own ssh alias
 ssh-keygen -t ed25519 -N '' -f ~/.ssh/mem-personal_ed25519
 GH_TOKEN="$(claude-memsync app-token --app memsync-admin)" \
-  gh repo deploy-key add ~/.ssh/mem-personal_ed25519.pub -R <your-org>/mem-personal -w -t <host-label>
+  gh repo deploy-key add ~/.ssh/mem-personal_ed25519.pub -R <org>/mem-personal -w -t <host-label>
 # ~/.ssh/config:  Host gh-mem-personal / HostName ssh.github.com / Port 443 /
 #                 User git / IdentityFile ~/.ssh/mem-personal_ed25519 / IdentitiesOnly yes
 
 # the encrypted sync dir
-claude-memsync init --remote git@gh-mem-personal:<your-org>/mem-personal.git \
+claude-memsync init --remote git@gh-mem-personal:<org>/mem-personal.git \
   --sync-dir ~/.claudesync.d/personal --encrypt --host-label <host-label> \
   --recovery-recipient <age1pq1...> --archive-deletes --private-only \
   --github-app memsync-check
 ```
 
 `init --encrypt` creates this host's own hybrid identity in
-`~/.config/claude-memsync/` (or `$XDG_CONFIG_HOME/claude-memsync/`; mode 0600)
-and prints only its public key. On a Mac the identity is there too, except on
-installs made before this rule, where it stays in
-`~/Library/Application Support/claude-memsync/` and keeps working (`status` hints
-at moving it; see "The config directory" in [claude-memsync.md](claude-memsync.md)).
+`${XDG_CONFIG_HOME:-~/.config}/claude-memsync/` (mode 0600) and prints only its
+public key; see [the config directory](#the-config-directory) for an identity
+left in the older macOS or Windows location.
 With several repos, write
 `~/.config/claude-memsync/routes.json` (see "Several repos per host" in
 [claude-memsync.md](claude-memsync.md#several-repos-per-host)), pin the home
@@ -221,7 +309,7 @@ folder, and start the service:
 claude-memsync route home personal --yes
 claude-memsync install && claude-memsync start
 claude-memsync status
-claude-memsync doctor --org <your-org>
+claude-memsync doctor --org <org>
 ```
 
 `doctor --install-timer` writes a daily check of every `mem-*` repo's
@@ -315,7 +403,7 @@ The host then starts to commit and sync.
 A VM that should only read notes, and only for a while:
 
 ```sh
-claude-memsync init --remote git@gh-mem-personal:<your-org>/mem-personal.git \
+claude-memsync init --remote git@gh-mem-personal:<org>/mem-personal.git \
   --sync-dir ~/.claudesync.d/personal --encrypt --read-only \
   --host-label <host-label> --expires 2026-12-31
 ```
@@ -349,10 +437,10 @@ retire it when you are done.
 From any other member host (a host cannot retire itself):
 
 ```sh
-claude-memsync host list --org <your-org>                 # who is there, stale or expired
-claude-memsync host retire <host-label> --org <your-org>  # dry run: the plan only
+claude-memsync host list --org <org>                 # who is there, stale or expired
+claude-memsync host retire <host-label> --org <org>  # dry run: the plan only
 claude-memsync stop
-claude-memsync host retire <host-label> --org <your-org> --apply
+claude-memsync host retire <host-label> --org <org> --apply
 claude-memsync start
 ```
 
@@ -398,7 +486,7 @@ claude-memsync version && claude-memsync status
 ```
 
 Or download a release archive and check it against `SHA256SUMS` first (see
-"Releasing" in the README). On start the daemon rewrites each encrypted
+[releases.md](releases.md)). On start the daemon rewrites each encrypted
 clone's filter and merge-driver settings to point at the binary that is
 running, so an upgrade that moved the binary (for example a new versioned
 directory from the bootstrap) needs no `init --force`. A binary run from a temp

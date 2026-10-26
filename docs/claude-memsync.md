@@ -1,6 +1,6 @@
 # claude-memsync — syncing Claude Code memories across workstations
 
-> See also: [setup guide](setup.md) · [security model](security.md) · [command reference](reference.md) · [changelog](../CHANGELOG.md)
+> See also: [fork overview](fork.md) · [setup guide](setup.md) · [security model](security.md) · [command reference](reference.md) · [changelog](../CHANGELOG.md)
 
 A guide to setting up and running the memory-sync daemon.
 
@@ -23,7 +23,7 @@ of its own — just a git remote you can push to.
 
 ## Prerequisites
 
-- Go 1.23+ to build.
+- Go 1.25+ to build (the `go` line in `go.mod`), or a [release archive](releases.md) instead.
 - `git` 2.26 or later on PATH at runtime (the daemon shells out to it; older
   versions record a rebase's start in the reflog differently, so the daemon
   could not tell its own stopped rebase from yours and would pause instead).
@@ -61,8 +61,10 @@ go build -ldflags "-X github.com/MarimerLLC/claude-utils/internal/version.Overri
 ```
 
 A plain `go build` (no ldflags) still produces a working binary —
-`claude-memsync version` falls back to the VCS revision Go embeds automatically
-(e.g. `dev+a52d68609b6e`). See the README's *Releasing* section for details.
+`claude-memsync version` falls back to the version Go embeds automatically: a
+pseudo-version such as `v0.2.1-0.20260508213755-a52d68630b31` (Go 1.24 or later,
+in a git checkout), or `dev+<commit>` where the toolchain gives none. See the
+README's *Releasing* section for details.
 
 Both binaries (`claude-memsync` and `claude-memmerge`) end up in `bin/`.
 **They must live in the same directory** — `claude-memsync` finds the merge
@@ -1607,8 +1609,9 @@ must re-clone.
 ### Keys
 
 `init --encrypt` generates a per-host identity (hybrid under `pq`, X25519 under
-`classic`) (mode 0600; default
-`~/.config/claude-memsync/identity.txt`, or `--identity <file>`) and
+`classic`) (mode 0600; default `identity.txt` in the
+[config directory](#the-config-directory), or `--identity <file>`; after a
+`rekey-pq` the hybrid one is `identity-pq.txt` beside it) and
 prints only the **public** recipient. An existing age identity file, or an
 unencrypted SSH ed25519/RSA key (age cannot use ssh-agent, so a passphrase-protected
 key does not work for a daemon), can be used instead. Back the identity up
@@ -1752,7 +1755,7 @@ admitted by another host sees exactly this on its first pull and accepts it.
 
 Encryption hides note contents and the diffs inside them. The host still sees:
 file names (project folder hashes and note names), file sizes (plaintext plus
-about 200 bytes per recipient), commit times and counts, branch names, the
+about 200 bytes per classic recipient, or about 1.5 KB per hybrid one), commit times and counts, branch names, the
 commit graph, and the recipients' public keys. It cannot search or render the
 notes, and its secret scanning sees only ciphertext. Hiding names and timing
 would need name hashing or a different tool.

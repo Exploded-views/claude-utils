@@ -13,7 +13,7 @@
 
 ## Prerequisites
 
-Checked first, before any change, and also in `--dry-run`: one `missing prerequisite: <tool> (<why>)` line per missing item on stderr, then exit 1 with nothing changed. The list: bash 3.2 or later (macOS's `/bin/bash` is enough), the basic tools the script calls (`sed`, `awk`, `grep`, `find`, `stat` and friends), `git` 2.26 or later, `python3`, `ssh-keygen`, `ssh-keyscan`, `gh`, `systemctl` on Linux or `launchctl` on macOS (the service step), and, only when building from source, Go at or above the `go.mod` version (or docker on Linux; on macOS `brew install go`). With `--prebuilt-dir` Go is not needed.
+Checked first, before any change, and also in `--dry-run`: one `missing prerequisite: <tool> (<why>)` line per missing item on stderr, then exit 1 with nothing changed. The list: bash 3.2 or later (macOS's `/bin/bash` is enough), the basic tools the script calls (`sed`, `awk`, `grep`, `find`, `stat` and friends), `git` 2.26 or later, `python3`, `ssh-keygen`, `ssh-keyscan`, `gh`, `systemctl` on Linux or `launchctl` on macOS (the service step), and, only when building from source, Go at or above the `go.mod` version (or docker on Linux; on macOS `brew install go`). With `--prebuilt-dir` Go is not needed. On macOS the stock `/bin/bash` 3.2 and the BSD tools are enough; nothing GNU is required (see [setup.md](setup.md#macos-notes)).
 
 ## How the paste prompts are written
 
@@ -26,6 +26,8 @@ Every flow below has the same shape, so a value is written once and used by name
 
 Run the steps in **bash**, not zsh: the keep-out lists are space-separated and are split into repeated flags by bash's word splitting, which zsh does not do. (On macOS run `bash` first.)
 
+A key or token command that waits for your password manager (an approval prompt) prints `waiting for your password manager (approve the prompt if one appears)…` and is given 120 s at a terminal, so keep the password manager unlocked and in view while the run goes (`CLAUDE_MEMSYNC_SECRET_TIMEOUT` changes the limit; the daemon keeps 10 s).
+
 `scripts/bootstrap_test.sh` extracts each prompt from this file, substitutes test values for the inputs, and runs it as a shell snippet, so this file and the script cannot drift: a flag the script does not know, an input the steps do not use, or a name the steps use but INPUTS does not list fails the test.
 
 ### Keep-out lists (optional, repeatable)
@@ -37,7 +39,7 @@ On a laptop there may be work to keep out of the memory repos: a client, an empl
 | `--keep-out-owner <owner>` (repeatable; old name `--deny-owner`) | A discovered git checkout whose origin owner matches (case-insensitive) gets no repo and no route, so default-deny applies. The owner is also flagged in the token-reach warning if the gh login or the org token can reach that org. |
 | `--keep-out-term <term>` (repeatable; old name `--deny-term`) | A checkout whose `owner/repo` contains the term (case-insensitive substring) is skipped the same way. Each term is also written, regex-escaped, to every `denylist-<kind>.txt`. At commit time the daemon uses that file to hold back any note whose content or repo-relative path matches: the note stays local, is never committed or pushed, and is logged without its path. |
 
-Keep-out owners are **not** written to the denylist. Only terms are.
+Keep-out owners are **not** written to the denylist. Only terms are. A re-run adds new terms to an existing `denylist-<kind>.txt` (regex-escaped, de-duplicated, never removing a line) and says how many it added. When the gh login or the org token can reach orgs and no keep-out owner is given, the plan suggests `KEEP_OUT_OWNERS="<orgs>"`; it is a suggestion, nothing is kept out unless you set it.
 
 Placeholders below are `<angle brackets>`. Put real values only in the session you paste into, never in this repository.
 
@@ -63,7 +65,7 @@ The admin entry is added to `apps.json` for the run only and removed when the sc
 
 <!-- prompt: homelab-app -->
 ```text
-Set up claude-memsync on this host from github.com/Exploded-views/claude-utils (role homelab). Use bash, not zsh.
+Set up claude-memsync on this host from the repository named in REPO below. Use bash, not zsh.
 
 INPUTS (fill these in; nothing else changes)
 - COMMIT = <commit>
@@ -116,7 +118,7 @@ Stop and tell me before any step that needs me (an approval prompt, a pause with
 
 <!-- prompt: personal-dev-app -->
 ```text
-Set up claude-memsync on this host from github.com/Exploded-views/claude-utils (role personal-dev). Use bash, not zsh.
+Set up claude-memsync on this host from the repository named in REPO below. Use bash, not zsh.
 
 INPUTS (fill these in; nothing else changes)
 - COMMIT = <commit>
@@ -187,7 +189,7 @@ On the host the file must be mode 0600, owned by you, with one hard link, and no
 
 <!-- prompt: homelab-tokenfile -->
 ```text
-Set up claude-memsync on this host from github.com/Exploded-views/claude-utils (role homelab), using an org token file I copied here. Use bash, not zsh.
+Set up claude-memsync on this host from the repository named in REPO below, using an org token file I copied here. Use bash, not zsh.
 
 INPUTS (fill these in; nothing else changes)
 - COMMIT = <commit>
@@ -239,7 +241,7 @@ The release archives carry `scripts/bootstrap.sh`. A host that should not build 
 
 <!-- prompt: crewkit -->
 ```text
-Set up claude-memsync on this host from a release archive of github.com/Exploded-views/claude-utils (role homelab); no clone, no build. Use bash, not zsh.
+Set up claude-memsync on this host from a release archive of the repository named in REPO below; no clone, no build. Use bash, not zsh.
 
 INPUTS (fill these in; nothing else changes)
 - TAG = <tag>
@@ -303,7 +305,7 @@ age-keygen -pq | <password-manager store command>
 
 `age-keygen -pq` writes the secret key to stdout, straight into the password manager, and nothing to disk. `age-keygen -y` reads that secret key back from the read command and prints only the public key. Do not rely on `age-keygen` printing the public key on stderr (it does not on every setup), and do not use `-o /dev/stdout`: `age-keygen` opens `-o` files exclusively and refuses an existing path. The public key is about 1,960 characters long; pass it whole.
 
-A repo created before this change is classic (X25519). Migrate it with `claude-memsync recipients rekey-pq`; see `docs/claude-memsync.md`. `init --encryption-scheme classic` keeps the upstream format.
+A repo created before this change is classic (X25519). Migrate it with `claude-memsync recipients rekey-pq`; see [setup.md](setup.md#converting-a-classic-repo-to-post-quantum) and `docs/claude-memsync.md`. `init --encryption-scheme classic` keeps the upstream format.
 
 ## Register the GitHub Apps (once, on the owner's Mac)
 
@@ -317,7 +319,7 @@ cd ~/.local/src/claude-utils-<commit> && go build -o "$L/claude-memsync" ./cmd/c
 ln -sfn "$L/claude-memsync" ~/.local/bin/claude-memsync
 ```
 
-This is bootstrap's own layout (`~/.local/lib/claude-memsync/<sha>/` plus symlinks in `~/.local/bin`), so a later bootstrap run adopts it. A standalone binary copied straight into `~/.local/bin` also works: bootstrap moves a regular file there aside to `<name>.pre-bootstrap-<UTC time>` and links its own build in its place; an existing symlink is simply re-pointed, and anything that is neither a regular file nor a symlink is refused.
+This is bootstrap's own layout (`~/.local/lib/claude-memsync/<sha>/` plus symlinks in `~/.local/bin`), so a later bootstrap run adopts it. A standalone binary copied straight into `~/.local/bin` also works: bootstrap moves a regular file there aside to `<name>.pre-bootstrap-<UTC time>` (a taken name gets `.1`, `.2`, …, so an earlier backup is never overwritten; the dry run lists the move) and links its own build in its place; an existing symlink is simply re-pointed, and anything that is neither a regular file nor a symlink is refused.
 
 1. `memsync-admin` (repository Administration: write, Metadata: read). The key goes straight into the password manager and is never written to a file; `--key-cmd-store` reads the key on stdin, `--key-cmd` is the command that prints it back (use that as `<admin-key-cmd>`):
 
@@ -360,7 +362,7 @@ scripts/bootstrap.sh --host <label> --role <role> --org <org> --recovery-recipie
                      [--sha <commit>] [--prebuilt-dir <dir>]
                      [--workspace <dir>]... [--own-owner <owner>]...
                      [--keep-out-owner <owner>]... [--keep-out-term <term>]...
-                     [--repo-url <url>]
+                     [--repo-url <url>] [--allow-org <org>]...
                      --org-token-file <path> [--delete-org-token-file]
                        | --org-token-cmd "<argv>" | --org-app <name>
                      [--org-app-id <id> --org-app-key-cmd "<argv>"]
@@ -374,7 +376,7 @@ scripts/bootstrap.sh --host <label> --role <role> --org <org> --recovery-recipie
 
 `--prebuilt-dir <dir>` installs `<dir>/claude-memsync` and `<dir>/claude-memmerge` into `~/.local/lib/claude-memsync/<sha-or-version>/` (and links them into `~/.local/bin`) and skips the clone and the build, so Go is not a prerequisite. The script refuses if the directory or either binary is missing or not executable, or if `<dir>/claude-memsync version` is not what is expected: it must contain the first 12 hex characters of `--sha` when `--sha` is given; without `--sha` it must be a release version (`vX.Y.Z`, what `release.yml` stamps into the binaries), and that version names the install directory. An existing, different binary in that directory is never overwritten. Without a source checkout the plugin step is skipped and the summary says how to add it.
 
-`--keep-out-owner` and `--keep-out-term` are optional and repeatable (see "Keep-out lists" above); `--deny-owner` and `--deny-term` are their old names and still work.
+`--keep-out-owner` and `--keep-out-term` are optional and repeatable (see "Keep-out lists" above); `--deny-owner` and `--deny-term` are their old names and still work. `--allow-org <org>` (repeatable) adds an org to the allow list used by the org-scope warning (step 1b); `--org` is always on it.
 
 Roles (table at the top of the script):
 
@@ -403,7 +405,7 @@ Unknown roles are refused. No `mem-client-*` or `mem-orch-*` repo can be created
 8. `claude-memsync route home <key> --yes`.
 9. Plugin: `claude plugin marketplace add` of the clone, then `claude plugin install memory-notices@claude-utils`.
 10. Service: `install`, `start` (these may need your approval in the session), `status`, `doctor`.
-11. Summary: repos, key names, pending joins, next steps. Private keys and tokens are never printed.
+11. Summary: repos, key names, pending joins, next steps, including running `/reload-plugins` in each open Claude session (or restarting the sessions) so the `memory-notices` hooks load. Private keys and tokens are never printed.
 
 A re-run whose plan differs from the `routes.json` an earlier run wrote (a new project or workspace) regenerates it before any repo is created, keeping the old one as `routes.json.bak`, and puts the home pin back. Keep-out terms are written to the denylists as literal regexes (a leading `#` is escaped).
 

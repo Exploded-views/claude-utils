@@ -4,128 +4,58 @@
 
 Cross-workstation tooling for Claude Code.
 
-This is a fork of the upstream `claude-utils`. Its `claude-memsync` has grown
-from "one private repo per person" into an encrypted, layered memory store
-for people who work across several machines and several confidential
-contexts. The other tools are as upstream ships them.
+Two capabilities, both built from a single pair of Go binaries
+(`claude-memsync` + `claude-memmerge`) that run on Windows, Linux, and macOS:
 
-- **claude-memsync** (this fork): keeps Claude Code memories
-  (`~/.claude/projects/<folder>/memory/`) in sync across your machines through
-  private GitHub repos, routes each project to the right repo, and encrypts
-  every note with post-quantum age before it leaves the machine. Described
-  below; setup in [docs/setup.md](docs/setup.md).
+- **[claude-memsync](docs/claude-memsync.md)**: a background daemon that keeps
+  your Claude Code memories (`~/.claude/projects/<hash>/memory/`) in sync across
+  multiple workstations, using a private git repository as transport. A custom
+  merge driver unions `MEMORY.md` section blocks instead of producing line-level
+  conflicts.
 - **[Distilling environment memories](docs/distilling-memories.md)**: lift the
   *transferable* lessons (shell/OS quirks, CLI gotchas, toolchain, your standing
   preferences) out of one project and reuse them in any other, existing or new,
   via a shared catalog and two Claude skills (`/distill`, `/distill-apply`).
-- **[claude-focus](docs/claude-focus.md)** (Windows only): brings the Claude
-  desktop app to the front (launching it if needed). Bind it to the Copilot key
-  with PowerToys so that key opens Claude instead of Copilot.
 
-## claude-memsync
+Plus a small Windows-only helper:
 
-Claude Code keeps what it learns about a project in a memory folder on the
-machine where it learned it. `claude-memsync` is a background daemon (one Go
-binary plus the `claude-memmerge` merge driver, for Linux, macOS and Windows)
-that mirrors those folders into git repos and back, so every machine you use
-sees the same notes. `MEMORY.md` indexes are merged section by section rather
-than line by line, deleted notes are archived instead of lost, and a secret
-scrub plus your own denylist keep credentials and named terms out of the
-commits.
+- **[claude-focus](docs/claude-focus.md)**: brings the Claude desktop app to
+  the front (launching it if needed). Bind it to the Copilot key with PowerToys
+  so that key opens Claude instead of Copilot.
 
-### Layered memory
-
-Not every note belongs on every machine. Notes live in several private repos,
-each of one **kind**, all named `mem-*` so the tool can never touch any other
-repo:
-
-| Kind | Repo | Holds | Lives on |
-|---|---|---|---|
-| personal | `mem-personal` | you and how you work: standing preferences, rules, the distilled catalog | every host |
-| project | `mem-project-<name>` | one of your own projects, keyed by its git remote | hosts that work on it |
-| infra | `mem-infra-<env>` | one environment you run: its services, network, quirks | hosts that manage it |
-| client | `mem-client-<client-codename>` | one client's systems, people and decisions | only hosts doing that client's work |
-| orchestrator | `mem-orch-<client-codename>` (later `mem-orch-all`) | a coordinating agent's own state for one client, kept apart from the client's technical notes | the coordinating host only |
-
-A small `mem-registry` repo holds what hosts share about each other: routing
-templates, relations between repos, expiry dates and check-key records. Name
-client repos by a codename, never by the client's name.
-
-**Routing.** Each host has its own `routes.json` (never synced) listing the
-repos it holds and an ordered list of rules: pin an exact Claude folder, match
-a project path, or match the project's git remote (`github.com/<your-org>/*`).
-The first matching rule wins and sends that folder to exactly one repo.
-
-**Default deny.** A folder no rule matches is not synced at all. A rule that
-cannot decide (the checkout is missing, has no readable `origin`, or names a
-repo this host does not have) denies the folder on the spot instead of falling
-through to a broader rule.
-
-**Client boundary.** A client or orchestrator folder never leaks into another
-repo by accident: moving a folder out of a client repo needs an explicit
-`--confirm-move-out-of-client`, templates published to the registry replace
-client rules with denies, client folders never feed the shared catalog, and
-relations between repos may not cross from one client to another or between a
-client and your own repos. The only cross-client edge allowed is a read-only
-view from `mem-orch-all` into each `mem-orch-<client-codename>`.
-
-Hosts can also **read** related repos without joining them (a fetch-only copy
-that is never mirrored into Claude and never pushed), get suggestions for
-such relations from their own session history, and be added or retired as
-members with a reviewed join flow.
-
-### Encryption
-
-Every `mem-*` repo is encrypted with [age](https://age-encryption.org) on the
-machine, through a git clean/smudge filter, so GitHub stores only ciphertext.
-The work tree and the Claude folders stay plain text.
-
-- **Post-quantum by default.** New repos use `encryptionScheme: pq`: hybrid
-  ML-KEM-768 + X25519 recipients (`age1pq1…`, identities
-  `AGE-SECRET-KEY-PQ-1…`). Classic X25519 is available only as an explicit
-  option, and age refuses to encrypt one file to a mix of the two, so a repo is
-  either all hybrid or all classic. `recipients rekey-pq` converts a classic
-  repo (see [setup](docs/setup.md#converting-a-classic-repo-to-post-quantum)).
-- **Protected:** the contents of every note and every diff inside them.
-- **Not protected:** file names (project folder names and note names), file
-  sizes, commit times and counts, branch names, the commit graph, the
-  recipients' public keys, and the repo names themselves. Pick repo and note
-  names you would not mind GitHub seeing.
-- **Old history after a rekey.** Adding, removing or replacing recipients
-  re-encrypts the current tree only. Every earlier commit stays encrypted to
-  the keys it had, readable by any key that was a recipient then, and (for a
-  classic repo) exposed to a future quantum attacker. `rekey-pq` can replace
-  the history with one fresh root commit, but a force-push does not erase the
-  old objects at once: GitHub keeps them reachable by SHA until its garbage
-  collection runs, and any clone or fork that fetched them keeps them for
-  good.
-- **Every change to the recipient set is reviewed.** A host encrypts only to
-  the recipients it has pinned; a pull that brings new keys, changed host
-  labels or a changed `.gitattributes` stops that host from committing until a
-  person accepts the change.
-
-The threat model is in [docs/security.md](docs/security.md).
-
-### Quickstart
+## Quick start
 
 ```sh
-git clone <fork-url> claude-utils && cd claude-utils
-go build -o ~/.local/bin/ ./cmd/claude-memsync ./cmd/claude-memmerge
-# once per org: create the org, register the two GitHub Apps, make the recovery key
-#   -> docs/setup.md "First machine"
-age-keygen -pq | <password-manager store command>   # then: <read command> | age-keygen -y
-bash scripts/bootstrap.sh --host <host-label> --role personal-dev --org <your-org> \
-  --recovery-recipient <age1pq1...> --org-app memsync-admin --check-app memsync-check ... --dry-run
-# review the plan, run again with --yes, then on any later host: the paste prompt
-claude-memsync status && claude-memsync doctor
+# Build both binaries (they must end up in the same directory)
+git clone https://github.com/MarimerLLC/claude-utils.git
+cd claude-utils
+go build -o bin/ ./cmd/...
+
+# Bootstrap and run the sync daemon (per PC)
+claude-memsync init --remote https://github.com/<you>/claude-sync.git
+claude-memsync install
+claude-memsync start
 ```
 
-Full steps, including adding machines, throwaway VMs and retiring a host, are in
-[docs/setup.md](docs/setup.md). Every command and flag is in
-[docs/reference.md](docs/reference.md) (generated from `--help`). The detailed
-behaviour of each feature is in [docs/claude-memsync.md](docs/claude-memsync.md)
-and the host bootstrap in [docs/bootstrap.md](docs/bootstrap.md). Fork changes
-are listed in [CHANGELOG.md](CHANGELOG.md).
+Full instructions:
+
+- **Syncing memories across machines** → [docs/claude-memsync.md](docs/claude-memsync.md)
+  (prerequisites, setup, lifecycle commands, how it works, deletes, auth,
+  limitations). Every command and flag is in [docs/reference.md](docs/reference.md).
+- **Distilling lessons across projects** → [docs/distilling-memories.md](docs/distilling-memories.md)
+  (installing the skills, the `/distill` and `/distill-apply` workflows,
+  permissions, troubleshooting).
+
+## This fork
+
+The `claude-memsync` in the Exploded-views fork adds encrypted, layered
+memory: several private `mem-*` repos routed per project, post-quantum age
+encryption, reviewed host joins, and a bootstrap script for new hosts. Those
+features are not described in this README; start at
+[docs/fork.md](docs/fork.md). Also fork-only: [setup](docs/setup.md),
+[security model](docs/security.md), [release downloads](docs/releases.md),
+[bootstrap](docs/bootstrap.md), [CI](docs/ci.md) and the
+[changelog](CHANGELOG.md).
 
 ## Project layout
 
@@ -141,16 +71,6 @@ are listed in [CHANGELOG.md](CHANGELOG.md).
 | `internal/config` | Config load/save (`~/.claudesync/config.json`) |
 | `internal/proc` | Cross-platform helper that hides child-process console windows on Windows |
 | `internal/version` | Version resolution from `-ldflags` override or embedded VCS info |
-| `internal/agecrypt` | age filter, recipients, pinning and join requests (fork) |
-| `internal/route` | `routes.json`: repo kinds, rules, default deny (fork) |
-| `internal/scrub` | Secret scrub and denylist (fork) |
-| `internal/archive` | Archive-instead-of-delete (fork) |
-| `internal/related` | Related repos and suggestions (fork) |
-| `internal/ghguard`, `internal/ghapp` | Private-only checks and GitHub App tokens (fork) |
-| `internal/hosts` | Host list and retire (fork) |
-| `internal/foreign` | Foreign-writer guard (fork) |
-| `scripts/bootstrap.sh` | One-pass host bootstrap (fork) |
-| `scripts/gen-reference.sh` | Regenerates `docs/reference.md` from `--help` (fork) |
 | `skills/` | `/distill` and `/distill-apply` Claude Code skills |
 | `.githooks/` | Shared git hooks (pre-commit gofmt check) |
 
@@ -221,7 +141,8 @@ After 1.0 the standard SemVer rules kick in (breaking → major, additive → mi
    sha256sum -c --ignore-missing SHA256SUMS   # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
    ```
 
-   Then extract it and swap the binaries:
+   Then extract it and swap the binaries (the fork's [docs/releases.md](docs/releases.md)
+   covers verifying and installing an archive in full):
 
    ```sh
    claude-memsync stop
@@ -264,7 +185,8 @@ failed run left some assets behind, delete them first
 ### Building locally without a release
 
 For dev iteration, a plain `go build -o bin/ ./cmd/...` is enough — the
-binaries will report a VCS-derived `dev+<sha>` version. To stamp a
+binaries will report a VCS-derived version (a pseudo-version, or `dev+<sha>`
+on older toolchains). To stamp a
 specific version into a local build:
 
 ```sh
@@ -284,9 +206,9 @@ go build -ldflags "-X github.com/MarimerLLC/claude-utils/internal/version.Overri
 `internal/version.String()` returns the first of:
 
 1. The build-time `Override` set via `-ldflags "-X .../internal/version.Override=<v>"` (preferred for releases).
-2. `runtime/debug.BuildInfo.Main.Version` — populated automatically when installed via `go install <path>@<tag>`. Yields `v0.1.7` for tagged installs, or a pseudo-version like `v0.0.0-20260508213755-a52d68630b31` for untagged commits.
-3. `vcs.revision` from the embedded build settings — yields `dev+<short-sha>` (or `dev+<short-sha>-dirty` if the working tree had uncommitted changes at build time).
-4. The literal `dev` — only seen if Go embedded no VCS info (e.g. building from outside a git checkout).
+2. `runtime/debug.BuildInfo.Main.Version`: populated automatically when installed via `go install <path>@<tag>`, and by Go 1.24 or later for a plain `go build` inside a git checkout. Yields `v0.1.7` for tagged installs, or a pseudo-version like `v0.2.1-0.20260508213755-a52d68630b31` (with `+dirty` appended for uncommitted changes) for builds past a tag or of untagged commits.
+3. `vcs.revision` from the embedded build settings, when the toolchain gives no main-module version: yields `dev+<short-sha>` (or `dev+<short-sha>-dirty` if the working tree had uncommitted changes at build time).
+4. The literal `dev`: only seen if Go embedded no VCS info (e.g. building from outside a git checkout).
 
 This means a plain `go build` always produces a binary whose `version` subcommand says something useful — no Makefile or build script required for development.
 
