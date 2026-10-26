@@ -362,3 +362,13 @@ func TestRunIdentity_Dispatch(t *testing.T) {
 		t.Errorf("unknown: %d", code)
 	}
 }
+
+func TestIdentityBackup_HelpExitsZeroAndPrintsUsage(t *testing.T) {
+	code, out, errs := runIDBackup("-h")
+	if code != 0 {
+		t.Fatalf("-h exit %d, want 0", code)
+	}
+	if !strings.Contains(out+errs, "--store-cmd") {
+		t.Errorf("-h does not describe --store-cmd: %q %q", out, errs)
+	}
+}
