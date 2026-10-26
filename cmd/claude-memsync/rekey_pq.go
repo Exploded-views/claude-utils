@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -15,7 +16,7 @@ import (
 	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
 
-const rekeyUsage = "usage: claude-memsync recipients rekey-pq (--repo <name> | --all | --config <path>) --recovery-recipient <age1pq1...> --host <label> [--fresh-root] [--apply]\n       claude-memsync recipients rekey-pq (--repo <name> | --all) --rollback\n       claude-memsync recipients rekey-pq (--repo <name> | --all) --drop-backup"
+const rekeyUsage = "usage: claude-memsync recipients rekey-pq (--repo <name> | --all | --config <path>) --recovery-recipient <age1pq1...> --host <label> [--fresh-root] [--apply]\n       claude-memsync recipients rekey-pq (--repo <name> | --all) --rollback [--discard-local-commits]\n       claude-memsync recipients rekey-pq (--repo <name> | --all) --drop-backup"
 
 // rekeyTarget is one repo of a rekey-pq run and the name it is reported under.
 type rekeyTarget struct {
@@ -33,7 +34,7 @@ type rekeyTarget struct {
 // that was not pushed.
 func rekeyPQCmd(stdout, stderr io.Writer, sel repoSel, args []string, hostLabel string) int {
 	args, recovery := extractFlag(args, "--recovery-recipient")
-	var all, fresh, apply, drop, rollback bool
+	var all, fresh, apply, drop, rollback, discard bool
 	for _, a := range args {
 		switch a {
 		case "--all":
@@ -46,12 +47,18 @@ func rekeyPQCmd(stdout, stderr io.Writer, sel repoSel, args []string, hostLabel 
 			drop = true
 		case "--rollback":
 			rollback = true
+		case "--discard-local-commits":
+			discard = true
 		default:
 			fmt.Fprintf(stderr, "recipients rekey-pq: unexpected argument %q\n%s\n", a, rekeyUsage)
 			return 2
 		}
 	}
 	recovery = strings.TrimSpace(recovery)
+	if discard && !rollback {
+		fmt.Fprintln(stderr, "recipients rekey-pq: --discard-local-commits goes only with --rollback")
+		return 2
+	}
 	if drop || rollback {
 		if drop && rollback {
 			fmt.Fprintln(stderr, "recipients rekey-pq: --drop-backup and --rollback are separate runs")
@@ -65,46 +72,9 @@ func rekeyPQCmd(stdout, stderr io.Writer, sel repoSel, args []string, hostLabel 
 		fmt.Fprintln(stderr, rekeyUsage)
 		return 2
 	}
-	var targets []rekeyTarget
-	var all2 []config.Config // every repo of the host, for the identity-retirement check
-	if all {
-		if sel.Repo != "" || sel.Config != "" {
-			fmt.Fprintln(stderr, "recipients: --all does not go with --repo or --config")
-			return 2
-		}
-		path, ok, err := resolveRoutesPath(sel.Routes)
-		if err != nil || !ok {
-			fmt.Fprintln(stderr, "recipients: --all needs a routes file")
-			return 1
-		}
-		set, err := loadRouted(path)
-		if err != nil {
-			fmt.Fprintln(stderr, "recipients:", err)
-			return 1
-		}
-		for _, n := range set.names() {
-			targets = append(targets, rekeyTarget{n, set.Cfgs[n]})
-			all2 = append(all2, set.Cfgs[n])
-		}
-	} else {
-		cfg, name, err := resolveRepo(sel, true)
-		if err != nil {
-			fmt.Fprintln(stderr, "recipients:", err)
-			return 1
-		}
-		if name == "" {
-			name = cfg.SyncDir
-		}
-		targets = append(targets, rekeyTarget{name, cfg})
-		all2 = []config.Config{cfg}
-		if path, ok, rerr := resolveRoutesPath(sel.Routes); rerr == nil && ok {
-			if set, lerr := loadRouted(path); lerr == nil {
-				all2 = nil
-				for _, n := range set.names() {
-					all2 = append(all2, set.Cfgs[n])
-				}
-			}
-		}
+	targets, all2, rc := rekeyTargets(stderr, sel, all)
+	if rc != 0 {
+		return rc
 	}
 	code := 0
 	var done, failed, notStarted []string
@@ -114,7 +84,7 @@ func rekeyPQCmd(stdout, stderr io.Writer, sel repoSel, args []string, hostLabel 
 		case drop:
 			c = dropBackupOne(stdout, stderr, t.cfg)
 		case rollback:
-			c = rollbackOne(stdout, stderr, t.cfg, all)
+			c = rollbackOne(stdout, stderr, t.cfg, all, discard)
 		default:
 			c = rekeyOne(stdout, stderr, t.cfg, all2, agecrypt.RekeyOpts{
 				Label: hostLabel, Recovery: recovery, ConfiguredRecovery: t.cfg.RecoveryRecipients, FreshRoot: fresh,
@@ -155,6 +125,52 @@ func rekeyPQCmd(stdout, stderr io.Writer, sel repoSel, args []string, hostLabel 
 	return code
 }
 
+// rekeyTargets resolves --all / --repo / --config to the repos a run acts on,
+// and all2: every repo of the host, for the identity-retirement scan. A nonzero
+// code means it already said why.
+func rekeyTargets(stderr io.Writer, sel repoSel, all bool) (targets []rekeyTarget, all2 []config.Config, code int) {
+	if all {
+		if sel.Repo != "" || sel.Config != "" {
+			fmt.Fprintln(stderr, "recipients: --all does not go with --repo or --config")
+			return nil, nil, 2
+		}
+		path, ok, err := resolveRoutesPath(sel.Routes)
+		if err != nil || !ok {
+			fmt.Fprintln(stderr, "recipients: --all needs a routes file")
+			return nil, nil, 1
+		}
+		set, err := loadRouted(path)
+		if err != nil {
+			fmt.Fprintln(stderr, "recipients:", err)
+			return nil, nil, 1
+		}
+		for _, n := range set.names() {
+			targets = append(targets, rekeyTarget{n, set.Cfgs[n]})
+			all2 = append(all2, set.Cfgs[n])
+		}
+	} else {
+		cfg, name, err := resolveRepo(sel, true)
+		if err != nil {
+			fmt.Fprintln(stderr, "recipients:", err)
+			return nil, nil, 1
+		}
+		if name == "" {
+			name = cfg.SyncDir
+		}
+		targets = append(targets, rekeyTarget{name, cfg})
+		all2 = []config.Config{cfg}
+		if path, ok, rerr := resolveRoutesPath(sel.Routes); rerr == nil && ok {
+			if set, lerr := loadRouted(path); lerr == nil {
+				all2 = nil
+				for _, n := range set.names() {
+					all2 = append(all2, set.Cfgs[n])
+				}
+			}
+		}
+	}
+	return targets, all2, 0
+}
+
 func joinOrNone(l []string) string {
 	if len(l) == 0 {
 		return "(none)"
@@ -186,24 +202,39 @@ func cfgFileOf(cfg config.Config) string {
 	return cfg.Path()
 }
 
+// rollbackBeforeLock is a test seam: it runs just before rollbackOne takes the
+// sync lock, where a daemon cycle could still move HEAD.
+var rollbackBeforeLock func()
+
 // rollbackOne undoes an unpublished migration of one repo. With quietNone a
 // repo that has nothing to roll back is only mentioned (for --all).
-func rollbackOne(stdout, stderr io.Writer, cfg config.Config, quietNone bool) int {
+func rollbackOne(stdout, stderr io.Writer, cfg config.Config, quietNone, discard bool) int {
 	repo := gitwt.New(cfg.SyncDir)
 	if !repo.IsRepo() {
 		fmt.Fprintf(stderr, "recipients: %s: not a git repo\n", cfg.SyncDir)
 		return 1
 	}
-	if _, err := agecrypt.ReadRekeyState(repo); errors.Is(err, os.ErrNotExist) && quietNone {
+	if st, err := agecrypt.ReadRekeyState(repo); err == nil {
+		// A published repo cannot be rolled back: with --all that is reported
+		// and the run goes on.
+		if quietNone && agecrypt.SchemeOf(repo) == agecrypt.SchemePQ && (st.Finished() || st.Stage == "") {
+			fmt.Fprintf(stdout, "%s: published; nothing to roll back\n", cfg.SyncDir)
+			return 0
+		}
+	} else if errors.Is(err, os.ErrNotExist) && quietNone {
 		fmt.Fprintf(stdout, "%s: nothing to roll back\n", cfg.SyncDir)
 		return 0
 	}
 	cfgFile := cfgFileOf(cfg)
-	head, _ := repo.Run("rev-parse", "HEAD")
+	if rollbackBeforeLock != nil {
+		rollbackBeforeLock()
+	}
 	var st agecrypt.PreRekeyState
 	err := withSyncLock(cfg.SyncDir, func() error {
+		// Read under the lock: a cycle that ran before it may have moved HEAD.
+		head, _ := repo.Run("rev-parse", "HEAD")
 		var rerr error
-		st, rerr = agecrypt.RollbackRekey(repo, func(pc agecrypt.PriorConfig) error {
+		st, rerr = agecrypt.RollbackRekey(repo, agecrypt.RollbackOpts{DiscardLocalCommits: discard, Out: stderr}, func(pc agecrypt.PriorConfig) error {
 			raw, err := config.Load(cfgFile)
 			if err != nil {
 				return err
@@ -218,6 +249,10 @@ func rollbackOne(stdout, stderr io.Writer, cfg config.Config, quietNone bool) in
 	})
 	if err != nil {
 		return recipientsFail(stderr, fmt.Errorf("%s: %w", cfg.SyncDir, err))
+	}
+	if st.Cleared {
+		fmt.Fprintf(stdout, "%s: cleared a stale restore record (nothing had changed)\n", cfg.SyncDir)
+		return 0
 	}
 	fmt.Fprintf(stdout, "%s: rolled back to the classic repo at %s (identity, scheme, pin and config.json restored)\n", cfg.SyncDir, shortRev(st.Tip))
 	fmt.Fprintf(stdout, "  the hybrid identity %s is kept; a later rekey-pq reuses it\n", st.NewIdentity)
@@ -274,6 +309,7 @@ func rekeyOne(stdout, stderr io.Writer, cfg config.Config, hostCfgs []config.Con
 		pushEr error
 		verr   error
 		vc, vb int
+		synced agecrypt.PreRekeyState
 	)
 	err = withSyncLock(cfg.SyncDir, func() error {
 		var st agecrypt.PreRekeyState
@@ -284,20 +320,32 @@ func rekeyOne(stdout, stderr io.Writer, cfg config.Config, hostCfgs []config.Con
 		switch stage {
 		case agecrypt.StageDone:
 			return nil
+		case agecrypt.StageSynced:
+			synced = st
+			if !st.Finished() {
+				// Pushed and synced on top, but the crash came before
+				// config.json and the stage were saved: finish the tail.
+				raw.EncryptionScheme = agecrypt.SchemePQ
+				raw.HostLabel = st.Label
+				raw.RecoveryRecipients = []string{st.Recovery}
+				if err := config.SaveAt(cfgFile, raw); err != nil {
+					return fmt.Errorf("config.json could not be saved: %w (set encryptionScheme to pq, hostLabel and recoveryRecipients by hand)", err)
+				}
+				return agecrypt.UpdateRekeyState(repo, func(s *agecrypt.PreRekeyState) { s.Stage = agecrypt.RekeyRecPublished })
+			}
+			return nil
 		case agecrypt.StageFresh:
 			p, aerr := agecrypt.ApplyRekeyPQ(repo, o)
 			if aerr != nil {
 				return aerr
 			}
 			plan = p
-		case agecrypt.StageFinishLocal:
+		case agecrypt.StageFinishLocal, agecrypt.StageRetryPush, agecrypt.StagePublished:
 			p, ferr := agecrypt.FinishRekeyLocal(repo, st)
 			if ferr != nil {
 				return ferr
 			}
 			plan = p
-		default:
-			plan = agecrypt.PlanFromState(repo, st)
 		}
 		if stage != agecrypt.StagePublished {
 			if err := syncpkg.MoveSyncedHead(repo, plan.Tip, plan.NewCommit); err != nil {
@@ -315,6 +363,9 @@ func rekeyOne(stdout, stderr io.Writer, cfg config.Config, hostCfgs []config.Con
 		raw.RecoveryRecipients = []string{o.Recovery}
 		if err := config.SaveAt(cfgFile, raw); err != nil {
 			return fmt.Errorf("pushed, but config.json could not be saved: %w (set encryptionScheme to pq, hostLabel and recoveryRecipients by hand)", err)
+		}
+		if err := agecrypt.UpdateRekeyState(repo, func(s *agecrypt.PreRekeyState) { s.Stage = agecrypt.RekeyRecPublished }); err != nil {
+			return fmt.Errorf("pushed, but the restore record could not be updated: %w", err)
 		}
 		want := 0
 		if o.FreshRoot {
@@ -334,6 +385,11 @@ func rekeyOne(stdout, stderr io.Writer, cfg config.Config, hostCfgs []config.Con
 		fmt.Fprintf(stdout, "%s: already post-quantum; nothing to do\n", cfg.SyncDir)
 		return 0
 	}
+	if stage == agecrypt.StageSynced {
+		fmt.Fprintf(stdout, "%s: already done: migrated to post-quantum and synced since; nothing to redo\n", cfg.SyncDir)
+		retireClassicIdentity(stdout, synced.ClassicIdentity, cfg, hostCfgs, true)
+		return 0
+	}
 	if pushed && verr != nil {
 		fmt.Fprintf(stderr, "recipients: %s: pushed; verification failed: %v\n  the classic identity is kept. Inspect origin/main before relying on it.\n", cfg.SyncDir, verr)
 		return 1
@@ -345,11 +401,25 @@ func rekeyOne(stdout, stderr io.Writer, cfg config.Config, hostCfgs []config.Con
 		fmt.Fprintf(stdout, "  re-encrypted and pushed; origin/main verified: %d files, all hybrid ciphertext\n", vb)
 	}
 	fmt.Fprintf(stdout, "  rollback point kept at %s; delete it later with `recipients rekey-pq --drop-backup`\n", agecrypt.BackupRef)
-	retireClassicIdentity(stdout, plan.IdentityPath, cfg, hostCfgs)
+	retireClassicIdentity(stdout, plan.IdentityPath, cfg, hostCfgs, true)
 	return 0
 }
 
 func rekeyPlanOne(stdout, stderr io.Writer, cfg config.Config, repo *gitwt.Repo, o agecrypt.RekeyOpts) int {
+	if st, err := agecrypt.ReadRekeyState(repo); err == nil {
+		switch {
+		case st.Finished() && agecrypt.SchemeOf(repo) == agecrypt.SchemePQ:
+			fmt.Fprintf(stdout, "%s: already done: migrated to post-quantum; nothing to plan\n", cfg.SyncDir)
+		case st.Stage == "":
+			fmt.Fprintf(stdout, "%s: an earlier rekey-pq --apply left a restore record (written by an older build, so its stage is unknown)\n  rerun it with --apply and the same --host, --recovery-recipient and --fresh-root to finish or verify it, or undo an unpublished one with `recipients rekey-pq --repo <name> --rollback`\n", cfg.SyncDir)
+		default:
+			fmt.Fprintf(stdout, "%s: an earlier rekey-pq --apply was interrupted (it got as far as %q)\n  rerun it with --apply and the same --host, --recovery-recipient and --fresh-root to finish it, or undo it with `recipients rekey-pq --repo <name> --rollback`\n", cfg.SyncDir, st.Stage)
+		}
+		return 0
+	} else if errors.Is(err, agecrypt.ErrRecordUnreadable) {
+		fmt.Fprintf(stderr, "recipients: %s: %v\n", cfg.SyncDir, err)
+		return 1
+	}
 	p, err := agecrypt.PlanRekeyPQ(repo, o, false)
 	if err != nil {
 		fmt.Fprintf(stderr, "recipients: %s: %v\n", cfg.SyncDir, err)
@@ -386,7 +456,49 @@ func rekeyPush(repo *gitwt.Repo, p agecrypt.RekeyPlan, fresh bool) error {
 // sync dir (siblings such as ~/.claudesync.d/<name>.incident-1 included, routed
 // or not) whose repo-local memage.identity names the file old.
 func clonesUsingIdentity(old string, hostCfgs []config.Config) []string {
-	want := filepath.Clean(filepath.FromSlash(old))
+	want := normIdentityPath(old)
+	var out []string
+	for _, dir := range cloneDirs(hostCfgs) {
+		id, ok := identityInGitConfig(filepath.Join(dir, ".git", "config"))
+		// A config git cannot read counts as using the file: keeping it is the safe side.
+		if !ok || (id != "" && normIdentityPath(id) == want) {
+			out = append(out, dir)
+		}
+	}
+	return out
+}
+
+// clonesWithPendingRecord lists the clones whose restore record names old as
+// their classic identity and is not finished: such a clone may still roll
+// back, and a rollback needs the file. A record from an older build (no stage)
+// counts unless the clone is already post-quantum; one that cannot be read
+// counts too.
+func clonesWithPendingRecord(old string, hostCfgs []config.Config) []string {
+	want := normIdentityPath(old)
+	var out []string
+	for _, dir := range cloneDirs(hostCfgs) {
+		st, err := agecrypt.ReadRekeyStateAt(dir)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			continue
+		case err != nil:
+			out = append(out, dir)
+			continue
+		}
+		if normIdentityPath(st.ClassicIdentity) != want || st.Finished() {
+			continue
+		}
+		if st.Stage == "" && schemeOf(dir) == agecrypt.SchemePQ {
+			continue
+		}
+		out = append(out, dir)
+	}
+	return out
+}
+
+// cloneDirs lists the git clones of the host: the sync dirs and every clone
+// beside them.
+func cloneDirs(hostCfgs []config.Config) []string {
 	parents := map[string]bool{}
 	for _, c := range hostCfgs {
 		parents[filepath.Dir(filepath.Clean(c.SyncDir))] = true
@@ -399,11 +511,9 @@ func clonesUsingIdentity(old string, hostCfgs []config.Config) []string {
 			return
 		}
 		seen[dir] = true
-		if id := identityInGitConfig(gitCfg); id != "" && filepath.Clean(filepath.FromSlash(id)) == want {
-			out = append(out, dir)
-		}
+		out = append(out, dir)
 	}
-	for _, c := range hostCfgs {
+	for _, c := range append(append([]config.Config{}, hostCfgs...), config.Defaults()) {
 		check(filepath.Join(c.SyncDir, ".git", "config"))
 	}
 	for p := range parents {
@@ -416,39 +526,64 @@ func clonesUsingIdentity(old string, hostCfgs []config.Config) []string {
 	return out
 }
 
-// identityInGitConfig reads memage.identity out of a git config file without
-// running git (the file may belong to any clone).
-func identityInGitConfig(path string) string {
-	b, err := os.ReadFile(path)
+// identityInGitConfig reads memage.identity out of the git config file of any clone.
+func identityInGitConfig(path string) (string, bool) {
+	return gitConfigValue(path, "memage", "identity")
+}
+
+// gitConfigValue reads section.key out of a git config file with git itself
+// (inline comments, quoting and case rules included). ok is false when git
+// failed for any reason other than the key being unset (a corrupt file, no git):
+// the caller must then assume the worst.
+func gitConfigValue(path, section, key string) (val string, ok bool) {
+	if _, err := os.Stat(path); err != nil {
+		return "", true
+	}
+	out, err := exec.Command("git", "config", "--file", path, "--get", section+"."+key).Output()
 	if err != nil {
-		return ""
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() == 1 {
+			return "", true // the key is not set
+		}
+		return "", false
 	}
-	in := false
-	for _, l := range strings.Split(string(b), "\n") {
-		l = strings.TrimSpace(l)
-		if strings.HasPrefix(l, "[") {
-			f := strings.Fields(strings.Trim(l, "[]"))
-			in = len(f) > 0 && strings.EqualFold(f[0], "memage")
-			continue
-		}
-		if !in {
-			continue
-		}
-		if k, v, ok := strings.Cut(l, "="); ok && strings.EqualFold(strings.TrimSpace(k), "identity") {
-			return strings.Trim(strings.TrimSpace(v), `"`)
+	return strings.TrimSpace(string(out)), true
+}
+
+// normIdentityPath makes identity paths comparable: ~ expanded, absolute,
+// symlinks resolved where the file exists.
+func normIdentityPath(p string) string {
+	p = filepath.FromSlash(strings.TrimSpace(p))
+	if p == "~" || strings.HasPrefix(p, "~"+string(filepath.Separator)) {
+		if home, err := os.UserHomeDir(); err == nil {
+			p = filepath.Join(home, strings.TrimPrefix(p, "~"))
 		}
 	}
-	return ""
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	// the file may be gone: resolve its directory
+	if r, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
+		return filepath.Join(r, filepath.Base(p))
+	}
+	return filepath.Clean(p)
 }
 
 // retireClassicIdentity renames the old classic identity to
 // <name>.classic-retired once no clone on this host still points at it: every
-// git clone beside the sync dirs counts, routed or not.
-func retireClassicIdentity(stdout io.Writer, old string, done config.Config, hostCfgs []config.Config) {
+// git clone beside the sync dirs counts, routed or not. Without apply it only
+// says what it would do.
+func retireClassicIdentity(stdout io.Writer, old string, done config.Config, hostCfgs []config.Config, apply bool) {
 	if old == "" {
 		return
 	}
 	if _, err := os.Stat(old); err != nil {
+		if _, rerr := os.Stat(old + agecrypt.RetiredSuffix); rerr == nil {
+			fmt.Fprintf(stdout, "  the classic identity is already retired (%s)\n", old+agecrypt.RetiredSuffix)
+		}
 		return // already retired (a rerun)
 	}
 	cfgs := append(append([]config.Config{}, hostCfgs...), done)
@@ -457,9 +592,93 @@ func retireClassicIdentity(stdout io.Writer, old string, done config.Config, hos
 		fmt.Fprintln(stdout, "  rekey those clones (or remove them), then run this command again to retire it")
 		return
 	}
+	if pend := clonesWithPendingRecord(old, cfgs); len(pend) > 0 {
+		fmt.Fprintf(stdout, "  the classic identity %s is kept: the restore record of %s still names it (an unfinished rekey that a rollback would need it for)\n", old, strings.Join(pend, ", "))
+		fmt.Fprintln(stdout, "  finish or roll back that rekey, then run this command again to retire it")
+		return
+	}
+	if !apply {
+		fmt.Fprintf(stdout, "  dry run: the classic identity %s would be retired (no clone uses it); add --apply\n", old)
+		return
+	}
 	if err := os.Rename(old, old+".classic-retired"); err != nil {
 		fmt.Fprintln(stdout, "  could not retire the classic identity:", err)
 		return
 	}
 	fmt.Fprintf(stdout, "  the classic identity is kept as %s (needed to read the rollback point)\n", old+".classic-retired")
+}
+
+// retireClassicCmd is `recipients retire-classic [--repo <name> | --all]
+// [--apply]`: it retires the classic identity file of repos that were rekeyed
+// to post-quantum once no clone uses it. It needs no rekey flags; the file is
+// found in the restore record, or by the "-pq" name of the current identity.
+func retireClassicCmd(stdout, stderr io.Writer, sel repoSel, args []string) int {
+	var all, apply bool
+	for _, a := range args {
+		switch a {
+		case "--all":
+			all = true
+		case "--apply":
+			apply = true
+		default:
+			fmt.Fprintf(stderr, "recipients retire-classic: unexpected argument %q\nusage: claude-memsync recipients retire-classic (--repo <name> | --all | --config <path>) [--apply]\n", a)
+			return 2
+		}
+	}
+	targets, all2, rc := rekeyTargets(stderr, sel, all)
+	if rc != 0 {
+		return rc
+	}
+	for _, t := range targets {
+		repo := gitwt.New(t.cfg.SyncDir)
+		if !repo.IsRepo() {
+			fmt.Fprintf(stderr, "recipients: %s: not a git repo\n", t.cfg.SyncDir)
+			return 1
+		}
+		cands := classicCandidates(repo)
+		if len(cands) == 0 {
+			fmt.Fprintf(stdout, "%s: no classic identity to retire\n", t.cfg.SyncDir)
+			continue
+		}
+		fmt.Fprintf(stdout, "%s:\n", t.cfg.SyncDir)
+		for _, old := range cands {
+			retireClassicIdentity(stdout, old, t.cfg, all2, apply)
+		}
+	}
+	if !apply {
+		fmt.Fprintln(stdout, "dry run: nothing changed; add --apply to retire")
+	}
+	return 0
+}
+
+// classicCandidates are the classic identity files a rekeyed repo left behind:
+// the one its restore record names, and the current identity's name without
+// "-pq". The repo's own current identity is never one.
+func classicCandidates(repo *gitwt.Repo) []string {
+	cur := filepath.Clean(filepath.FromSlash(agecrypt.IdentityPath(repo)))
+	var out []string
+	add := func(p string) {
+		if p == "" || filepath.Clean(filepath.FromSlash(p)) == cur {
+			return
+		}
+		for _, o := range out {
+			if o == p {
+				return
+			}
+		}
+		out = append(out, p)
+	}
+	if st, err := agecrypt.ReadRekeyState(repo); err == nil {
+		add(st.ClassicIdentity)
+	}
+	ext := filepath.Ext(cur)
+	if base := strings.TrimSuffix(cur, ext); strings.HasSuffix(base, "-pq") {
+		add(strings.TrimSuffix(base, "-pq") + ext)
+	}
+	return out
+}
+
+func schemeOf(dir string) string {
+	v, _ := gitConfigValue(filepath.Join(dir, ".git", "config"), "memage", "scheme")
+	return v
 }

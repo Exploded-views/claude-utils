@@ -301,9 +301,9 @@ func TestRekeyPQ_ApplyFreshRootProducesOneHybridCommit(t *testing.T) {
 	if err := agecrypt.PushGuard(c.repo, "main"); err != nil {
 		t.Errorf("guard: %v", err)
 	}
-	// a second run is refused: already pq
-	if code, _, _ := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--apply"); code == 0 {
-		t.Error("rekeying a pq repo must be refused")
+	// a second run (even with other flags) changes nothing and says it is done
+	if code, o, e := rekey(t, c, "--recovery-recipient", newRec, "--host", "vm-1", "--apply"); code != 0 || !strings.Contains(o, "already done") {
+		t.Errorf("a rerun of a finished rekey must report \"already done\": %d %s%s", code, o, e)
 	}
 	// drop the backup
 	var o2, e2 bytes.Buffer

@@ -95,6 +95,16 @@ func PlanRekeyPQ(repo *gitwt.Repo, o RekeyOpts, fetch bool) (RekeyPlan, error) {
 	if repo.MergeInProgress() || repo.RebaseInProgress() || repo.HasUnmerged() {
 		return p, errors.New("a merge or rebase is in progress")
 	}
+	// An unfinished park or pull belongs to the daemon's recovery, which
+	// must run before the history is rewritten under it.
+	for _, m := range []struct{ file, what string }{
+		{"parked.json", "files held back by a secret scan are still parked"},
+		{"pull-running", "a pull was interrupted"},
+	} {
+		if _, err := os.Stat(filepath.Join(repo.Dir, ".state", m.file)); err == nil {
+			return p, fmt.Errorf(".state/%s exists: %s. Start the daemon (`claude-memsync start`) and let one cycle finish so it recovers (the file goes away), stop it, then rerun this command", m.file, m.what)
+		}
+	}
 	// Dirty or unpushed state would be lost or published by a rewrite.
 	if out, err := repo.Run("status", "--porcelain"); err != nil {
 		return p, err
@@ -238,7 +248,7 @@ func ApplyRekeyPQ(repo *gitwt.Repo, o RekeyOpts) (RekeyPlan, error) {
 	st := PreRekeyState{
 		Tip: p.Tip, ClassicIdentity: p.IdentityPath, NewIdentity: filepath.ToSlash(o.NewIdentityPath),
 		NewRecipient: p.NewRecipient, Label: o.Label, Recovery: strings.TrimSpace(o.Recovery), FreshRoot: o.FreshRoot,
-		Config: o.Prior,
+		Config: o.Prior, Stage: RekeyRecStarted,
 	}
 	st.PriorScheme, st.PriorSchemeSet = rawScheme(repo)
 	if err := writeRekeyState(repo, st); err != nil {
@@ -253,6 +263,7 @@ func ApplyRekeyPQ(repo *gitwt.Repo, o RekeyOpts) (RekeyPlan, error) {
 		}
 	}
 	if _, err := repo.Run("update-ref", BackupRef, p.Tip); err != nil {
+		removeRekeyState(repo)
 		return p, err
 	}
 	if err := os.WriteFile(recPath, data, 0o600); err != nil {
@@ -260,11 +271,20 @@ func ApplyRekeyPQ(repo *gitwt.Repo, o RekeyOpts) (RekeyPlan, error) {
 		return p, err
 	}
 	if err := commitInfoMode(repo, p.Tip, "memsync: recipients updated", info, headOID, drop, o.FreshRoot,
-		func(commit string) error { return PushGuardCommit(repo, "main", commit) }); err != nil {
+		func(commit string) error {
+			if err := PushGuardCommit(repo, "main", commit); err != nil {
+				return err
+			}
+			// Recorded before HEAD moves, so a crash cannot lose it.
+			return UpdateRekeyState(repo, func(s *PreRekeyState) { s.NewCommit, s.Stage = commit, RekeyRecCommitted })
+		}); err != nil {
 		undo()
 		return p, err
 	}
 	if err := repointLocal(repo, o.NewIdentityPath); err != nil {
+		return p, err
+	}
+	if err := UpdateRekeyState(repo, func(s *PreRekeyState) { s.Stage = RekeyRecMigrated }); err != nil {
 		return p, err
 	}
 	head, err := repo.Run("rev-parse", "HEAD")
@@ -331,6 +351,9 @@ func DropBackup(repo *gitwt.Repo) error {
 	}
 	if _, err := repo.Run("rev-parse", "--verify", "--quiet", BackupRef); err != nil {
 		return errors.New("no backup ref " + BackupRef)
+	}
+	if err := checkDropAllowed(repo); err != nil {
+		return err
 	}
 	// Only the refs that held the old history: `--all` would also expire the
 	// stash reflog (the daemon's autostash) and lose its entries.
