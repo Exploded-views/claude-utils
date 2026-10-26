@@ -22,6 +22,9 @@ import (
 var (
 	lockWait = 30 * time.Second
 	lockPoll = 200 * time.Millisecond
+	// How long after the automatic restart before the service is asked
+	// whether it is still running.
+	restartSettle = time.Second
 )
 
 // notifySignals reports SIGINT and SIGTERM until the returned func is called;
