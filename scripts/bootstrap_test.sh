@@ -260,10 +260,11 @@ newhome() {
 
 # runboot <args...>: run the script in the fake HOME; sets RC and OUT.
 runboot() {
+  local SHAARGS=(--sha "$SHA"); [ -z "${NO_SHA:-}" ] || SHAARGS=()
   set +e
   OUT="$(HOME="$H" PATH="${BOOT_PATH:-$STUBS:$PATH}" STUB_DIR="$STUB_DIR" STUB_TOKEN="$TOKEN" STUB_ORG_TOKEN="$ORGTOK" REAL_DIR="${REAL_RUN:-$REAL}" GIT_CONFIG_NOSYSTEM=1 \
     BOOTSTRAP_APP_API_BASE="http://127.0.0.1:$APIPORT" CLAUDE_UTILS_URL="https://example.invalid/claude-utils.git" \
-    "$BASH" "$ROOT/scripts/bootstrap.sh" --sha "$SHA" --deny-owner Acme-Client --deny-term acmeclient ${ORGARGS[@]+"${ORGARGS[@]}"} "${REQ[@]}" "$@" </dev/null 2>&1)"
+    "$BASH" "$ROOT/scripts/bootstrap.sh" ${SHAARGS[@]+"${SHAARGS[@]}"} --deny-owner Acme-Client --deny-term acmeclient ${ORGARGS[@]+"${ORGARGS[@]}"} "${REQ[@]}" "$@" </dev/null 2>&1)"
   RC=$?
   set -e
 }
@@ -426,6 +427,55 @@ mkgit "$H/code/byowner" "git@github.com:Some-Owner/byowner.git"
 mkgit "$H/code/byterm" "git@github.com:example-org/has-secretword-inside.git"
 runboot --host testmac --role personal-dev --workspace "$H/code" --dry-run --keep-out-owner some-owner --keep-out-term SecretWord
 check "keep-out owner (any case) and term (substring, any case) skip a checkout; others are kept" bash -c "printf '%s\n' \"\$1\" | grep -q 'byowner.*REFUSED (keep-out)' && printf '%s\n' \"\$1\" | grep -q 'byterm.*REFUSED (keep-out)' && printf '%s\n' \"\$1\" | grep -q 'mem-project-keepme'" _ "$OUT"
+
+
+# ============================ --prebuilt-dir ====================================
+echo "--- --prebuilt-dir: install given binaries, no clone, no build, no Go"
+PB="$BASE/prebuilt"; rm -rf "$PB"; mkdir -p "$PB/real" "$PB/wrap" "$PB/onlyone" "$PB/noexec" "$PB/dev"
+cp "$REAL/claude-memsync" "$REAL/claude-memmerge" "$PB/real/"
+cp "$STUBS/memsync-wrap" "$PB/wrap/claude-memsync"; cp "$REAL/claude-memmerge" "$PB/wrap/"
+cp "$REAL/claude-memsync" "$PB/onlyone/"
+cp "$REAL/claude-memsync" "$REAL/claude-memmerge" "$PB/noexec/"; chmod -x "$PB/noexec/claude-memmerge"
+printf '#!/bin/sh\necho "claude-memsync dev+0123456789ab"\n' >"$PB/dev/claude-memsync"; cp "$REAL/claude-memmerge" "$PB/dev/"; chmod +x "$PB/dev/claude-memsync"
+PBVER="$("$REAL/claude-memsync" version | sed 's/^claude-memsync //')"
+PBSHORT="$(printf '%s' "$PBVER" | sed -nE 's/.*[-+]([0-9a-f]{12})(\+dirty|-dirty)?$/\1/p')"
+BSHA=""; [ -z "$PBSHORT" ] || BSHA="$(git -C "$ROOT" rev-parse --verify -q "$PBSHORT^{commit}" || true)"
+if [ -z "$BSHA" ]; then
+  pending "prebuilt: the test binary's version ($PBVER) carries no commit of this tree"
+else
+  newhome pb1
+  BOOT_PATH="$(minipath go)" runboot --host testhost --role homelab --dry-run --sha "$BSHA" --prebuilt-dir "$PB/real"
+  check "prebuilt dry run without Go on PATH exits 0" [ "$RC" -eq 0 ]
+  check "prebuilt dry run says it installs from the dir, to the sha dir, and clones nothing" bash -c "printf '%s\n' \"\$1\" | grep -q 'Install prebuilt binaries from $PB/real' && printf '%s\n' \"\$1\" | grep -q '.local/lib/claude-memsync/$BSHA' && ! printf '%s\n' \"\$1\" | grep -q 'git clone'" _ "$OUT"
+  check "prebuilt dry run changes nothing" untouched
+  newhome pb2
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  [ "$RC" -eq 0 ] || echo "$OUT" | tail -8
+  check "prebuilt full run exits 0" [ "$RC" -eq 0 ]
+  LIBD="$H/.local/lib/claude-memsync/$BSHA"
+  check "prebuilt: both binaries installed in the sha dir, executable" bash -c "[ -x '$LIBD/claude-memsync' ] && [ -x '$LIBD/claude-memmerge' ] && cmp -s '$PB/wrap/claude-memmerge' '$LIBD/claude-memmerge'"
+  check "prebuilt: ~/.local/bin links point into that dir" bash -c "[ \"\$(readlink '$H/.local/bin/claude-memsync')\" = '$LIBD/claude-memsync' ] && [ \"\$(readlink '$H/.local/bin/claude-memmerge')\" = '$LIBD/claude-memmerge' ]"
+  check "prebuilt: no clone, no go build" bash -c "[ ! -e '$H/.local/src' ] && [ ! -e '$STUB_DIR/go.log' ]"
+  check "prebuilt: no clone means no plugin step, and the next-step note says so" bash -c "! grep -qs 'plugin' '$STUB_DIR/claude.log' && printf '%s\n' \"\$1\" | grep -q 'plugin step skipped'" _ "$OUT"
+  newhome pb3
+  NO_SHA=1 BOOT_PATH="$(minipath go)" runboot --host testhost --role homelab --dry-run --prebuilt-dir "$PB/real"
+  check "prebuilt without --sha: a release-shaped version is the dir name; no git checkout needed" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -qF '.local/lib/claude-memsync/$PBVER'" _ "$OUT"
+  newhome pb4
+  runboot --host testhost --role homelab --yes --sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --prebuilt-dir "$PB/real"
+  check "prebuilt: a version that does not match --sha is refused, nothing installed" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'does not match --sha' && [ ! -e '$H/.local/lib' ] && [ ! -s '$STUB_DIR/gh.log' ]" _ "$OUT"
+fi
+newhome pb5
+runboot --host testhost --role homelab --yes --prebuilt-dir "$PB/onlyone"
+check "prebuilt: a missing claude-memmerge is refused" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'claude-memmerge is missing or not executable'" _ "$OUT"
+newhome pb6
+runboot --host testhost --role homelab --yes --prebuilt-dir "$PB/noexec"
+check "prebuilt: a non-executable binary is refused" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'claude-memmerge is missing or not executable'" _ "$OUT"
+newhome pb7
+NO_SHA=1 runboot --host testhost --role homelab --yes --prebuilt-dir "$PB/dev"
+check "prebuilt without --sha: a dev build is refused (not a release version)" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'not a release version'" _ "$OUT"
+newhome pb8
+runboot --host testhost --role homelab --yes --prebuilt-dir "$PB/does-not-exist"
+check "prebuilt: a directory that does not exist is refused" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'is not a directory'" _ "$OUT"
 
 quick_exit
 
