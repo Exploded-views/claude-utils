@@ -87,7 +87,7 @@ fixture_check_key_ok() { printf 'key\n' >"$W/chkkey"; chmod 600 "$W/chkkey"; GA=
 fixture_org_not_kept_out() { GA=(Example); }
 fixture_repo_name_ok() { GA=(mem-project-x); }
 fixture_host_key_fp() {
-  ssh-keygen -q -t ed25519 -N '' -f "$W/hk" >/dev/null 2>&1
+  [ -f "$W/hk" ] || ssh-keygen -q -t ed25519 -N "" -f "$W/hk" >/dev/null 2>&1
   GITHUB_FP="$(ssh-keygen -lf "$W/hk.pub" | awk 'NR==1{print $2}')"
   GA=(github.com "$W/hk.pub")
 }
@@ -186,7 +186,7 @@ unsnap
 if [ "$(uname -s)" = Linux ]; then
   CASES=$((CASES + 1))
   fk="$(mkfakes exit1 systemctl)"
-  if PATH="$fk:$PATH" BOOTSTRAP_GUARD_TEST= BOOTSTRAP_TEST_OS=Darwin guard_ok no_predecessor_units; then bad "no_predecessor_units: BOOTSTRAP_TEST_OS skipped the guard without the test flag"; else ok; fi
+  if PATH="$fk:$PATH" BOOTSTRAP_GUARD_TEST='' BOOTSTRAP_TEST_OS=Darwin guard_ok no_predecessor_units; then bad "no_predecessor_units: BOOTSTRAP_TEST_OS skipped the guard without the test flag"; else ok; fi
 fi
 
 # --- a signal during a hanging guard: top level and inside a job ---

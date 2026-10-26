@@ -93,31 +93,46 @@ mark()   { [ "$DRY_RUN" -eq 1 ] && return 0; mkdir -p "$STATE"; : >"$STATE/$HOST
 #     "if <cmd>; then", "<cmd> && ..." or "|| true": it captures a tool's output
 #     with "x=$(cmd) || refuse" and compares it with what a working tool must
 #     say (a control question first, where an empty answer is the safe one).
-#   - It is run through guard (dies) or guard_ok (returns): safe only if the exit
+#   - It is run as "guard <name> args..." (dies) or "guard_ok <name> args..." (returns),
+#     which run <name>_check and nothing else: safe only if the exit
 #     status is 0 AND the last stdout line is exactly SAFE:<name>. Any other
 #     exit status, a missing or wrong token, extra output after it, a signal, a
-#     missing tool (127) or a timeout is a refusal.
+#     missing tool (127) or a timeout is a refusal. Whether a path exists is asked
+#     with path_state (ABSENT only for "no such file"), never with [ -e ] / [ -L ],
+#     which read every stat error as "absent". A signal to the script, or to a job,
+#     takes the running check down with it (guard_abort).
 #   - Blocks below: guard-helper (the runner), guard-py (Python sources for the
 #     probes, whole body in try/except: an exception prints no token), guards (the
 #     guards and what they use). scripts/lint-guards.sh checks the convention,
 #     scripts/guard_fault_test.sh injects faults into every registered guard.
 # ---------------------------------------------------------------------------
 # >>> guard-helper
-GUARD_TIMEOUT="${BOOTSTRAP_GUARD_TIMEOUT:-30}" GUARD_WHY="" GUARD_REASON=""
-# guard_ok <name> -- <cmd...>: 0 only for a SAFE:<name> last line with exit status 0;
-# sets GUARD_WHY (why it refused) and GUARD_REASON (the guard's own REFUSE: text, if any).
-guard_ok() {
-  local name="$1" res last body rc line n=0 lim
+GUARD_TIMEOUT="${BOOTSTRAP_GUARD_TIMEOUT:-30}" GUARD_WHY="" GUARD_REASON="" GUARD_PGID=""
+# guard_abort: kill the check a guard is waiting for. An exit trap and a job's signal trap call it, so a
+# check never outlives the script or the job that asked.
+guard_abort() {
+  if [ -n "$GUARD_PGID" ]; then
+    kill -KILL -- "-$GUARD_PGID" 2>/dev/null || true
+    kill -KILL "$GUARD_PGID" 2>/dev/null || true
+  fi
+  GUARD_PGID=""
+}
+# guard_run <name> <cmd...>: 0 only for a SAFE:<name> last line with exit status 0 (see above).
+# Sets GUARD_WHY (why it refused) and GUARD_REASON (the check's own REFUSE: text, if any). The check runs in
+# its own process group, polled by a runner that is read through a pipe; a signal to this shell, or to the
+# runner, takes the check down with it.
+guard_run() {
+  local name="$1" res="" line last body rc n=0 lim
   GUARD_WHY="" GUARD_REASON=""
   shift
-  if [ "${1-}" != "--" ]; then GUARD_WHY="guard $name: called without --"; return 1; fi
-  shift
   lim=$((GUARD_TIMEOUT * 20))
-  res="$(
+  exec 9< <(
     set -m
     "$@" 2>/dev/null </dev/null &
     cp=$!
+    trap 'kill -KILL -- "-$cp" 2>/dev/null; kill -KILL "$cp" 2>/dev/null; exit 1' INT TERM HUP
     set +m
+    printf 'GUARD_PGID:%s\n' "$cp"
     while kill -0 "$cp" 2>/dev/null; do
       if [ "$n" -ge "$lim" ]; then
         kill -TERM -- "-$cp" 2>/dev/null || true
@@ -134,7 +149,17 @@ guard_ok() {
     wc=0
     wait "$cp" || wc=$?
     printf '\nGUARD_RC:%s\n' "$wc"
-  )" || { GUARD_WHY="guard $name: the runner failed"; return 1; }
+  )
+  while IFS= read -r -u 9 line || [ -n "$line" ]; do
+    case "$line" in
+      GUARD_PGID:*) GUARD_PGID="${line#GUARD_PGID:}" ;;
+      GUARD_RC:* | GUARD_TIMEOUT) res="$res$line"$'\n'; break ;;
+      *) res="$res$line"$'\n' ;;
+    esac
+  done
+  exec 9<&-
+  GUARD_PGID=""
+  while [ "${res%$'\n'}" != "$res" ]; do res="${res%$'\n'}"; done
   last="${res##*$'\n'}"
   case "$last" in
     GUARD_TIMEOUT) GUARD_WHY="guard $name: no answer within ${GUARD_TIMEOUT}s"; return 1 ;;
@@ -156,24 +181,46 @@ guard_ok() {
   if [ "$last" != "SAFE:$name" ]; then GUARD_WHY="guard $name: it did not say SAFE:$name${GUARD_REASON:+: $GUARD_REASON}"; return 1; fi
   return 0
 }
-# guard <name> -- <cmd...>: as guard_ok, and a refusal is fatal (exit 1).
+# guard_ok <name> [args...]: runs <name>_check with the args, and nothing else; returns 0 or 1.
+guard_ok() { local gn="$1"; shift; guard_run "$gn" "${gn}_check" "$@"; }
+# guard <name> [args...]: as guard_ok, and a refusal is fatal (exit 1).
 guard() { guard_ok "$@" || die "$GUARD_WHY"; }
 # <<< guard-helper
 
 # >>> guard-py
+G_PY_STATE='import os, stat, sys
+verdict = None
+try:
+    try:
+        st = os.lstat(sys.argv[1])
+    except FileNotFoundError:
+        verdict = "ABSENT"
+    if verdict is None:
+        verdict = "PRESENT"
+        if stat.S_ISLNK(st.st_mode):
+            try:
+                os.stat(sys.argv[1])
+            except FileNotFoundError:
+                verdict = "DANGLING"
+except BaseException as e:
+    verdict = "ERR " + type(e).__name__
+print(verdict)
+'
 G_PY_LOCK='import fcntl, sys
+verdict = None
 try:
     f = open(sys.argv[1], "rb")
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        verdict = "FREE"
     except BlockingIOError:
-        print("HELD")
-        sys.exit(0)
-    print("FREE")
+        verdict = "HELD"
 except BaseException as e:
-    print("ERR " + type(e).__name__)
+    verdict = "ERR " + type(e).__name__
+print(verdict)
 '
 G_PY_ROUTES='import json, os, sys
+verdict = None
 try:
     d = os.path.realpath(sys.argv[2])
     data = json.load(open(sys.argv[1]))
@@ -195,26 +242,44 @@ try:
                 break
         elif v.endswith(".json") or v.startswith(("./", "../")):
             verdict = "UNRESOLVABLE"
-    print(verdict)
 except BaseException as e:
-    print("ERR " + type(e).__name__)
+    verdict = "ERR " + type(e).__name__
+print(verdict)
 '
 G_PY_PRIVATE='import json, sys
+verdict = None
 try:
     d = json.load(sys.stdin)
     if d.get("private") is True and d.get("visibility") == "private":
-        print("PRIVATE")
+        verdict = "PRIVATE"
     else:
-        print("NOTPRIVATE")
+        verdict = "NOTPRIVATE"
 except BaseException as e:
-    print("ERR " + type(e).__name__)
+    verdict = "ERR " + type(e).__name__
+print(verdict)
 '
 G_PY_OLDCFG='import json, sys
+verdict = None
 try:
     v = json.load(open(sys.argv[1])).get("repo")
-    print("REPO" if v else "NOREPO")
+    verdict = "REPO" if v else "NOREPO"
 except BaseException as e:
-    print("ERR " + type(e).__name__)
+    verdict = "ERR " + type(e).__name__
+print(verdict)
+'
+G_PY_APPS='import json, sys
+verdict = None
+try:
+    apps = json.load(open(sys.argv[1]))
+    if not isinstance(apps, list):
+        verdict = "ERR NotAList"
+    elif any(isinstance(a, dict) and a.get("name") == sys.argv[2] for a in apps):
+        verdict = "HASENTRY"
+    else:
+        verdict = "NOENTRY"
+except BaseException as e:
+    verdict = "ERR " + type(e).__name__
+print(verdict)
 '
 # <<< guard-py
 
@@ -231,7 +296,6 @@ in_list() { # needle items...
   return 1
 }
 
-
 # valid_pq_recipient <key>: a hybrid post-quantum age public key, age1pq1 plus
 # at least 1000 more bech32 characters (real ones are about 1,960). No regex
 # repeat count anywhere: macOS's grep and bash [[ =~ ]] stop at 255. Parameter
@@ -242,6 +306,29 @@ valid_pq_recipient() {
   [ "${#k}" -ge 1000 ] || return 1
   rest="${k#age1pq1}"
   [ -z "${rest//[023456789acdefghjklmnpqrstuvwxyz]/}" ]
+}
+
+# path_state <path>: the one way to ask "is it there?". Prints ABSENT only when lstat says
+# "no such file" (FileNotFoundError); PRESENT; DANGLING (a symlink whose target is missing);
+# anything else (EACCES, ENOTDIR, ELOOP, a failing python3, odd output) is no answer.
+# [ -e ] and [ -L ] read every stat error as "absent": they are not used in a guard.
+path_state() { python3 -I -c "$G_PY_STATE" "$1"; }
+# g_state <path>: path_state, but prints only an answer; returns 1 for no answer.
+g_state() {
+  local s
+  s="$(path_state "$1")" || return 1
+  case "$s" in ABSENT | PRESENT | DANGLING) printf '%s' "$s" ;; *) return 1 ;; esac
+}
+# g_kind <path>: what stat says it is, without following a symlink: file, dir or symlink.
+g_kind() {
+  local k
+  k="$(stat -c %F "$1" 2>/dev/null || stat -f %HT "$1")" || return 1
+  case "$k" in
+    "regular file" | "Regular File") printf file ;;
+    directory | Directory) printf dir ;;
+    "symbolic link" | "Symbolic Link") printf symlink ;;
+    *) return 1 ;;
+  esac
 }
 
 # git on a half-made sync dir: never climbing above the sync root into some enclosing repo
@@ -265,7 +352,7 @@ git_unpushed_check() { # dir
   g_git_ctl "$1" || { g_refuse "$1: cannot read its git state (a corrupt .git?); refusing to move it"; return 1; }
   o="$(g_git "$1" log --branches --not --remotes --format=%h)" || { g_refuse "$1: git log failed; refusing to move it"; return 1; }
   [ -z "$o" ] || { g_refuse "$1 began as an init of this bootstrap but holds a commit that is not on any remote (${o%%$'\n'*}); refusing to move it. Look at it with: git -C $1 log --branches --not --remotes"; return 1; }
-  s="$(g_git "$1" symbolic-ref -q HEAD)" || s=""
+  s="$(g_git "$1" symbolic-ref -q HEAD)" || s=""   # guard-ok: no branch (or no answer) takes the stricter detached-HEAD path below
   if [ -z "$s" ]; then   # a detached HEAD (or one we cannot read): its commits count too
     o="$(g_git "$1" log HEAD --not --remotes --format=%h)" || { g_refuse "$1: a detached HEAD that git cannot read; refusing to move it"; return 1; }
     [ -z "$o" ] || { g_refuse "$1 has a detached HEAD with a commit that is not on any remote (${o%%$'\n'*}); refusing to move it"; return 1; }
@@ -280,21 +367,20 @@ git_clean_tree_check() { # dir
   echo "SAFE:git_clean_tree"
 }
 git_idle_check() { # dir
-  local n
+  local n st
   g_git_ctl "$1" || { g_refuse "$1: cannot read its git state (a corrupt .git?); refusing to move it"; return 1; }
-  for n in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG; do
-    if [ -e "$1/.git/$n" ] || [ -L "$1/.git/$n" ]; then
-      g_refuse "$1 is in the middle of a git operation ($n); refusing to move it"
-      return 1
-    fi
+  for n in rebase-merge rebase-apply sequencer MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG; do
+    st="$(g_state "$1/.git/$n")" || { g_refuse "$1: cannot tell whether $n exists; refusing to move it"; return 1; }
+    [ "$st" = "ABSENT" ] || { g_refuse "$1 is in the middle of a git operation ($n); refusing to move it"; return 1; }
   done
   echo "SAFE:git_idle"
 }
 
 # claude-memsync's daemon holds an exclusive flock on <sync dir>/.state/daemon.lock while it serves the dir
 daemon_lock_check() { # dir
-  local lk="$1/.state/daemon.lock" o
-  if [ ! -e "$lk" ] && [ ! -L "$lk" ]; then echo "SAFE:daemon_lock"; return 0; fi
+  local lk="$1/.state/daemon.lock" st o
+  st="$(g_state "$lk")" || { g_refuse "could not check the daemon lock of $1 (cannot tell whether $lk exists); refusing to move it"; return 1; }
+  case "$st" in ABSENT) echo "SAFE:daemon_lock"; return 0 ;; esac
   o="$(python3 -I -c "$G_PY_LOCK" "$lk")" || { g_refuse "could not check the daemon lock of $1 (python3 failed); refusing to move it"; return 1; }
   case "$o" in
     FREE) echo "SAFE:daemon_lock" ;;
@@ -305,9 +391,11 @@ daemon_lock_check() { # dir
 
 # a routes.json this script did not write must not name the dir (any path form: ~, symlinks)
 routes_unnamed_check() { # dir
-  local o
-  if [ ! -e "$ROUTES" ] && [ ! -L "$ROUTES" ]; then echo "SAFE:routes_unnamed"; return 0; fi
-  if [ -e "$STATE/$HOST.routes" ]; then echo "SAFE:routes_unnamed"; return 0; fi
+  local o st ms
+  st="$(g_state "$ROUTES")" || { g_refuse "cannot tell whether $ROUTES exists; refusing to move $1"; return 1; }
+  case "$st" in ABSENT) echo "SAFE:routes_unnamed"; return 0 ;; esac
+  ms="$(g_state "$STATE/$HOST.routes")" || ms="UNKNOWN"   # guard-ok: an unreadable mark counts as "not written by this script": the stricter path
+  case "$ms" in PRESENT) echo "SAFE:routes_unnamed"; return 0 ;; esac
   o="$(python3 -I -c "$G_PY_ROUTES" "$ROUTES" "$1")" || { g_refuse "cannot read $ROUTES (python3 failed); refusing to move $1"; return 1; }
   case "$o" in
     UNNAMED) echo "SAFE:routes_unnamed" ;;
@@ -318,12 +406,38 @@ routes_unnamed_check() { # dir
 
 # may this key's sync dir be touched at all? absent, or ours (inited; or begun by this script and interrupted)
 sync_dir_ours_check() { # key
-  local d="$SYNC_ROOT/$1"
-  if [ ! -e "$d" ] && [ ! -L "$d" ]; then echo "SAFE:sync_dir_ours"; return 0; fi
-  if [ -e "$STATE/$HOST.init.$1" ]; then echo "SAFE:sync_dir_ours"; return 0; fi
-  if [ -e "$STATE/$HOST.initing.$1" ] && [ -d "$d" ] && [ ! -L "$d" ]; then echo "SAFE:sync_dir_ours"; return 0; fi
+  local d="$SYNC_ROOT/$1" st ms k
+  st="$(g_state "$d")" || { g_refuse "cannot tell whether $d exists; refusing to touch it"; return 1; }
+  case "$st" in ABSENT) echo "SAFE:sync_dir_ours"; return 0 ;; esac
+  ms="$(g_state "$STATE/$HOST.init.$1")" || { g_refuse "cannot tell whether $d was made by this bootstrap; refusing to touch it"; return 1; }
+  case "$ms" in PRESENT) echo "SAFE:sync_dir_ours"; return 0 ;; esac
+  ms="$(g_state "$STATE/$HOST.initing.$1")" || { g_refuse "cannot tell whether $d was begun by this bootstrap; refusing to touch it"; return 1; }
+  case "$ms" in
+    PRESENT)
+      k="$(g_kind "$d")" || { g_refuse "cannot tell what $d is; refusing to touch it"; return 1; }
+      [ "$k" = "dir" ] || { g_refuse "$d is not a plain directory; refusing to touch it"; return 1; }
+      echo "SAFE:sync_dir_ours"
+      return 0 ;;
+  esac
   g_refuse "$d already exists and was not made by this bootstrap; refusing to touch it"
   return 1
+}
+
+# the apps.json entry the script adds for the run (and deletes at the end) must not be one the owner put there
+app_entry_absent_check() { # name
+  local st o
+  st="$(g_state "$APPS")" || { g_refuse "cannot tell whether $APPS exists; refusing"; return 1; }
+  case "$st" in
+    ABSENT) echo "SAFE:app_entry_absent"; return 0 ;;
+    PRESENT) ;;
+    *) g_refuse "cannot read $APPS (a dangling symlink?); refusing"; return 1 ;;
+  esac
+  o="$(python3 -I -c "$G_PY_APPS" "$APPS" "$1")" || { g_refuse "cannot read $APPS (python3 failed); refusing"; return 1; }
+  case "$o" in
+    NOENTRY) echo "SAFE:app_entry_absent" ;;
+    HASENTRY) g_refuse "$APPS already has an entry named $1; refusing to replace it (and delete it at the end). Drop --org-app-id/--org-app-key-cmd to use that entry, or remove it first."; return 1 ;;
+    *) g_refuse "cannot read $APPS ($o); refusing"; return 1 ;;
+  esac
 }
 
 repo_private_check() { # repo name
@@ -336,9 +450,10 @@ repo_private_check() { # repo name
 
 # a file that holds a secret: absolute path, a plain file of ours, mode 0600, one link
 g_private_file() { # label file
-  local lbl="$1" f="$2" m u n me
+  local lbl="$1" f="$2" k m u n me
   case "$f" in /*) ;; *) g_refuse "$lbl $f must be an absolute path"; return 1 ;; esac
-  [ -f "$f" ] && [ ! -L "$f" ] || { g_refuse "$lbl $f is missing or not a plain file"; return 1; }
+  k="$(g_kind "$f")" || { g_refuse "$lbl $f is missing or not a plain file"; return 1; }
+  [ "$k" = "file" ] || { g_refuse "$lbl $f is missing or not a plain file"; return 1; }
   m="$(stat -c %a "$f" 2>/dev/null || stat -f %Lp "$f")" || { g_refuse "cannot stat $f"; return 1; }
   u="$(stat -c %u "$f" 2>/dev/null || stat -f %u "$f")" || { g_refuse "cannot stat $f"; return 1; }
   n="$(stat -c %h "$f" 2>/dev/null || stat -f %l "$f")" || { g_refuse "cannot stat $f"; return 1; }
@@ -393,26 +508,31 @@ repo_name_ok_check() { # repo name: only mem-* names, never client or orchestrat
   echo "SAFE:repo_name_ok"
 }
 
-host_key_fp_check() { # label scan-file: the scanned host key must be GitHub's
-  local fp
-  fp="$(ssh-keygen -lf "$2" | awk 'NR==1{print $2}')" || { g_refuse "cannot read the host key of $1"; return 1; }
-  [ -n "$fp" ] && [ "$fp" = "$GITHUB_FP" ] || { g_refuse "host key fingerprint for $1 is '$fp', expected $GITHUB_FP; refusing"; return 1; }
+# the scanned host key must be GitHub's, and be the only key in the scan (every line is appended to known_hosts)
+host_key_fp_check() { # label scan-file
+  local fps
+  fps="$(ssh-keygen -lf "$2" | awk '{print $2}')" || { g_refuse "cannot read the host key of $1"; return 1; }
+  [ -n "$fps" ] && [ "$fps" = "$GITHUB_FP" ] || { g_refuse "host key fingerprint for $1 is '$fps', expected exactly one key with $GITHUB_FP; refusing"; return 1; }
   echo "SAFE:host_key_fp"
 }
 
 no_old_config_check() { # the old memsync must not be configured
-  local old="$XDG_CFG/memsync/config.json" o
-  if [ ! -e "$old" ] && [ ! -L "$old" ]; then echo "SAFE:no_old_config"; return 0; fi
+  local old="$XDG_CFG/memsync/config.json" o st
+  st="$(g_state "$old")" || { g_refuse "cannot tell whether the old memsync is configured ($old); refusing"; return 1; }
+  case "$st" in ABSENT) echo "SAFE:no_old_config"; return 0 ;; esac
   o="$(python3 -I -c "$G_PY_OLDCFG" "$old")" || { g_refuse "cannot read $old (python3 failed); refusing"; return 1; }
   [ "$o" = "NOREPO" ] || { g_refuse "the old memsync is configured ($old has \"repo\", or cannot be read: $o). Disable it first (move the file aside)."; return 1; }
   echo "SAFE:no_old_config"
 }
 
 no_predecessor_units_check() { # the old memsync's systemd units must be absent, or disabled and inactive
-  local u o
-  case "${BOOTSTRAP_TEST_OS:-$(uname -s)}" in
+  local u o os
+  os="$(uname -s)" || { g_refuse "cannot tell the operating system; refusing"; return 1; }
+  [ "${BOOTSTRAP_GUARD_TEST:-}" != "1" ] || os="${BOOTSTRAP_TEST_OS:-$os}"   # a test-only override
+  case "$os" in
     Linux) ;;
-    *) echo "SAFE:no_predecessor_units"; return 0 ;;
+    Darwin) echo "SAFE:no_predecessor_units"; return 0 ;;
+    *) g_refuse "cannot check for predecessor units on $os; refusing"; return 1 ;;
   esac
   for u in memsync.timer memsync.service; do
     o="$(systemctl --user show -p LoadState -p ActiveState -p UnitFileState "$u")" || { g_refuse "cannot ask systemd about $u; refusing"; return 1; }
@@ -440,11 +560,12 @@ recovery_key_ok_check() { # key
 }
 
 key_free_check() { # path of the deploy key to make
-  if [ -e "$1" ] || [ -L "$1" ]; then
-    g_refuse "$1 already exists and was not made by this bootstrap; refusing to overwrite it"
-    return 1
-  fi
-  echo "SAFE:key_free"
+  local st
+  st="$(g_state "$1")" || { g_refuse "cannot tell whether $1 exists; refusing to overwrite it"; return 1; }
+  case "$st" in
+    ABSENT) echo "SAFE:key_free" ;;
+    *) g_refuse "$1 already exists and was not made by this bootstrap; refusing to overwrite it"; return 1 ;;
+  esac
 }
 # <<< guards
 
@@ -508,7 +629,7 @@ check_prereqs() {
 
 
 add_repo() { # key kind name
-  guard repo_name_ok -- repo_name_ok_check "$3"
+  guard repo_name_ok "$3"
   R_KEYS+=("$1"); R_KINDS+=("$2"); R_NAMES+=("$3")
 }
 
@@ -631,7 +752,7 @@ jr_flush() { # hand every finished job at the front to jr_emit, in order
 
 jr_start() { # index
   set -m
-  ( "$JR_FN" "$1" ) </dev/null >"$JR_JD/$1.out" 2>"$JR_JD/$1.err" &   # job control hands background jobs the tty; a read from it would stop the job
+  ( trap 'if declare -F guard_abort >/dev/null; then guard_abort; fi; exit 143' TERM INT HUP; "$JR_FN" "$1" ) </dev/null >"$JR_JD/$1.out" 2>"$JR_JD/$1.err" &   # job control hands background jobs the tty; a read from it would stop the job
   JR_PID[$1]=$!
   set +m
   JR_L=$(($1 + 1))
@@ -701,6 +822,10 @@ secure_delete() { # file: remove it; where shred exists, overwrite it first as a
 token_file_remove() {
   [ "$TOKEN_FILE_ARMED" -eq 1 ] || return 0
   TOKEN_FILE_ARMED=0
+  if ! guard_ok token_file_ok "$ORG_TOKEN_FILE"; then   # it may have been swapped for something that is not ours
+    printf 'WARNING: not deleting %s: %s\n' "$ORG_TOKEN_FILE" "${GUARD_REASON:-$GUARD_WHY}" >&2
+    return 0
+  fi
   secure_delete "$ORG_TOKEN_FILE"
   if [ -e "$ORG_TOKEN_FILE" ]; then
     printf 'WARNING: could not delete the org token file %s; delete it by hand\n' "$ORG_TOKEN_FILE" >&2
@@ -719,6 +844,7 @@ on_exit() {
   local rc=$?
   jr_shield
   set +e   # clean up as much as possible, whatever fails on the way
+  guard_abort   # a check a guard is waiting for
   jr_kill_all   # repo jobs still running, with what they started
   run_dir_remove
   if declare -F admin_entry_remove >/dev/null; then admin_entry_remove; fi
@@ -732,7 +858,7 @@ trap 'exit 129' HUP
 
 # check_token_file: a token file to be deleted must be a plain file of ours,
 # 0600, one link. Anything else is refused and left alone (it may not be ours).
-check_token_file() { guard token_file_ok -- token_file_ok_check "$ORG_TOKEN_FILE"; }
+check_token_file() { guard token_file_ok "$ORG_TOKEN_FILE"; }
 
 # check_prebuilt: --prebuilt-dir must hold both binaries, executable, and
 # claude-memsync must report the version we expect. Sets PREBUILT_DIR (absolute)
@@ -746,6 +872,7 @@ check_prebuilt() {
     { [ -f "$PREBUILT_DIR/$b" ] && [ -x "$PREBUILT_DIR/$b" ]; } || die "--prebuilt-dir: $PREBUILT_DIR/$b is missing or not executable"
   done
   got="$("$PREBUILT_DIR/claude-memsync" version 2>&1)" || die "--prebuilt-dir: '$PREBUILT_DIR/claude-memsync version' failed"
+  case "$got" in *$'\n'*) die "--prebuilt-dir: '$PREBUILT_DIR/claude-memsync version' must print exactly one line" ;; esac
   PB_VER="${got#claude-memsync }"
   printf '%s' "$PB_VER" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._+-]*$' || die "--prebuilt-dir: unexpected version output from $PREBUILT_DIR/claude-memsync"
 }
@@ -800,7 +927,7 @@ validate_flags() {
   [ -n "$HOST" ] || udie "--host is required"
   [ -n "$ORG" ] || udie "--org <org> is required: the GitHub organisation that holds the memory repos (there is no default)"
   [ -n "$AGE_RECOVERY" ] || udie "--recovery-recipient <age1pq1...> is required: your own offline post-quantum recovery PUBLIC key (generate one as docs/bootstrap.md describes; there is no default)"
-  guard_ok recovery_key_ok -- recovery_key_ok_check "$AGE_RECOVERY" || udie "${GUARD_REASON:-$GUARD_WHY}"
+  guard_ok recovery_key_ok "$AGE_RECOVERY" || udie "${GUARD_REASON:-$GUARD_WHY}"
   [ -n "$ROLE" ] || udie "--role is required"
   case "$ROLE" in
     homelab | personal-dev) ;;
@@ -810,7 +937,7 @@ validate_flags() {
   [[ $HOST =~ $re ]] || udie "bad --host label '$HOST' (it is the host's label in recipients, deploy keys and join requests: 1-32 characters of a-z, 0-9 and '-', starting with a letter or digit)"
   re='^[A-Za-z0-9][A-Za-z0-9-]*$'
   [[ $ORG =~ $re ]] || udie "bad --org '$ORG'"
-  guard_ok org_not_kept_out -- org_not_kept_out_check "$ORG" || udie "${GUARD_REASON:-$GUARD_WHY}"
+  guard_ok org_not_kept_out "$ORG" || udie "${GUARD_REASON:-$GUARD_WHY}"
   if [ ${#PROJECTS_SEL[@]} -gt 0 ] && [ ${#SKIP_PROJECTS[@]} -gt 0 ]; then
     udie "--project and --skip-project are mutually exclusive: name the projects to keep, or the ones to leave out"
   fi
@@ -874,6 +1001,12 @@ validate_flags2() { # needs python3 and git
     printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || udie "--sha must be a full 40-hex commit"
   fi
 }
+# The guard runner (below) polls with sleep 0.05, and validate_flags already runs guards: check this first.
+if ! command -v sleep >/dev/null 2>&1 || ! sleep 0.1 >/dev/null 2>&1; then
+  printf 'missing prerequisite: sleep that accepts fractional seconds (the guard runner polls with sleep 0.05)\n' >&2
+  printf 'ERROR: 1 prerequisite(s) missing; nothing was changed\n' >&2
+  exit 1
+fi
 validate_flags
 [ -z "$PREBUILT_DIR" ] || BUILD_FROM_SOURCE=0   # installing given binaries: no clone, no build, no Go
 check_prereqs
@@ -1091,15 +1224,6 @@ os.replace(tmp, p)
 PY
 }
 
-apps_has() { # name: is there an entry of that name?
-  python3 -I -c '
-import json, sys
-try:
-    sys.exit(0 if any(a.get("name") == sys.argv[2] for a in json.load(open(sys.argv[1]))) else 1)
-except Exception:
-    sys.exit(1)' "$APPS" "$1"
-}
-
 app_entry() { # name id keyfile|"" keycmd-json|"" [fingerprint]
   BS_N="$1" BS_I="$2" BS_F="$3" BS_C="$4" BS_P="${5:-}" BS_O="$ORG" BS_B="$APP_API_BASE" python3 -I -c '
 import json, os
@@ -1115,14 +1239,12 @@ print(json.dumps(e))'
 admin_entry_add() {
   [ -n "$ORG_APP_ID" ] || return 0
   if [ "$DRY_RUN" -eq 1 ]; then
-    if [ -e "$APPS" ] && apps_has "$ORG_APP"; then die "$APPS already has an entry named $ORG_APP; refusing to replace it"; fi
+    guard app_entry_absent "$ORG_APP"
     say "  would add the app entry $ORG_APP to $APPS (key command only), and remove it when the run ends"
     return 0
   fi
   # An entry the owner put there is never replaced, and so never deleted.
-  if [ -e "$APPS" ] && apps_has "$ORG_APP"; then
-    die "$APPS already has an entry named $ORG_APP; refusing to replace it (and delete it at the end). Drop --org-app-id/--org-app-key-cmd to use that entry, or remove it first."
-  fi
+  guard app_entry_absent "$ORG_APP"
   ADMIN_WRITTEN=1
   apps_edit upsert "$ORG_APP" "$(app_entry "$ORG_APP" "$ORG_APP_ID" "" "$(split_args json "$ORG_APP_KEY_CMD")")"
 }
@@ -1133,7 +1255,7 @@ admin_entry_remove() {
 }
 
 # check_key_file: the per-host check key must be a plain file of ours, 0600, one link.
-check_key_file() { guard check_key_ok -- check_key_ok_check "$CHECK_KEY_FILE"; }
+check_key_file() { guard check_key_ok "$CHECK_KEY_FILE"; }
 
 preflight() {
   step "a. Preflight"
@@ -1144,8 +1266,8 @@ preflight() {
   command -v claude >/dev/null || warn "claude not found on PATH; the plugin step will be skipped"
 
   # Predecessor writers: refuse while any is configured or active.
-  guard no_old_config -- no_old_config_check
-  guard no_predecessor_units -- no_predecessor_units_check
+  guard no_old_config 
+  guard no_predecessor_units 
   say "  ok (gh logged in${GO_MODE:+, build via $GO_MODE})"
 }
 
@@ -1154,23 +1276,26 @@ preflight() {
 # it is moved aside, after the plan is confirmed, just before its init (see
 # half_made_aside). Never deleted.
 half_made_guards() { # key: every guard that says the half-made dir holds nothing that exists only there
-  local d="$SYNC_ROOT/$1"
-  if [ -e "$d/.git" ] || [ -L "$d/.git" ]; then
-    guard git_dir -- git_dir_check "$d"
-    guard git_stash -- git_stash_check "$d"
-    guard git_unpushed -- git_unpushed_check "$d"
-    guard git_clean_tree -- git_clean_tree_check "$d"
-    guard git_idle -- git_idle_check "$d"
+  local d="$SYNC_ROOT/$1" gs
+  gs="$(path_state "$d/.git")" || gs=""   # no answer: run the git guards (they refuse on anything they cannot read)
+  if [ "$gs" != "ABSENT" ]; then
+    guard git_dir "$d"
+    guard git_stash "$d"
+    guard git_unpushed "$d"
+    guard git_clean_tree "$d"
+    guard git_idle "$d"
   fi
-  guard daemon_lock -- daemon_lock_check "$d"
-  guard routes_unnamed -- routes_unnamed_check "$d"
+  guard daemon_lock "$d"
+  guard routes_unnamed "$d"
 }
 check_sync_dirs() { # run after the plan is final
-  local i k
+  local i k ds ms
   for i in "${!R_KEYS[@]}"; do
     k="${R_KEYS[$i]}"
-    guard sync_dir_ours -- sync_dir_ours_check "$k"
-    if { [ -e "$SYNC_ROOT/$k" ] || [ -L "$SYNC_ROOT/$k" ]; } && [ ! -e "$STATE/$HOST.init.$k" ]; then   # begun by this script and interrupted
+    guard sync_dir_ours "$k"
+    ds="$(path_state "$SYNC_ROOT/$k")" || ds=""
+    ms="$(path_state "$STATE/$HOST.init.$k")" || ms=""
+    if [ "$ds" != "ABSENT" ] && [ "$ms" != "PRESENT" ]; then   # begun by this script and interrupted (no answer: look closer)
       half_made_guards "$k"
       warn "$SYNC_ROOT/$k is half-made by an interrupted run of this bootstrap; after you confirm, it is moved aside (to $k.half-made.<time>), never deleted"
     fi
@@ -1186,10 +1311,13 @@ unique_path() {
 # half_made_aside <key>: after confirmation, in the repo's job, just before its init.
 # The guards run again here: the dir may have changed since the first check.
 half_made_aside() {
-  local d="$SYNC_ROOT/$1" to
-  [ "$DRY_RUN" -eq 0 ] && { [ -e "$d" ] || [ -L "$d" ]; } || return 0
-  guard sync_dir_ours -- sync_dir_ours_check "$1"
-  [ -e "$STATE/$HOST.initing.$1" ] || die "$d is there but was not begun by this bootstrap; refusing to touch it"
+  local d="$SYNC_ROOT/$1" to ds ms
+  [ "$DRY_RUN" -eq 0 ] || return 0
+  ds="$(path_state "$d")" || die "cannot tell whether $d exists; refusing to touch it"
+  [ "$ds" != "ABSENT" ] || return 0
+  guard sync_dir_ours "$1"
+  ms="$(path_state "$STATE/$HOST.initing.$1")" || ms=""
+  [ "$ms" = "PRESENT" ] || die "$d is there but was not begun by this bootstrap; refusing to touch it"
   half_made_guards "$1"
   to="$(unique_path "$d.half-made.${BOOTSTRAP_ASIDE_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}")"
   say "  $d is half-made by an interrupted run: moving it aside to $to"
@@ -1245,7 +1373,7 @@ $ws" seen="" checkouts
 "; continue ;;
     esac
     owner="$(lower "${rest%%/*}")"; repo="$(lower "${rest#*/}")"
-    if ! guard_ok project_not_kept_out -- project_not_kept_out_check "$owner" "$repo"; then
+    if ! guard_ok project_not_kept_out "$owner" "$repo"; then
       NOT_SYNCED="${NOT_SYNCED}  $p ($owner/$repo): ${GUARD_REASON:-not synced (could not be sure it is an own project)}
 "; continue
     fi
@@ -1390,7 +1518,7 @@ step_build() {
 # ---------------------------------------------------------------------------
 # c. Repos (private only)
 # ---------------------------------------------------------------------------
-check_private() { GUARD_TIMEOUT=120 guard repo_private -- repo_private_check "$1"; } # repo
+check_private() { GUARD_TIMEOUT=120 guard repo_private "$1"; } # repo
 
 # (the per-repo steps c, d and f run as jobs: see repo_ensure_job and repo_keys_init below)
 
@@ -1406,7 +1534,7 @@ add_known_host() { # label hostpattern scan-args...
   [ "$DRY_RUN" -eq 1 ] && { say "  would add $label to known_hosts if its fingerprint is $GITHUB_FP"; return 0; }
   tmp="$(mktemp)"
   ssh-keyscan -t ed25519 "$@" >"$tmp" 2>/dev/null || { rm -f "$tmp"; die "ssh-keyscan failed for $label"; }
-  guard_ok host_key_fp -- host_key_fp_check "$label" "$tmp" || { rm -f "$tmp"; die "$GUARD_WHY"; }
+  guard_ok host_key_fp "$label" "$tmp" || { rm -f "$tmp"; die "$GUARD_WHY"; }
   sed -E "s/^[^ ]+ /$pat /" "$tmp" >>"$kh"
   rm -f "$tmp"; chmod 600 "$kh"
   say "  added $label to known_hosts (fingerprint verified)"
@@ -1516,9 +1644,11 @@ raise SystemExit(0 if old == new else 1)'
 # here, or the run stops, rather than creating repos nothing routes to.
 step_routes() {
   step "e. routes.json and denylists"
-  local k t new regen=0
+  local k t new regen=0 dls
   for k in $(printf '%s\n' ${R_KINDS[@]+"${R_KINDS[@]}"} | sort -u); do
-    if [ -e "$CFG/denylist-$k.txt" ]; then
+    dls="$(g_state "$CFG/denylist-$k.txt")" || die "cannot tell whether $CFG/denylist-$k.txt exists; refusing"
+    case "$dls" in ABSENT | PRESENT) ;; *) die "$CFG/denylist-$k.txt is a dangling symlink; refusing to write through it" ;; esac
+    if [ "$dls" = PRESENT ]; then
       # A re-run adds new keep-out terms (escaped, de-duplicated) and never removes a line.
       local f="$CFG/denylist-$k.txt" esc added=0
       for t in ${KEEP_OUT_TERMS[@]+"${KEEP_OUT_TERMS[@]}"}; do
@@ -1593,7 +1723,7 @@ token_hint() {
 repo_ensure_job() { # index
   local i="$1" name out
   name="${R_NAMES[$i]}"
-  guard repo_name_ok -- repo_name_ok_check "$name"
+  guard repo_name_ok "$name"
   if [ "$DRY_RUN" -eq 1 ]; then
     say "  would check $ORG/$name, create it with --private if missing, and verify private=true"
   else
@@ -1610,7 +1740,7 @@ repo_ensure_job() { # index
 }
 
 repo_keys_init() { # index
-  local i="$1" k name kind url content=0 out fp key pub
+  local i="$1" k name kind url content=0 out fp key pub lsout
   JOB_IDX="$i"
   k="${R_KEYS[$i]}"; name="${R_NAMES[$i]}"; kind="${R_KINDS[$i]}"
   url="git@gh-$name:$ORG/$name.git"
@@ -1619,7 +1749,7 @@ repo_keys_init() { # index
   if done_p "keygen.$name"; then
     say "  key for $name already generated"
   else
-    guard key_free -- key_free_check "$key"
+    guard key_free "$key"
     run ssh-keygen -q -t ed25519 -N '' -C "$HOST-$name" -f "$key"
     [ "$DRY_RUN" -eq 1 ] || chmod 600 "$key"
     mark "keygen.$name"
@@ -1649,7 +1779,10 @@ repo_keys_init() { # index
   # f. init. The initing mark says a sync dir of this name was begun by this
   # script, so an interrupted init's half-made dir can be cleared on the re-run.
   if ! done_p "init.$k"; then
-    [ "$DRY_RUN" -eq 1 ] || { git ls-remote "$url" 2>/dev/null | grep -q . && content=1; }
+    if [ "$DRY_RUN" -eq 0 ]; then
+      lsout="$(git ls-remote "$url" 2>/dev/null)" || die "git ls-remote $url failed: cannot tell whether $name already has content (a join may be needed); run the same command again once it works"
+      [ -z "$lsout" ] || content=1
+    fi
     half_made_aside "$k"
     mark "initing.$k"
     run "$BIN/claude-memsync" init --remote "$url" --sync-dir "$SYNC_ROOT/$k" --encrypt \
@@ -1743,7 +1876,7 @@ step_repos_keys_init() {
 # if the owner put one there. This script never creates or writes that PAT file.
 step_token_split() {
   step "f2. Daemon re-check token"
-  local tf="$CFG/github-token" i k cfg usefile=0 fp="" slug="$CHECK_APP"
+  local tf="$CFG/github-token" i k cfg usefile=0 fp="" slug="$CHECK_APP" reg
   if [ -n "$CHECK_APP" ]; then
     say "  check app $CHECK_APP (app id $CHECK_APP_ID, org $ORG): key file $CHECK_KEY_FILE"
     if [ "$DRY_RUN" -eq 1 ]; then
@@ -1753,16 +1886,24 @@ step_token_split() {
       printf '%s' "$fp" | grep -Eq '^SHA256:[A-Za-z0-9+/=_-]+$' || die "unexpected key fingerprint output"
       apps_edit upsert "$CHECK_APP" "$(app_entry "$CHECK_APP" "$CHECK_APP_ID" "$CHECK_KEY_FILE" "" "$fp")"
       say "  wrote the $CHECK_APP entry to $APPS (0600) with key fingerprint $fp"
-      if python3 -I -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("registry") else 1)' "$ROUTES" 2>/dev/null; then
-        if "$BIN/claude-memsync" host check-key --fingerprint "$fp" --app "$slug"; then :; else
-          warn "could not record the check key in the registry; run: claude-memsync host check-key --fingerprint $fp --app $slug (on a writable host)"
-          NEXT_STEPS+=("record the check key: claude-memsync host check-key --fingerprint $fp --app $slug")
-        fi
-      else
-        say "  no registry in routes.json: the check key is not recorded there"
-      fi
+      reg="$(python3 -I -c 'import json, sys
+verdict = None
+try:
+    verdict = "REGISTRY" if json.load(open(sys.argv[1])).get("registry") else "NOREGISTRY"
+except BaseException as e:
+    verdict = "ERR " + type(e).__name__
+print(verdict)' "$ROUTES")" || die "cannot read the registry setting of $ROUTES; refusing to go on"
+      case "$reg" in
+        REGISTRY)
+          if "$BIN/claude-memsync" host check-key --fingerprint "$fp" --app "$slug"; then :; else
+            warn "could not record the check key in the registry; run: claude-memsync host check-key --fingerprint $fp --app $slug (on a writable host)"
+            NEXT_STEPS+=("record the check key: claude-memsync host check-key --fingerprint $fp --app $slug")
+          fi ;;
+        NOREGISTRY) say "  no registry in routes.json: the check key is not recorded there" ;;
+        *) die "cannot tell whether $ROUTES names a registry ($reg); refusing to go on" ;;
+      esac
     fi
-  elif [ -f "$tf" ] && [ "$(stat -c %a "$tf" 2>/dev/null || stat -f %Lp "$tf")" = 600 ]; then
+  elif guard_ok token_file_ok "$tf"; then   # the same checks as for the other secret files
     usefile=1; say "  found $tf (0600): the daemon re-check will use it"
   else
     warn "no Metadata-read PAT at $tf (0600): the hourly private re-check is OFF until it exists. Add it with: install -m 600 /dev/stdin $tf  (paste the token, then Ctrl-D), then re-run this bootstrap. Or use --check-app."
