@@ -201,6 +201,10 @@ func cfgFileOf(cfg config.Config) string {
 	return cfg.Path()
 }
 
+// rollbackBeforeLock is a test seam: it runs just before rollbackOne takes the
+// sync lock, where a daemon cycle could still move HEAD.
+var rollbackBeforeLock func()
+
 // rollbackOne undoes an unpublished migration of one repo. With quietNone a
 // repo that has nothing to roll back is only mentioned (for --all).
 func rollbackOne(stdout, stderr io.Writer, cfg config.Config, quietNone, discard bool) int {
@@ -222,6 +226,9 @@ func rollbackOne(stdout, stderr io.Writer, cfg config.Config, quietNone, discard
 	}
 	cfgFile := cfgFileOf(cfg)
 	head, _ := repo.Run("rev-parse", "HEAD")
+	if rollbackBeforeLock != nil {
+		rollbackBeforeLock()
+	}
 	var st agecrypt.PreRekeyState
 	err := withSyncLock(cfg.SyncDir, func() error {
 		var rerr error

@@ -433,3 +433,29 @@ func TestRekeyPQ_RecordWriteLeavesNoTempFile(t *testing.T) {
 		}
 	}
 }
+
+// N6: HEAD is read under the sync lock. A cycle that moves HEAD (and records
+// it as synced) just before the lock is taken must not leave the synced-head
+// record on a commit the rollback then discards.
+func TestRekeyPQ_RollbackReadsHeadUnderTheSyncLock(t *testing.T) {
+	c, _, oldTip := unpublishedRekey(t)
+	rec := filepath.Join(c.cfg.SyncDir, ".state", "synced-head")
+	rollbackBeforeLock = func() {
+		commitEmpty(t, c.repo, "a daemon cycle just before the lock")
+		h, _ := c.repo.Run("rev-parse", "HEAD")
+		if err := os.MkdirAll(filepath.Dir(rec), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(rec, []byte(strings.TrimSpace(h)+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { rollbackBeforeLock = nil })
+	if code, o, e := rollbackCmd(t, c, "--discard-local-commits"); code != 0 {
+		t.Fatalf("rollback: %d\n%s%s", code, o, e)
+	}
+	got, _ := os.ReadFile(rec)
+	if strings.TrimSpace(string(got)) != oldTip {
+		t.Errorf("synced-head record %q, want the restored tip %q", strings.TrimSpace(string(got)), oldTip)
+	}
+}
