@@ -272,6 +272,74 @@ hasnt()  { ! grep -qE -- "$2" "$1"; }
 mode()   { [ "$(stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1")" = "$2" ]; }
 jsonok() { python3 -I -c "$1" "$2"; }
 
+# --- helpers for the new-flag sections ----------------------------------------------
+# minipath <omit...>: a bin dir holding only the tools the script needs (the
+# stubs for gh, go and friends, the real rest), minus the ones named, so a
+# missing tool is really missing.
+MININ=0
+MINI_TOOLS="git python3 ssh-keygen ssh-keyscan gh systemctl launchctl claude go sed awk grep tr cut sort head tail find dirname basename cat id uname stat mktemp chmod mkdir ln rm cp mv touch date env wc tee readlink sleep sh bash shred dd tar sha256sum"
+minipath() {
+  local d="$BASE/mini.$MININ" t p; MININ=$((MININ + 1))
+  rm -rf "$d"; mkdir -p "$d"
+  for t in $MINI_TOOLS; do
+    case " $* " in *" $t "*) continue ;; esac
+    if [ -x "$STUBS/$t" ]; then ln -s "$STUBS/$t" "$d/$t"
+    elif p="$(type -P "$t")" && [ -n "$p" ]; then ln -s "$p" "$d/$t"; fi
+  done
+  printf '%s' "$d"
+}
+untouched() { [ -z "$(find "$H" -mindepth 1 -not -name .gitconfig | head -1)" ] && [ ! -s "$STUB_DIR/gh.log" ]; }
+quick_exit() { # after the new-flag sections, when BT_QUICK is set
+  [ -n "${BT_QUICK:-}" ] || return 0
+  echo; echo "passed=$PASS failed=$FAIL pending=$PENDING (BT_QUICK: stopped early)"; [ "$FAIL" -eq 0 ]; exit $?
+}
+
+# ============================ prerequisites ====================================
+echo "--- prerequisites: one line per missing tool, exit 1, nothing changed (also in --dry-run)"
+newhome pq0
+BOOT_PATH="$(minipath)" runboot --host testhost --role homelab --dry-run
+[ "$RC" -eq 0 ] || echo "$OUT" | tail -8
+check "control: a minimal PATH with every tool passes a dry run" [ "$RC" -eq 0 ]
+case "$(uname -s)" in Darwin) SVC=launchctl ;; *) SVC=systemctl ;; esac
+for mode in --dry-run --yes; do
+  for t in git python3 ssh-keygen ssh-keyscan gh $SVC go; do
+    newhome pq
+    BOOT_PATH="$(minipath "$t")" runboot --host testhost --role homelab "$mode"
+    check "without $t ($mode): exit 1 and a 'missing prerequisite: $t' line" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -qE '^missing prerequisite: $t( |\$)'" _ "$OUT"
+    check "without $t ($mode): nothing was changed" untouched
+  done
+done
+newhome pq
+BOOT_PATH="$(minipath git python3 ssh-keygen gh)" runboot --host testhost --role homelab --yes
+check "four tools missing: four lines, one each, then exit 1" bash -c "[ $RC -eq 1 ] && [ \$(printf '%s\n' \"\$1\" | grep -c '^missing prerequisite: ') -eq 4 ]" _ "$OUT"
+newhome pq
+BOOT_PATH="$(minipath)" STUB_GOVER=1.24.0 runboot --host testhost --role homelab --yes
+check "go older than go.mod: its own line, exit 1, nothing changed" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -qE '^missing prerequisite: go 1\.24 is too old \(need >= 1\.25' " _ "$OUT"
+check "go too old: nothing was changed" untouched
+
+# ============================ pause for a missing check key ====================
+echo "--- missing check key: exit 3 (paused, needs a human), exact instructions, nothing changed"
+for mode in --dry-run --yes; do
+  newhome pause
+  NOKEY="$H/.config/claude-memsync/memsync-check.pem"
+  ORGARGS=()
+  runboot --host testhost --role homelab "$mode" --org-app memsync-admin --org-app-id 12345 --org-app-key-cmd "cat $BASE/app.pem" \
+    --check-app memsync-check --check-app-id 54321 --check-key-file "$NOKEY"
+  ORGARGS=(--org-token-file "$BASE/orgtoken")
+  check "missing check key ($mode): exit 3" [ "$RC" -eq 3 ]
+  check "missing check key ($mode): the UI path, step by step" bash -c "printf '%s\n' \"\$1\" | grep -qF 'GitHub > Settings > Developer settings > GitHub Apps > memsync-check' && printf '%s\n' \"\$1\" | grep -qF '\"Generate a private key\"'" _ "$OUT"
+  check "missing check key ($mode): copy to the path, chmod 600, delete the download, rerun" bash -c "printf '%s\n' \"\$1\" | grep -qF 'copy the downloaded .pem to $NOKEY' && printf '%s\n' \"\$1\" | grep -qF 'chmod 600 $NOKEY' && printf '%s\n' \"\$1\" | grep -qi 'delete the download' && printf '%s\n' \"\$1\" | grep -qi 'rerun the same command'" _ "$OUT"
+  check "missing check key ($mode): nothing was changed, no gh call, no apps.json" untouched
+done
+newhome pause2
+ORGARGS=()
+runboot --host testhost --role homelab --yes --org-app memsync-admin --org-app-id 12345 --org-app-key-cmd "cat $BASE/app.pem" \
+  --check-app memsync-check --check-app-id 54321 --check-key-file "relative/key.pem"
+ORGARGS=(--org-token-file "$BASE/orgtoken")
+check "a relative --check-key-file is an error (exit 1), not a pause" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'must be an absolute path'" _ "$OUT"
+
+quick_exit
+
 # ============================ homelab ==========================================
 echo "--- homelab run"
 newhome homelab
@@ -332,53 +400,6 @@ runboot --host testhost --role homelab --dry-run
 check "dry run exits 0" [ "$RC" -eq 0 ]
 check "dry run creates nothing" bash -c "[ -z \"\$(find '$H' -mindepth 1 -not -name .gitconfig | head -1)\" ]"
 check "dry run makes no repo or key calls" hasnt "$STUB_DIR/gh.log" 'repo (create|deploy-key)'
-
-# --- helpers for the new-flag sections ----------------------------------------------
-# minipath <omit...>: a bin dir holding only the tools the script needs (the
-# stubs for gh, go and friends, the real rest), minus the ones named, so a
-# missing tool is really missing.
-MININ=0
-MINI_TOOLS="git python3 ssh-keygen ssh-keyscan gh systemctl launchctl claude go sed awk grep tr cut sort head tail find dirname basename cat id uname stat mktemp chmod mkdir ln rm cp mv touch date env wc tee readlink sleep sh bash shred dd tar sha256sum"
-minipath() {
-  local d="$BASE/mini.$MININ" t p; MININ=$((MININ + 1))
-  rm -rf "$d"; mkdir -p "$d"
-  for t in $MINI_TOOLS; do
-    case " $* " in *" $t "*) continue ;; esac
-    if [ -x "$STUBS/$t" ]; then ln -s "$STUBS/$t" "$d/$t"
-    elif p="$(type -P "$t")" && [ -n "$p" ]; then ln -s "$p" "$d/$t"; fi
-  done
-  printf '%s' "$d"
-}
-untouched() { [ -z "$(find "$H" -mindepth 1 -not -name .gitconfig | head -1)" ] && [ ! -s "$STUB_DIR/gh.log" ]; }
-quick_exit() { # after the new-flag sections, when BT_QUICK is set
-  [ -n "${BT_QUICK:-}" ] || return 0
-  echo; echo "passed=$PASS failed=$FAIL pending=$PENDING (BT_QUICK: stopped early)"; [ "$FAIL" -eq 0 ]; exit $?
-}
-
-# ============================ prerequisites ====================================
-echo "--- prerequisites: one line per missing tool, exit 1, nothing changed (also in --dry-run)"
-newhome pq0
-BOOT_PATH="$(minipath)" runboot --host testhost --role homelab --dry-run
-[ "$RC" -eq 0 ] || echo "$OUT" | tail -8
-check "control: a minimal PATH with every tool passes a dry run" [ "$RC" -eq 0 ]
-case "$(uname -s)" in Darwin) SVC=launchctl ;; *) SVC=systemctl ;; esac
-for mode in --dry-run --yes; do
-  for t in git python3 ssh-keygen ssh-keyscan gh $SVC go; do
-    newhome pq
-    BOOT_PATH="$(minipath "$t")" runboot --host testhost --role homelab "$mode"
-    check "without $t ($mode): exit 1 and a 'missing prerequisite: $t' line" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -qE '^missing prerequisite: $t( |\$)'" _ "$OUT"
-    check "without $t ($mode): nothing was changed" untouched
-  done
-done
-newhome pq
-BOOT_PATH="$(minipath git python3 ssh-keygen gh)" runboot --host testhost --role homelab --yes
-check "four tools missing: four lines, one each, then exit 1" bash -c "[ $RC -eq 1 ] && [ \$(printf '%s\n' \"\$1\" | grep -c '^missing prerequisite: ') -eq 4 ]" _ "$OUT"
-newhome pq
-BOOT_PATH="$(minipath)" STUB_GOVER=1.24.0 runboot --host testhost --role homelab --yes
-check "go older than go.mod: its own line, exit 1, nothing changed" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -qE '^missing prerequisite: go 1\.24 is too old \(need >= 1\.25' " _ "$OUT"
-check "go too old: nothing was changed" untouched
-
-quick_exit
 
 echo "--- org scope"
 newhome orgs
