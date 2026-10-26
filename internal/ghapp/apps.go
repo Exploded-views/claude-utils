@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/secretcmd"
 	"net/url"
 	"os"
@@ -104,17 +105,14 @@ func (a App) Validate() error {
 	return nil
 }
 
-// DefaultAppsPath is $XDG_CONFIG_HOME/claude-memsync/apps.json, or
-// ~/.config/claude-memsync/apps.json.
+// DefaultAppsPath is apps.json in config.Dir():
+// $XDG_CONFIG_HOME/claude-memsync, else ~/.config/claude-memsync.
 func DefaultAppsPath() (string, error) {
-	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "claude-memsync", "apps.json"), nil
-	}
-	home, err := os.UserHomeDir()
+	dir, err := config.Dir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".config", "claude-memsync", "apps.json"), nil
+	return filepath.Join(dir, "apps.json"), nil
 }
 
 func readApps(path string) ([]App, error) {

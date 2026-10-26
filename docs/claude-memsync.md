@@ -1025,6 +1025,18 @@ the same API calls as before, and App auth is optional. Without it, the
 `MEMSYNC_GITHUB_TOKEN`, `githubTokenFile` and `githubTokenCmd` sources behave
 exactly as described under "Where the check runs".
 
+### The config directory
+
+Everything per host and never synced (`routes.json`, `apps.json`, the age
+identity, key files) lives in one directory on every OS:
+`$XDG_CONFIG_HOME/claude-memsync`, else `~/.config/claude-memsync` (on Windows
+too: `%USERPROFILE%\.config\claude-memsync`). Earlier builds kept the age
+identity under the OS's own config dir: `~/Library/Application Support/claude-memsync`
+on macOS, `%AppData%\claude-memsync` on Windows. An identity still there keeps
+being used (a second one is never created) and `status` prints a one-time hint
+suggesting you move it. Nothing is moved automatically; to move it, copy the
+`identity*.txt` files (mode 0600) to the new directory and remove the old ones.
+
 ### apps.json
 
 `~/.config/claude-memsync/apps.json` (or `$XDG_CONFIG_HOME/claude-memsync/`) must
@@ -1569,7 +1581,7 @@ must re-clone.
 
 `init --encrypt` generates a per-host identity (hybrid under `pq`, X25519 under
 `classic`) (mode 0600; default
-`<user config dir>/claude-memsync/identity.txt`, or `--identity <file>`) and
+`~/.config/claude-memsync/identity.txt`, or `--identity <file>`) and
 prints only the **public** recipient. An existing age identity file, or an
 unencrypted SSH ed25519/RSA key (age cannot use ssh-agent, so a passphrase-protected
 key does not work for a daemon), can be used instead. Back the identity up
