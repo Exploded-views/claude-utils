@@ -715,3 +715,116 @@ func TestStartSingle_PrivateOnlyWithoutTokenSourceIsHeld(t *testing.T) {
 		t.Fatalf("a privateOnly repo with no token source started %d times", n)
 	}
 }
+
+// Across a restart: a repo with a held record on disk stays held until the
+// release check (an API answer) passes, whatever the start check says. The
+// start check is stubbed to pass, as a check skipped for want of a token
+// used to; the release check still fails, so no loop may start.
+func TestStartSingle_HeldRecordOnDiskNeedsReleaseCheck(t *testing.T) {
+	fastGuardRetry(t)
+	cfg := guardCfg(t, privateH(), true)
+	failed := loopFailedPath(cfg.SyncDir)
+	os.MkdirAll(filepath.Dir(failed), 0700)
+	if err := os.WriteFile(failed, []byte("2026-01-01T00:00:00Z "+heldMarker+"public\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	oldC, oldR := guardCheck, guardRelease
+	t.Cleanup(func() { guardCheck, guardRelease = oldC, oldR })
+	guardCheck = func(config.Config, func(string, ...any)) error { return nil }
+	var releases atomic.Int32
+	guardRelease = func(config.Config, func(string, ...any)) error {
+		releases.Add(1)
+		return errNotAPIVerified
+	}
+	var started atomic.Int32
+	old := runLoop
+	runLoop = func(ctx context.Context, l *syncpkg.Loop) error { started.Add(1); <-ctx.Done(); return nil }
+	t.Cleanup(func() { runLoop = old })
+	r, err := startSingle(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	waitFor(t, "release checks", func() bool { return releases.Load() >= 3 })
+	if n := started.Load(); n != 0 {
+		t.Fatalf("a repo held before the restart started %d times on a start check alone", n)
+	}
+	if _, err := os.Stat(failed); err != nil {
+		t.Errorf("the held record must stay: %v", err)
+	}
+}
+
+// Routed twin.
+func TestRouted_HeldRecordOnDiskNeedsReleaseCheck(t *testing.T) {
+	fastGuardRetry(t)
+	cfgs := privateRouted(t, map[string]string{"a": "git@github.com:Org/mem-project-a.git"}, routedAPI(""))
+	failed := loopFailedPath(cfgs["a"].SyncDir)
+	os.MkdirAll(filepath.Dir(failed), 0700)
+	if err := os.WriteFile(failed, []byte("2026-01-01T00:00:00Z "+heldMarker+"public\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	oldC, oldR := guardCheck, guardRelease
+	t.Cleanup(func() { guardCheck, guardRelease = oldC, oldR })
+	guardCheck = func(config.Config, func(string, ...any)) error { return nil }
+	var releases atomic.Int32
+	guardRelease = func(config.Config, func(string, ...any)) error {
+		releases.Add(1)
+		return errNotAPIVerified
+	}
+	set, err := loadRouted(os.Getenv(routesEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loops := stubLoops(t, nil)
+	r, err := set.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	waitFor(t, "release checks", func() bool { return releases.Load() >= 3 })
+	if n := loops.started("a"); n != 0 {
+		t.Fatalf("a repo held before the restart started %d times on a start check alone", n)
+	}
+}
+
+// End to end: held as public, config.json turns
+// untrusted (its token sources are dropped), the daemon restarts: the repo
+// stays held. Covered twice: by the held-record rule and by "no token source
+// holds" at start.
+func TestStartSingle_HeldThenUntrustedConfigThenRestartStaysHeld(t *testing.T) {
+	fastGuardRetry(t)
+	h := func(w http.ResponseWriter, r *http.Request) {
+		jsonH(200, repoJSON{Name: "mem-personal", Private: tb(false), Visibility: "public"})(w, r)
+	}
+	cfg := savedAndLoaded(t, guardCfg(t, h, true))
+	var started atomic.Int32
+	old := runLoop
+	runLoop = func(ctx context.Context, l *syncpkg.Loop) error { started.Add(1); <-ctx.Done(); return nil }
+	t.Cleanup(func() { runLoop = old })
+	r, err := startSingle(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the held record", func() bool {
+		b, _ := os.ReadFile(loopFailedPath(cfg.SyncDir))
+		return isHeldRecord(b)
+	})
+	if err := r.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cfg.Path(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err = startSingle(context.Background(), cfg) // the restart
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	time.Sleep(30 * time.Millisecond)
+	if n := started.Load(); n != 0 {
+		t.Fatalf("released %d times after a restart with an untrusted config", n)
+	}
+	if b, _ := os.ReadFile(loopFailedPath(cfg.SyncDir)); !isHeldRecord(b) {
+		t.Errorf("held record gone after the restart: %q", b)
+	}
+}
