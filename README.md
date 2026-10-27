@@ -14,34 +14,34 @@ work on. It watches `~/.claude/projects/<hash>/memory/`, commits each change to
 a private git repo, and pulls what your other machines learned. A custom merge
 driver, `claude-memmerge`, merges `MEMORY.md` by section, so two machines that
 add notes to the same project end up with both sets instead of a conflict.
-It is two Go binaries for Linux, macOS and Windows, with no server of its own.
+It ships as two Go binaries for Linux, macOS and Windows and needs no server.
 
-This fork adds encryption on top. With `init --encrypt` every note is encrypted
+This fork adds encryption. With `init --encrypt` every note is encrypted
 on your machine with [age](https://age-encryption.org) before git sees it, using
 hybrid post-quantum keys (ML-KEM-768 + X25519) by default, so the git host
 stores only ciphertext. It can also route each project to one of several
-private repos, and adds a reviewed join flow for new machines and a one-pass
+private repos, and it adds a reviewed join flow for new machines and a one-pass
 bootstrap for new hosts.
 
 This is a fork of [MarimerLLC/claude-utils](https://github.com/MarimerLLC/claude-utils)
 by Rockford Lhotka at [Marimer LLC](https://github.com/MarimerLLC). The daemon, the
 `MEMORY.md` merge driver, the distill skills and `claude-focus` are his work.
 
-[About this fork](#about-this-fork) · [Install](#install) · [Quickstart](#quickstart) · [How it works](#how-it-works) · [Status and roadmap](#status-and-roadmap) · [Docs](#documentation)
+[About this fork](#about-this-fork) · [Install](#install) · [Quickstart](#quickstart) · [How it works](#how-it-works) · [Status](#status) · [Docs](#documentation)
 
 ## About this fork
 
 Upstream `claude-utils` syncs one private repo per person, in plain text. That
-works well until memory holds things you would not hand to your git host, or
-until you work for more than one party and some notes must never reach some
-machines. This fork grows `claude-memsync` into an encrypted, layered memory
-store for that case. The full model (repo kinds, routing rules, default deny,
-the client boundary) is in [docs/fork.md](docs/fork.md); the threat model is in
-[docs/security.md](docs/security.md).
+stops being enough once memory holds things you would not hand to your git
+host, or once some notes must never reach some machines. This fork turns
+`claude-memsync` into an encrypted, layered memory store for that case. The
+model (repo kinds, routing, default deny, the client boundary) and how the
+fork tracks upstream are in [docs/fork.md](docs/fork.md); the threat model is
+in [docs/security.md](docs/security.md).
 
-Every change is listed in the [CHANGELOG](CHANGELOG.md) and marked either
-*upstream candidate* (useful to any `claude-memsync` user) or *fork-only* (tied
-to the fork's layered `mem-*` model). None has been proposed upstream yet.
+The [CHANGELOG](CHANGELOG.md) marks each change *upstream candidate* (useful to
+any `claude-memsync` user) or *fork-only* (tied to the layered `mem-*` model).
+None has been proposed upstream.
 
 | Change | What it adds | Kind |
 |---|---|---|
@@ -60,13 +60,8 @@ to the fork's layered `mem-*` model). None has been proposed upstream yet.
 | Host bootstrap | `scripts/bootstrap.sh`: repos, deploy keys, routes, init and join requests in one pass, dry run first, or as one paste prompt | Fork-only |
 | Fork CI | Race tests, per-package coverage floors that only rise, shellcheck and macOS portability lints, gitleaks, a release-layout test | Fork-only |
 
-### Branches and staying in sync with upstream
-
-- `main` mirrors upstream's `main`.
-- `integ/next` carries the fork's work, and releases are tagged from it
-  (`v0.3.0-ev.1` is). Build from this branch, not from `main`.
-- Fork-only workflow files say so in a header comment, and the fork's CI
-  workflow is guarded so it never runs in the upstream repository.
+`main` mirrors upstream's `main`. The fork's work and its release tags are on
+`integ/next`, so build from that branch.
 
 ## Install
 
@@ -190,8 +185,8 @@ flowchart TB
   holds only age ciphertext. Before every push the daemon checks each outgoing
   blob is ciphertext and refuses the push otherwise.
 - When both machines changed `MEMORY.md`, `claude-memmerge` unions the section
-  blocks. Conflict markers are never written into your memory; a copy that
-  cannot be merged is kept beside it as `<name>.from-remote-<random>`.
+  blocks. Conflict markers never reach `~/.claude`; a copy that cannot be
+  merged is kept beside yours as `<name>.from-remote-<random>`.
 - File names, sizes, commit times and the recipients' public keys stay visible
   to the git host. [docs/security.md](docs/security.md) lists what is and is
   not protected.
@@ -225,49 +220,23 @@ Both come from upstream unchanged.
   the Claude desktop app to the front, launching it if needed. Bind it to the
   Copilot key with PowerToys and that key opens Claude.
 
-## Status and roadmap
+## Status
 
-Pre-release. `v0.3.0-ev.1` is the fork's first release; the project is pre-1.0,
-so config format and on-disk layout can still change between minor versions.
+Pre-release and pre-1.0: config format and on-disk layout can still change.
+`v0.3.0-ev.1` is the fork's first release. Changes made since then (among them
+`join --all`, `identity backup` and the Linux autostart fix: in
+`v0.3.0-ev.1` the systemd user unit does not start after a reboot) are under
+*Unreleased* in the [CHANGELOG](CHANGELOG.md). Open work is in
+[docs/fork.md](docs/fork.md#known-follow-ups) and the
+[issues](https://github.com/Exploded-views/claude-utils/issues).
 
-On `integ/next` since that release, not yet in a release:
+## Related projects
 
-- `join accept|reject|list --all`: accept a host's requests in every repo at
-  once ([#1](https://github.com/Exploded-views/claude-utils/issues/1)).
-- `identity backup`: store each age identity through your password manager and
-  read it back to verify ([#3](https://github.com/Exploded-views/claude-utils/issues/3)),
-  plus `version --json`.
-- Bootstrap `--project`, `--skip-project` and `--jobs N` for hosts with many
-  repos ([#4](https://github.com/Exploded-views/claude-utils/issues/4)).
-- Linux autostart fix: the systemd user unit now uses `WantedBy=default.target`,
-  and a re-run `install` keeps the unit's arguments.
-
-Next, from the [open issues](https://github.com/Exploded-views/claude-utils/issues):
-
-- Consistent repo keys across hosts ([#2](https://github.com/Exploded-views/claude-utils/issues/2)).
-- A precomputed changes index so per-prompt hooks spawn no git, with
-  performance budgets in CI ([#5](https://github.com/Exploded-views/claude-utils/issues/5),
-  [#12](https://github.com/Exploded-views/claude-utils/issues/12)).
-- No crash loop when the private-only start check cannot reach a verdict
-  ([#8](https://github.com/Exploded-views/claude-utils/issues/8)), and a
-  `release <repo>` command to lift a hold deliberately ([#10](https://github.com/Exploded-views/claude-utils/issues/10)).
-- Planned and not built: `join self` (break-glass join with no member online)
-  and a safe `identity move`.
-
-The upstream candidates are the changes that could go back to
-MarimerLLC/claude-utils; none has been proposed yet.
-
-## Family
-
-- **[crewkit](https://github.com/Exploded-views/crewkit)** is the front door:
-  agent practice, memory notices and crew tooling for Claude Code. Its
-  installer fetches a pinned release of this fork's `claude-memsync` and checks
-  it against a sha256 pin.
-- **[bitc](https://github.com/Exploded-views/bitc)** offloads heavy commands to
-  pluggable cloud providers under a spend cap, with local slot gating as the
-  fallback.
-- **yo-human** (in design) will be the one way AI agents reach their human, as
-  a CLI that delivers through channels such as PagerDuty and ntfy.
+- **[crewkit](https://github.com/Exploded-views/crewkit)**: agent practice,
+  memory notices and crew tooling for Claude Code. Its installer fetches a
+  pinned release of this fork's `claude-memsync` and checks its sha256.
+- **[bitc](https://github.com/Exploded-views/bitc)**: offloads heavy commands
+  to pluggable cloud providers under a spend cap, falling back to local slots.
 
 ## Documentation
 
@@ -305,36 +274,24 @@ MarimerLLC/claude-utils; none has been proposed yet.
 
 ## Development
 
-The repo ships a pre-commit hook that runs the same `gofmt` check as CI, so
-formatting problems surface locally instead of after a push. Enable it once per
+A pre-commit hook runs the same `gofmt` check as CI. Enable it once per
 clone:
 
 ```sh
 git config core.hooksPath .githooks
 ```
 
-It only inspects staged `.go` files and blocks the commit if any are not
-gofmt-clean, printing the `gofmt -w ...` command to fix them. `go vet`, the race
+It checks staged `.go` files only and prints the `gofmt -w` command that fixes
+them. `go vet`, the race
 tests and the coverage floors run in CI ([docs/ci.md](docs/ci.md)); run the
 same coverage check locally with `make cover cover-check`.
 
 ## Releasing
 
-Versions follow [SemVer](https://semver.org), `vMAJOR.MINOR.PATCH`, with a
-suffix for the fork's own releases (`v0.3.0-ev.1`). While on `0.x`:
-
-| Change | Bump |
-|---|---|
-| Bug fix, internal refactor, doc update | patch (`v0.1.7` to `v0.1.8`) |
-| Behavior change, new feature, default change, new config field | minor (`v0.1.x` to `v0.2.0`) |
-| Breaking change to config format, on-disk layout, or CLI surface | minor while pre-1.0, called out clearly in the tag message |
-
-After 1.0 the standard SemVer rules apply (breaking to major, additive to minor,
-fix to patch), and a `v2+` would need a `/v2` suffix in the Go module path.
-Publishing a GitHub Release runs `.github/workflows/release.yml`, which builds
-and uploads the archives and `SHA256SUMS`. The steps, recovering a missed run,
-local versioned builds and how `version` is resolved are in
-[docs/releases.md](docs/releases.md#cutting-a-release).
+Versions follow [SemVer](https://semver.org); the fork's own releases carry an
+`-ev.N` suffix. Publishing a GitHub Release runs `.github/workflows/release.yml`,
+which builds the archives and `SHA256SUMS`. The version rules and the steps are
+in [docs/releases.md](docs/releases.md#cutting-a-release).
 
 ## License
 

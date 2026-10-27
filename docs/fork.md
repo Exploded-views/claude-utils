@@ -11,10 +11,27 @@ steps are in [setup.md](setup.md), the threat model in
 CI in [ci.md](ci.md), and user-visible changes in
 [../CHANGELOG.md](../CHANGELOG.md).
 
-The fork grows `claude-memsync` from "one private repo per person" into an
+The fork turns `claude-memsync` from "one private repo per person" into an
 encrypted, layered memory store for people who work across several machines
 and several confidential contexts. The other tools (`distill`, `claude-focus`)
 are as upstream ships them.
+
+## Relationship to upstream
+
+This repo is a fork of
+[MarimerLLC/claude-utils](https://github.com/MarimerLLC/claude-utils), under
+the same MIT licence and copyright.
+
+- `main` mirrors upstream's `main` and carries no fork changes.
+- `integ/next` holds the fork's work. Releases are tagged from it with an
+  `-ev.N` suffix (`v0.3.0-ev.1`) that keeps them apart from upstream's tags.
+- The Go module path stays `github.com/MarimerLLC/claude-utils`.
+- Upstream's `ci.yml` stays; the fork's own checks are in `fork-ci.yml`, whose
+  jobs are skipped in upstream's repository. Files the fork changes for its
+  own needs, such as `release.yml`, say so in a header comment.
+- [CHANGELOG.md](../CHANGELOG.md) lists every fork change and marks it
+  *upstream candidate* or *fork-only*. That label describes the change; it is
+  not a plan to send it upstream, and none has been proposed.
 
 ## Layered memory
 
@@ -92,7 +109,7 @@ The work tree and the Claude folders stay plain text.
 ## Quickstart (fork)
 
 ```sh
-git clone <fork-url> claude-utils && cd claude-utils
+git clone -b integ/next https://github.com/Exploded-views/claude-utils.git && cd claude-utils
 go build -o ~/.local/bin/ ./cmd/claude-memsync ./cmd/claude-memmerge
 # once per org: create the org, register the two GitHub Apps, make the recovery key
 #   -> setup.md "First machine"
@@ -124,17 +141,18 @@ instead; see [releases.md](releases.md).
 
 ## Known follow-ups
 
-Open work on the fork, tracked as GitHub issues at
-<https://github.com/Exploded-views/claude-utils>. None of it is in this
-release; the behaviour described elsewhere in these docs is what ships.
+Open work, tracked as [GitHub issues](https://github.com/Exploded-views/claude-utils/issues).
+None of it is in a release; the rest of these docs describe what ships.
 
 | Issue | What |
 |---|---|
-| [#1](https://github.com/Exploded-views/claude-utils/issues/1) | `join accept --all`: accept a host's pending requests across every repo in one command (today: one `join accept` per repo) |
-| [#2](https://github.com/Exploded-views/claude-utils/issues/2) | Consistent repo keys across hosts. The keys in `routes.json` can differ between hosts, so a command printed on one host (such as the `join accept` line) can fail on another; `--repo` already accepts the GitHub repo name for that reason. The fix derives keys from the repo name, with aliases for existing hosts (a migration) |
-| [#4](https://github.com/Exploded-views/claude-utils/issues/4) | Faster, selectable setup for a host with many repos |
-| [#5](https://github.com/Exploded-views/claude-utils/issues/5) | A precomputed changes index, so per-prompt hooks spawn no git, and performance budgets ratcheted in CI (planned, see [ci.md](ci.md#performance-budgets-planned)) |
-| [#6](https://github.com/Exploded-views/claude-utils/issues/6) | Deterministic `internal/sync` coverage: its coverage varies with host load close to its floor, so CI can flake. The fix makes the timing-dependent tests deterministic; the floor is not lowered |
+| [#1](https://github.com/Exploded-views/claude-utils/issues/1) | `join accept --all`: accept a host's requests in every repo at once. Built on `integ/next`, not yet released |
+| [#2](https://github.com/Exploded-views/claude-utils/issues/2) | Consistent repo keys across hosts. Keys in `routes.json` can differ between hosts, so a command printed on one host can fail on another; `--repo` already accepts the GitHub repo name for that reason |
+| [#3](https://github.com/Exploded-views/claude-utils/issues/3) | `identity backup`: store the age identity through a password manager and verify it. Built on `integ/next`, not yet released |
+| [#4](https://github.com/Exploded-views/claude-utils/issues/4) | Faster, selectable setup for a host with many repos (bootstrap `--project`, `--skip-project`, `--jobs`). Built on `integ/next`, not yet released |
+| [#5](https://github.com/Exploded-views/claude-utils/issues/5) | A precomputed changes index, so per-prompt hooks spawn no git, with performance budgets in CI (see [ci.md](ci.md#performance-budgets-planned)) |
+| [#6](https://github.com/Exploded-views/claude-utils/issues/6) | Deterministic `internal/sync` coverage, so CI does not flake near its floor; the floor is not lowered |
+| [#8](https://github.com/Exploded-views/claude-utils/issues/8), [#10](https://github.com/Exploded-views/claude-utils/issues/10) | No crash loop when the private-only start check cannot reach a verdict, and a `release <repo>` command to lift a hold on purpose |
 
 Also planned and not built: `join self` (break-glass join with no member
 online), see [setup.md](setup.md#break-glass-join-self-planned).

@@ -170,37 +170,47 @@ want the Copilot-key helper ([claude-focus.md](claude-focus.md)).
 
 ## Cutting a release
 
-Tagging is the owner's decision: nobody tags or publishes a Release without the
-owner's say-so, and this repo's docs do not name the next version. The version
-rules are in the README's "Releasing" section. The examples below use
-`v0.1.8`; the fork's own releases so far (`v0.3.0-ev.1`) are cut from
-`integ/next`, so pass that branch as the target.
+Only the owner tags or publishes a Release, and this repo's docs do not name
+the next version. The fork's
+releases are cut from `integ/next`, so pass that branch as the target.
+
+Versions follow [SemVer](https://semver.org), `vMAJOR.MINOR.PATCH`, with an
+`-ev.N` suffix for the fork's own releases. While on `0.x`:
+
+| Change | Bump |
+|---|---|
+| Bug fix, internal refactor, doc update | patch |
+| Behavior change, new feature, default change, new config field | minor |
+| Breaking change to config format, on-disk layout or CLI surface | minor while pre-1.0, called out in the tag message |
+
+After 1.0 the usual SemVer rules apply, and a `v2+` needs a `/v2` suffix in the
+Go module path.
 
 1. Land all changes on the release branch and confirm CI is green.
 2. Create a GitHub Release for the version. Either:
 
    ```sh
-   gh release create v0.1.8 \
-     --title "v0.1.8" \
+   gh release create <tag> \
+     --title "<tag>" \
      --notes "- <bullet summary of user-visible changes>" \
      --target <branch>
    ```
 
-   or use the GitHub UI (Releases, Draft a new release, choose tag `v0.1.8`
+   or use the GitHub UI (Releases, Draft a new release, choose the tag
    and the target branch, fill in title and notes, **Publish**).
 
 3. Publishing the Release fires `.github/workflows/release.yml`, which runs
    `scripts/package-release.sh`: it cross-compiles both binaries for
    {linux, darwin, windows} x {amd64, arm64} (plus `claude-focus.exe` for
    Windows), stamps the version in via `-ldflags`, packages each target as
-   `claude-utils-v0.1.8-<os>-<arch>.{tar.gz,zip}`, generates `SHA256SUMS`, and
-   uploads everything to the Release. About a minute.
+   `claude-utils-<tag>-<os>-<arch>.{tar.gz,zip}`, generates `SHA256SUMS`, and
+   uploads everything to the Release.
 
 4. Watch the run finish:
 
    ```sh
    gh run watch
-   gh release view v0.1.8     # confirms the assets are attached
+   gh release view <tag>      # confirms the assets are attached
    ```
 
 5. Upgrade your own machines as in [Upgrade an installed host by
@@ -215,23 +225,22 @@ Release was created from a pre-existing tag via the API. Two recovery paths:
   tag without touching the Release.
 
   ```sh
-  gh workflow run release.yml --field tag=v0.1.8
+  gh workflow run release.yml --field tag=<tag>
   gh run watch
   ```
 
-  This re-uses the same build and upload steps, and the existing Release picks
-  up the assets.
+  It runs the same build and upload steps against the existing Release.
 
-- **Recreate the Release**: `gh release delete v0.1.8 --cleanup-tag=false`,
-  then recreate it. That sometimes nudges GitHub into firing the event. Manual
-  dispatch is simpler; prefer it unless you also need to fix release notes.
+- **Recreate the Release**: `gh release delete <tag> --cleanup-tag=false`,
+  then create it again, which can make GitHub fire the event. Use this only if
+  you also need to fix the release notes.
 
-The same manual dispatch builds archives for any tag that doesn't yet have
-them, or for any Release whose previous build run failed.
+Manual dispatch also builds archives for a tag that has none yet, or after a
+failed run.
 
 The upload never overwrites an asset that is already attached, so a published
 archive and its `SHA256SUMS` never change under a tag. If a failed run left
-some assets behind, delete them first (`gh release delete-asset v0.1.8 <name>`),
+some assets behind, delete them first (`gh release delete-asset <tag> <name>`),
 then dispatch again.
 
 ### Building locally without a release
@@ -263,5 +272,4 @@ The module path stays `github.com/MarimerLLC/claude-utils` in this fork.
 3. `vcs.revision` from the embedded build settings, when the toolchain gives no main-module version: yields `dev+<short-sha>` (or `dev+<short-sha>-dirty` if the working tree had uncommitted changes at build time).
 4. The literal `dev`: only seen if Go embedded no VCS info (for example when building from outside a git checkout).
 
-So a plain `go build` always produces a binary whose `version` subcommand says
-something useful, with no Makefile or build script required for development.
+So a plain `go build` gives a useful `version` with no build script.
