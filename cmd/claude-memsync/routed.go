@@ -709,3 +709,15 @@ func (s *routedSet) publishExpiries() {
 		}
 	}
 }
+
+// Private-only hold (scaffold for the RED tests; no behaviour yet).
+var (
+	guardBackoffMin = 10 * time.Second
+	guardBackoffMax = 30 * time.Minute
+	guardCheck      = daemonGuard
+	guardWait       = func(ctx context.Context, d time.Duration) bool { return false }
+)
+
+func awaitPrivate(ctx context.Context, name string, cfg config.Config, first error) bool {
+	return false
+}
