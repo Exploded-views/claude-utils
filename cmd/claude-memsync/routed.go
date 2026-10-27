@@ -785,3 +785,6 @@ func (s *routedSet) publishExpiries() {
 		}
 	}
 }
+
+// heldMarker (scaffold for the RED tests; not yet written or read).
+const heldMarker = "private-only hold: "

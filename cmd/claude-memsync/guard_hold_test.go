@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -273,7 +274,7 @@ func TestStartSingle_GuardFailureHoldsThenStarts(t *testing.T) {
 func TestProgramStart_AppNotInstalledHoldsUntilInstalled(t *testing.T) {
 	fastGuardRetry(t)
 	var installed atomic.Bool
-	var lookups atomic.Int32
+	var lookups, repoHits atomic.Int32
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/installation"):
@@ -287,6 +288,7 @@ func TestProgramStart_AppNotInstalledHoldsUntilInstalled(t *testing.T) {
 			w.WriteHeader(201)
 			fmt.Fprintf(w, `{"token":%q,"expires_at":%q}`, appTestToken, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
 		case strings.HasPrefix(r.URL.Path, "/repos/"):
+			repoHits.Add(1)
 			if r.Header.Get("Authorization") != "Bearer "+appTestToken {
 				w.WriteHeader(401)
 				return
@@ -304,8 +306,15 @@ func TestProgramStart_AppNotInstalledHoldsUntilInstalled(t *testing.T) {
 		t.Fatal(err)
 	}
 	var started atomic.Int32
+	var pushOK atomic.Bool
 	old := runLoop
-	runLoop = func(ctx context.Context, l *syncpkg.Loop) error { started.Add(1); <-ctx.Done(); return nil }
+	runLoop = func(ctx context.Context, l *syncpkg.Loop) error {
+		before := repoHits.Load()
+		pushOK.Store(l.PushAllowed != nil && l.PushAllowed() && repoHits.Load() > before)
+		started.Add(1)
+		<-ctx.Done()
+		return nil
+	}
 	t.Cleanup(func() { runLoop = old })
 	p := &program{configPath: cfg.Path()}
 	if err := p.Start(nil); err != nil {
@@ -322,8 +331,147 @@ func TestProgramStart_AppNotInstalledHoldsUntilInstalled(t *testing.T) {
 	}
 	installed.Store(true)
 	waitFor(t, "the loop to start after the install", func() bool { return started.Load() == 1 })
+	if !pushOK.Load() {
+		t.Error("the released loop's push guard must allow and re-check against the API (built after the passing check)")
+	}
 	waitFor(t, "the held state to clear", func() bool {
 		_, err := os.Stat(loopFailedPath(cfg.SyncDir))
 		return os.IsNotExist(err)
 	})
+}
+
+// B1: a token source that is configured but gives no token (a failing token
+// command, an empty token file) is an unverifiable check, not "no token
+// configured": the repo must be held, never passed.
+func TestDaemonGuard_ConfiguredSourceGivingNoTokenHolds(t *testing.T) {
+	logf := func(string, ...any) {}
+	failing := guardCfg(t, privateH(), false)
+	failing.GitHubTokenCmd = []string{tokScript(t, "exit 1")}
+	if err := daemonGuard(failing, logf); err == nil {
+		t.Error("a failing token command must fail the check")
+	}
+	empty := guardCfg(t, privateH(), false)
+	f := filepath.Join(t.TempDir(), "tok")
+	if err := os.WriteFile(f, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	empty.GitHubTokenFile = f
+	if err := daemonGuard(empty, logf); err == nil {
+		t.Error("an empty token file must fail the check")
+	}
+}
+
+// B1 end to end: a repo held as public must stay held when the token command
+// later fails; a failed retry is never a pass.
+func TestStartSingle_PublicThenTokenFailsStaysHeld(t *testing.T) {
+	fastGuardRetry(t)
+	var checks atomic.Int32
+	h := func(w http.ResponseWriter, r *http.Request) {
+		checks.Add(1)
+		jsonH(200, repoJSON{Name: "mem-personal", Private: tb(false), Visibility: "public"})(w, r)
+	}
+	cfg := guardCfg(t, h, false)
+	flag := filepath.Join(t.TempDir(), "token-works")
+	if err := os.WriteFile(flag, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.GitHubTokenCmd = []string{tokScript(t, "[ -e "+flag+" ] || exit 1; echo "+cmdTok)}
+	var started atomic.Int32
+	old := runLoop
+	runLoop = func(ctx context.Context, l *syncpkg.Loop) error { started.Add(1); <-ctx.Done(); return nil }
+	t.Cleanup(func() { runLoop = old })
+	r, err := startSingle(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	waitFor(t, "the public answer", func() bool { return checks.Load() >= 1 })
+	os.Remove(flag) // the token command now fails
+	b0, _ := os.ReadFile(loopFailedPath(cfg.SyncDir))
+	waitFor(t, "a few failed retries", func() bool {
+		b, _ := os.ReadFile(loopFailedPath(cfg.SyncDir))
+		return string(b) != string(b0) && strings.Contains(string(b), "token")
+	})
+	time.Sleep(20 * time.Millisecond)
+	if n := started.Load(); n != 0 {
+		t.Fatalf("a repo held as public was released %d times after its token command failed", n)
+	}
+}
+
+// B1, push side: a push guard built while a configured source gives no token
+// blocks pushes (no fall back to local checks only), and asks the API once the
+// source works again.
+func TestPushWatch_ConfiguredSourceGivingNoTokenBlocksUntilItWorks(t *testing.T) {
+	var hits atomic.Int32
+	h := func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		privateH()(w, r)
+	}
+	cfg := guardCfg(t, h, false)
+	flag := filepath.Join(t.TempDir(), "token-works")
+	cfg.GitHubTokenCmd = []string{tokScript(t, "[ -e "+flag+" ] || exit 1; echo "+cmdTok)}
+	allowed := pushWatch(cfg, func(string, ...any) {})
+	if allowed == nil {
+		t.Fatal("no push guard")
+	}
+	if allowed() {
+		t.Fatal("pushes must be blocked while the configured token source gives no token")
+	}
+	if err := os.WriteFile(flag, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if !allowed() {
+		t.Fatal("pushes must resume once the source works and the repo is private")
+	}
+	if hits.Load() == 0 {
+		t.Error("the recovered push guard never asked the API")
+	}
+}
+
+// S1: a held marker left by a stopped daemon is cleared when the next start's
+// first check passes (single-repo mode has no supervisor to clear it).
+func TestStartSingle_StaleHeldMarkerClearedWhenCheckPasses(t *testing.T) {
+	cfg := guardCfg(t, privateH(), true)
+	failed := loopFailedPath(cfg.SyncDir)
+	os.MkdirAll(filepath.Dir(failed), 0700)
+	if err := os.WriteFile(failed, []byte("2026-01-01T00:00:00Z "+heldMarker+"x\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	old := runLoop
+	runLoop = func(ctx context.Context, l *syncpkg.Loop) error { <-ctx.Done(); return nil }
+	t.Cleanup(func() { runLoop = old })
+	r, err := startSingle(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	if _, err := os.Stat(failed); !os.IsNotExist(err) {
+		t.Errorf("stale held marker kept after a passing start check: %v", err)
+	}
+}
+
+// S3: a check that passes after the daemon was told to stop releases nothing.
+func TestAwaitPrivate_PassAfterStopReleasesNothing(t *testing.T) {
+	oldCheck, oldMin := guardCheck, guardBackoffMin
+	t.Cleanup(func() { guardCheck, guardBackoffMin = oldCheck, oldMin })
+	guardBackoffMin = time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	guardCheck = func(config.Config, func(string, ...any)) error {
+		cancel() // Stop arrives while the check is in flight
+		return nil
+	}
+	if awaitPrivate(ctx, "x", config.Config{SyncDir: t.TempDir()}, errors.New("first")) {
+		t.Fatal("a pass that lands after Stop must not release the repo")
+	}
+}
+
+// N3: only a held marker reads as held; a dying loop whose error happens to
+// say "repo held" is still a stopped loop.
+func TestLoopFailedLine_MarkerNotPhrase(t *testing.T) {
+	if l := loopFailedLine([]byte("t " + heldMarker + "x")); !strings.HasPrefix(l, "waiting for the private-only check") {
+		t.Errorf("held marker: %q", l)
+	}
+	if l := loopFailedLine([]byte("t watch failed: repo held by another tool")); !strings.HasPrefix(l, "loop stopped") {
+		t.Errorf("phrase misread as held: %q", l)
+	}
 }
