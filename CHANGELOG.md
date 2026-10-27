@@ -9,7 +9,7 @@ fork are upstream's own releases.
 
 Nothing yet.
 
-## v0.3.0-ev.2 (2026-10-27)
+## v0.4.0-ev.1 (2026-10-27)
 
 Upgrading from `v0.3.0-ev.1`: on Linux, `claude-memsync install` (re-run) or `claude-memsync start` repairs the unit. On macOS an existing launchd agent is not rewritten; run `claude-memsync stop`, `claude-memsync uninstall`, then `claude-memsync install` with the same `--config`/`--routes` as before, then `claude-memsync start`, so the agent gets `RunAtLoad`.
 
