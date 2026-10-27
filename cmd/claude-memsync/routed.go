@@ -454,7 +454,7 @@ func startSingle(ctx context.Context, cfg config.Config) (*running, error) {
 		l.Release()
 		return nil, fmt.Errorf("refresh encryption settings: %w", err)
 	}
-	first := guardCheck(cfg, log.Printf)
+	first := startCheck(cfg)
 	ctx, cancel := context.WithCancel(ctx)
 	loop := &syncpkg.Loop{Cfg: cfg}
 	if first == nil {
@@ -490,7 +490,7 @@ func (s *routedSet) Start(ctx context.Context) (*running, error) {
 	// repo that fails it is held (see awaitPrivate); the others sync meanwhile.
 	unverified := map[string]error{}
 	for _, name := range s.names() {
-		if err := guardCheck(s.Cfgs[name], log.Printf); err != nil {
+		if err := startCheck(s.Cfgs[name]); err != nil {
 			unverified[name] = err
 		}
 	}
@@ -616,6 +616,17 @@ var (
 		}
 	}
 )
+
+// startCheck is the first private-only check of a repo at daemon start. A
+// repo held when the daemon last stopped (a held record on disk) stays held
+// until the release check passes on an API answer: a restart is not a way
+// out of a hold.
+func startCheck(cfg config.Config) error {
+	if b, err := os.ReadFile(loopFailedPath(cfg.SyncDir)); err == nil && isHeldRecord(b) {
+		return guardRelease(cfg, log.Printf)
+	}
+	return guardCheck(cfg, log.Printf)
+}
 
 // awaitPrivate holds a repo whose check failed with first, re-running the
 // check until it passes (true) or ctx ends (false).
