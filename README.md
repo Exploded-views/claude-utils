@@ -185,8 +185,9 @@ flowchart TB
   holds only age ciphertext. Before every push the daemon checks each outgoing
   blob is ciphertext and refuses the push otherwise.
 - When both machines changed `MEMORY.md`, `claude-memmerge` unions the section
-  blocks. Conflict markers never reach `~/.claude`; a copy that cannot be
-  merged is kept beside yours as `<name>.from-remote-<random>`.
+  blocks. Conflict markers never reach `~/.claude`. Only `MEMORY.md` is
+  merged: when another note differs on both sides, your Claude copy is kept and
+  the remote copy is saved in the sync work tree as `<name>.from-remote-<random>`.
 - File names, sizes, commit times and the recipients' public keys stay visible
   to the git host. [docs/security.md](docs/security.md) lists what is and is
   not protected.
@@ -224,9 +225,10 @@ Both come from upstream unchanged.
 
 Pre-release and pre-1.0: config format and on-disk layout can still change.
 `v0.3.0-ev.1` is the fork's first release. Changes made since then (among them
-`join --all`, `identity backup` and the Linux autostart fix: in
-`v0.3.0-ev.1` the systemd user unit does not start after a reboot) are under
-*Unreleased* in the [CHANGELOG](CHANGELOG.md). Open work is in
+`join --all`, `identity backup` and the autostart fix: in `v0.3.0-ev.1` the
+Linux systemd user unit does not start after a reboot and the macOS launchd
+agent does not start at login) are under *Unreleased* in the
+[CHANGELOG](CHANGELOG.md). Open work is in
 [docs/fork.md](docs/fork.md#known-follow-ups) and the
 [issues](https://github.com/Exploded-views/claude-utils/issues).
 

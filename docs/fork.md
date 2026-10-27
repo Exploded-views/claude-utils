@@ -151,7 +151,6 @@ None of it is in a release; the rest of these docs describe what ships.
 | [#3](https://github.com/Exploded-views/claude-utils/issues/3) | `identity backup`: store the age identity through a password manager and verify it. Built on `integ/next`, not yet released |
 | [#4](https://github.com/Exploded-views/claude-utils/issues/4) | Faster, selectable setup for a host with many repos (bootstrap `--project`, `--skip-project`, `--jobs`). Built on `integ/next`, not yet released |
 | [#5](https://github.com/Exploded-views/claude-utils/issues/5) | A precomputed changes index, so per-prompt hooks spawn no git, with performance budgets in CI (see [ci.md](ci.md#performance-budgets-planned)) |
-| [#6](https://github.com/Exploded-views/claude-utils/issues/6) | Deterministic `internal/sync` coverage, so CI does not flake near its floor; the floor is not lowered |
 | [#8](https://github.com/Exploded-views/claude-utils/issues/8), [#10](https://github.com/Exploded-views/claude-utils/issues/10) | No crash loop when the private-only start check cannot reach a verdict, and a `release <repo>` command to lift a hold on purpose |
 
 Also planned and not built: `join self` (break-glass join with no member
