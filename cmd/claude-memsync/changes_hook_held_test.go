@@ -291,3 +291,75 @@ func TestHeldAlerts_RepoNameIsSanitized(t *testing.T) {
 		t.Fatalf("name not sanitized: %q", lines)
 	}
 }
+
+// The per-session marker is read like the record: bounded and regular-file
+// only. A FIFO in its place must not block the hook; the alert still goes out.
+func TestHook_HeldMarkerFIFOIsSkippedQuickly(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRecord(t, cfgPath, "2026-10-26T02:50:29Z "+heldMarker+"check failed\n")
+	mark := filepath.Join(cfg.SyncDir, ".state", "hook-markers", "sess-m.held")
+	os.MkdirAll(filepath.Dir(mark), 0o700)
+	if err := mkfifo(mark); err != nil {
+		t.Skipf("mkfifo: %v", err)
+	}
+	in := hookJSON("sess-m", "/home/alice/src/app", "UserPromptSubmit")
+	type res struct {
+		code int
+		out  string
+	}
+	done := make(chan res, 1)
+	go func() {
+		code, out, _ := runHook(t, in, "--config", cfgPath, "--hook", "--deadline", "0")
+		done <- res{code, out}
+	}()
+	select {
+	case r := <-done:
+		if r.code != 0 || !strings.Contains(hookContext(t, r.out), "is HELD") {
+			t.Errorf("exit %d context %q: want the alert", r.code, hookContext(t, r.out))
+		}
+	case <-time.After(3 * time.Second):
+		if f, err := os.OpenFile(mark, os.O_WRONLY|syscallNonblock(), 0); err == nil {
+			f.Close()
+		}
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+		}
+		t.Error("the hook blocked on the session marker (no deadline set)")
+	}
+}
+
+// The marker is written through a fresh temp file, never a fixed name: a
+// symlink planted at the old fixed name must not be followed. The marker
+// still works (the second prompt gets no repeat).
+func TestHook_HeldMarkerWriteDoesNotFollowSymlink(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRecord(t, cfgPath, "2026-10-26T02:50:29Z "+heldMarker+"check failed\n")
+	mark := filepath.Join(cfg.SyncDir, ".state", "hook-markers", "sess-s.held")
+	os.MkdirAll(filepath.Dir(mark), 0o700)
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, mark+".tmp"); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	in := hookJSON("sess-s", "/home/alice/src/app", "UserPromptSubmit")
+	if _, out, _ := runHook(t, in, "--config", cfgPath, "--hook", "--deadline", "0"); !strings.Contains(hookContext(t, out), "is HELD") {
+		t.Fatalf("first prompt: no alert in %q", hookContext(t, out))
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "keep\n" {
+		t.Errorf("the marker write followed a symlink: victim now %q", b)
+	}
+	if _, out, _ := runHook(t, in, "--config", cfgPath, "--hook", "--deadline", "0"); strings.Contains(hookContext(t, out), "is HELD") {
+		t.Error("second prompt repeated the alert: the marker was not written")
+	}
+}
