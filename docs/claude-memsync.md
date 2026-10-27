@@ -964,14 +964,15 @@ error, never a silent fall-through to the next. The token is never written to
 |---|---|---|
 | `init` | yes | Refuses before cloning or pushing if the remote is not a private `mem-*` repo, or if it cannot check. |
 | `doctor` | yes | Non-zero exit if it cannot check. |
-| daemon start | no | With a token: a repo that fails the check (not private, or the check itself fails, such as a GitHub App lookup error) is held: its loop does not start, `status` shows `waiting for the private-only check, re-checking with backoff: …`, and the check is retried from 10 s, doubling to every 30 min, until it passes; other repos sync meanwhile and the daemon stays up. A configured token source that gives no token (a failing `githubTokenCmd`, an empty `githubTokenFile`, an unset `githubTokenEnv`, an App that mints nothing) counts as a failed check, not as "no token": the repo is held, and its push guard blocks pushes until the source works again and the API says private. A held repo is released only when the API says private, also across a daemon restart (a hold recorded in `.state/loop-failed` is honoured at start), never by a check skipped for want of a token (for example after `config.json` stops being trusted and its token sources are ignored). With no token source configured at all (or `recheckTokenCmd: false` with only a command) the daemon cannot check, so every `privateOnly` repo is held the same way: give the host a check App (`githubApp`) or a `githubTokenFile`. |
+| daemon start | no | With a token: a repo that fails the check (not private, or the check itself fails, such as a GitHub App lookup error) is held: its loop does not start, `status` shows `waiting for the private-only check, re-checking with backoff: …`, and the check is retried from 10 s, doubling to every 30 min, until it passes; other repos sync meanwhile and the daemon stays up. A configured token source that gives no token (a failing `githubTokenCmd`, an empty `githubTokenFile`, an unset `githubTokenEnv`, an App that mints nothing) counts as a failed check, not as "no token": the repo is held, and its push guard blocks pushes until the source works again and the API says private. A held repo is released only when the API says private, also across a daemon restart (a hold recorded in `.state/loop-failed` is honoured at start), never by a check skipped for want of a token (for example after `config.json` stops being trusted and its token sources are ignored). With no token source configured at all (or `recheckTokenCmd: false` with only a command) the daemon cannot check, so every `privateOnly` repo is held the same way: give the host a check App (`githubApp`) or a `githubTokenFile`. The daemon reads `config.json` only at start, so after adding a token source restart the service: `claude-memsync stop`, then `claude-memsync start` (they run `launchctl` on macOS and `systemctl --user` on Linux). A hold also outlives `privateOnly` being switched off: `status` then says `held from an earlier run` with the release step, which is deliberate and manual: stop the service, delete the repo's `.state/loop-failed`, start it. |
 
 With `privateOnly` on and a token configured, the daemon also re-checks at most
 once an hour (conditional request with the ETag; 304 means unchanged). If the
 repo is no longer private it stops pushing but keeps committing locally, logs one
 line per state change, and `claude-memsync status` says so. A failed API call
 keeps the last known state, is logged once, and does not block. Without a token
-there is no re-check; schedule `doctor`.
+the daemon cannot check at all, so every `privateOnly` repo is held (see the
+table above).
 
 ### Token from a command
 
@@ -991,12 +992,13 @@ is run). `doctor` and `repo create` do not save it; `init` saves the command
 - The command is honoured only from a trusted `config.json` (see "Which
   config.json keys are trusted" below); a command typed as `--token-cmd` is
   always honoured.
-- A command that fails, times out or prints nothing means *no token*: the
-  existing no-token behaviour applies (init and doctor refuse; the daemon
-  skips the API check).
+- A command that fails, times out or prints nothing is a failed check: init
+  and doctor refuse, and the daemon holds the repo (re-checked with backoff)
+  until the command gives a token the API accepts.
 - The daemon's hourly visibility re-check runs the command too. Set
   `"recheckTokenCmd": false` to keep the daemon from running it (then the
-  re-check needs a file or env token, or does not run).
+  daemon needs a check App or a token file; without one every `privateOnly`
+  repo is held).
 
 ### Which config.json keys are trusted
 
@@ -1034,9 +1036,9 @@ Remotes must also be on the allowed git host: `github.com`, or `githubHost`
 directly; ssh forms, including aliases like `gh-mem-personal`, are resolved with
 `ssh -G` and must land on it. The push URL git actually uses
 (`git remote get-url --push origin`, after `insteadOf` rewrites) must equal the
-configured remote, checked at `init` and daemon start. Without a token the
-daemon still runs the name, host and push-URL checks and skips only the API
-check. The hourly re-check also stops pushing after `recheckMaxFailures`
+configured remote, checked at `init` and daemon start. The name, host and
+push-URL checks run with or without a token; without one the API check cannot
+run, so the repo is held. The hourly re-check also stops pushing after `recheckMaxFailures`
 consecutive failures or `recheckMaxAgeHours` without a success (defaults 24 and
 24). The timer needs `githubTokenFile` set; install refuses otherwise. `githubHost`
 must pair with the API: github.com with api.github.com, or another host with

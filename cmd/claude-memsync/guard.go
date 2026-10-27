@@ -189,6 +189,11 @@ func daemonGuard(cfg config.Config, logf func(format string, args ...any)) error
 // was skipped for want of a token source (none configured, or config.json no
 // longer trusted so its sources are dropped) never releases a held repo.
 func releaseCheck(cfg config.Config, logf func(format string, args ...any)) error {
+	if !cfg.ForDaemon().PrivateOnly {
+		// Decision: switching privateOnly off does not lift a hold; release
+		// is a deliberate manual step.
+		return heldEarlierError(cfg.SyncDir)
+	}
 	asked, err := privateCheck(cfg, logf)
 	if err != nil {
 		return err
@@ -198,6 +203,25 @@ func releaseCheck(cfg config.Config, logf func(format string, args ...any)) erro
 	}
 	return nil
 }
+
+// errHeldEarlier: a repo held when the daemon last stopped, whose config no
+// longer asks for the private-only check. awaitPrivate shows this message as
+// is, so it starts with the real reason.
+var errHeldEarlier = errors.New("held from an earlier run")
+
+func heldEarlierError(syncDir string) error {
+	return fmt.Errorf("%w: privateOnly is off now, which does not lift a private-only hold; to release it, stop the service (claude-memsync stop, which runs launchctl on macOS and systemctl --user on Linux), delete %s, then claude-memsync start", errHeldEarlier, loopFailedPath(syncDir))
+}
+
+// noTokenError is errNoToken with a message fitted to the config: when
+// recheckTokenCmd is false the daemon never runs githubTokenCmd, so the
+// message names only the sources it can use.
+type noTokenError struct{ msg string }
+
+func (e noTokenError) Error() string        { return e.msg }
+func (e noTokenError) Is(target error) bool { return target == errNoToken }
+
+var errNoTokenCmdOff = noTokenError{"no GitHub token the daemon can use: recheckTokenCmd is false, so the token command is not run here; set githubApp (a check App) or githubTokenFile, then restart the service"}
 
 var errNotAPIVerified = errors.New("no GitHub token source the daemon can use, so the repo cannot be verified private; a held repo stays held")
 
@@ -221,6 +245,9 @@ func privateCheck(cfg config.Config, logf func(format string, args ...any)) (boo
 	if c == nil {
 		if tokenSourceConfigured(cfg) {
 			return false, errSourceGaveNoToken
+		}
+		if cfg.RecheckTokenCmd != nil && !*cfg.RecheckTokenCmd {
+			return false, errNoTokenCmdOff
 		}
 		return false, errNoToken // privateOnly needs a check the daemon can run
 	}

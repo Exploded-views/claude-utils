@@ -639,6 +639,9 @@ func awaitPrivate(ctx context.Context, name string, cfg config.Config, first err
 	backoff := guardBackoffMin
 	for err := first; err != nil; err = guardRelease(cfg, log.Printf) {
 		msg := heldMarker + "check failed, nothing syncs until it passes: " + strings.SplitN(err.Error(), "\n", 2)[0]
+		if errors.Is(err, errHeldEarlier) {
+			msg = heldMarker + strings.SplitN(err.Error(), "\n", 2)[0]
+		}
 		log.Printf("%s%s; retrying in %s", prefix, msg, backoff)
 		_ = os.MkdirAll(filepath.Dir(failed), 0700)
 		// Replaced by rename, so status never reads a half-written record.
