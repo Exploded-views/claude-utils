@@ -475,3 +475,162 @@ func TestLoopFailedLine_MarkerNotPhrase(t *testing.T) {
 		t.Errorf("phrase misread as held: %q", l)
 	}
 }
+
+// Review round 2, B1: a held repo is released only by a check that asked the
+// API. Here config.json turns untrusted during the hold, so the daemon drops
+// every token source and the check would be "skipped"; that must not release
+// a repo the API called public.
+func TestStartSingle_HeldRepoNotReleasedBySkippedCheck(t *testing.T) {
+	fastGuardRetry(t)
+	var checks atomic.Int32
+	h := func(w http.ResponseWriter, r *http.Request) {
+		checks.Add(1)
+		jsonH(200, repoJSON{Name: "mem-personal", Private: tb(false), Visibility: "public"})(w, r)
+	}
+	cfg := savedAndLoaded(t, guardCfg(t, h, true))
+	var started atomic.Int32
+	old := runLoop
+	runLoop = func(ctx context.Context, l *syncpkg.Loop) error { started.Add(1); <-ctx.Done(); return nil }
+	t.Cleanup(func() { runLoop = old })
+	r, err := startSingle(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	waitFor(t, "the public answer", func() bool { return checks.Load() >= 1 })
+	if err := os.Chmod(cfg.Path(), 0o644); err != nil { // no longer trusted
+		t.Fatal(err)
+	}
+	b0, _ := os.ReadFile(loopFailedPath(cfg.SyncDir))
+	waitFor(t, "a retry after the config turned untrusted", func() bool {
+		b, _ := os.ReadFile(loopFailedPath(cfg.SyncDir))
+		return len(b) > 0 && string(b) != string(b0)
+	})
+	time.Sleep(20 * time.Millisecond)
+	if n := started.Load(); n != 0 {
+		t.Fatalf("a repo held as public was released %d times by a skipped check", n)
+	}
+}
+
+// Review round 2, S2: the push guard of a released repo is built after the
+// passing check, so it uses the token that passed. Here the token file is
+// rotated during the hold (the old token gets 401); no request may carry the
+// old token after release.
+func TestStartSingle_ReleasedPushGuardUsesTheTokenThatPassed(t *testing.T) {
+	fastGuardRetry(t)
+	var released atomic.Bool
+	var staleAfter, newHits atomic.Int32
+	h := func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer new-token" {
+			if released.Load() {
+				staleAfter.Add(1)
+			}
+			w.WriteHeader(401)
+			return
+		}
+		newHits.Add(1)
+		privateH()(w, r)
+	}
+	cfg := guardCfg(t, h, false)
+	tok := filepath.Join(t.TempDir(), "tok")
+	if err := os.WriteFile(tok, []byte("old-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.GitHubTokenFile = tok
+	var pushed atomic.Int32
+	var done atomic.Bool
+	old := runLoop
+	runLoop = func(ctx context.Context, l *syncpkg.Loop) error {
+		released.Store(true)
+		if l.PushAllowed != nil && l.PushAllowed() {
+			pushed.Add(1)
+		}
+		done.Store(true)
+		<-ctx.Done()
+		return nil
+	}
+	t.Cleanup(func() { runLoop = old })
+	r, err := startSingle(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	if err := os.WriteFile(tok, []byte("new-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the loop to start", done.Load)
+	if staleAfter.Load() != 0 || pushed.Load() != 1 {
+		t.Fatalf("pushed=%d, %d requests with the old token after release", pushed.Load(), staleAfter.Load())
+	}
+}
+
+// Review round 2: an unset named env variable is a configured source that
+// gives no token.
+func TestDaemonGuard_UnsetNamedEnvHolds(t *testing.T) {
+	cfg := guardCfg(t, privateH(), false)
+	cfg.GitHubTokenEnv = "MEMSYNC_TEST_UNSET_TOKEN_VAR"
+	t.Setenv(cfg.GitHubTokenEnv, "")
+	if err := daemonGuard(cfg, func(string, ...any) {}); err == nil {
+		t.Error("an unset githubTokenEnv variable must fail the check")
+	}
+}
+
+// Review round 2: the routed start clears a stale held marker too.
+func TestRouted_StaleHeldMarkerClearedWhenCheckPasses(t *testing.T) {
+	cfgs := privateRouted(t, map[string]string{"a": "git@github.com:Org/mem-project-a.git"}, routedAPI(""))
+	failed := loopFailedPath(cfgs["a"].SyncDir)
+	os.MkdirAll(filepath.Dir(failed), 0700)
+	if err := os.WriteFile(failed, []byte("2026-01-01T00:00:00Z "+heldMarker+"x\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	set, err := loadRouted(os.Getenv(routesEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubLoops(t, nil)
+	r, err := set.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	if _, err := os.Stat(failed); !os.IsNotExist(err) {
+		t.Errorf("stale held marker kept after a passing routed start: %v", err)
+	}
+}
+
+// Review round 2: when a configured source starts giving a token again, the
+// push guard hands over only after the API accepts it; a 401 keeps pushes
+// blocked.
+func TestPushWatch_RecoveredSourceNeedsAnAPIPassFirst(t *testing.T) {
+	var ok atomic.Bool
+	h := func(w http.ResponseWriter, r *http.Request) {
+		if !ok.Load() {
+			w.WriteHeader(401)
+			return
+		}
+		privateH()(w, r)
+	}
+	cfg := guardCfg(t, h, false)
+	flag := filepath.Join(t.TempDir(), "token-works")
+	cfg.GitHubTokenCmd = []string{tokScript(t, "[ -e "+flag+" ] || exit 1; echo "+cmdTok)}
+	allowed := pushWatch(cfg, func(string, ...any) {})
+	if allowed() {
+		t.Fatal("blocked while the source gives nothing")
+	}
+	os.WriteFile(flag, nil, 0600)
+	if allowed() {
+		t.Fatal("a token the API rejects must keep pushes blocked")
+	}
+	ok.Store(true)
+	if !allowed() {
+		t.Fatal("pushes resume once the API accepts the token and the repo is private")
+	}
+}
+
+// Review round 2: only a record whose reason starts with the marker is held.
+func TestLoopFailedLine_MarkerOnlyAfterTimestamp(t *testing.T) {
+	dead := []byte("2026-01-01T00:00:00Z sync failed: remote said " + heldMarker + "x\n")
+	if l := loopFailedLine(dead); !strings.HasPrefix(l, "loop stopped") {
+		t.Errorf("marker inside a dead loop's error misread as held: %q", l)
+	}
+}
