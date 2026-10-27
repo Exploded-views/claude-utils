@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
 )
@@ -178,7 +179,7 @@ func TestHook_ManyHeldReposAlertedEvenWhenTheReportOverruns(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	slowHook(t, 3*time.Second)
+	slow := slowHook(t, 3*time.Second)
 	start := time.Now()
 	code, out, errs := runHook(t, in, "--hook", "--deadline", "300ms")
 	if took := time.Since(start); took > 300*time.Millisecond+700*time.Millisecond {
@@ -195,14 +196,84 @@ func TestHook_ManyHeldReposAlertedEvenWhenTheReportOverruns(t *testing.T) {
 		t.Errorf("change notices printed on the deadline path:\n%s", ctx)
 	}
 	// Told once: the next prompt (no overrun) does not repeat them.
-	slowHookOff(t)
+	slow.Store(false)
 	if _, out, _ := runHook(t, in, "--hook", "--deadline", "0"); strings.Contains(hookContext(t, out), "is HELD") {
 		t.Error("alerts delivered on the deadline path were repeated")
 	}
 }
 
-// slowHookOff ends slowHook's delay for later calls in the same test.
-func slowHookOff(t *testing.T) {
-	t.Helper()
-	hookTestHook = nil
+// The record is read bounded and only from a regular file: a FIFO must not
+// block the hook (or swallow the alerts with it), and a symlink to an endless
+// file must not grow memory. Neither gives an alert or a failure.
+func TestHook_HeldRecordFIFOAndSymlinkAreSkippedQuickly(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := loopFailedPath(cfg.SyncDir)
+	os.MkdirAll(filepath.Dir(p), 0o700)
+	in := hookJSON("sess-x", "/home/alice/src/app", "UserPromptSubmit")
+	for name, setup := range map[string]func() error{
+		"fifo": func() error { return mkfifo(p) },
+		// A link is not followed: here it points at a real hold record, which
+		// must not be alerted (a link to /dev/zero would read forever).
+		"symlink": func() error {
+			target := filepath.Join(t.TempDir(), "elsewhere")
+			if err := os.WriteFile(target, []byte("2026-10-26T02:50:29Z "+heldMarker+"via link\n"), 0o600); err != nil {
+				return err
+			}
+			return os.Symlink(target, p)
+		},
+	} {
+		os.RemoveAll(p)
+		if err := setup(); err != nil {
+			t.Skipf("%s: %v", name, err)
+		}
+		type res struct {
+			code      int
+			out, errs string
+		}
+		done := make(chan res, 1)
+		go func() {
+			code, out, errs := runHook(t, in, "--config", cfgPath, "--hook", "--deadline", "0")
+			done <- res{code, out, errs}
+		}()
+		select {
+		case r := <-done:
+			if r.code != 0 || strings.Contains(hookContext(t, r.out), "HELD") {
+				t.Errorf("%s: exit %d context %q stderr %q", name, r.code, hookContext(t, r.out), r.errs)
+			}
+		case <-time.After(3 * time.Second):
+			// Unblock the reader so the goroutine ends, then fail.
+			if f, err := os.OpenFile(p, os.O_WRONLY|syscallNonblock(), 0); err == nil {
+				f.Close()
+			}
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+			}
+			t.Errorf("%s: the hook blocked on the held record (no deadline set)", name)
+		}
+	}
+	os.RemoveAll(p)
+}
+
+// Invisible and line-breaking characters are stripped too: bidi controls,
+// zero-width characters (Unicode Cf) and the line and paragraph separators.
+// The time field is sanitized like the reason.
+func TestHook_HeldTextStripsInvisibleAndSeparators(t *testing.T) {
+	cfgPath, _ := changesRepo(t)
+	rec := "2026\u202e10\u200b-26T02:50:29Z " + heldMarker + "a\u2066b\u2069c\u200dd\u2028second\u2029third\n"
+	writeRecord(t, cfgPath, rec)
+	_, out, _ := runHook(t, hookJSON("sess-u", "/home/alice/src/app", "UserPromptSubmit"), "--config", cfgPath, "--hook")
+	ctx := hookContext(t, out)
+	if !strings.Contains(ctx, "is HELD") {
+		t.Fatalf("no alert:\n%s", ctx)
+	}
+	for _, r := range ctx {
+		if unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029' {
+			t.Errorf("character %U reached the context: %q", r, ctx)
+		}
+	}
 }
