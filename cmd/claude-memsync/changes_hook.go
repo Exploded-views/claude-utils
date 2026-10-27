@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/MarimerLLC/claude-utils/internal/changes"
 	"github.com/MarimerLLC/claude-utils/internal/config"
@@ -83,6 +85,7 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 	}
 	var errBuf bytes.Buffer // the worker's until it reports back
 	done := make(chan outcome, 1)
+	pre := make(chan hookPre, 1) // the held-repo alerts, before any git work
 	go func() {
 		var o outcome
 		defer func() {
@@ -94,7 +97,13 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 			}
 			done <- o
 		}()
-		o.out, o.commit, o.err = hookWork(stdin, &errBuf, cfgPath, routesFlag, project, limit)
+		buf, rerr := io.ReadAll(io.LimitReader(stdin, 1<<20))
+		var p hookPre
+		if rerr == nil {
+			p = hookPrelude(buf, cfgPath, routesFlag)
+		}
+		pre <- p
+		o.out, o.commit, o.err = hookWork(bytes.NewReader(buf), &errBuf, cfgPath, routesFlag, project, limit, p)
 	}()
 	var expired <-chan time.Time
 	if deadline > 0 {
@@ -127,6 +136,18 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 		}
 		return 0
 	case <-expired:
+		// Held-repo alerts were read before any git work: they still go out.
+		select {
+		case p := <-pre:
+			if len(p.alerts) > 0 {
+				if b, err := hookReplyJSON(p.event, p.alerts); err == nil {
+					if _, err := stdout.Write(b); err == nil {
+						p.commit()
+					}
+				}
+			}
+		default:
+		}
 		fmt.Fprintln(stderr, "changes: hook deadline exceeded; notices deferred to the next prompt")
 		return 0
 	}
@@ -135,7 +156,7 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 // hookWork computes the hook's report. It returns the bytes to print (nil:
 // nothing) and a function that moves the markers, which the caller runs once
 // the output was written. It moves no marker itself.
-func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project string, limit int) (out []byte, commit func() error, err error) {
+func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project string, limit int, p hookPre) (out []byte, commit func() error, err error) {
 	if hookTestHook != nil {
 		hookTestHook()
 	}
@@ -163,7 +184,10 @@ func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project st
 		project = in.Cwd
 	}
 
-	alerts, alertCommit := heldAlerts(targets, in.SessionID)
+	alerts, alertCommit := p.alerts, p.commit
+	if alertCommit == nil {
+		alertCommit = func() {}
+	}
 
 	// One report per repo, each against its own marker. A repo reports only the
 	// folders it owns; with one repo that is all of them, as before.
@@ -256,19 +280,9 @@ func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project st
 	if !reported {
 		out = nil
 	} else {
-		var reply struct {
-			Out struct {
-				Event   string `json:"hookEventName"`
-				Context string `json:"additionalContext"`
-			} `json:"hookSpecificOutput"`
-		}
-		reply.Out.Event = in.Event
-		reply.Out.Context = strings.Join(lines, "\n")
-		var buf bytes.Buffer
-		if err := json.NewEncoder(&buf).Encode(reply); err != nil {
+		if out, err = hookReplyJSON(in.Event, lines); err != nil {
 			return nil, nil, err
 		}
-		out = buf.Bytes()
 	}
 	commit = func() error {
 		alertCommit()
@@ -355,6 +369,68 @@ func pruneMarkers(dir, keep string, maxAge time.Duration) {
 	}
 }
 
+// hookPre is what the hook works out before any git work: the held-repo
+// alerts (and how to record them as told), so they survive a deadline.
+type hookPre struct {
+	event  string
+	alerts []string
+	commit func()
+}
+
+// hookPrelude reads the hook input and the held-repo alerts. Any problem gives
+// no alerts; the worker reports the input error itself.
+func hookPrelude(in []byte, cfgPath, routesFlag string) hookPre {
+	p := hookPre{commit: func() {}}
+	var h hookInput
+	if json.Unmarshal(in, &h) != nil || !sessionIDPattern.MatchString(h.SessionID) || h.Event == "" {
+		return p
+	}
+	targets, err := hookTargets(cfgPath, routesFlag)
+	if err != nil {
+		return p
+	}
+	p.event = h.Event
+	p.alerts, p.commit = heldAlerts(targets, h.SessionID)
+	return p
+}
+
+// hookReplyJSON is the hook's stdout: additionalContext for the event.
+func hookReplyJSON(event string, lines []string) ([]byte, error) {
+	var reply struct {
+		Out struct {
+			Event   string `json:"hookEventName"`
+			Context string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	reply.Out.Event = event
+	reply.Out.Context = strings.Join(lines, "\n")
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(reply); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// heldReasonMax caps the reason an alert quotes from a state file.
+const heldReasonMax = 200
+
+// oneLine makes state-file text safe to put in the agent's context: control
+// characters (newlines included) and invalid bytes become spaces, runs of
+// spaces collapse, and it is cut to max runes.
+func oneLine(s string, max int) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || r == utf8.RuneError {
+			return ' '
+		}
+		return r
+	}, s)
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max]) + "…"
+	}
+	return s
+}
+
 // heldAlerts is one context line per repo the private-only check holds (its
 // .state/loop-failed is a hold record), so the agent knows that repo is not
 // syncing (the design: hold only that repo, and alert the agents). Each
@@ -375,9 +451,9 @@ func heldAlerts(targets []hookTarget, session string) (lines []string, commit fu
 		if prev, err := os.ReadFile(mark); err == nil && strings.TrimSpace(string(prev)) == digest {
 			continue
 		}
-		when, reason, _ := strings.Cut(strings.TrimSpace(string(b)), " ")
+		when, reason, _ := strings.Cut(string(b), " ")
 		reason = strings.TrimPrefix(reason, heldMarker)
-		lines = append(lines, fmt.Sprintf("memsync: repo %s is HELD by the private-only check since %s: %s. Nothing syncs for it (no pull, commit or push) until the check passes; see `claude-memsync status`.", tg.name, when, reason))
+		lines = append(lines, fmt.Sprintf("memsync: repo %s is HELD by the private-only check since %s: %s. Nothing syncs for it (no pull, commit or push) until the check passes; see `claude-memsync status`.", oneLine(tg.name, 80), oneLine(when, 40), oneLine(reason, heldReasonMax)))
 		marks = append(marks, seen{mark, digest})
 	}
 	return lines, func() {
