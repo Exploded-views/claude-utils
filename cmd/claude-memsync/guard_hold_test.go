@@ -879,6 +879,87 @@ func TestDaemonGuard_NoTokenMessageFitsTheConfig(t *testing.T) {
 	if msg := err.Error(); strings.Contains(msg, "githubTokenCmd") || !strings.Contains(msg, "githubApp") || !strings.Contains(msg, "githubTokenFile") {
 		t.Errorf("message must point at githubApp/githubTokenFile, not githubTokenCmd: %q", msg)
 	}
+	if msg := err.Error(); !strings.Contains(msg, "githubTokenEnv") || !strings.Contains(msg, "MEMSYNC_GITHUB_TOKEN") {
+		t.Errorf("message must name the env token too (it still works): %q", msg)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "recheckTokenCmd") {
+		t.Errorf("with a token command configured, the message must say why it is not run: %q", msg)
+	}
+}
+
+// Bootstrap's case: recheckTokenCmd false and no token command at all. The
+// message must not talk about a token command that does not exist.
+func TestDaemonGuard_NoTokenMessageWithoutATokenCommand(t *testing.T) {
+	cfg := guardCfg(t, privateH(), false)
+	cfg.GitHubTokenCmd = nil
+	off := false
+	cfg.RecheckTokenCmd = &off
+	err := daemonGuard(cfg, func(string, ...any) {})
+	if !errors.Is(err, errNoToken) {
+		t.Fatalf("want errNoToken, got %v", err)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "token command") || strings.Contains(msg, "recheckTokenCmd") {
+		t.Errorf("no token command is configured, so the message must not mention one: %q", msg)
+	}
+	for _, want := range []string{"githubApp", "githubTokenFile", "githubTokenEnv", "MEMSYNC_GITHUB_TOKEN"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message lacks %s: %q", want, msg)
+		}
+	}
+}
+
+// A hold from an earlier run, with privateOnly now off, is not waiting for
+// anything: status must not say it re-checks, and must say it is released by
+// hand.
+func TestLoopFailedLine_HeldEarlierIsNotWaiting(t *testing.T) {
+	rec := []byte("2026-01-01T00:00:00Z " + heldMarker + heldEarlierError("/s").Error() + "\n")
+	l := loopFailedLine(rec)
+	if strings.Contains(l, "re-checking") || strings.Contains(l, "waiting for") {
+		t.Errorf("a held-earlier record shows as waiting: %q", l)
+	}
+	if !strings.Contains(l, "released by hand") || !strings.Contains(l, "claude-memsync stop") {
+		t.Errorf("status line must say the hold is released by hand, with the steps: %q", l)
+	}
+	// Regression: an ordinary hold still reads as re-checking.
+	if l := loopFailedLine([]byte("2026-01-01T00:00:00Z " + heldMarker + "check failed, nothing syncs until it passes: public\n")); !strings.Contains(l, "re-checking with backoff") {
+		t.Errorf("an ordinary hold lost its re-checking prefix: %q", l)
+	}
+}
+
+// Routed twin of TestStartSingle_HeldRecordStaysHeldWhenPrivateOnlyTurnedOff.
+func TestRouted_HeldRecordStaysHeldWhenPrivateOnlyTurnedOff(t *testing.T) {
+	fastGuardRetry(t)
+	cfgs := privateRouted(t, map[string]string{"a": "git@github.com:Org/mem-project-a.git"}, routedAPI(""))
+	cfg := cfgs["a"]
+	cfg.PrivateOnly = false
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	failed := loopFailedPath(cfg.SyncDir)
+	os.MkdirAll(filepath.Dir(failed), 0700)
+	if err := os.WriteFile(failed, []byte("2026-01-01T00:00:00Z "+heldMarker+"public\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	set, err := loadRouted(os.Getenv(routesEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loops := stubLoops(t, nil)
+	r, err := set.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	waitFor(t, "the release step in the held record", func() bool {
+		b, _ := os.ReadFile(failed)
+		s := string(b)
+		return isHeldRecord(b) && strings.Contains(s, heldMarker+"held from an earlier run") && strings.Contains(s, "claude-memsync stop")
+	})
+	time.Sleep(20 * time.Millisecond)
+	if n := loops.started("a"); n != 0 {
+		t.Fatalf("switching privateOnly off released a held routed repo %d times", n)
+	}
 }
 
 func mustRead(t *testing.T, p string) []byte {
