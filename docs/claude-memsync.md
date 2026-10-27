@@ -964,7 +964,7 @@ error, never a silent fall-through to the next. The token is never written to
 |---|---|---|
 | `init` | yes | Refuses before cloning or pushing if the remote is not a private `mem-*` repo, or if it cannot check. |
 | `doctor` | yes | Non-zero exit if it cannot check. |
-| daemon start | no | With a token: refuses to start on a non-private repo. Without one: logs once that visibility was verified only at init and by `doctor`, and starts. |
+| daemon start | no | With a token: a repo that fails the check (not private, or the check itself fails, such as a GitHub App lookup error) is held: its loop does not start, `status` shows `held, re-checking with backoff: …`, and the check is retried from 10 s, doubling to every 30 min, until it passes; other repos sync meanwhile and the daemon stays up. Without one: logs once that visibility was verified only at init and by `doctor`, and starts. |
 
 With `privateOnly` on and a token configured, the daemon also re-checks at most
 once an hour (conditional request with the ETag; 304 means unchanged). If the
@@ -1349,7 +1349,7 @@ Editing a route moves a folder. The new repo treats the folder's files as Claude
 
 ### Service, PID and lock
 
-There is still one service unit (`claude-memsync`), one process and one PID file. The PID file lives in the personal repo's sync dir (else the first repo's by name). Each sync dir takes a lock (`.state/daemon.lock`) for the life of the process, and a daemon, routed or not, refuses to start when another one holds any of the dirs it needs. The lock is released when the process dies, so a crash leaves nothing stale. One loop failing does not stop the others.
+There is still one service unit (`claude-memsync`), one process and one PID file. The PID file lives in the personal repo's sync dir (else the first repo's by name). Each sync dir takes a lock (`.state/daemon.lock`) for the life of the process, and a daemon, routed or not, refuses to start when another one holds any of the dirs it needs. The lock is released when the process dies, so a crash leaves nothing stale. One loop failing does not stop the others, and neither does one repo failing the private-only check: that repo is held and re-checked with backoff (see the table of checks).
 
 Install the unit as usual; with a routes file present, `run` loads every repo of `routes.json` this host has, and `claude-memsync install` needs no legacy `~/.claudesync/config.json`: without `--config` it uses the personal (primary) repo's config (`--config <path>` still wins).
 
