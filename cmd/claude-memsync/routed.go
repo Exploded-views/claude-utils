@@ -594,14 +594,17 @@ func (s *routedSet) reload() {
 // holds, a lookup error as much as a public repo, and so does a configured
 // token source that gives no token (daemonGuard); nothing reads an error as
 // private. This keeps one unverifiable repo from stopping the others, and a
-// service manager from restarting the daemon every few seconds.
+// service manager from restarting the daemon every few seconds. A held repo
+// is released only by releaseCheck, which needs the API's answer.
+
 // heldMarker starts the reason in .state/loop-failed for a held repo.
 const heldMarker = "private-only hold: "
 
 var (
 	guardBackoffMin = 10 * time.Second
 	guardBackoffMax = 30 * time.Minute
-	guardCheck      = daemonGuard
+	guardCheck      = daemonGuard  // the first check at start
+	guardRelease    = releaseCheck // every re-check of a held repo
 	guardWait       = func(ctx context.Context, d time.Duration) bool {
 		t := time.NewTimer(d)
 		defer t.Stop()
@@ -623,7 +626,7 @@ func awaitPrivate(ctx context.Context, name string, cfg config.Config, first err
 		prefix = "[" + name + "] "
 	}
 	backoff := guardBackoffMin
-	for err := first; err != nil; err = guardCheck(cfg, log.Printf) {
+	for err := first; err != nil; err = guardRelease(cfg, log.Printf) {
 		msg := heldMarker + "check failed, nothing syncs until it passes: " + strings.SplitN(err.Error(), "\n", 2)[0]
 		log.Printf("%s%s; retrying in %s", prefix, msg, backoff)
 		_ = os.MkdirAll(filepath.Dir(failed), 0700)
@@ -651,9 +654,16 @@ func awaitPrivate(ctx context.Context, name string, cfg config.Config, first err
 // start's first check passes. A dead loop's record is left to superviseLoop.
 func clearHeld(syncDir string) {
 	p := loopFailedPath(syncDir)
-	if b, err := os.ReadFile(p); err == nil && strings.Contains(string(b), heldMarker) {
+	if b, err := os.ReadFile(p); err == nil && isHeldRecord(b) {
 		os.Remove(p)
 	}
+}
+
+// isHeldRecord says a loop-failed record is a hold: its reason, right after
+// the timestamp, starts with heldMarker.
+func isHeldRecord(b []byte) bool {
+	_, reason, ok := strings.Cut(string(b), " ")
+	return ok && strings.HasPrefix(reason, heldMarker)
 }
 
 // Loop supervision. A loop that dies is recorded in .state/loop-failed (which
@@ -670,7 +680,7 @@ func loopFailedPath(syncDir string) string { return filepath.Join(syncDir, ".sta
 // loopFailedLine is the status line for a loop-failed record: a repo held by
 // the private-only check, or a loop that died.
 func loopFailedLine(b []byte) string {
-	if strings.Contains(string(b), heldMarker) {
+	if isHeldRecord(b) {
 		return "waiting for the private-only check, re-checking with backoff: " + strings.TrimSpace(string(b))
 	}
 	return "loop stopped, restarting with backoff: " + strings.TrimSpace(string(b))

@@ -184,8 +184,8 @@ func TestRouted_HeldRepoStartsOnlyAfterTheCheckPasses(t *testing.T) {
 // guardBackoffMax, so a check that keeps failing costs a few calls an hour,
 // not one every few seconds.
 func TestAwaitPrivate_BackoffDoublesAndCaps(t *testing.T) {
-	oldMin, oldMax, oldCheck, oldWait := guardBackoffMin, guardBackoffMax, guardCheck, guardWait
-	t.Cleanup(func() { guardBackoffMin, guardBackoffMax, guardCheck, guardWait = oldMin, oldMax, oldCheck, oldWait })
+	oldMin, oldMax, oldCheck, oldWait := guardBackoffMin, guardBackoffMax, guardRelease, guardWait
+	t.Cleanup(func() { guardBackoffMin, guardBackoffMax, guardRelease, guardWait = oldMin, oldMax, oldCheck, oldWait })
 	guardBackoffMin, guardBackoffMax = time.Second, 5*time.Second
 	var waits []time.Duration
 	guardWait = func(ctx context.Context, d time.Duration) bool {
@@ -193,7 +193,7 @@ func TestAwaitPrivate_BackoffDoublesAndCaps(t *testing.T) {
 		return true
 	}
 	n := 0
-	guardCheck = func(config.Config, func(string, ...any)) error {
+	guardRelease = func(config.Config, func(string, ...any)) error {
 		if n++; n < 6 {
 			return errors.New("installation lookup: GitHub returned HTTP 404")
 		}
@@ -216,9 +216,9 @@ func TestAwaitPrivate_BackoffDoublesAndCaps(t *testing.T) {
 
 // A daemon stopped while a repo is held returns false and starts nothing.
 func TestAwaitPrivate_StopWhileHeld(t *testing.T) {
-	oldCheck := guardCheck
-	t.Cleanup(func() { guardCheck = oldCheck })
-	guardCheck = func(config.Config, func(string, ...any)) error { return errors.New("still failing") }
+	oldCheck := guardRelease
+	t.Cleanup(func() { guardRelease = oldCheck })
+	guardRelease = func(config.Config, func(string, ...any)) error { return errors.New("still failing") }
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if awaitPrivate(ctx, "x", config.Config{SyncDir: t.TempDir()}, errors.New("first")) {
@@ -452,11 +452,11 @@ func TestStartSingle_StaleHeldMarkerClearedWhenCheckPasses(t *testing.T) {
 
 // S3: a check that passes after the daemon was told to stop releases nothing.
 func TestAwaitPrivate_PassAfterStopReleasesNothing(t *testing.T) {
-	oldCheck, oldMin := guardCheck, guardBackoffMin
-	t.Cleanup(func() { guardCheck, guardBackoffMin = oldCheck, oldMin })
+	oldCheck, oldMin := guardRelease, guardBackoffMin
+	t.Cleanup(func() { guardRelease, guardBackoffMin = oldCheck, oldMin })
 	guardBackoffMin = time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
-	guardCheck = func(config.Config, func(string, ...any)) error {
+	guardRelease = func(config.Config, func(string, ...any)) error {
 		cancel() // Stop arrives while the check is in flight
 		return nil
 	}
