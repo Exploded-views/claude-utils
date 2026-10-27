@@ -215,19 +215,28 @@ func heldEarlierError(syncDir string) error {
 
 // noTokenError is errNoToken with a message fitted to the config: when
 // recheckTokenCmd is false the daemon never runs githubTokenCmd, so the
-// message names only the sources it can use.
+// message names only the sources it can use, and mentions the command only
+// when one is configured.
 type noTokenError struct{ msg string }
 
 func (e noTokenError) Error() string        { return e.msg }
 func (e noTokenError) Is(target error) bool { return target == errNoToken }
 
-var errNoTokenCmdOff = noTokenError{"no GitHub token the daemon can use: recheckTokenCmd is false, so the token command is not run here; set githubApp (a check App) or githubTokenFile, then restart the service"}
+const noTokenSources = "set githubApp (a check App), githubTokenFile, or a token in the service's environment (githubTokenEnv, default MEMSYNC_GITHUB_TOKEN), then restart the service"
+
+func noTokenCmdOff(hasCmd bool) error {
+	if hasCmd {
+		return noTokenError{"no GitHub token the daemon can use: recheckTokenCmd is false, so the configured token command is not run here; " + noTokenSources}
+	}
+	return noTokenError{"no GitHub token the daemon can use: " + noTokenSources}
+}
 
 var errNotAPIVerified = errors.New("no GitHub token source the daemon can use, so the repo cannot be verified private; a held repo stays held")
 
 // privateCheck runs the private-only check and reports whether the API was
 // asked (false with a nil error only when privateOnly is off).
 func privateCheck(cfg config.Config, logf func(format string, args ...any)) (bool, error) {
+	hasCmd := len(cfg.GitHubTokenCmd) > 0
 	cfg = cfg.ForDaemon()
 	if !cfg.PrivateOnly {
 		return false, nil
@@ -247,7 +256,7 @@ func privateCheck(cfg config.Config, logf func(format string, args ...any)) (boo
 			return false, errSourceGaveNoToken
 		}
 		if cfg.RecheckTokenCmd != nil && !*cfg.RecheckTokenCmd {
-			return false, errNoTokenCmdOff
+			return false, noTokenCmdOff(hasCmd)
 		}
 		return false, errNoToken // privateOnly needs a check the daemon can run
 	}

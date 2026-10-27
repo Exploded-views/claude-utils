@@ -695,6 +695,11 @@ func loopFailedPath(syncDir string) string { return filepath.Join(syncDir, ".sta
 // the private-only check, or a loop that died.
 func loopFailedLine(b []byte) string {
 	if isHeldRecord(b) {
+		_, reason, _ := strings.Cut(string(b), " ")
+		if strings.HasPrefix(reason, heldMarker+errHeldEarlier.Error()) {
+			// privateOnly is off: no re-check can release it.
+			return "held, released by hand only: " + strings.TrimSpace(string(b))
+		}
 		return "waiting for the private-only check, re-checking with backoff: " + strings.TrimSpace(string(b))
 	}
 	return "loop stopped, restarting with backoff: " + strings.TrimSpace(string(b))
