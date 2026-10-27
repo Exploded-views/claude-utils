@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
@@ -262,4 +264,66 @@ func TestStartSingle_GuardFailureHoldsThenStarts(t *testing.T) {
 	if !push.Load() {
 		t.Error("the loop must get its push guard")
 	}
+}
+
+// The case seen on a Mac: the check App is registered but not installed on the
+// org, so the installation lookup answers 404. The daemon must stay up, hold
+// the repo with a status line naming the 404, back off, and start the loop
+// once the App is installed, never before.
+func TestProgramStart_AppNotInstalledHoldsUntilInstalled(t *testing.T) {
+	fastGuardRetry(t)
+	var installed atomic.Bool
+	var lookups atomic.Int32
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/installation"):
+			lookups.Add(1)
+			if !installed.Load() {
+				http.NotFound(w, r)
+				return
+			}
+			fmt.Fprint(w, `{"id":5}`)
+		case r.URL.Path == "/app/installations/5/access_tokens":
+			w.WriteHeader(201)
+			fmt.Fprintf(w, `{"token":%q,"expires_at":%q}`, appTestToken, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+		case strings.HasPrefix(r.URL.Path, "/repos/"):
+			if r.Header.Get("Authorization") != "Bearer "+appTestToken {
+				w.WriteHeader(401)
+				return
+			}
+			fmt.Fprint(w, `{"name":"mem-personal","private":true,"visibility":"private"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(gh.Close)
+	cfg := guardCfg(t, nil, false)
+	appEnv(t, gh.URL)
+	cfg.GitHubAPIURL, cfg.GitHubApp, cfg.GitHubTokenFile = gh.URL, "check", ""
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	var started atomic.Int32
+	old := runLoop
+	runLoop = func(ctx context.Context, l *syncpkg.Loop) error { started.Add(1); <-ctx.Done(); return nil }
+	t.Cleanup(func() { runLoop = old })
+	p := &program{configPath: cfg.Path()}
+	if err := p.Start(nil); err != nil {
+		t.Fatalf("an App that is not installed must hold the repo, not stop the daemon: %v", err)
+	}
+	defer p.Stop(nil)
+	waitFor(t, "several 404 lookups", func() bool { return lookups.Load() >= 4 })
+	if n := started.Load(); n != 0 {
+		t.Fatalf("loop started %d times while the App lookup 404s", n)
+	}
+	b, err := os.ReadFile(loopFailedPath(cfg.SyncDir))
+	if err != nil || !strings.Contains(string(b), "HTTP 404") || !strings.Contains(loopFailedLine(b), "held") {
+		t.Errorf("state file = %q, %v; want a held line naming the 404", b, err)
+	}
+	installed.Store(true)
+	waitFor(t, "the loop to start after the install", func() bool { return started.Load() == 1 })
+	waitFor(t, "the held state to clear", func() bool {
+		_, err := os.Stat(loopFailedPath(cfg.SyncDir))
+		return os.IsNotExist(err)
+	})
 }
