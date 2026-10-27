@@ -38,6 +38,11 @@ func newRelHost(t *testing.T, own map[string][2]string, remotes map[string]strin
 	}
 	cfgs := routedHost(t, keys, "", routes)
 	home, _ := os.UserHomeDir()
+	// Clone paths are reported resolved; on macOS the temp HOME sits under the
+	// /var -> /private/var symlink, so build the expected root the same way.
+	if r, err := filepath.EvalSymlinks(home); err == nil {
+		home = r
+	}
 	p := os.Getenv(routesEnv)
 	var rj map[string]any
 	b, _ := os.ReadFile(p)

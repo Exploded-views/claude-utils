@@ -33,6 +33,13 @@ func newUpgradeEnv(t *testing.T) *upgradeEnv {
 	e := &upgradeEnv{cfg: cfg, home: home, logs: &bytes.Buffer{}}
 	e.msA, e.mmA = testenv.BinariesVersion(t, "vA")
 	e.msB, e.mmB = testenv.BinariesVersion(t, "vB")
+	// Git config holds resolved paths; on macOS the temp dir is under the
+	// /var -> /private/var symlink, so compare against the resolved form.
+	for _, p := range []*string{&e.msA, &e.mmA, &e.msB, &e.mmB} {
+		if r, err := filepath.EvalSymlinks(*p); err == nil {
+			*p = r
+		}
+	}
 
 	oldRoots, oldExe := tempRoots, executable
 	tempRoots = func() []string { return []string{filepath.Join(os.TempDir(), "never-matches")} }

@@ -66,6 +66,9 @@ func NormalizeRemote(raw string) (string, bool) {
 		return "", false
 	}
 	host = sanitizeSegment(strings.ToLower(host))
+	if host == "ssh.github.com" {
+		host = "github.com" // GitHub's ssh-over-443 endpoint, as ghguard treats it
+	}
 	if host == "" {
 		return "", false
 	}
