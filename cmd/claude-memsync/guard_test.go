@@ -365,7 +365,6 @@ func TestRunInitPrivateOnlyPublicPushesNothing(t *testing.T) {
 	}
 }
 
-// Wiring: program.Start with a public repo refuses.
 // A public repo is held, never synced: Start succeeds (a service manager has
 // nothing to restart), no loop runs, and the state file says "not private".
 func TestProgramStartHoldsPublicRepo(t *testing.T) {

@@ -440,7 +440,8 @@ func refreshEncryption(cfg config.Config) error {
 }
 
 // startSingle runs one Loop on cfg, as before routing existed, but refuses a
-// second daemon on the same sync dir.
+// second daemon on the same sync dir. A repo that fails the private-only
+// check is held until it passes (see awaitPrivate).
 func startSingle(ctx context.Context, cfg config.Config) (*running, error) {
 	if err := legacyGuard(cfg); err != nil {
 		return nil, err
@@ -457,6 +458,7 @@ func startSingle(ctx context.Context, cfg config.Config) (*running, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	loop := &syncpkg.Loop{Cfg: cfg}
 	if first == nil {
+		clearHeld(cfg.SyncDir)
 		loop.PushAllowed = pushWatch(cfg, log.Printf)
 	}
 	r := &running{cancel: cancel, locks: []*lock.Lock{l}, loop: loop}
@@ -528,6 +530,7 @@ func (s *routedSet) Start(ctx context.Context) (*running, error) {
 		loop := &syncpkg.Loop{Cfg: cfg, Name: name, Owns: s.Router.Owns(name), Hold: func() bool { return s.held(name) }}
 		first := unverified[name]
 		if first == nil {
+			clearHeld(cfg.SyncDir)
 			loop.PushAllowed = pushWatch(cfg, log.Printf)
 		}
 		r.loops = append(r.loops, loop)
@@ -588,9 +591,13 @@ func (s *routedSet) reload() {
 // Private-only hold. A repo whose private-only check fails at start is held:
 // its loop does not start, .state/loop-failed (which `status` shows) says why,
 // and the check is retried with a growing delay until it passes. Every failure
-// holds, a lookup error as much as a public repo; nothing reads an error as
+// holds, a lookup error as much as a public repo, and so does a configured
+// token source that gives no token (daemonGuard); nothing reads an error as
 // private. This keeps one unverifiable repo from stopping the others, and a
 // service manager from restarting the daemon every few seconds.
+// heldMarker starts the reason in .state/loop-failed for a held repo.
+const heldMarker = "private-only hold: "
+
 var (
 	guardBackoffMin = 10 * time.Second
 	guardBackoffMax = 30 * time.Minute
@@ -617,10 +624,14 @@ func awaitPrivate(ctx context.Context, name string, cfg config.Config, first err
 	}
 	backoff := guardBackoffMin
 	for err := first; err != nil; err = guardCheck(cfg, log.Printf) {
-		msg := "private-only check failed, repo held (nothing syncs until it passes): " + strings.SplitN(err.Error(), "\n", 2)[0]
+		msg := heldMarker + "check failed, nothing syncs until it passes: " + strings.SplitN(err.Error(), "\n", 2)[0]
 		log.Printf("%s%s; retrying in %s", prefix, msg, backoff)
 		_ = os.MkdirAll(filepath.Dir(failed), 0700)
-		_ = os.WriteFile(failed, []byte(time.Now().UTC().Format(time.RFC3339)+" "+msg+"\n"), 0600)
+		// Replaced by rename, so status never reads a half-written record.
+		tmp := failed + ".tmp"
+		if os.WriteFile(tmp, []byte(time.Now().UTC().Format(time.RFC3339)+" "+msg+"\n"), 0600) == nil {
+			_ = os.Rename(tmp, failed)
+		}
 		if !guardWait(ctx, backoff) || ctx.Err() != nil {
 			return false
 		}
@@ -628,9 +639,21 @@ func awaitPrivate(ctx context.Context, name string, cfg config.Config, first err
 			backoff = guardBackoffMax
 		}
 	}
+	if ctx.Err() != nil {
+		return false // the check passed after Stop: start nothing
+	}
 	os.Remove(failed)
 	log.Printf("%sprivate-only check passes; syncing", prefix)
 	return true
+}
+
+// clearHeld removes a held marker that a stopped daemon left behind, once a
+// start's first check passes. A dead loop's record is left to superviseLoop.
+func clearHeld(syncDir string) {
+	p := loopFailedPath(syncDir)
+	if b, err := os.ReadFile(p); err == nil && strings.Contains(string(b), heldMarker) {
+		os.Remove(p)
+	}
 }
 
 // Loop supervision. A loop that dies is recorded in .state/loop-failed (which
@@ -647,8 +670,8 @@ func loopFailedPath(syncDir string) string { return filepath.Join(syncDir, ".sta
 // loopFailedLine is the status line for a loop-failed record: a repo held by
 // the private-only check, or a loop that died.
 func loopFailedLine(b []byte) string {
-	if strings.Contains(string(b), "repo held") {
-		return "held, re-checking with backoff: " + strings.TrimSpace(string(b))
+	if strings.Contains(string(b), heldMarker) {
+		return "waiting for the private-only check, re-checking with backoff: " + strings.TrimSpace(string(b))
 	}
 	return "loop stopped, restarting with backoff: " + strings.TrimSpace(string(b))
 }
@@ -785,6 +808,3 @@ func (s *routedSet) publishExpiries() {
 		}
 	}
 }
-
-// heldMarker (scaffold for the RED tests; not yet written or read).
-const heldMarker = "private-only hold: "

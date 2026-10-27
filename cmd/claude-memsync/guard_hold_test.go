@@ -115,11 +115,11 @@ func TestRouted_GuardFailureHoldsOnlyThatRepo(t *testing.T) {
 	out := strings.Join(set.statusLines(), "\n")
 	for _, n := range []string{"b", "c"} {
 		b, err := os.ReadFile(loopFailedPath(cfgs[n].SyncDir))
-		if err != nil || !strings.Contains(string(b), "private-only check failed") {
-			t.Errorf("repo %s: state file = %q, %v; want the private-only failure", n, b, err)
+		if err != nil || !strings.Contains(string(b), heldMarker) {
+			t.Errorf("repo %s: state file = %q, %v; want the private-only hold", n, b, err)
 		}
 	}
-	if !strings.Contains(out, "private-only check failed") {
+	if !strings.Contains(out, "waiting for the private-only check") {
 		t.Errorf("status does not show the held repos:\n%s", out)
 	}
 	if err := r.Stop(); err != nil {
@@ -326,7 +326,7 @@ func TestProgramStart_AppNotInstalledHoldsUntilInstalled(t *testing.T) {
 		t.Fatalf("loop started %d times while the App lookup 404s", n)
 	}
 	b, err := os.ReadFile(loopFailedPath(cfg.SyncDir))
-	if err != nil || !strings.Contains(string(b), "HTTP 404") || !strings.Contains(loopFailedLine(b), "held") {
+	if err != nil || !strings.Contains(string(b), "HTTP 404") || !strings.HasPrefix(loopFailedLine(b), "waiting for the private-only check") {
 		t.Errorf("state file = %q, %v; want a held line naming the 404", b, err)
 	}
 	installed.Store(true)

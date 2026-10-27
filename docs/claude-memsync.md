@@ -964,7 +964,7 @@ error, never a silent fall-through to the next. The token is never written to
 |---|---|---|
 | `init` | yes | Refuses before cloning or pushing if the remote is not a private `mem-*` repo, or if it cannot check. |
 | `doctor` | yes | Non-zero exit if it cannot check. |
-| daemon start | no | With a token: a repo that fails the check (not private, or the check itself fails, such as a GitHub App lookup error) is held: its loop does not start, `status` shows `held, re-checking with backoff: …`, and the check is retried from 10 s, doubling to every 30 min, until it passes; other repos sync meanwhile and the daemon stays up. Without one: logs once that visibility was verified only at init and by `doctor`, and starts. |
+| daemon start | no | With a token: a repo that fails the check (not private, or the check itself fails, such as a GitHub App lookup error) is held: its loop does not start, `status` shows `waiting for the private-only check, re-checking with backoff: …`, and the check is retried from 10 s, doubling to every 30 min, until it passes; other repos sync meanwhile and the daemon stays up. A configured token source that gives no token (a failing `githubTokenCmd`, an empty `githubTokenFile`, an unset `githubTokenEnv`, an App that mints nothing) counts as a failed check, not as "no token": the repo is held, and its push guard blocks pushes until the source works again. With no token source configured at all (or `recheckTokenCmd: false` with only a command): logs once that visibility was verified only at init and by `doctor`, and starts. |
 
 With `privateOnly` on and a token configured, the daemon also re-checks at most
 once an hour (conditional request with the ETag; 304 means unchanged). If the

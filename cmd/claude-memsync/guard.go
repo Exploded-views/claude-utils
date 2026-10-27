@@ -193,10 +193,25 @@ func daemonGuard(cfg config.Config, logf func(format string, args ...any)) error
 		return err
 	}
 	if c == nil {
+		if tokenSourceConfigured(cfg) {
+			return errSourceGaveNoToken
+		}
 		logf("private-only check skipped: no GitHub token configured; visibility was only verified at init and by `claude-memsync doctor`")
 		return nil
 	}
 	return c.CheckRemote(cfg.RemoteURL)
+}
+
+// errSourceGaveNoToken: a token source is configured but gave no token (a failing
+// command, an empty file, an unset named variable). That is an unverified
+// check, never "no token configured".
+var errSourceGaveNoToken = errors.New("the configured GitHub token source gave no token, so the repo cannot be verified private")
+
+// tokenSourceConfigured says whether cfg names a token source the daemon may
+// use, after the same filtering guardClient applies.
+func tokenSourceConfigured(cfg config.Config) bool {
+	cfg = sanitizeCfg(cfg.ForDaemon())
+	return cfg.GitHubApp != "" || cfg.GitHubTokenFile != "" || len(cfg.GitHubTokenCmd) > 0 || cfg.GitHubTokenEnv != ""
 }
 
 func orgFor(cfg config.Config, flagOrg string) (string, error) {
@@ -512,6 +527,40 @@ func pushWatch(cfg config.Config, logf func(string, ...any)) func() bool {
 	}
 	c, err := guardClient(cfg)
 	owner, name, perr := ghguard.ParseRemote(cfg.RemoteURL)
+	watch := func(c *ghguard.Client) func() bool {
+		w := &ghguard.Watch{C: c, Owner: owner, Name: name, Precheck: pre,
+			MaxFailures: cfg.RecheckMaxFailures, MaxAge: time.Duration(cfg.RecheckMaxAgeHours) * time.Hour,
+			StateDir: filepath.Join(cfg.SyncDir, ".state"), Logf: logf}
+		return w.Allowed
+	}
+	if (err != nil || c == nil) && perr == nil && tokenSourceConfigured(cfg) {
+		// A configured source that gives no token now: block pushes (no
+		// falling back to the local checks alone) until it does, then
+		// re-check against the API as usual.
+		var mu sync.Mutex
+		var allowed func() bool
+		logged := false
+		return func() bool {
+			mu.Lock()
+			if allowed == nil {
+				c, err := guardClient(cfg)
+				if err != nil || c == nil {
+					if !logged {
+						logged = true
+						logf("pushing stopped: %v", errSourceGaveNoToken)
+					}
+					mu.Unlock()
+					return false
+				}
+				if logged {
+					logf("the GitHub token source works again")
+				}
+				allowed = watch(c)
+			}
+			mu.Unlock()
+			return allowed()
+		}
+	}
 	if err != nil || c == nil || perr != nil {
 		// No token: nothing to re-check against the API, but the local
 		// checks still run before every push.
@@ -530,10 +579,7 @@ func pushWatch(cfg config.Config, logf func(string, ...any)) func() bool {
 			return e == nil
 		}
 	}
-	w := &ghguard.Watch{C: c, Owner: owner, Name: name, Precheck: pre,
-		MaxFailures: cfg.RecheckMaxFailures, MaxAge: time.Duration(cfg.RecheckMaxAgeHours) * time.Hour,
-		StateDir: filepath.Join(cfg.SyncDir, ".state"), Logf: logf}
-	return w.Allowed
+	return watch(c)
 }
 
 // visibilityLine is the status line for a repo that stopped being private.
