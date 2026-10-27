@@ -828,3 +828,64 @@ func TestStartSingle_HeldThenUntrustedConfigThenRestartStaysHeld(t *testing.T) {
 		t.Errorf("held record gone after the restart: %q", b)
 	}
 }
+
+// Decision (A): a hold outlives privateOnly being switched off. Release is a
+// deliberate manual step, which the held record (and so status) spells out.
+func TestStartSingle_HeldRecordStaysHeldWhenPrivateOnlyTurnedOff(t *testing.T) {
+	fastGuardRetry(t)
+	cfg := guardCfg(t, privateH(), true) // a working token: not the reason
+	cfg.PrivateOnly = false
+	failed := loopFailedPath(cfg.SyncDir)
+	os.MkdirAll(filepath.Dir(failed), 0700)
+	if err := os.WriteFile(failed, []byte("2026-01-01T00:00:00Z "+heldMarker+"public\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var started atomic.Int32
+	old := runLoop
+	runLoop = func(ctx context.Context, l *syncpkg.Loop) error { started.Add(1); <-ctx.Done(); return nil }
+	t.Cleanup(func() { runLoop = old })
+	r, err := startSingle(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	waitFor(t, "the release step in the held record", func() bool {
+		b, _ := os.ReadFile(failed)
+		s := string(b)
+		return isHeldRecord(b) && strings.Contains(s, heldMarker+"held from an earlier run") && strings.Contains(s, "privateOnly is off") &&
+			strings.Contains(s, "claude-memsync stop") && strings.Contains(s, ".state/loop-failed") &&
+			strings.Contains(s, "claude-memsync start")
+	})
+	time.Sleep(20 * time.Millisecond)
+	if n := started.Load(); n != 0 {
+		t.Fatalf("switching privateOnly off released a held repo %d times", n)
+	}
+	if l := loopFailedLine(mustRead(t, failed)); !strings.Contains(l, "claude-memsync stop") {
+		t.Errorf("status line lacks the release step: %q", l)
+	}
+}
+
+// The no-token error names the sources the daemon can actually use: with
+// recheckTokenCmd false, not githubTokenCmd.
+func TestDaemonGuard_NoTokenMessageFitsTheConfig(t *testing.T) {
+	cfg := guardCfg(t, privateH(), false)
+	cfg.GitHubTokenCmd = []string{"true"}
+	off := false
+	cfg.RecheckTokenCmd = &off
+	err := daemonGuard(cfg, func(string, ...any) {})
+	if !errors.Is(err, errNoToken) {
+		t.Fatalf("want errNoToken, got %v", err)
+	}
+	if msg := err.Error(); strings.Contains(msg, "githubTokenCmd") || !strings.Contains(msg, "githubApp") || !strings.Contains(msg, "githubTokenFile") {
+		t.Errorf("message must point at githubApp/githubTokenFile, not githubTokenCmd: %q", msg)
+	}
+}
+
+func mustRead(t *testing.T, p string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
