@@ -1,8 +1,8 @@
 # This fork: encrypted, layered claude-memsync
 
-The top-level [README](../README.md) is shared with upstream `claude-utils`
-and stays neutral. This page is the overview of what this fork adds to
-`claude-memsync`, kept here so the README does not have to carry it. Setup
+The top-level [README](../README.md) introduces the fork and its install and
+quickstart. This page is the overview of the model this fork adds to
+`claude-memsync`: repo kinds, routing, default deny and encryption. Setup
 steps are in [setup.md](setup.md), the threat model in
 [security.md](security.md), the mechanics of each feature in
 [claude-memsync.md](claude-memsync.md), every flag in

@@ -48,7 +48,7 @@ gh repo create <you>/claude-sync --private --description "Private Claude Code me
 ### 2. Build (each PC)
 
 ```sh
-git clone https://github.com/MarimerLLC/claude-utils.git
+git clone -b integ/next https://github.com/Exploded-views/claude-utils.git
 cd claude-utils
 go build -o bin/ ./cmd/...
 ```
@@ -60,11 +60,11 @@ VERSION=$(git describe --tags --always --dirty)
 go build -ldflags "-X github.com/MarimerLLC/claude-utils/internal/version.Override=$VERSION" -o bin/ ./cmd/...
 ```
 
-A plain `go build` (no ldflags) still produces a working binary —
+A plain `go build` (no ldflags) still produces a working binary:
 `claude-memsync version` falls back to the version Go embeds automatically: a
 pseudo-version such as `v0.2.1-0.20260508213755-a52d68630b31` (Go 1.24 or later,
-in a git checkout), or `dev+<commit>` where the toolchain gives none. See the
-README's *Releasing* section for details.
+in a git checkout), or `dev+<commit>` where the toolchain gives none. See
+[How version resolution works](releases.md#how-version-resolution-works) for details.
 
 Both binaries (`claude-memsync` and `claude-memmerge`) end up in `bin/`.
 **They must live in the same directory** — `claude-memsync` finds the merge

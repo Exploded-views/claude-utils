@@ -2,7 +2,7 @@
 
 A release gives you the two binaries (and, on Windows, `claude-focus`) without
 Go and without a clone. This page is for the person installing one. How a
-release is cut is in the README's "Releasing" section; what CI checks about the
+release is cut is in [Cutting a release](#cutting-a-release); what CI checks about the
 archives is in [ci.md](ci.md#release-packaging-fork-only). The full host setup
 that uses a release is in [setup.md](setup.md) and [bootstrap.md](bootstrap.md).
 
@@ -171,7 +171,97 @@ want the Copilot-key helper ([claude-focus.md](claude-focus.md)).
 ## Cutting a release
 
 Tagging is the owner's decision: nobody tags or publishes a Release without the
-owner's say-so, and this repo's docs do not name the next version. The steps
-(create the Release, watch the workflow, recover a missed run) are in the
-README's "Releasing" section. Published assets are never overwritten; to redo a
-failed upload, delete the leftover assets first and dispatch the workflow again.
+owner's say-so, and this repo's docs do not name the next version. The version
+rules are in the README's "Releasing" section. The examples below use
+`v0.1.8`; the fork's own releases so far (`v0.3.0-ev.1`) are cut from
+`integ/next`, so pass that branch as the target.
+
+1. Land all changes on the release branch and confirm CI is green.
+2. Create a GitHub Release for the version. Either:
+
+   ```sh
+   gh release create v0.1.8 \
+     --title "v0.1.8" \
+     --notes "- <bullet summary of user-visible changes>" \
+     --target <branch>
+   ```
+
+   or use the GitHub UI (Releases, Draft a new release, choose tag `v0.1.8`
+   and the target branch, fill in title and notes, **Publish**).
+
+3. Publishing the Release fires `.github/workflows/release.yml`, which runs
+   `scripts/package-release.sh`: it cross-compiles both binaries for
+   {linux, darwin, windows} x {amd64, arm64} (plus `claude-focus.exe` for
+   Windows), stamps the version in via `-ldflags`, packages each target as
+   `claude-utils-v0.1.8-<os>-<arch>.{tar.gz,zip}`, generates `SHA256SUMS`, and
+   uploads everything to the Release. About a minute.
+
+4. Watch the run finish:
+
+   ```sh
+   gh run watch
+   gh release view v0.1.8     # confirms the assets are attached
+   ```
+
+5. Upgrade your own machines as in [Upgrade an installed host by
+   hand](#upgrade-an-installed-host-by-hand), verifying the archive first.
+
+### If the release workflow didn't fire
+
+GitHub's `release: published` event is occasionally missed, usually when the
+Release was created from a pre-existing tag via the API. Two recovery paths:
+
+- **Manual dispatch** (preferred): trigger the workflow against the existing
+  tag without touching the Release.
+
+  ```sh
+  gh workflow run release.yml --field tag=v0.1.8
+  gh run watch
+  ```
+
+  This re-uses the same build and upload steps, and the existing Release picks
+  up the assets.
+
+- **Recreate the Release**: `gh release delete v0.1.8 --cleanup-tag=false`,
+  then recreate it. That sometimes nudges GitHub into firing the event. Manual
+  dispatch is simpler; prefer it unless you also need to fix release notes.
+
+The same manual dispatch builds archives for any tag that doesn't yet have
+them, or for any Release whose previous build run failed.
+
+The upload never overwrites an asset that is already attached, so a published
+archive and its `SHA256SUMS` never change under a tag. If a failed run left
+some assets behind, delete them first (`gh release delete-asset v0.1.8 <name>`),
+then dispatch again.
+
+### Building locally without a release
+
+For dev iteration, a plain `go build -o bin/ ./cmd/...` is enough. The binaries
+report a VCS-derived version (a pseudo-version, or `dev+<sha>` on older
+toolchains). To stamp a specific version into a local build:
+
+```sh
+VERSION=$(git describe --tags --always --dirty)
+go build -ldflags "-X github.com/MarimerLLC/claude-utils/internal/version.Override=$VERSION" -o bin/ ./cmd/...
+```
+
+PowerShell equivalent:
+
+```powershell
+$VERSION = git describe --tags --always --dirty
+go build -ldflags "-X github.com/MarimerLLC/claude-utils/internal/version.Override=$VERSION" -o bin\ .\cmd\...
+```
+
+The module path stays `github.com/MarimerLLC/claude-utils` in this fork.
+
+### How version resolution works
+
+`internal/version.String()` returns the first of:
+
+1. The build-time `Override` set via `-ldflags "-X .../internal/version.Override=<v>"` (preferred for releases).
+2. `runtime/debug.BuildInfo.Main.Version`: populated automatically when installed via `go install <path>@<tag>`, and by Go 1.24 or later for a plain `go build` inside a git checkout. Yields `v0.1.7` for tagged installs, or a pseudo-version like `v0.2.1-0.20260508213755-a52d68630b31` (with `+dirty` appended for uncommitted changes) for builds past a tag or of untagged commits.
+3. `vcs.revision` from the embedded build settings, when the toolchain gives no main-module version: yields `dev+<short-sha>` (or `dev+<short-sha>-dirty` if the working tree had uncommitted changes at build time).
+4. The literal `dev`: only seen if Go embedded no VCS info (for example when building from outside a git checkout).
+
+So a plain `go build` always produces a binary whose `version` subcommand says
+something useful, with no Makefile or build script required for development.
