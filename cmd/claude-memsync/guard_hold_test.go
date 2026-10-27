@@ -634,3 +634,60 @@ func TestLoopFailedLine_MarkerOnlyAfterTimestamp(t *testing.T) {
 		t.Errorf("marker inside a dead loop's error misread as held: %q", l)
 	}
 }
+
+// Routed twin of TestStartSingle_ReleasedPushGuardUsesTheTokenThatPassed.
+func TestRouted_ReleasedPushGuardUsesTheTokenThatPassed(t *testing.T) {
+	fastGuardRetry(t)
+	var released atomic.Bool
+	var staleAfter atomic.Int32
+	api := func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer new-token" {
+			if released.Load() {
+				staleAfter.Add(1)
+			}
+			w.WriteHeader(401)
+			return
+		}
+		routedAPI("")(w, r)
+	}
+	cfgs := privateRouted(t, map[string]string{"a": "git@github.com:Org/mem-project-a.git"}, api)
+	tok := filepath.Join(t.TempDir(), "tok")
+	if err := os.WriteFile(tok, []byte("old-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MEMSYNC_GITHUB_TOKEN", "")
+	cfg := cfgs["a"]
+	cfg.GitHubTokenFile = tok
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	set, err := loadRouted(os.Getenv(routesEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pushed atomic.Int32
+	var done atomic.Bool
+	old := runLoop
+	runLoop = func(ctx context.Context, l *syncpkg.Loop) error {
+		released.Store(true)
+		if l.PushAllowed != nil && l.PushAllowed() {
+			pushed.Add(1)
+		}
+		done.Store(true)
+		<-ctx.Done()
+		return nil
+	}
+	t.Cleanup(func() { runLoop = old })
+	r, err := set.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	if err := os.WriteFile(tok, []byte("new-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the loop to start", done.Load)
+	if staleAfter.Load() != 0 || pushed.Load() != 1 {
+		t.Fatalf("pushed=%d, %d requests with the old token after release", pushed.Load(), staleAfter.Load())
+	}
+}
