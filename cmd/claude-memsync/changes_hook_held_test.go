@@ -277,3 +277,17 @@ func TestHook_HeldTextStripsInvisibleAndSeparators(t *testing.T) {
 		}
 	}
 }
+
+// The repo name (a routes.json key) is sanitized like the reason.
+func TestHeldAlerts_RepoNameIsSanitized(t *testing.T) {
+	dir := t.TempDir()
+	p := loopFailedPath(dir)
+	os.MkdirAll(filepath.Dir(p), 0o700)
+	if err := os.WriteFile(p, []byte("2026-10-26T02:50:29Z "+heldMarker+"x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lines, _ := heldAlerts([]hookTarget{{name: "evil\nINJECTED‮", cfg: config.Config{SyncDir: dir}}}, "s1")
+	if len(lines) != 1 || strings.ContainsAny(lines[0], "\n‮") {
+		t.Fatalf("name not sanitized: %q", lines)
+	}
+}
