@@ -74,11 +74,11 @@ must be on your `PATH`.
 
 Each [release](https://github.com/Exploded-views/claude-utils/releases) has an
 archive per platform (`linux`, `darwin` and `windows`, each `amd64` and `arm64`)
-and a `SHA256SUMS` file. The current one, `v0.3.0-ev.1`, is a pre-release. On
+and a `SHA256SUMS` file. The current one, `v0.3.0-ev.2`, is a pre-release. On
 Linux or macOS:
 
 ```sh
-TAG=v0.3.0-ev.1
+TAG=v0.3.0-ev.2
 PLATFORM=linux-amd64        # linux-arm64, darwin-amd64 or darwin-arm64
 NAME=claude-utils-$TAG-$PLATFORM
 URL=https://github.com/Exploded-views/claude-utils/releases/download/$TAG
@@ -86,7 +86,7 @@ curl -fLO "$URL/$NAME.tar.gz" -O "$URL/SHA256SUMS"
 sha256sum -c --ignore-missing SHA256SUMS     # macOS: grep " $NAME.tar.gz\$" SHA256SUMS | shasum -a 256 -c -
 tar -xzf "$NAME.tar.gz"
 mkdir -p ~/.local/bin && cp "$NAME/claude-memsync" "$NAME/claude-memmerge" ~/.local/bin/
-claude-memsync version      # claude-memsync v0.3.0-ev.1
+claude-memsync version      # claude-memsync v0.3.0-ev.2
 ```
 
 Do not extract an archive that does not verify. On Windows, unzip
@@ -224,11 +224,12 @@ Both come from upstream unchanged.
 ## Status
 
 Pre-release and pre-1.0: config format and on-disk layout can still change.
-`v0.3.0-ev.1` is the fork's first release. Changes made since then (among them
-`join --all`, `identity backup` and the autostart fix: in `v0.3.0-ev.1` the
+`v0.3.0-ev.2` is the fork's current release; it adds `join --all`, `identity
+backup` and faster host bootstrap, and fixes autostart (in `v0.3.0-ev.1` the
 Linux systemd user unit does not start after a reboot and the macOS launchd
-agent does not start at login) are under *Unreleased* in the
-[CHANGELOG](CHANGELOG.md). Open work is in
+agent does not start at login; the
+[CHANGELOG](CHANGELOG.md#v030-ev2-2026-10-27) says how to upgrade each).
+Each release's changes are in the [CHANGELOG](CHANGELOG.md). Open work is in
 [docs/fork.md](docs/fork.md#known-follow-ups) and the
 [issues](https://github.com/Exploded-views/claude-utils/issues).
 

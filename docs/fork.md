@@ -146,10 +146,7 @@ None of it is in a release; the rest of these docs describe what ships.
 
 | Issue | What |
 |---|---|
-| [#1](https://github.com/Exploded-views/claude-utils/issues/1) | `join accept --all`: accept a host's requests in every repo at once. Built on `integ/next`, not yet released |
 | [#2](https://github.com/Exploded-views/claude-utils/issues/2) | Consistent repo keys across hosts. Keys in `routes.json` can differ between hosts, so a command printed on one host can fail on another; `--repo` already accepts the GitHub repo name for that reason |
-| [#3](https://github.com/Exploded-views/claude-utils/issues/3) | `identity backup`: store the age identity through a password manager and verify it. Built on `integ/next`, not yet released |
-| [#4](https://github.com/Exploded-views/claude-utils/issues/4) | Faster, selectable setup for a host with many repos (bootstrap `--project`, `--skip-project`, `--jobs`). Built on `integ/next`, not yet released |
 | [#5](https://github.com/Exploded-views/claude-utils/issues/5) | A precomputed changes index, so per-prompt hooks spawn no git, with performance budgets in CI (see [ci.md](ci.md#performance-budgets-planned)) |
 | [#8](https://github.com/Exploded-views/claude-utils/issues/8), [#10](https://github.com/Exploded-views/claude-utils/issues/10) | No crash loop when the private-only start check cannot reach a verdict, and a `release <repo>` command to lift a hold on purpose |
 
