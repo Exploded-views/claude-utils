@@ -415,11 +415,12 @@ func hookReplyJSON(event string, lines []string) ([]byte, error) {
 const heldReasonMax = 200
 
 // oneLine makes state-file text safe to put in the agent's context: control
-// characters (newlines included) and invalid bytes become spaces, runs of
-// spaces collapse, and it is cut to max runes.
+// and format characters (newlines, bidi controls, zero-width characters) and
+// invalid bytes become spaces, runs of spaces (U+2028/2029 included) collapse,
+// and it is cut to max runes.
 func oneLine(s string, max int) string {
 	s = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || r == utf8.RuneError {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == utf8.RuneError {
 			return ' '
 		}
 		return r
@@ -441,8 +442,8 @@ func heldAlerts(targets []hookTarget, session string) (lines []string, commit fu
 	type seen struct{ path, digest string }
 	var marks []seen
 	for _, tg := range targets {
-		b, err := os.ReadFile(loopFailedPath(tg.cfg.SyncDir))
-		if err != nil || !isHeldRecord(b) {
+		b, ok := readHeldRecord(loopFailedPath(tg.cfg.SyncDir))
+		if !ok || !isHeldRecord(b) {
 			continue
 		}
 		sum := sha256.Sum256(b)
@@ -459,9 +460,35 @@ func heldAlerts(targets []hookTarget, session string) (lines []string, commit fu
 	return lines, func() {
 		for _, m := range marks {
 			_ = os.MkdirAll(filepath.Dir(m.path), 0o700)
-			_ = os.WriteFile(m.path, []byte(m.digest+"\n"), 0o600)
+			tmp := m.path + ".tmp"
+			if os.WriteFile(tmp, []byte(m.digest+"\n"), 0o600) == nil {
+				_ = os.Rename(tmp, m.path)
+			}
 		}
 	}
+}
+
+// heldRecordMax bounds how much of a loop-failed record the hook reads.
+const heldRecordMax = 4 << 10
+
+// readHeldRecord reads at most heldRecordMax bytes of a loop-failed record,
+// and only from a regular file: a symlink is not followed and a FIFO does not
+// block (openStateFlags), so a stray file can neither hang the hook nor grow
+// its memory. ok is false for anything else or any error.
+func readHeldRecord(p string) (b []byte, ok bool) {
+	if fi, err := os.Lstat(p); err != nil || !fi.Mode().IsRegular() {
+		return nil, false
+	}
+	f, err := os.OpenFile(p, os.O_RDONLY|openStateFlags, 0)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return nil, false
+	}
+	b, err = io.ReadAll(io.LimitReader(f, heldRecordMax))
+	return b, err == nil
 }
 
 // hookHasRelated reports whether a routes file with a registry is in play.
