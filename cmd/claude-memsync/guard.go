@@ -176,10 +176,9 @@ func guardRemote(cfg config.Config) error {
 	return c.CheckRemote(cfg.RemoteURL)
 }
 
-// daemonGuard is the private-only check at daemon start. With a token source
-// the API must say private; a configured source that gives no token fails.
-// With no token source configured at all it logs once that the check only ran
-// at init/doctor and passes (only at start: see releaseCheck).
+// daemonGuard is the private-only check at daemon start. The API must say
+// private: with no token source, or a source that gives no token, the check
+// fails and the repo is held, as for a repo that is not private.
 func daemonGuard(cfg config.Config, logf func(format string, args ...any)) error {
 	_, err := privateCheck(cfg, logf)
 	return err
@@ -203,7 +202,7 @@ func releaseCheck(cfg config.Config, logf func(format string, args ...any)) erro
 var errNotAPIVerified = errors.New("no GitHub token source the daemon can use, so the repo cannot be verified private; a held repo stays held")
 
 // privateCheck runs the private-only check and reports whether the API was
-// asked (false only when it passed by skipping: no token source configured).
+// asked (false with a nil error only when privateOnly is off).
 func privateCheck(cfg config.Config, logf func(format string, args ...any)) (bool, error) {
 	cfg = cfg.ForDaemon()
 	if !cfg.PrivateOnly {
@@ -223,8 +222,7 @@ func privateCheck(cfg config.Config, logf func(format string, args ...any)) (boo
 		if tokenSourceConfigured(cfg) {
 			return false, errSourceGaveNoToken
 		}
-		logf("private-only check skipped: no GitHub token configured; visibility was only verified at init and by `claude-memsync doctor`")
-		return false, nil
+		return false, errNoToken // privateOnly needs a check the daemon can run
 	}
 	return true, c.CheckRemote(cfg.RemoteURL)
 }

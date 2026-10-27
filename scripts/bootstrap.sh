@@ -1975,7 +1975,7 @@ print(verdict)' "$ROUTES")" || die "cannot read the registry setting of $ROUTES;
   elif guard_ok token_file_ok "$tf"; then   # the same checks as for the other secret files
     usefile=1; say "  found $tf (0600): the daemon re-check will use it"
   else
-    warn "no Metadata-read PAT at $tf (0600): the hourly private re-check is OFF until it exists. Add it with: install -m 600 /dev/stdin $tf  (paste the token, then Ctrl-D), then re-run this bootstrap. Or use --check-app."
+    warn "no Metadata-read PAT at $tf (0600): the daemon cannot check privacy, so it holds every privateOnly repo (nothing syncs) until it exists. Add it with: install -m 600 /dev/stdin $tf  (paste the token, then Ctrl-D), then re-run this bootstrap. Or use --check-app."
     NEXT_STEPS+=("add the Metadata-read PAT file $tf (mode 0600) to turn the hourly re-check on")
   fi
   for i in "${!R_KEYS[@]}"; do
