@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -161,6 +163,8 @@ func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project st
 		project = in.Cwd
 	}
 
+	alerts, alertCommit := heldAlerts(targets, in.SessionID)
+
 	// One report per repo, each against its own marker. A repo reports only the
 	// folders it owns; with one repo that is all of them, as before.
 	type repoReport struct {
@@ -241,6 +245,14 @@ func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project st
 		lines = append(lines, relLines...)
 		reported = true
 	}
+	if len(alerts) > 0 {
+		if reported {
+			lines = append(append(alerts, ""), lines...)
+		} else {
+			lines = alerts
+		}
+		reported = true
+	}
 	if !reported {
 		out = nil
 	} else {
@@ -259,6 +271,7 @@ func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project st
 		out = buf.Bytes()
 	}
 	commit = func() error {
+		alertCommit()
 		if relCommit != nil {
 			relCommit()
 		}
@@ -338,6 +351,39 @@ func pruneMarkers(dir, keep string, maxAge time.Duration) {
 		}
 		if info, err := e.Info(); err == nil && info.ModTime().Before(cutoff) {
 			os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
+}
+
+// heldAlerts is one context line per repo the private-only check holds (its
+// .state/loop-failed is a hold record), so the agent knows that repo is not
+// syncing (the design: hold only that repo, and alert the agents). Each
+// session hears about a given record once: commit records the record's digest
+// in the session's ".held" marker, and runs only after the output went out.
+// It reads local files only: no lock, no git, no network.
+func heldAlerts(targets []hookTarget, session string) (lines []string, commit func()) {
+	type seen struct{ path, digest string }
+	var marks []seen
+	for _, tg := range targets {
+		b, err := os.ReadFile(loopFailedPath(tg.cfg.SyncDir))
+		if err != nil || !isHeldRecord(b) {
+			continue
+		}
+		sum := sha256.Sum256(b)
+		digest := hex.EncodeToString(sum[:])
+		mark := filepath.Join(tg.cfg.SyncDir, ".state", "hook-markers", session+".held")
+		if prev, err := os.ReadFile(mark); err == nil && strings.TrimSpace(string(prev)) == digest {
+			continue
+		}
+		when, reason, _ := strings.Cut(strings.TrimSpace(string(b)), " ")
+		reason = strings.TrimPrefix(reason, heldMarker)
+		lines = append(lines, fmt.Sprintf("memsync: repo %s is HELD by the private-only check since %s: %s. Nothing syncs for it (no pull, commit or push) until the check passes; see `claude-memsync status`.", tg.name, when, reason))
+		marks = append(marks, seen{mark, digest})
+	}
+	return lines, func() {
+		for _, m := range marks {
+			_ = os.MkdirAll(filepath.Dir(m.path), 0o700)
+			_ = os.WriteFile(m.path, []byte(m.digest+"\n"), 0o600)
 		}
 	}
 }
