@@ -449,7 +449,7 @@ func heldAlerts(targets []hookTarget, session string) (lines []string, commit fu
 		sum := sha256.Sum256(b)
 		digest := hex.EncodeToString(sum[:])
 		mark := filepath.Join(tg.cfg.SyncDir, ".state", "hook-markers", session+".held")
-		if prev, err := os.ReadFile(mark); err == nil && strings.TrimSpace(string(prev)) == digest {
+		if prev, ok := readHeldRecord(mark); ok && strings.TrimSpace(string(prev)) == digest {
 			continue
 		}
 		when, reason, _ := strings.Cut(string(b), " ")
@@ -460,11 +460,22 @@ func heldAlerts(targets []hookTarget, session string) (lines []string, commit fu
 	return lines, func() {
 		for _, m := range marks {
 			_ = os.MkdirAll(filepath.Dir(m.path), 0o700)
-			tmp := m.path + ".tmp"
-			if os.WriteFile(tmp, []byte(m.digest+"\n"), 0o600) == nil {
-				_ = os.Rename(tmp, m.path)
-			}
+			writeMarker(m.path, m.digest+"\n")
 		}
+	}
+}
+
+// writeMarker replaces p with data through a fresh temp file in the same
+// directory (os.CreateTemp: O_EXCL with a random name, so no planted link is
+// followed) and a rename. Errors leave the old marker; the alert repeats.
+func writeMarker(p, data string) {
+	f, err := os.CreateTemp(filepath.Dir(p), filepath.Base(p)+".*.tmp")
+	if err != nil {
+		return
+	}
+	_, werr := f.WriteString(data)
+	if cerr := f.Close(); werr != nil || cerr != nil || os.Rename(f.Name(), p) != nil {
+		_ = os.Remove(f.Name())
 	}
 }
 
