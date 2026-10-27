@@ -691,3 +691,27 @@ func TestRouted_ReleasedPushGuardUsesTheTokenThatPassed(t *testing.T) {
 		t.Fatalf("pushed=%d, %d requests with the old token after release", pushed.Load(), staleAfter.Load())
 	}
 }
+
+// privateOnly with no token source at all: the daemon cannot check, so the
+// repo is held with a status line saying so, never started.
+func TestStartSingle_PrivateOnlyWithoutTokenSourceIsHeld(t *testing.T) {
+	fastGuardRetry(t)
+	cfg := guardCfg(t, privateH(), false)
+	var started atomic.Int32
+	old := runLoop
+	runLoop = func(ctx context.Context, l *syncpkg.Loop) error { started.Add(1); <-ctx.Done(); return nil }
+	t.Cleanup(func() { runLoop = old })
+	r, err := startSingle(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	waitFor(t, "the held record", func() bool {
+		b, _ := os.ReadFile(loopFailedPath(cfg.SyncDir))
+		return strings.Contains(string(b), heldMarker) && strings.Contains(string(b), "no GitHub token")
+	})
+	time.Sleep(20 * time.Millisecond)
+	if n := started.Load(); n != 0 {
+		t.Fatalf("a privateOnly repo with no token source started %d times", n)
+	}
+}
