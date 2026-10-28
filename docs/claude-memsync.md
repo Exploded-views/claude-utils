@@ -720,10 +720,22 @@ the markers would have moved anyway). Change it with `--deadline <duration>`
 (for example `--deadline 3s`) or with `CLAUDE_MEMSYNC_HOOK_DEADLINE_MS`
 (milliseconds; the flag wins); `0` turns the deadline off. If the reports for
 all repos are not computed in time, for instance because the host's disk is
-saturated, the hook prints nothing, moves no marker, writes one line to stderr
+saturated, the hook prints no change notices (only the held-repo alerts below,
+if any), moves no change marker, writes one line to stderr
 (`changes: hook deadline exceeded; notices deferred to the next prompt`) and
 exits 0 at once. It is all or nothing: a repo that finished while another did
 not is not reported either, so the next prompt reports every change.
+
+**Held repos.** When the daemon holds a repo because its private-only check
+failed (see the table of checks), the hook leads its output with one line per
+held repo: ``memsync: repo <name> is HELD by the private-only check since <time>:
+<reason>. Nothing syncs for it (no pull, commit or push) until the check passes;
+see `claude-memsync status`.`` It reads only the repo's local `.state` files (no
+lock, git or network), so the alert goes out even when the deadline cuts the
+change report short. Each session is told once per hold: the session's `.held`
+marker under `.state/hook-markers/` records which hold it has seen, and it is
+written only after the output. Text taken from state files is cut to one line,
+with control and invisible format characters removed.
 
 Markers are kept, not deleted when a session ends: a session resumed with the
 same id needs its marker to report what changed while it was closed. Instead,
