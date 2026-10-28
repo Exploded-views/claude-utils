@@ -10,6 +10,7 @@ that uses a release is in [setup.md](setup.md) and [bootstrap.md](bootstrap.md).
 
 | Tag | Commit | Notes |
 |---|---|---|
+| [v0.4.0-ev.1](https://github.com/Exploded-views/claude-utils/releases/tag/v0.4.0-ev.1) | `80543d3` | Pre-release: routing for hosts that reach GitHub over port 443, `join --all`, `identity backup`, selectable host bootstrap, autostart and install re-run fixes. After upgrading, rewrite any `routes.json` rule or alias that uses `ssh.github.com/…` as `github.com/…`; on Linux re-run `claude-memsync install` or `start`; on macOS re-install the launchd agent (see the changelog). |
 | [v0.3.0-ev.1](https://github.com/Exploded-views/claude-utils/releases/tag/v0.3.0-ev.1) | `37fa564` | First release of the fork (pre-release): post-quantum encryption by default, one config directory, host bootstrap with `--prebuilt-dir`, fork CI. |
 
 ## What a release holds
