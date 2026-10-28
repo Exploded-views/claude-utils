@@ -421,7 +421,7 @@ Unknown roles are refused. No `mem-client-*` or `mem-orch-*` repo can be created
 10. Service: `install`, `start` (these may need your approval in the session), `status`, `doctor`.
 11. Summary: repos, key names, pending joins, next steps, including running `/reload-plugins` in each open Claude session (or restarting the sessions) so the `memory-notices` hooks load. Private keys and tokens are never printed.
 
-A re-run whose plan differs from the `routes.json` an earlier run wrote (a new project or workspace) regenerates it before any repo is created, keeping the old one as a timestamped, never-overwritten `routes.json.bak.<UTC time>` (a numbered suffix if the name is taken), and puts the home pin back. Keep-out terms are written to the denylists as literal regexes (a leading `#` is escaped).
+A re-run whose plan differs from the `routes.json` an earlier run wrote (a new project or workspace) regenerates it before any repo is created, keeping the old one as a timestamped, never-overwritten `routes.json.bak.<UTC time>` (a numbered suffix if the name is taken), and puts the home pin back. Apart from the `registry` setting and the home pin, the new file holds only what the plan calls for: routes, repos and other keys added by hand since the last run are dropped, so merge them back from the `.bak`, then restart the daemon (the script does not restart it on a re-run). Keep-out terms are written to the denylists as literal regexes (a leading `#` is escaped).
 
 Each completed step leaves a marker under `~/.local/state/claude-memsync-bootstrap/`, so a re-run after a failure resumes and never regenerates keys or re-inits a sync dir.
 

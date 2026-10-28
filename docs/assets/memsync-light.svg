@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-label="claude-utils: Claude Code memory, synced across machines through private, post-quantum encrypted git repos.">
+<rect width="1280" height="360" rx="16" fill="#ffffff"/>
+<text x="64" y="92" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="15" letter-spacing="3" fill="#59636e">EXPLODED VIEWS</text>
+<text x="62" y="178" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="76" font-weight="700" fill="#1f2328">claude-utils</text>
+<rect x="64" y="204" width="56" height="4" rx="2" fill="#b35c00"/>
+<text x="64" y="252" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="24" fill="#59636e">Claude Code memory, synced across machines</text>
+<text x="64" y="286" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="24" fill="#59636e">through private, post-quantum encrypted git repos.</text>
+<line x1="900" y1="4.0" x2="900" y2="360.0" stroke="#d1d9e0" stroke-width="1.5" stroke-dasharray="4 6"/>
+<polygon points="788,284.0 900,324.0 900,336.0 788,296.0" fill="#e6eaef" stroke="#59636e" stroke-width="1.5" stroke-linejoin="round"/>
+<polygon points="900,324.0 1012,284.0 1012,296.0 900,336.0" fill="#e6eaef" stroke="#59636e" stroke-width="1.5" stroke-linejoin="round"/>
+<polygon points="900,244.0 1012,284.0 900,324.0 788,284.0" fill="#f6f8fa" stroke="#59636e" stroke-width="1.5" stroke-linejoin="round"/>
+<line x1="961.6" y1="284.0" x2="1064" y2="284.0" stroke="#d1d9e0" stroke-width="1.5"/>
+<circle cx="1064" cy="284.0" r="3" fill="#59636e"/>
+<text x="1078" y="290.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="18" fill="#59636e">private git</text>
+<polygon points="788,212.0 900,252.0 900,264.0 788,224.0" fill="#e6eaef" stroke="#b35c00" stroke-width="1.5" stroke-linejoin="round"/>
+<polygon points="900,252.0 1012,212.0 1012,224.0 900,264.0" fill="#e6eaef" stroke="#b35c00" stroke-width="1.5" stroke-linejoin="round"/>
+<polygon points="900,172.0 1012,212.0 900,252.0 788,212.0" fill="#f6f8fa" stroke="#b35c00" stroke-width="1.5" stroke-linejoin="round"/>
+<circle cx="900" cy="212.0" r="5" fill="#b35c00"/>
+<line x1="961.6" y1="212.0" x2="1064" y2="212.0" stroke="#d1d9e0" stroke-width="1.5"/>
+<circle cx="1064" cy="212.0" r="3" fill="#b35c00"/>
+<text x="1078" y="218.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="18" fill="#1f2328">age (pq)</text>
+<polygon points="788,140.0 900,180.0 900,192.0 788,152.0" fill="#e6eaef" stroke="#59636e" stroke-width="1.5" stroke-linejoin="round"/>
+<polygon points="900,180.0 1012,140.0 1012,152.0 900,192.0" fill="#e6eaef" stroke="#59636e" stroke-width="1.5" stroke-linejoin="round"/>
+<polygon points="900,100.0 1012,140.0 900,180.0 788,140.0" fill="#f6f8fa" stroke="#59636e" stroke-width="1.5" stroke-linejoin="round"/>
+<line x1="961.6" y1="140.0" x2="1064" y2="140.0" stroke="#d1d9e0" stroke-width="1.5"/>
+<circle cx="1064" cy="140.0" r="3" fill="#59636e"/>
+<text x="1078" y="146.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="18" fill="#59636e">merge driver</text>
+<polygon points="788,68.0 900,108.0 900,120.0 788,80.0" fill="#e6eaef" stroke="#59636e" stroke-width="1.5" stroke-linejoin="round"/>
+<polygon points="900,108.0 1012,68.0 1012,80.0 900,120.0" fill="#e6eaef" stroke="#59636e" stroke-width="1.5" stroke-linejoin="round"/>
+<polygon points="900,28.0 1012,68.0 900,108.0 788,68.0" fill="#f6f8fa" stroke="#59636e" stroke-width="1.5" stroke-linejoin="round"/>
+<line x1="961.6" y1="68.0" x2="1064" y2="68.0" stroke="#d1d9e0" stroke-width="1.5"/>
+<circle cx="1064" cy="68.0" r="3" fill="#59636e"/>
+<text x="1078" y="74.0" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="18" fill="#59636e">memory/</text>
+</svg>
