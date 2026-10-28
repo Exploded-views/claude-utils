@@ -448,6 +448,35 @@ func TestRewriteSSHHost(t *testing.T) {
 	}
 }
 
+// GitHub's ssh-over-443 endpoint (ssh config "HostName ssh.github.com") is
+// github.com, as the private-only guard already treats it (ghguard host.go): a
+// checkout cloned over ssh on such a host must route by its github.com key.
+func TestRewriteSSHHost_GitHub443EndpointIsGitHub(t *testing.T) {
+	look := func(h string) string {
+		switch h {
+		case "github.com", "gh443":
+			return "ssh.github.com"
+		case "SSH.GitHub.com":
+			return "SSH.GitHub.com"
+		}
+		return ""
+	}
+	for in, want := range map[string]string{
+		"git@github.com:Me/Thing.git":           "github.com/me/thing",
+		"git@gh443:Me/Thing.git":                "github.com/me/thing",
+		"ssh://git@github.com:443/Me/Thing.git": "github.com/me/thing",
+		"git@SSH.GitHub.com:Me/Thing.git":       "github.com/me/thing",
+	} {
+		k, ok := NormalizeRemote(rewriteSSHHost(in, look))
+		if !ok || k != want {
+			t.Errorf("%q -> %q %v, want %q", in, k, ok, want)
+		}
+	}
+	if k, _ := NormalizeRemote(rewriteSSHHost("git@x:o/r.git", func(string) string { return "ssh.gitlab.com" })); k != "ssh.gitlab.com/o/r" {
+		t.Errorf("only GitHub's endpoint folds: %q", k)
+	}
+}
+
 func TestRemotePatternsLowerCased(t *testing.T) {
 	f := fileOf(Rule{Remote: "GitHub.com/Me/*", Repo: "projects"})
 	r := testRouter(t, f, []string{"projects", "personal"}, map[string]string{"-x": "github.com/me/app"})

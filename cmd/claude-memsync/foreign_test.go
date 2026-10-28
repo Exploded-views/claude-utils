@@ -33,6 +33,21 @@ type fakeHost struct {
 	mu     sync.Mutex
 }
 
+// set changes the fake's state under h.mu, which the daemon's goroutines
+// read it under.
+func (h *fakeHost) set(f func()) {
+	h.mu.Lock()
+	f()
+	h.mu.Unlock()
+}
+
+// setUnit changes a unit's state; the daemon's goroutines read it under h.mu.
+func (h *fakeHost) setUnit(unit, state string) {
+	h.mu.Lock()
+	h.units[unit] = state
+	h.mu.Unlock()
+}
+
 func useFakeHost(t *testing.T) *fakeHost {
 	t.Helper()
 	h := &fakeHost{units: map[string]string{}}
@@ -42,16 +57,25 @@ func useFakeHost(t *testing.T) *fakeHost {
 			GOOS: "linux",
 			Home: os.Getenv("HOME"),
 			Systemctl: func(args ...string) (string, error) {
-				if h.noSys {
+				h.mu.Lock()
+				noSys := h.noSys
+				h.mu.Unlock()
+				if noSys {
 					return "", errors.New("systemctl: not found")
 				}
 				if args[1] == "is-enabled" {
+					h.mu.Lock()
+					defer h.mu.Unlock()
 					return h.units[args[2]], nil
 				}
 				return "inactive", nil
 			},
-			Processes: func() ([]string, error) { return h.procs, nil },
-			Logf:      func(string, ...any) {},
+			Processes: func() ([]string, error) {
+				h.mu.Lock()
+				defer h.mu.Unlock()
+				return append([]string(nil), h.procs...), nil
+			},
+			Logf: func(string, ...any) {},
 		}
 	}
 	quietWait = func(d time.Duration) {
@@ -125,7 +149,7 @@ func TestStartGuard_SingleRepoRefusesActiveWriter(t *testing.T) {
 	h := useFakeHost(t)
 	cfg := singleHost(t)
 	setForeign(t, cfg, foreign.Writer{SystemdUnit: "old-sync.timer"})
-	h.units["old-sync.timer"] = "enabled"
+	h.setUnit("old-sync.timer", "enabled")
 	err := startGuard(cfg.Path(), "", false, guardOpts{})
 	if err == nil || !strings.Contains(err.Error(), "foreign writer systemdUnit old-sync.timer") {
 		t.Fatalf("want a refusal naming the entry: %v", err)
@@ -141,7 +165,7 @@ func TestStartGuard_SingleRepoRefusesActiveWriter(t *testing.T) {
 		t.Fatalf("override: %v", err)
 	}
 	// Disabled: starts.
-	h.units["old-sync.timer"] = "disabled"
+	h.setUnit("old-sync.timer", "disabled")
 	if err := startGuard(cfg.Path(), "", false, guardOpts{}); err != nil {
 		t.Fatal(err)
 	}
@@ -188,12 +212,12 @@ func TestStartGuard_RoutedUsesRoutesListAndOwnedFolders(t *testing.T) {
 	b, _ = json.Marshal(rj)
 	os.WriteFile(rp, b, 0o600)
 
-	h.procs = []string{"python3 /x/old-sync.py"}
+	h.set(func() { h.procs = []string{"python3 /x/old-sync.py"} })
 	err := startGuard("", rp, true, guardOpts{})
 	if err == nil || !strings.Contains(err.Error(), "foreign writer process old-sync.py") {
 		t.Fatalf("%v", err)
 	}
-	h.procs = nil
+	h.set(func() { h.procs = nil })
 	// Quiet window: a folder owned by "projects" changing refuses; one nobody owns does not.
 	claude := cfgs["projects"].ClaudeProjectsDir
 	mine := filepath.Join(claude, "mine", "memory", "n.md")
@@ -217,7 +241,7 @@ func TestStatus_ShowsBlockedForeignWriter(t *testing.T) {
 	h := useFakeHost(t)
 	cfg := singleHost(t)
 	setForeign(t, cfg, foreign.Writer{SystemdUnit: "old-sync.timer"})
-	h.units["old-sync.timer"] = "enabled"
+	h.setUnit("old-sync.timer", "enabled")
 	old := statusFn
 	statusFn = func() (string, error) { return "", service.ErrNotInstalled }
 	t.Cleanup(func() { statusFn = old })
@@ -226,7 +250,7 @@ func TestStatus_ShowsBlockedForeignWriter(t *testing.T) {
 	if !strings.Contains(out, "blocked: foreign writer systemdUnit old-sync.timer") || code == 0 {
 		t.Fatalf("exit %d:\n%s", code, out)
 	}
-	h.units["old-sync.timer"] = "disabled"
+	h.setUnit("old-sync.timer", "disabled")
 	code, out = captureStdout(t, func() int { return runStatus(nil) })
 	if strings.Contains(out, "blocked") || code != 0 {
 		t.Fatalf("exit %d:\n%s", code, out)
@@ -241,7 +265,7 @@ func TestInit_RefusesActiveWriterBeforeAnythingIsCloned(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv(routesEnv, "")
-	h.units["old-sync.timer"] = "enabled"
+	h.setUnit("old-sync.timer", "enabled")
 	setForeign(t, cfg, foreign.Writer{SystemdUnit: "old-sync.timer"})
 
 	err := initGuard(cfg, nil, guardOpts{})
@@ -264,7 +288,7 @@ func TestInit_RoutesFileListApplies(t *testing.T) {
 	rp := filepath.Join(home, "routes.json")
 	os.WriteFile(rp, []byte(`{"repos":{},"routes":[],"foreignWriters":[{"process":"old-sync.py"}]}`), 0o600)
 	t.Setenv(routesEnv, rp)
-	h.procs = []string{"python3 old-sync.py"}
+	h.set(func() { h.procs = []string{"python3 old-sync.py"} })
 	if err := initGuard(cfg, nil, guardOpts{}); err == nil || !strings.Contains(err.Error(), "foreign writer process old-sync.py") {
 		t.Fatalf("%v", err)
 	}
@@ -289,7 +313,7 @@ func TestStartGuard_UncheckableUnitRefusesOnLinux(t *testing.T) {
 	h := useFakeHost(t)
 	cfg := singleHost(t)
 	setForeign(t, cfg, foreign.Writer{SystemdUnit: "old-sync.timer"})
-	h.noSys = true
+	h.set(func() { h.noSys = true })
 	err := startGuard(cfg.Path(), "", false, guardOpts{})
 	if err == nil || !strings.Contains(err.Error(), "could not be checked") {
 		t.Fatalf("%v", err)
@@ -420,7 +444,7 @@ func TestRunInit_RefusesAnActiveWriterBeforeTouchingTheRemote(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv(routesEnv, "")
-	h.units["old-sync.timer"] = "enabled"
+	h.setUnit("old-sync.timer", "enabled")
 	setForeign(t, cfg, foreign.Writer{SystemdUnit: "old-sync.timer"})
 	exe, _ := os.Executable()
 	drv := filepath.Join(filepath.Dir(exe), "claude-memmerge")
@@ -455,7 +479,7 @@ func TestRunService_RefusesBeforeAnyServiceStarts(t *testing.T) {
 	h := useFakeHost(t)
 	cfg := singleHost(t)
 	setForeign(t, cfg, foreign.Writer{SystemdUnit: "old-sync.timer"})
-	h.units["old-sync.timer"] = "enabled"
+	h.setUnit("old-sync.timer", "enabled")
 	code, errs := captureErr(t, func() int { return runService(cfg.Path(), "", guardOpts{}) })
 	if code != 1 || !strings.Contains(errs, "foreign writer systemdUnit old-sync.timer") {
 		t.Fatalf("code %d stderr %q", code, errs)
@@ -494,14 +518,14 @@ func TestRouted_ForeignWriterHoldsOnlyThatRepoAndRechecks(t *testing.T) {
 	if set.held("projects") || set.held("other") {
 		t.Fatal("nothing active yet")
 	}
-	h.units["old-sync.timer"] = "enabled"
+	h.setUnit("old-sync.timer", "enabled")
 	set.recheckForeign()
 	if !set.held("projects") || set.held("other") || set.held("personal") {
 		t.Fatalf("only the repo that lists the writer is held")
 	}
 	// Sticky: the writer going away does not lift the hold, because what it
 	// left behind would be mirrored. Only a restart does.
-	h.units["old-sync.timer"] = "disabled"
+	h.setUnit("old-sync.timer", "disabled")
 	set.recheckForeign()
 	if !set.held("projects") {
 		t.Fatal("the hold must stay until a daemon restart")
@@ -520,11 +544,11 @@ func TestRouted_ForeignWriterHoldsOnlyThatRepoAndRechecks(t *testing.T) {
 	if _, err := os.Stat(foreignHeldPath(cfgs["projects"].SyncDir)); err == nil {
 		t.Error("a restart clears the marker")
 	}
-	h.units["old-sync.timer"] = "enabled"
+	h.setUnit("old-sync.timer", "enabled")
 	set = set2
 	// A flaky systemctl keeps the previous verdict instead of flipping it.
 	set.recheckForeign()
-	h.noSys = true
+	h.set(func() { h.noSys = true })
 	set.recheckForeign()
 	if !set.held("projects") {
 		t.Error("an unanswerable check must not release a hold")
@@ -541,11 +565,11 @@ func TestRouted_HoldLogsOnce(t *testing.T) {
 	h := useFakeHost(t)
 	cfgs := routedHost(t, []string{"projects"}, "", nil)
 	setForeign(t, cfgs["projects"], foreign.Writer{SystemdUnit: "old-sync.timer"})
-	h.units["old-sync.timer"] = "enabled"
+	h.setUnit("old-sync.timer", "enabled")
 	set, _ := loadRouted(os.Getenv(routesEnv))
 	var buf strings.Builder
 	set.logf = func(f string, a ...any) { fmt.Fprintf(&buf, f+"\n", a...) }
-	h.units["old-sync.timer"] = "enabled"
+	h.setUnit("old-sync.timer", "enabled")
 	set.recheckForeign()
 	set.recheckForeign()
 	set.recheckForeign()
@@ -571,7 +595,7 @@ func TestRouted_StartWiresHoldAndReloadAndRestartRecheck(t *testing.T) {
 		t.Fatal("not held while the writer is off")
 	}
 	// A supervised restart rechecks.
-	h.units["old-sync.timer"] = "enabled"
+	h.setUnit("old-sync.timer", "enabled")
 	// A fake loop supervised beside the running set: no package variable is
 	// assigned while the set's goroutines read them.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -588,7 +612,7 @@ func TestRouted_StartWiresHoldAndReloadAndRestartRecheck(t *testing.T) {
 		t.Error("a loop restart must recheck the foreign writers")
 	}
 	// A routes reload rechecks too.
-	h.units["old-sync.timer"] = "disabled"
+	h.setUnit("old-sync.timer", "disabled")
 	set.reload()
 	if !r.loops[0].Hold() {
 		t.Error("a reload does not lift a hold either")
@@ -599,7 +623,7 @@ func TestStatus_RoutedShowsHeldRepo(t *testing.T) {
 	h := useFakeHost(t)
 	cfgs := routedHost(t, []string{"personal", "projects"}, "personal", nil)
 	setForeign(t, cfgs["projects"], foreign.Writer{SystemdUnit: "old-sync.timer"})
-	h.units["old-sync.timer"] = "enabled"
+	h.setUnit("old-sync.timer", "enabled")
 	old := statusFn
 	statusFn = func() (string, error) { return "", service.ErrNotInstalled }
 	t.Cleanup(func() { statusFn = old })
@@ -610,7 +634,7 @@ func TestStatus_RoutedShowsHeldRepo(t *testing.T) {
 	// A daemon held it: status keeps saying so after the writer is gone.
 	set, _ := loadRouted(os.Getenv(routesEnv))
 	set.recheckForeign()
-	h.units["old-sync.timer"] = "disabled"
+	h.setUnit("old-sync.timer", "disabled")
 	code, out = captureStdout(t, func() int { return runStatus(nil) })
 	if code == 0 || !strings.Contains(out, "[projects] held: foreign writer seen: restart after cleanup") || strings.Contains(out, "[personal] held") {
 		t.Fatalf("exit %d:\n%s", code, out)
