@@ -22,18 +22,22 @@ func guardChildren() (stop func()) {
 	sigs, stopSigs := notifySignals()
 	done := make(chan struct{})
 	go func() {
-		select {
-		case s := <-sigs:
-			if syncOwnsSignals.Load() {
-				return // the sync flow decides: the first lets the change finish
+		for {
+			select {
+			case s := <-sigs:
+				if syncOwnsSignals.Load() {
+					continue // the sync flow decides: the first lets the change finish
+				}
+				proc.KillAll()
+				code := 130
+				if s == syscall.SIGTERM {
+					code = 143
+				}
+				exitFn(code)
+				return
+			case <-done:
+				return
 			}
-			proc.KillAll()
-			code := 130
-			if s == syscall.SIGTERM {
-				code = 143
-			}
-			exitFn(code)
-		case <-done:
 		}
 	}()
 	return func() { stopSigs(); close(done) }
