@@ -14,6 +14,7 @@
   "github.com/MarimerLLC/claude-utils/internal/hosts": 81.4,
   "github.com/MarimerLLC/claude-utils/internal/lock": 84.0,
   "github.com/MarimerLLC/claude-utils/internal/merge": 93.7,
+  "github.com/MarimerLLC/claude-utils/internal/proc": 98.3,
   "github.com/MarimerLLC/claude-utils/internal/related": 83.3,
   "github.com/MarimerLLC/claude-utils/internal/route": 90.5,
   "github.com/MarimerLLC/claude-utils/internal/scrub": 93.2,
