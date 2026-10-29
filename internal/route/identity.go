@@ -386,12 +386,25 @@ func (r *Router) defaultRoots(folder string) ([]string, bool) {
 		return nil, false
 	}
 	git := r.Git
+	var head string
 	if git == nil {
 		git = gitOut
-	}
-	head, err := git(c[0], "rev-parse", "HEAD")
-	if err != nil || head == "" {
-		return nil, false
+		switch h, k := directHEAD(c[0]); k {
+		case directYes:
+			head = h
+		case directNo:
+			return nil, false // HEAD names no commit yet: git would fail
+		default:
+			var err error
+			if head, err = git(c[0], "rev-parse", "HEAD"); err != nil || head == "" {
+				return nil, false
+			}
+		}
+	} else {
+		var err error
+		if head, err = git(c[0], "rev-parse", "HEAD"); err != nil || head == "" {
+			return nil, false
+		}
 	}
 	k := c[0] + "\x00" + head
 	r.rootMu.Lock()

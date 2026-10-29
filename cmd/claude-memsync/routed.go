@@ -219,6 +219,9 @@ func loadRouted(path string) (*routedSet, error) {
 	}
 	s.Router = route.New(f, func(repo string) bool { _, ok := s.Cfgs[repo]; return ok })
 	s.Router.StatePath = filepath.Join(filepath.Dir(path), "owners.json")
+	if c, ok := s.Primary(); ok {
+		s.Router.ProjectsDir = c.ClaudeProjectsDir
+	}
 	return s, nil
 }
 
@@ -512,6 +515,13 @@ func (s *routedSet) Start(ctx context.Context) (*running, error) {
 		log.Printf("routing: repo %q is not on this host; folders routed to it are denied", m)
 	}
 	s.recheckForeign()
+	// Resolve every folder side by side before the loops each ask for theirs
+	// one by one (the git children among them are bounded).
+	if primary, ok := s.Primary(); ok {
+		if !s.Router.WarmWithin(claudeFolders(primary.ClaudeProjectsDir), warmDeadline) {
+			log.Printf("routing: start-up resolution is still running after %v; the loops start and the rest is decided as git answers", warmDeadline)
+		}
+	}
 	interval := time.Hour
 	for _, name := range s.names() {
 		cfg := s.Cfgs[name]
@@ -620,6 +630,9 @@ func superviseLoopWith(ctx context.Context, loop *syncpkg.Loop, recheck func(), 
 }
 
 // claudeFolders lists the project folders in the Claude tree.
+// warmDeadline is the longest Start waits for the start-up resolution.
+var warmDeadline = 5 * time.Second
+
 func claudeFolders(dir string) []string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -677,6 +690,9 @@ func (s *routedSet) statusLines() []string {
 	}
 	for _, h := range sum.Changed {
 		lines = append(lines, fmt.Sprintf("  remote changed repos: folder %s is denied until routes.json is edited", h))
+	}
+	for _, h := range sum.TooLarge {
+		lines = append(lines, fmt.Sprintf("  unresolved: folder %s is a live project, but a directory on its path has too many entries to list: ambiguous, not synced (it stays denied)", h))
 	}
 	for _, sh := range s.Router.Shadowed() {
 		lines = append(lines, fmt.Sprintf("  shadowed: rule %d is never reached first (rule %d matches the same folders)", sh.Rule, sh.By))

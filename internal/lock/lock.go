@@ -50,3 +50,28 @@ func (l *Lock) Release() {
 	l.f.Close()
 	l.f = nil
 }
+
+// HookPath is the lock file the changes hook holds while it works.
+func HookPath(syncDir string) string { return filepath.Join(syncDir, ".state", "hook.lock") }
+
+// TryHook takes the hook lock of a sync dir without waiting. held is true when
+// another hook has it (the caller should do nothing); an error means the lock
+// file could not be used (the caller may go on without it).
+func TryHook(syncDir string) (l *Lock, held bool, err error) {
+	p := HookPath(syncDir)
+	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+		return nil, false, err
+	}
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := tryLock(f); err != nil {
+		f.Close()
+		if errors.Is(err, errWouldBlock) {
+			return nil, true, nil
+		}
+		return nil, false, err
+	}
+	return &Lock{f: f}, false, nil
+}

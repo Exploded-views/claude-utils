@@ -18,6 +18,14 @@ import (
 // pointed HOME at a temp dir.
 var startEnv = os.Environ()
 
+// hostTmp is the temp dir this process started with, before SmallTempDir
+// swaps TMPDIR.
+var hostTmp = os.TempDir()
+
+// HostTempDir returns the temp dir the test process started with, whatever
+// SmallTempDir set TMPDIR to since.
+func HostTempDir() string { return hostTmp }
+
 var (
 	cachesOnce sync.Once
 	caches     []string
@@ -127,4 +135,26 @@ func BinariesVersion(t testing.TB, ver string) (memsync, memmerge string) {
 		verDirs[ver] = d
 	}
 	return filepath.Join(d, "claude-memsync"), filepath.Join(d, "claude-memmerge")
+}
+
+// SmallTempDir points TMPDIR at a fresh directory under /tmp
+// when the host's temp dir is too big for route resolution to list (a busy
+// macOS $TMPDIR holds hundreds of thousands of entries, so every directory
+// below it is unresolved by design). It returns the function that removes it;
+// call it before os.Exit.
+func SmallTempDir() (cleanup func()) {
+	if f, err := os.Open(os.TempDir()); err == nil {
+		names, _ := f.Readdirnames(201)
+		f.Close()
+		if len(names) <= 200 {
+			return func() {}
+		}
+	}
+	// Not inside a checkout (a "not a repo" fixture must stay one): /tmp.
+	d, err := os.MkdirTemp("/tmp", "gotmp-")
+	if err != nil {
+		return func() {}
+	}
+	os.Setenv("TMPDIR", d)
+	return func() { os.RemoveAll(d) }
 }
