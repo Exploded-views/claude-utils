@@ -176,10 +176,9 @@ func guardRemote(cfg config.Config) error {
 	return c.CheckRemote(cfg.RemoteURL)
 }
 
-// daemonGuard is the private-only check at daemon start. With a token source
-// the API must say private; a configured source that gives no token fails.
-// With no token source configured at all it logs once that the check only ran
-// at init/doctor and passes (only at start: see releaseCheck).
+// daemonGuard is the private-only check at daemon start. The API must say
+// private: with no token source, or a source that gives no token, the check
+// fails and the repo is held, as for a repo that is not private.
 func daemonGuard(cfg config.Config, logf func(format string, args ...any)) error {
 	_, err := privateCheck(cfg, logf)
 	return err
@@ -190,6 +189,11 @@ func daemonGuard(cfg config.Config, logf func(format string, args ...any)) error
 // was skipped for want of a token source (none configured, or config.json no
 // longer trusted so its sources are dropped) never releases a held repo.
 func releaseCheck(cfg config.Config, logf func(format string, args ...any)) error {
+	if !cfg.ForDaemon().PrivateOnly {
+		// Decision: switching privateOnly off does not lift a hold; release
+		// is a deliberate manual step.
+		return heldEarlierError(cfg.SyncDir)
+	}
 	asked, err := privateCheck(cfg, logf)
 	if err != nil {
 		return err
@@ -200,11 +204,39 @@ func releaseCheck(cfg config.Config, logf func(format string, args ...any)) erro
 	return nil
 }
 
+// errHeldEarlier: a repo held when the daemon last stopped, whose config no
+// longer asks for the private-only check. awaitPrivate shows this message as
+// is, so it starts with the real reason.
+var errHeldEarlier = errors.New("held from an earlier run")
+
+func heldEarlierError(syncDir string) error {
+	return fmt.Errorf("%w: privateOnly is off now, which does not lift a private-only hold; to release it, stop the service (claude-memsync stop, which runs launchctl on macOS and systemctl --user on Linux), delete %s, then claude-memsync start", errHeldEarlier, loopFailedPath(syncDir))
+}
+
+// noTokenError is errNoToken with a message fitted to the config: when
+// recheckTokenCmd is false the daemon never runs githubTokenCmd, so the
+// message names only the sources it can use, and mentions the command only
+// when one is configured.
+type noTokenError struct{ msg string }
+
+func (e noTokenError) Error() string        { return e.msg }
+func (e noTokenError) Is(target error) bool { return target == errNoToken }
+
+const noTokenSources = "set githubApp (a check App), githubTokenFile, or a token in the service's environment (githubTokenEnv, default MEMSYNC_GITHUB_TOKEN), then restart the service"
+
+func noTokenCmdOff(hasCmd bool) error {
+	if hasCmd {
+		return noTokenError{"no GitHub token the daemon can use: recheckTokenCmd is false, so the configured token command is not run here; " + noTokenSources}
+	}
+	return noTokenError{"no GitHub token the daemon can use: " + noTokenSources}
+}
+
 var errNotAPIVerified = errors.New("no GitHub token source the daemon can use, so the repo cannot be verified private; a held repo stays held")
 
 // privateCheck runs the private-only check and reports whether the API was
-// asked (false only when it passed by skipping: no token source configured).
+// asked (false with a nil error only when privateOnly is off).
 func privateCheck(cfg config.Config, logf func(format string, args ...any)) (bool, error) {
+	hasCmd := len(cfg.GitHubTokenCmd) > 0
 	cfg = cfg.ForDaemon()
 	if !cfg.PrivateOnly {
 		return false, nil
@@ -223,8 +255,10 @@ func privateCheck(cfg config.Config, logf func(format string, args ...any)) (boo
 		if tokenSourceConfigured(cfg) {
 			return false, errSourceGaveNoToken
 		}
-		logf("private-only check skipped: no GitHub token configured; visibility was only verified at init and by `claude-memsync doctor`")
-		return false, nil
+		if cfg.RecheckTokenCmd != nil && !*cfg.RecheckTokenCmd {
+			return false, noTokenCmdOff(hasCmd)
+		}
+		return false, errNoToken // privateOnly needs a check the daemon can run
 	}
 	return true, c.CheckRemote(cfg.RemoteURL)
 }

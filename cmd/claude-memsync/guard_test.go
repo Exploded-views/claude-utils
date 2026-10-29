@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -102,12 +103,11 @@ func TestDaemonGuard(t *testing.T) {
 	var logs []string
 	logf := func(f string, a ...any) { logs = append(logs, f) }
 
+	// privateOnly promises a checked repo; with no token source the daemon
+	// cannot check, so the repo is held (not started on the init-time check).
 	nt := guardCfg(t, jsonH(200, repoJSON{}), false)
-	if err := daemonGuard(nt, logf); err != nil {
-		t.Errorf("no token must not block: %v", err)
-	}
-	if len(logs) != 1 || !strings.Contains(logs[0], "init") {
-		t.Errorf("want one log naming init/doctor, got %v", logs)
+	if err := daemonGuard(nt, logf); !errors.Is(err, errNoToken) {
+		t.Errorf("privateOnly with no token source must fail with errNoToken, got %v", err)
 	}
 
 	logs = nil
