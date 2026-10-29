@@ -159,6 +159,9 @@ check "the scan asks for exit code 99 and a JSON report" bash -c "grep -q -- '--
 set +e; FAKE_GL_CONTROL_RC=1 FAKE_GL_CONTROL_REPORT=none GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/e1" >"$W/e1.log" 2>&1; e1=$?; set -e
 check "a scanner that errors (exit 1, no report) on the control fails the packaging (rc=$e1)" bash -c "[ $e1 -ne 0 ] && grep -q 'secret scan error on the control (rc=1)' '$W/e1.log'"
 check "... and leaves nothing behind" noleft "$W/e1"
+set +e; FAKE_GL_CONTROL_RC=1 FAKE_GL_CONTROL_REPORT=finding GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/e1b" >"$W/e1b.log" 2>&1; e1b=$?; set -e
+check "an error exit (1) on the control fails even when its report holds a finding (rc=$e1b)" bash -c "[ $e1b -ne 0 ] && grep -q 'secret scan error on the control (rc=1)' '$W/e1b.log'"
+check "... and leaves nothing behind" noleft "$W/e1b"
 set +e; FAKE_GL_CONTROL_RC=99 FAKE_GL_CONTROL_REPORT=empty GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/e2" >"$W/e2.log" 2>&1; e2=$?; FAKE_GL_CONTROL_RC=99 FAKE_GL_CONTROL_REPORT=clean GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/e2b" >"$W/e2b.log" 2>&1; e2b=$?; set -e
 check "exit 99 with an empty report on the control fails (rc=$e2)" bash -c "[ $e2 -ne 0 ] && grep -q 'secret scan error on the control (rc=99)' '$W/e2.log'"
 check "exit 99 with a report holding no finding on the control fails (rc=$e2b)" bash -c "[ $e2b -ne 0 ] && grep -q 'secret scan error on the control (rc=99)' '$W/e2b.log'"
