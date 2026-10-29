@@ -15,7 +15,8 @@ var syncOwnsSignals atomic.Bool
 // process started before it exits. A git child leads a group of its own, so the
 // terminal's Ctrl-C no longer reaches it and it would run on as an orphan.
 // While a command is stopping the service the signals belong to that flow:
-// the children are killed, and the flow decides when to exit. The returned
+// the guard does nothing, and the flow kills the children on its second
+// signal, just before it exits. The returned
 // func stops the guard.
 func guardChildren() (stop func()) {
 	sigs, stopSigs := notifySignals()
@@ -23,10 +24,10 @@ func guardChildren() (stop func()) {
 	go func() {
 		select {
 		case s := <-sigs:
-			proc.KillAll()
 			if syncOwnsSignals.Load() {
-				return
+				return // the sync flow decides: the first lets the change finish
 			}
+			proc.KillAll()
 			code := 130
 			if s == syscall.SIGTERM {
 				code = 143

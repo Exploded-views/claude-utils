@@ -15,6 +15,7 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/lock"
+	"github.com/MarimerLLC/claude-utils/internal/proc"
 	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
 
@@ -180,6 +181,7 @@ func withSyncLocksStopping(stderr io.Writer, syncDirs []string, fn func() error)
 					fmt.Fprintln(stderr, "interrupted: finishing this change, then restarting the service (press again to restart now)")
 					continue
 				}
+				proc.KillAll() // git leads its own group: Ctrl-C no longer reaches it
 				restart()
 				exitFn(130)
 				return
