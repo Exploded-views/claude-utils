@@ -443,7 +443,8 @@ func refreshEncryption(cfg config.Config) error {
 }
 
 // startSingle runs one Loop on cfg, as before routing existed, but refuses a
-// second daemon on the same sync dir.
+// second daemon on the same sync dir. A repo that fails the private-only
+// check is held until it passes (see awaitPrivate).
 func startSingle(ctx context.Context, cfg config.Config) (*running, error) {
 	if err := legacyGuard(cfg); err != nil {
 		return nil, err
@@ -456,17 +457,24 @@ func startSingle(ctx context.Context, cfg config.Config) (*running, error) {
 		l.Release()
 		return nil, fmt.Errorf("refresh encryption settings: %w", err)
 	}
-	if err := daemonGuard(cfg, log.Printf); err != nil {
-		l.Release()
-		return nil, fmt.Errorf("private-only check failed, refusing to sync: %w", err)
-	}
+	first := guardCheck(cfg, log.Printf)
 	ctx, cancel := context.WithCancel(ctx)
-	loop := &syncpkg.Loop{Cfg: cfg, PushAllowed: pushWatch(cfg, log.Printf)}
+	loop := &syncpkg.Loop{Cfg: cfg}
+	if first == nil {
+		clearHeld(cfg.SyncDir)
+		loop.PushAllowed = pushWatch(cfg, log.Printf)
+	}
 	r := &running{cancel: cancel, locks: []*lock.Lock{l}, loop: loop}
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
-		if err := loop.Run(ctx); err != nil {
+		if first != nil {
+			if !awaitPrivate(ctx, "", cfg, first) {
+				return
+			}
+			loop.PushAllowed = pushWatch(cfg, log.Printf)
+		}
+		if err := runLoop(ctx, loop); err != nil {
 			r.fail(err)
 		}
 	}()
@@ -481,11 +489,12 @@ func (s *routedSet) Start(ctx context.Context) (*running, error) {
 		return nil, fmt.Errorf("%s: this host has none of the repos", s.Path)
 	}
 	s.Router.Writable()
-	// The private-only guard runs for every repo before anything starts: one
-	// repo that fails it refuses the whole daemon, like a single-repo start.
+	// The private-only guard runs for every repo before its loop starts. A
+	// repo that fails it is held (see awaitPrivate); the others sync meanwhile.
+	unverified := map[string]error{}
 	for _, name := range s.names() {
-		if err := daemonGuard(s.Cfgs[name], log.Printf); err != nil {
-			return nil, fmt.Errorf("repo %q: private-only check failed, refusing to sync: %w", name, err)
+		if err := guardCheck(s.Cfgs[name], log.Printf); err != nil {
+			unverified[name] = err
 		}
 	}
 	ctx, cancel := context.WithCancel(ctx)
@@ -528,11 +537,24 @@ func (s *routedSet) Start(ctx context.Context) (*running, error) {
 		if d := time.Duration(cfg.PullIntervalSec) * time.Second; d > 0 && d < interval {
 			interval = d
 		}
-		loop := &syncpkg.Loop{Cfg: cfg, Name: name, Owns: s.Router.Owns(name), PushAllowed: pushWatch(cfg, log.Printf), Hold: func() bool { return s.held(name) }}
+		loop := &syncpkg.Loop{Cfg: cfg, Name: name, Owns: s.Router.Owns(name), Hold: func() bool { return s.held(name) }}
+		first := unverified[name]
+		if first == nil {
+			clearHeld(cfg.SyncDir)
+			loop.PushAllowed = pushWatch(cfg, log.Printf)
+		}
 		r.loops = append(r.loops, loop)
 		r.wg.Add(1)
 		go func() {
 			defer r.wg.Done()
+			if first != nil {
+				if !awaitPrivate(ctx, name, cfg, first) {
+					return
+				}
+				// Built only now: a push guard made while the check failed
+				// could have fallen back to the local checks alone.
+				loop.PushAllowed = pushWatch(cfg, log.Printf)
+			}
 			superviseLoop(ctx, loop, s.recheckForeign)
 		}()
 	}
@@ -576,6 +598,87 @@ func (s *routedSet) reload() {
 	s.Router.Replace(f)
 }
 
+// Private-only hold. A repo whose private-only check fails at start is held:
+// its loop does not start, .state/loop-failed (which `status` shows) says why,
+// and the check is retried with a growing delay until it passes. Every failure
+// holds, a lookup error as much as a public repo, and so does a configured
+// token source that gives no token (daemonGuard); nothing reads an error as
+// private. This keeps one unverifiable repo from stopping the others, and a
+// service manager from restarting the daemon every few seconds. A held repo
+// is released only by releaseCheck, which needs the API's answer.
+
+// heldMarker starts the reason in .state/loop-failed for a held repo.
+const heldMarker = "private-only hold: "
+
+var (
+	guardBackoffMin = 10 * time.Second
+	guardBackoffMax = 30 * time.Minute
+	guardCheck      = daemonGuard  // the first check at start
+	guardRelease    = releaseCheck // every re-check of a held repo
+	guardWait       = func(ctx context.Context, d time.Duration) bool {
+		t := time.NewTimer(d)
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-t.C:
+			return true
+		}
+	}
+)
+
+// awaitPrivate holds a repo whose check failed with first, re-running the
+// check until it passes (true) or ctx ends (false).
+func awaitPrivate(ctx context.Context, name string, cfg config.Config, first error) bool {
+	failed := loopFailedPath(cfg.SyncDir)
+	prefix := ""
+	if name != "" {
+		prefix = "[" + name + "] "
+	}
+	backoff := guardBackoffMin
+	// The record keeps the time the hold began, so a retry of the same failure
+	// leaves it byte-identical and the sessions that heard it are not told again.
+	since := time.Now().UTC().Format(time.RFC3339)
+	for err := first; err != nil; err = guardRelease(cfg, log.Printf) {
+		msg := heldMarker + "check failed, nothing syncs until it passes: " + strings.SplitN(err.Error(), "\n", 2)[0]
+		log.Printf("%s%s; retrying in %s", prefix, msg, backoff)
+		_ = os.MkdirAll(filepath.Dir(failed), 0700)
+		// Replaced by rename, so status never reads a half-written record.
+		tmp := failed + ".tmp"
+		if os.WriteFile(tmp, []byte(since+" "+msg+"\n"), 0600) == nil {
+			_ = os.Rename(tmp, failed)
+		}
+		if !guardWait(ctx, backoff) || ctx.Err() != nil {
+			return false
+		}
+		if backoff *= 2; backoff > guardBackoffMax {
+			backoff = guardBackoffMax
+		}
+	}
+	if ctx.Err() != nil {
+		return false // the check passed after Stop: start nothing
+	}
+	os.Remove(failed)
+	log.Printf("%sprivate-only check passes; syncing", prefix)
+	return true
+}
+
+// clearHeld removes a held marker that a stopped daemon left behind, once a
+// start's first check passes. A dead loop's record is left to superviseLoop.
+func clearHeld(syncDir string) {
+	p := loopFailedPath(syncDir)
+	if b, err := os.ReadFile(p); err == nil && isHeldRecord(b) {
+		os.Remove(p)
+	}
+}
+
+// isHeldRecord says a loop-failed record is a hold: its reason, right after
+// the timestamp, starts with heldMarker.
+func isHeldRecord(b []byte) bool {
+	_, reason, ok := strings.Cut(string(b), " ")
+	return ok && strings.HasPrefix(reason, heldMarker)
+}
+
 // Loop supervision. A loop that dies is recorded in .state/loop-failed (which
 // `status` shows) and restarted with a growing delay.
 var (
@@ -586,6 +689,15 @@ var (
 )
 
 func loopFailedPath(syncDir string) string { return filepath.Join(syncDir, ".state", "loop-failed") }
+
+// loopFailedLine is the status line for a loop-failed record: a repo held by
+// the private-only check, or a loop that died.
+func loopFailedLine(b []byte) string {
+	if isHeldRecord(b) {
+		return "waiting for the private-only check, re-checking with backoff: " + strings.TrimSpace(string(b))
+	}
+	return "loop stopped, restarting with backoff: " + strings.TrimSpace(string(b))
+}
 
 func superviseLoop(ctx context.Context, loop *syncpkg.Loop, recheck func()) {
 	superviseLoopWith(ctx, loop, recheck, runLoop, loopBackoffMin)
@@ -665,7 +777,7 @@ func (s *routedSet) statusLines() []string {
 		}
 		if have {
 			if b, err := os.ReadFile(loopFailedPath(cfg.SyncDir)); err == nil {
-				lines = append(lines, "    loop stopped, restarting with backoff: "+strings.TrimSpace(string(b)))
+				lines = append(lines, "    "+loopFailedLine(b))
 			}
 			if l := pausedLine(cfg); l != "" {
 				lines = append(lines, "    "+strings.ReplaceAll(l, "\n", " "))
