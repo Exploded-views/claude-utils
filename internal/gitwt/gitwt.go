@@ -6,6 +6,7 @@ package gitwt
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -33,6 +34,14 @@ func New(dir string) *Repo { return &Repo{Dir: dir} }
 // not; the daemon runs its own bounded maintenance instead (see the sync
 // package). Do not use these for that explicit run: `--auto` reads gc.auto.
 var NoAutoMaintenance = []string{"-c", "gc.auto=0", "-c", "maintenance.auto=false"}
+
+// Maintain runs git's own auto housekeeping (`gc --auto`) in the foreground
+// and under ctx: cancelling kills git's whole process group. It deliberately
+// omits NoAutoMaintenance, because --auto reads gc.auto and would do nothing.
+// Callers hold the sync dir's lock.
+func (r *Repo) Maintain(ctx context.Context) error {
+	return nil // RED stub
+}
 
 // Run executes `git -C <dir> <args...>` and returns stdout. Stderr is
 // included in the returned error on non-zero exit.

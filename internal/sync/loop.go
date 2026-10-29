@@ -42,6 +42,10 @@ type Loop struct {
 	// Now is the clock the expiry check reads (nil: time.Now); tests inject one.
 	Now func() time.Time
 
+	// MaintainEvery is the gap between housekeeping runs (0: 24 h) and
+	// MaintainTimeout the longest one may take (0: 10 min).
+	MaintainEvery, MaintainTimeout time.Duration
+
 	// Name labels this loop's log lines when several repos run in one process.
 	Name string
 	// Owns gates which Claude folders this loop may touch (see Roots.Owns).
@@ -54,6 +58,7 @@ type Loop struct {
 	recovered *recovery
 	// refused is the last pull-refused reason logged, so it is logged once.
 	refused    string
+	lastMaint  time.Time
 	expiryOnce sync.Once
 }
 
@@ -362,6 +367,9 @@ func (l *Loop) pullTick(repo *gitwt.Repo, roots Roots) {
 		l.OnFlush(false, err)
 	}
 }
+
+// maybeMaintain runs the daemon's own housekeeping when it is due.
+func (l *Loop) maybeMaintain(repo *gitwt.Repo) {} // RED stub
 
 // handleEvent filters and reacts to a single fsnotify event. Returns
 // (handled, error). handled=true means the change was relevant and should
