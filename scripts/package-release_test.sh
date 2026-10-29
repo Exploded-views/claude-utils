@@ -25,7 +25,7 @@ ok()    { PASS=$((PASS + 1)); printf 'PASS    %s\n' "$1"; }
 bad()   { FAIL=$((FAIL + 1)); printf 'FAIL    %s\n' "$1"; }
 check() { if "${@:2}"; then ok "$1"; else bad "$1"; fi; }
 
-rm -rf "$W"; mkdir -p "$W/out" "$W/x" "$W/home" "$W/stubs"
+rm -rf "$W"; mkdir -p "$W/out" "$W/all" "$W/x" "$W/home" "$W/stubs"
 GO="${GO:-go}" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/out" "$TARGET" >"$W/package.log" 2>&1 || { tail -20 "$W/package.log"; bad "package-release.sh exits 0"; }
 A="$W/out/$NAME.tar.gz"
 check "archive exists" [ -f "$A" ]
@@ -40,6 +40,40 @@ check "no stray top-level entries" bash -c "[ \"\$(tar -tzf '$A' | cut -d/ -f1 |
 check "SHA256SUMS lists the archive" grep -q "$NAME.tar.gz" "$W/out/SHA256SUMS"
 check "SHA256SUMS verifies" bash -c "cd '$W/out' && ${SUMC[*]} SHA256SUMS >/dev/null"
 check "the binary reports the release version" bash -c "[ \"\$('$D/claude-memsync' version)\" = 'claude-memsync $VER' ]"
+
+# The budget bench ships as test binaries beside the product archive, so the
+# gates can run against the shipped bytes on a host with no Go and no checkout.
+BNAME="claude-utils-$VER-budget-${TARGET%/*}-${TARGET#*/}"
+BA="$W/out/$BNAME.tar.gz"
+check "budget archive exists" [ -f "$BA" ]
+mkdir -p "$W/bx"; tar -xzf "$BA" -C "$W/bx" 2>/dev/null || true
+BD="$W/bx/$BNAME"
+for f in claude-memsync-budget.test route-budget.test README; do
+  check "budget archive holds $BNAME/$f" [ -f "$BD/$f" ]
+done
+check "budget test binaries are executable" bash -c "[ -x '$BD/claude-memsync-budget.test' ] && [ -x '$BD/route-budget.test' ]"
+check "budget archive has no stray top-level entries" bash -c "[ \"\$(tar -tzf '$BA' | cut -d/ -f1 | sort -u)\" = '$BNAME' ]"
+check "budget README names the run commands" bash -c "grep -q 'MEMSYNC_BUDGET_BIN_DIR' '$BD/README' && grep -q 'MEMSYNC_BUDGET_TAG' '$BD/README' && grep -q 'claude-memsync-budget.test' '$BD/README' && grep -q 'route-budget.test' '$BD/README'"
+check "the budget binaries hold the budget gates (-test.list)" bash -c "'$BD/claude-memsync-budget.test' -test.list 'Budget' | grep -q '^TestBudgetB8' && '$BD/route-budget.test' -test.list 'Budget' | grep -q '^TestBudgetB4'"
+check "SHA256SUMS lists the product and the budget archive" bash -c "grep -q ' $NAME.tar.gz\$' '$W/out/SHA256SUMS' && grep -q ' $BNAME.tar.gz\$' '$W/out/SHA256SUMS'"
+
+# Every default target, with a stub Go that only writes its -o file: the release
+# set is four budget archives (linux and darwin, amd64 and arm64; none for
+# windows), and SHA256SUMS covers them and the six product archives alike.
+mkdir -p "$W/stubgo"
+cat >"$W/stubgo/go" <<'STUB'
+#!/bin/sh
+out=""; prev=""
+for a in "$@"; do if [ "$prev" = "-o" ]; then out="$a"; fi; prev="$a"; done
+[ -z "$out" ] || { echo stub >"$out"; chmod 755 "$out"; }
+STUB
+chmod +x "$W/stubgo/go"
+GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/all" >"$W/all.log" 2>&1 || { tail -5 "$W/all.log"; bad "package-release.sh with every default target exits 0"; }
+for bt in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
+  check "all targets: budget-$bt archive is in the release and in SHA256SUMS" bash -c "[ -f '$W/all/claude-utils-$VER-budget-$bt.tar.gz' ] && grep -q ' claude-utils-$VER-budget-$bt.tar.gz\$' '$W/all/SHA256SUMS'"
+done
+check "all targets: no windows budget archive" bash -c "! ls '$W/all' | grep -q 'budget-windows'"
+check "all targets: SHA256SUMS holds 6 product and 4 budget archives, and verifies" bash -c "[ \"\$(grep -c -- '-budget-' '$W/all/SHA256SUMS')\" = 4 ] && [ \"\$(grep -vc -- '-budget-' '$W/all/SHA256SUMS')\" = 6 ] && cd '$W/all' && ${SUMC[*]} SHA256SUMS >/dev/null"
 
 # One release-version rule everywhere: package-release.sh refuses what bootstrap.sh
 # --prebuilt-dir would refuse, and release.yml's tag check is the same rule.
