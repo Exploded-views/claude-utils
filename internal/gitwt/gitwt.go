@@ -26,6 +26,14 @@ type Repo struct {
 // not need to exist yet; pass it through Init or Clone first.
 func New(dir string) *Repo { return &Repo{Dir: dir} }
 
+// NoAutoMaintenance turns off the auto gc and auto maintenance a commit, fetch,
+// merge or rebase would start. git runs that as `maintenance run --auto
+// --detach`, which setsid()s out of proc's process group, so a deadline or
+// timeout could not kill it. With the trigger off nothing runs, detached or
+// not; the daemon runs its own bounded maintenance instead (see the sync
+// package). Do not use these for that explicit run: `--auto` reads gc.auto.
+var NoAutoMaintenance = []string{"-c", "gc.auto=0", "-c", "maintenance.auto=false"}
+
 // Run executes `git -C <dir> <args...>` and returns stdout. Stderr is
 // included in the returned error on non-zero exit.
 func (r *Repo) Run(args ...string) (string, error) {
@@ -41,7 +49,7 @@ func (r *Repo) RunStdin(stdin []byte, args ...string) (string, error) {
 
 // run is RunStdin with extra environment variables for git (KEY=VALUE).
 func (r *Repo) run(env []string, stdin []byte, args ...string) (string, error) {
-	full := append([]string{"-C", r.Dir}, args...)
+	full := append(append([]string{"-C", r.Dir}, NoAutoMaintenance...), args...)
 	cmd := proc.Command("git", full...)
 	cmd.Env = repoEnv(env)
 	if stdin != nil {
