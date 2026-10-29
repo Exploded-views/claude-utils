@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 )
@@ -286,5 +287,74 @@ func TestMissingTmpdirFolderOneReadPerGeneration(t *testing.T) {
 	decideAll()
 	if reads != 2 {
 		t.Fatalf("T read %d times after Replace, want 2", reads)
+	}
+}
+
+// A directory that changes on every read (a busy $TMPDIR) must not make the
+// walk start over for ever: it gives up after three walks, returns the answer
+// it has, and does not remember it.
+func TestCandidatesBoundedWhenDirKeepsChanging(t *testing.T) {
+	m := newMemoTree(t, 0)
+	var mu sync.Mutex
+	walks, bumps := 0, 0
+	bumping := true
+	inner := readDir
+	readDir = func(dir string) ([]os.DirEntry, error) {
+		es, err := inner(dir)
+		mu.Lock()
+		defer mu.Unlock()
+		// Bounded, so a missing cap fails the test instead of spinning.
+		if dir == m.big && bumping && bumps < 200 {
+			bumps++
+			_ = os.WriteFile(filepath.Join(m.big, fmt.Sprintf("bump%03d", bumps)), nil, 0600)
+		}
+		return es, err
+	}
+	walkHook = func(string) {
+		mu.Lock()
+		walks++
+		mu.Unlock()
+	}
+	r := memoRouter()
+	want := filepath.Join(m.big, "repo0")
+	got := r.Candidates(m.real[0])
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("answer %v, want [%s]", got, want)
+	}
+	if walks > 3 {
+		t.Fatalf("%d walks while the dir kept changing, want at most 3", walks)
+	}
+	mu.Lock()
+	bumping = false
+	before := walks
+	mu.Unlock()
+	r.Candidates(m.real[0]) // not remembered: walks again, now on a quiet dir
+	if walks <= before {
+		t.Fatalf("answer from a changing dir was remembered: %d walks, was %d", walks, before)
+	}
+	// Quiet now, so it is remembered (a few tries: ancestors of the temp dir
+	// may change under the test).
+	for try := 0; try < 3; try++ {
+		n := walks
+		r.Candidates(m.real[0])
+		if walks == n {
+			return
+		}
+	}
+	t.Fatal("stable answer not remembered")
+}
+
+func TestCandidatesFoldCaseOnCaseInsensitiveHosts(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
+		t.Skip("case-sensitive host")
+	}
+	dir := filepath.Join(t.TempDir(), "MixedCase")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for name, got := range map[string][]string{"package": Candidates(escape(dir)), "router": memoRouter().Candidates(escape(dir))} {
+		if len(got) != 1 || got[0] != dir {
+			t.Fatalf("%s: %v, want [%s]", name, got, dir)
+		}
 	}
 }

@@ -284,8 +284,12 @@ func (c *walkCache) list(dir string) (*listing, stamp) {
 	return e.l, st
 }
 
+// maxWalks bounds the walks of one Candidates call: a directory that changes
+// all the time (a busy temp dir) must not keep it walking.
+const maxWalks = 3
+
 func (c *walkCache) candidates(folder string) []string {
-	for {
+	for try := 1; ; try++ {
 		c.mu.Lock()
 		e := c.cands[folder]
 		if e == nil {
@@ -310,12 +314,16 @@ func (c *walkCache) candidates(folder string) []string {
 		if fresh {
 			return e.v
 		}
-		// A directory it read has changed: drop this answer and walk again.
+		// A directory it read has changed: drop this answer and walk again,
+		// or after the last walk hand it back without remembering it.
 		c.mu.Lock()
 		if c.cands[folder] == e {
 			delete(c.cands, folder)
 		}
 		c.mu.Unlock()
+		if try == maxWalks {
+			return e.v
+		}
 	}
 }
 
