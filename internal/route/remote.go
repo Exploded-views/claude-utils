@@ -509,16 +509,39 @@ var gitSem = make(chan struct{}, gitConcurrency)
 
 const gitConcurrency = 4
 
+// gitTimeout bounds one git call of route resolution: a git that hangs (a
+// stalled mount, an fsmonitor hook) must not hold a semaphore slot, Warm and so
+// the daemon's start for good.
+var gitTimeout = 10 * time.Second
+
+// SetGitTimeoutForTest changes the per-call git timeout and returns the
+// function that puts it back.
+func SetGitTimeoutForTest(d time.Duration) (restore func()) {
+	prev := gitTimeout
+	gitTimeout = d
+	return func() { gitTimeout = prev }
+}
+
+// errGitTimeout is what a call that ran out of time returns: not an exit
+// status, so it never reads as "git said no".
+var errGitTimeout = errors.New("git timed out")
+
 // gitOut runs git in dir with the inherited GIT_* variables dropped, at most
-// gitConcurrency at a time.
+// gitConcurrency at a time and for at most gitTimeout each.
 func gitOut(dir string, args ...string) (string, error) {
 	gitSem <- struct{}{}
 	defer func() { <-gitSem }()
-	c := proc.Command("git", append([]string{"-C", dir}, args...)...)
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	c := proc.GroupedCommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
 	c.Env = append(cleanGitEnv(os.Environ()), "LC_ALL=C", "LANGUAGE=C")
+	c.WaitDelay = time.Second
 	var out bytes.Buffer
 	c.Stdout = &out
 	err := proc.Run(c)
+	if err != nil && ctx.Err() != nil {
+		err = errGitTimeout
+	}
 	return strings.TrimSpace(out.String()), err
 }
 

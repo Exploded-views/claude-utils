@@ -52,16 +52,26 @@ func Command(name string, args ...string) *exec.Cmd {
 // CommandContext is Command with exec.CommandContext's cancellation; after
 // Group, cancelling kills the child's whole process group.
 func CommandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
+	if grouped.Load() {
+		return GroupedCommandContext(ctx, name, args...)
+	}
 	c := exec.CommandContext(ctx, name, args...)
 	HideWindow(c)
-	if grouped.Load() {
-		setGroup(c)
-		c.Cancel = func() error {
-			if c.Process != nil {
-				killGroup(c.Process.Pid)
-			}
-			return nil
+	return c
+}
+
+// GroupedCommandContext is CommandContext whose child always leads a process
+// group of its own, and whose cancellation kills that whole group: a timeout
+// takes the child's own children (hooks, helpers) with it.
+func GroupedCommandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
+	c := exec.CommandContext(ctx, name, args...)
+	HideWindow(c)
+	setGroup(c)
+	c.Cancel = func() error {
+		if c.Process != nil {
+			killGroup(c.Process.Pid)
 		}
+		return nil
 	}
 	return c
 }
