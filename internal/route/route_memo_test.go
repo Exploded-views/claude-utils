@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -352,9 +353,31 @@ func TestCandidatesFoldCaseOnCaseInsensitiveHosts(t *testing.T) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	for name, got := range map[string][]string{"package": Candidates(escape(dir)), "router": memoRouter().Candidates(escape(dir))} {
+	// Asked for in another case than the directory is spelled in.
+	q := escape(strings.ToLower(dir))
+	for name, got := range map[string][]string{"package": Candidates(q), "router": memoRouter().Candidates(q)} {
 		if len(got) != 1 || got[0] != dir {
 			t.Fatalf("%s: %v, want [%s]", name, got, dir)
 		}
+	}
+}
+
+// A folder whose directory did not exist when it was first asked about is
+// found once the directory is made: the remembered answer is re-checked.
+func TestMemoizedAnswerSeesDirCreatedLater(t *testing.T) {
+	big := filepath.Join(t.TempDir(), "big")
+	if err := os.MkdirAll(big, 0700); err != nil {
+		t.Fatal(err)
+	}
+	r := memoRouter()
+	dir := filepath.Join(big, "later")
+	if got := r.Candidates(escape(dir)); len(got) != 0 {
+		t.Fatalf("before: %v", got)
+	}
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.Candidates(escape(dir)); len(got) != 1 || got[0] != dir {
+		t.Fatalf("after the dir was made: %v, want [%s]", got, dir)
 	}
 }
