@@ -93,6 +93,7 @@ type recovery struct{ err error }
 // Run blocks until ctx is canceled. Returns the first fatal error or nil
 // when ctx ends. Recoverable errors (transient git failures) are logged.
 func (l *Loop) Run(ctx context.Context) error {
+	l.ctx = ctx
 	if l.Branch == "" {
 		l.Branch = "main"
 	}
@@ -397,15 +398,54 @@ func (l *Loop) maybeMaintain(repo *gitwt.Repo) {
 	if timeout <= 0 {
 		timeout = defaultMaintainTimeout
 	}
+	if l.lastMaint.IsZero() {
+		l.lastMaint = readMaintained(l.Cfg.SyncDir)
+	}
 	if t := now(); !l.lastMaint.IsZero() && t.Sub(l.lastMaint) < every {
 		return
 	}
+	parent := l.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	// One housekeeping at a time in the process: a Pi with many routed repos
+	// must not repack them all at once.
+	select {
+	case maintainSem <- struct{}{}:
+		defer func() { <-maintainSem }()
+	case <-parent.Done():
+		return
+	}
 	l.lastMaint = now() // a failure or timeout waits for the next period too
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	if err := writeSynced(maintainedPath(l.Cfg.SyncDir), []byte(l.lastMaint.UTC().Format(time.RFC3339)+"\n")); err != nil {
+		l.logln("housekeeping: cannot record the run:", newPathGuard(l.Cfg).Err(err))
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	if err := repo.Maintain(ctx); err != nil {
+	if err := repo.Maintain(ctx); err != nil && parent.Err() == nil {
 		l.logln("housekeeping:", newPathGuard(l.Cfg).Err(err))
 	}
+}
+
+// maintainSem lets one loop at a time run housekeeping.
+var maintainSem = make(chan struct{}, 1)
+
+// maintainedPath records, in the sync dir's .state, when housekeeping last
+// ran, so a restart does not run it again within the period.
+func maintainedPath(syncDir string) string {
+	return filepath.Join(syncDir, manifestStateDir, "maintained")
+}
+
+func readMaintained(syncDir string) time.Time {
+	b, err := os.ReadFile(maintainedPath(syncDir))
+	if err != nil {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, strings.TrimSpace(string(b)))
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // handleEvent filters and reacts to a single fsnotify event. Returns
