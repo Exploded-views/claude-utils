@@ -161,3 +161,40 @@ func TestLiveUnspellableNamesUnderHugeDirAreReported(t *testing.T) {
 		}
 	}
 }
+
+// The liveness check of a folder under a huge dir is file I/O: Warm runs it for
+// many folders side by side, so it must not run under the router's lock one
+// folder after another. Counted, not timed: at some moment two checks overlap.
+func TestLargeLivenessChecksOverlapDuringWarm(t *testing.T) {
+	r := New(fileOf(Rule{Remote: "github.com/me/*", Repo: "projects"}), func(string) bool { return true })
+	r.Logf = func(string, ...any) {}
+	var mu sync.Mutex
+	cur, peak := 0, 0
+	r.largeFn = func(string) bool {
+		mu.Lock()
+		cur++
+		if cur > peak {
+			peak = cur
+		}
+		mu.Unlock()
+		time.Sleep(5 * time.Millisecond)
+		mu.Lock()
+		cur--
+		mu.Unlock()
+		return true
+	}
+	var folders []string
+	for i := 0; i < 64; i++ {
+		folders = append(folders, fmt.Sprintf("-nonexistent-dir-%02d", i))
+	}
+	r.Warm(folders)
+	if peak < 2 {
+		t.Fatalf("at most %d liveness check(s) ran at once during Warm, want them side by side", peak)
+	}
+	// The decisions are unaffected.
+	for _, f := range folders {
+		if d := r.Decide(f); d.Reason != ReasonUnresolved {
+			t.Fatalf("%s: %+v", f, d)
+		}
+	}
+}
