@@ -366,10 +366,46 @@ func (l *Loop) pullTick(repo *gitwt.Repo, roots Roots) {
 	if l.OnFlush != nil {
 		l.OnFlush(false, err)
 	}
+	l.maybeMaintain(repo)
 }
 
-// maybeMaintain runs the daemon's own housekeeping when it is due.
-func (l *Loop) maybeMaintain(repo *gitwt.Repo) {} // RED stub
+// Housekeeping defaults: git's auto maintenance is off for every product git
+// call (gitwt.NoAutoMaintenance), so the loop runs `gc --auto` itself.
+const (
+	defaultMaintainEvery   = 24 * time.Hour
+	defaultMaintainTimeout = 10 * time.Minute
+)
+
+// maybeMaintain runs the daemon's own housekeeping when it is due: at most
+// once per MaintainEvery, in the foreground, killed after MaintainTimeout. It
+// runs on the loop's goroutine, so it never races a sync cycle of this sync
+// dir (the daemon holds the dir's lock for its lifetime), and it is never
+// called from the changes hook. A held loop does nothing.
+func (l *Loop) maybeMaintain(repo *gitwt.Repo) {
+	if l.held() {
+		return
+	}
+	now := time.Now
+	if l.Now != nil {
+		now = l.Now
+	}
+	every, timeout := l.MaintainEvery, l.MaintainTimeout
+	if every <= 0 {
+		every = defaultMaintainEvery
+	}
+	if timeout <= 0 {
+		timeout = defaultMaintainTimeout
+	}
+	if t := now(); !l.lastMaint.IsZero() && t.Sub(l.lastMaint) < every {
+		return
+	}
+	l.lastMaint = now() // a failure or timeout waits for the next period too
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := repo.Maintain(ctx); err != nil {
+		l.logln("housekeeping:", newPathGuard(l.Cfg).Err(err))
+	}
+}
 
 // handleEvent filters and reacts to a single fsnotify event. Returns
 // (handled, error). handled=true means the change was relevant and should

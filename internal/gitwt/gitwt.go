@@ -40,7 +40,18 @@ var NoAutoMaintenance = []string{"-c", "gc.auto=0", "-c", "maintenance.auto=fals
 // omits NoAutoMaintenance, because --auto reads gc.auto and would do nothing.
 // Callers hold the sync dir's lock.
 func (r *Repo) Maintain(ctx context.Context) error {
-	return nil // RED stub
+	cmd := proc.GroupedCommandContext(ctx, "git", "-C", r.Dir,
+		"-c", "gc.autoDetach=false", "-c", "maintenance.autoDetach=false", "gc", "--auto", "--quiet")
+	cmd.Env = repoEnv(nil)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := proc.Run(cmd); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("git gc --auto: %w", ctx.Err())
+		}
+		return fmt.Errorf("git gc --auto: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 // Run executes `git -C <dir> <args...>` and returns stdout. Stderr is

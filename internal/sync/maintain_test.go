@@ -59,7 +59,7 @@ func TestMaintainRunsOncePer24Hours(t *testing.T) {
 	if len(first) != 1 || !strings.Contains(first[0], "gc") || !strings.Contains(first[0], "--auto") {
 		t.Fatalf("calls = %q, want one gc --auto", first)
 	}
-	if strings.Contains(first[0], "gc.auto=0") || strings.Contains(first[0], "maintenance.auto") {
+	if strings.Contains(first[0], "gc.auto=") || strings.Contains(first[0], "maintenance.auto=") {
 		t.Errorf("housekeeping carries the flag that disables it: %q", first[0])
 	}
 	if !strings.Contains(first[0], "gc.autoDetach=false") {
