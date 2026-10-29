@@ -7,7 +7,7 @@ fork are upstream's own releases.
 
 ## Unreleased
 
-Nothing yet.
+- **Routing no longer re-reads a huge directory for every stale folder**: finding the directory a project folder name stands for read every directory along its path, so on a Mac with hundreds of folders for deleted `$TMPDIR` checkouts the daemon's startup reconcile re-read the same very large temp directory for each one (about 10 s apiece, in parallel across the loops) and never finished. The router now reads each directory once per routing generation (until `routes.json` reloads or the pull tick), re-reading one only when its modification time or size changes, shares the read between concurrent callers, and walks once per folder instead of twice. May also help the changes hook overrunning its deadline (#12). *Upstream candidate.*
 
 ## v0.4.0-ev.1 (2026-10-27)
 
