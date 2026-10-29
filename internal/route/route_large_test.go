@@ -54,24 +54,28 @@ func TestUnusualCharInHugeDirIsUnresolvedAtFlatCost(t *testing.T) {
 	}
 	var costs []int
 	for _, n := range []int{400, 2000} {
-		big := hugeDir(t, n, "my@app", "plain-name", "dot.name")
+		big := hugeDir(t, n, "my@app", "plainname", "plain-name", "dot.name")
 		restore := count(big)
 		entries = 0
 		if got := Candidates(escape(filepath.Join(big, "my@app"))); len(got) != 0 {
 			t.Errorf("%d entries: resolved %v, want unresolved", n, got)
 		}
-		// Plain names and the usual separators resolve by probing, without a listing.
+		// A name with no '-' in it is exact and resolves by probing, without a
+		// listing; one with a '-' could be an unlisted sibling's and does not.
+		want := filepath.Join(big, "plainname")
+		if got := Candidates(escape(want)); len(got) != 1 || got[0] != want {
+			t.Errorf("%d entries: plainname -> %v", n, got)
+		}
 		for _, name := range []string{"plain-name", "dot.name"} {
-			want := filepath.Join(big, name)
-			if got := Candidates(escape(want)); len(got) != 1 || got[0] != want {
-				t.Errorf("%d entries: %s -> %v", n, name, got)
+			if got := Candidates(escape(filepath.Join(big, name))); len(got) != 0 {
+				t.Errorf("%d entries: %s resolved to %v, want unresolved (ambiguous)", n, name, got)
 			}
 		}
 		restore()
 		costs = append(costs, entries)
 	}
-	if costs[0] != costs[1] || costs[0] > 3*(maxList+1) {
-		t.Errorf("entries read of the huge dir: %v, want equal and at most %d each", costs, 3*(maxList+1))
+	if costs[0] != costs[1] || costs[0] > 4*(maxList+1) {
+		t.Errorf("entries read of the huge dir: %v, want equal and at most %d each", costs, 4*(maxList+1))
 	}
 }
 
@@ -199,41 +203,84 @@ func TestLargeLivenessChecksOverlapDuringWarm(t *testing.T) {
 	}
 }
 
-// Under a huge dir the probe never settles for the first name it finds: every
-// spelling that exists is a candidate, so a folder two directories could
-// have made is ambiguous there exactly as it is in a small directory.
-func TestProbeUnderHugeDirReturnsEveryVariant(t *testing.T) {
+// Under a huge dir a name with a '-' in it fails closed: a sibling that was
+// not listed (a@b next to a/b) cannot be ruled out, so it resolves to nothing
+// rather than to the one the probe found. A small dir lists, and the two
+// entries make the folder ambiguous there as well. This replaces the earlier
+// expectation that the probe returns every spelling it can try.
+func TestDashedNameUnderHugeDirIsAmbiguousNotAProbedSibling(t *testing.T) {
 	gitEnv(t)
-	build := func(filler int) (string, string) {
-		big := hugeDir(t, filler, "a-b", "a.b", "a_b", "a")
-		if err := os.MkdirAll(filepath.Join(big, "a", "b"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		return big, escape(filepath.Join(big, "a-b"))
+	build := func(filler int) string {
+		big := hugeDir(t, filler, "a@b", "a")
+		repo := filepath.Join(big, "a", "b")
+		initRepo(t, repo, "git@github.com:me/the-wrong-one.git")
+		return escape(repo)
 	}
-	rel := func(big string, paths []string) []string {
-		var out []string
-		for _, p := range paths {
-			r, _ := filepath.Rel(big, p)
-			out = append(out, r)
-		}
-		return out
-	}
-	smallBig, smallFolder := build(10)
-	hugeBig, hugeFolder := build(400)
-	want := rel(smallBig, Candidates(smallFolder))
-	if len(want) != 4 {
-		t.Fatalf("small dir: %v, want the four spellings", want)
-	}
-	if got := rel(hugeBig, Candidates(hugeFolder)); strings.Join(got, "|") != strings.Join(want, "|") {
-		t.Errorf("huge dir candidates %v, listing path gives %v", got, want)
-	}
-	decide := func(folder string) Decision {
+	decide := func(folder string) (Decision, []string) {
 		r := New(fileOf(Rule{Remote: "github.com/me/*", Repo: "projects"}), func(string) bool { return true })
 		r.Logf = func(string, ...any) {}
-		return r.Decide(folder)
+		return r.Decide(folder), r.Candidates(folder)
 	}
-	if ds, dh := decide(smallFolder), decide(hugeFolder); ds != dh || ds.Reason != ReasonUnresolved {
-		t.Errorf("decision under a huge dir %+v, small dir %+v", dh, ds)
+	small, huge := build(10), build(400)
+	ds, cs := decide(small)
+	dh, ch := decide(huge)
+	if len(cs) != 2 {
+		t.Fatalf("small dir: %v, want both spellings", cs)
+	}
+	if len(ch) != 0 {
+		t.Errorf("huge dir: candidates %v, want none (ambiguous)", ch)
+	}
+	if ds.Reason != ReasonUnresolved || dh != ds {
+		t.Errorf("decision under a huge dir %+v, small dir %+v: want the same, unresolved", dh, ds)
+	}
+}
+
+// ...and a live one is reported in status as ambiguous.
+func TestLiveAmbiguousNameUnderHugeDirIsReportedAsAmbiguous(t *testing.T) {
+	big := hugeDir(t, 400, "a")
+	projects := t.TempDir()
+	folder := escape(filepath.Join(big, "a", "b"))
+	mem := filepath.Join(projects, folder, "memory")
+	if err := os.MkdirAll(mem, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mem, "n.md"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := New(fileOf(Rule{Remote: "github.com/me/*", Repo: "projects"}), func(string) bool { return true })
+	var logs []string
+	r.Logf = func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
+	r.ProjectsDir = projects
+	s := r.Summarize([]string{folder})
+	if len(s.TooLarge) != 1 {
+		t.Fatalf("summary lists %v, want the folder", s.TooLarge)
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "ambiguous, not synced") {
+		t.Errorf("log does not say ambiguous, not synced: %q", logs)
+	}
+}
+
+// A dashed name under a small dir still resolves by listing.
+func TestDashedNameUnderSmallDirResolvesByListing(t *testing.T) {
+	big := hugeDir(t, 20, "my-app")
+	want := filepath.Join(big, "my-app")
+	if got := Candidates(escape(want)); len(got) != 1 || got[0] != want {
+		t.Fatalf("small dir: %v, want [%s]", got, want)
+	}
+}
+
+// The gone folders under a huge dir cost no git process, dashed or not.
+func TestGoneFoldersUnderHugeDirCostNoSpawn(t *testing.T) {
+	big := hugeDir(t, 400)
+	l := countSpawns(t)
+	for _, n := range []string{"gone", "gone-1", "gone-1-sub", "x.y"} {
+		if _, ok := remoteURL(filepath.Join(big, n)); ok {
+			t.Fatalf("%s: remoteURL ok", n)
+		}
+		r := New(fileOf(Rule{Remote: "github.com/me/*", Repo: "projects"}), func(string) bool { return true })
+		r.Decide(escape(filepath.Join(big, n)))
+	}
+	if n := l.n(); n != 0 {
+		t.Errorf("%d git spawns for gone folders, want 0: %v", n, l.subs)
 	}
 }

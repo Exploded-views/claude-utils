@@ -107,7 +107,7 @@ func TestCacheInvalidatedOnReplaceAndRefresh(t *testing.T) {
 	// so the big dir itself never changes: only a reload can drop its listing.
 	var dirs []string
 	for _, name := range []string{"Replace", "Refresh"} {
-		dir := filepath.Join(m.big, "late-"+name)
+		dir := filepath.Join(m.big, "late"+name) // no dash: probed, not left ambiguous
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -441,7 +441,7 @@ func TestCandidatesFoldCaseUnderHugeDir(t *testing.T) {
 		}
 		f.Close()
 	}
-	dir := filepath.Join(big, "MixedCase", "SubDir")
+	dir := filepath.Join(big, "MixedCase")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
