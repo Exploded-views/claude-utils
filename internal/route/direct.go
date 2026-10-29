@@ -237,7 +237,9 @@ func readCoreConfig(path string) (bare bool, worktree string, ok bool) {
 
 // directInside answers `git rev-parse --is-inside-work-tree` plus
 // `--git-common-dir` for dir: Yes when both would succeed with "true", No when
-// git would fail or say "false".
+// git would fail or say "false". A "no" for a directory that exists is only a
+// hint (the walk follows the path as written, git the physical one): remoteURL
+// has git confirm it.
 func directInside(dir string) directKind {
 	_, k := locateRepo(dir)
 	return k

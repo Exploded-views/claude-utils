@@ -466,12 +466,17 @@ func (c *walkCache) candidatesLarge(folder string) ([]string, bool) {
 // is not in a work tree or git could not answer; url "" means no origin.
 func remoteURL(dir string) (url string, ok bool) {
 	git := func(args ...string) (string, error) { return gitOut(dir, args...) }
-	switch directInside(dir) {
-	case directNo:
-		return "", false
+	k := directInside(dir)
+	if k == directNo && gone(dir) {
+		return "", false // git -C cannot enter it either: no process needed
+	}
+	switch k {
 	case directYes:
 		// Read from the files: is-inside-work-tree and git-common-dir would say yes.
 	default:
+		// Includes a direct "no" for a dir that exists: the files may have
+		// been walked along the wrong path (a symlinked ancestor), so only git
+		// may say a directory is not a checkout.
 		if in, err := git("rev-parse", "--is-inside-work-tree"); err != nil || in != "true" {
 			return "", false
 		}
@@ -490,6 +495,12 @@ func remoteURL(dir string) (url string, ok bool) {
 		return "", false
 	}
 	return u, true
+}
+
+// gone reports that dir does not exist (git -C cannot enter it).
+func gone(dir string) bool {
+	_, err := os.Lstat(dir)
+	return missing(err)
 }
 
 // gitSem bounds the git children route resolution runs at once: the start-up
