@@ -736,6 +736,27 @@ func (r *Router) Warm(folders []string) {
 	wg.Wait()
 }
 
+// WarmWithin is Warm held to a deadline. It returns true when every folder was
+// decided in time. Otherwise it returns false at the deadline and the workers
+// keep resolving in the background: a folder not yet decided is decided when
+// its git answers (or times out), and a caller that asks for it meanwhile
+// shares that one computation.
+func (r *Router) WarmWithin(folders []string, d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.Warm(folders)
+	}()
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-done:
+		return true
+	case <-t.C:
+		return false
+	}
+}
+
 // Summarize routes every folder and counts the outcome.
 func (r *Router) Summarize(folders []string) Summary {
 	r.Warm(folders)

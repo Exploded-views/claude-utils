@@ -518,7 +518,9 @@ func (s *routedSet) Start(ctx context.Context) (*running, error) {
 	// Resolve every folder side by side before the loops each ask for theirs
 	// one by one (the git children among them are bounded).
 	if primary, ok := s.Primary(); ok {
-		s.Router.Warm(claudeFolders(primary.ClaudeProjectsDir))
+		if !s.Router.WarmWithin(claudeFolders(primary.ClaudeProjectsDir), warmDeadline) {
+			log.Printf("routing: start-up resolution is still running after %v; the loops start and the rest is decided as git answers", warmDeadline)
+		}
 	}
 	interval := time.Hour
 	for _, name := range s.names() {
@@ -628,6 +630,9 @@ func superviseLoopWith(ctx context.Context, loop *syncpkg.Loop, recheck func(), 
 }
 
 // claudeFolders lists the project folders in the Claude tree.
+// warmDeadline is the longest Start waits for the start-up resolution.
+var warmDeadline = 5 * time.Second
+
 func claudeFolders(dir string) []string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
