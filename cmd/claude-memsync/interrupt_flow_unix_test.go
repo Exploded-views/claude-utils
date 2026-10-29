@@ -163,3 +163,39 @@ func TestInterruptDuringSyncFlow_SecondSignalKillsGitAndExits130(t *testing.T) {
 		t.Errorf("git %d still running after the second signal", pid)
 	}
 }
+
+// M6: a signal the guard ignores during the flow must not end the guard: one
+// after the flow kills the child and exits.
+func TestInterruptGuardOutlivesTheSyncFlow(t *testing.T) {
+	h := newFlowHarness(t)
+	stop := guardChildren()
+	defer stop()
+	err := withSyncLocksStopping(&bytes.Buffer{}, []string{h.dir}, func() error {
+		h.guard <- syscall.SIGINT // ignored by the guard: the flow owns it
+		for deadline := time.Now().Add(2 * time.Second); len(h.guard) > 0 && time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		}
+		time.Sleep(100 * time.Millisecond)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case c := <-h.exited:
+		t.Fatalf("exited (%d) on a signal during the flow", c)
+	default:
+	}
+	pid := h.startGit()
+	h.guard <- syscall.SIGINT
+	select {
+	case c := <-h.exited:
+		if c != 130 {
+			t.Errorf("exit code %d, want 130", c)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a signal after the flow did not exit: the guard stopped listening")
+	}
+	if !h.goneWithin(pid, 2*time.Second) {
+		t.Errorf("git %d still running after the signal", pid)
+	}
+}
