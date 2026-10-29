@@ -37,10 +37,25 @@ if [ -d "$last" ]; then
   b="$(basename "$last")"
   (cd "$last" && find . -name '*.strings.txt' | sed "s|^\./||; s|^|$b |") >>"${FAKE_GL_LOG}.strings"
 fi
-# Like the real one for the scan control: a finding (exit 1) when given the control
-# tree (named memsync-scan-control), unless FAKE_GL_CLEAN=1 (a scanner that reports nothing, whatever it is given).
-[ "${FAKE_GL_CLEAN:-}" != 1 ] && [ "${FAKE_GL_RC:-0}" = 0 ] && [ "$(basename "$last")" = memsync-scan-control ] && exit 1
-exit "${FAKE_GL_RC:-0}"
+# Like the real one: the scan control tree (named memsync-scan-control) is a finding
+# (exit 99 and a one-finding JSON report); other trees are clean (exit 0, "[]"). Overrides:
+# FAKE_GL_CLEAN=1 (reports nothing whatever it is given), FAKE_GL_RC (the exit for the real
+# archives, 99 = findings), FAKE_GL_CONTROL_RC and FAKE_GL_CONTROL_REPORT (finding|clean|empty|none).
+rpath=""; prev=""; for a in "$@"; do [ "$prev" = --report-path ] && rpath="$a"; prev="$a"; done
+if [ "$(basename "$last")" = memsync-scan-control ]; then
+  rc="${FAKE_GL_CONTROL_RC:-99}"; rep="${FAKE_GL_CONTROL_REPORT:-finding}"
+else
+  rc="${FAKE_GL_RC:-0}"; rep=clean; [ "$rc" = 99 ] && rep=finding
+fi
+if [ "${FAKE_GL_CLEAN:-}" = 1 ]; then rc=0; rep=clean; fi
+if [ -n "$rpath" ]; then
+  case "$rep" in
+    finding) echo '[{"RuleID":"fake-rule"}]' >"$rpath" ;;
+    clean) echo '[]' >"$rpath" ;;
+    empty) : >"$rpath" ;;
+  esac
+fi
+exit "$rc"
 FAKE
 chmod +x "$W/fakegl/gitleaks"
 export FAKE_GL_LOG="$W/gl.log"
@@ -125,7 +140,7 @@ for a in $(cd "$W/all" && ls | grep '\.\(tar\.gz\|zip\)$'); do
   check "the scan covered $a" bash -c "grep -q 'dir.* [^ ]*${a%.tar.gz}' '$W/gl.log' || grep -q 'dir.* [^ ]*${a%.zip}' '$W/gl.log'"
 done
 check "the scan is gitleaks dir, redacted" bash -c "grep -q '^dir ' '$W/gl.log' && ! grep -qv -- '--redact' '$W/gl.log'"
-set +e; FAKE_GL_RC=1 GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/leaky" >"$W/leaky.log" 2>&1; lrc=$?; set -e
+set +e; FAKE_GL_RC=99 GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/leaky" >"$W/leaky.log" 2>&1; lrc=$?; set -e
 check "a finding fails the packaging (rc=$lrc)" [ "$lrc" -ne 0 ]
 check "... and leaves no SHA256SUMS and no archive to upload" bash -c "[ ! -e '$W/leaky/SHA256SUMS' ] && [ -z \"\$(ls '$W/leaky' | grep '\.\(tar\.gz\|zip\)$')\" ]"
 # The scan checks itself on the release path: a control binary with a fake token must
@@ -134,6 +149,24 @@ check "... and leaves no SHA256SUMS and no archive to upload" bash -c "[ ! -e '$
 set +e; FAKE_GL_CLEAN=1 GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/blind" >"$W/blind.log" 2>&1; brc=$?; set -e
 check "a scanner that finds nothing in the control fails the packaging (rc=$brc)" bash -c "[ $brc -ne 0 ] && grep -q 'secret scan cannot see inside binaries' '$W/blind.log' && [ ! -e '$W/blind/SHA256SUMS' ]"
 check "the control is not in the output" bash -c "! grep -rqs control '$W/scanned/SHA256SUMS' && [ -z \"\$(find '$W/scanned' -name '*control*')\" ]"
+# gitleaks exits 1 for a finding and for an error alike unless told otherwise, so the
+# script asks for 99 for a finding and a JSON report: only that counts as seen, and
+# a scanner error never passes for clean or for detection.
+noleft() { # dir: nothing to upload, no stage dirs
+  bash -c "[ ! -e '$1/SHA256SUMS' ] && [ -z \"\$(ls -a '$1' | grep -E '\.(tar\.gz|zip)\$|^\.stage')\" ]"
+}
+check "the scan asks for exit code 99 and a JSON report" bash -c "grep -q -- '--exit-code 99' '$W/gl.log' && grep -q -- '--report-format json' '$W/gl.log' && grep -q -- '--report-path ' '$W/gl.log'"
+set +e; FAKE_GL_CONTROL_RC=1 FAKE_GL_CONTROL_REPORT=none GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/e1" >"$W/e1.log" 2>&1; e1=$?; set -e
+check "a scanner that errors (exit 1, no report) on the control fails the packaging (rc=$e1)" bash -c "[ $e1 -ne 0 ] && grep -q 'secret scan error on the control (rc=1)' '$W/e1.log'"
+check "... and leaves nothing behind" noleft "$W/e1"
+set +e; FAKE_GL_CONTROL_RC=99 FAKE_GL_CONTROL_REPORT=empty GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/e2" >"$W/e2.log" 2>&1; e2=$?; FAKE_GL_CONTROL_RC=99 FAKE_GL_CONTROL_REPORT=clean GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/e2b" >"$W/e2b.log" 2>&1; e2b=$?; set -e
+check "exit 99 with an empty report on the control fails (rc=$e2)" bash -c "[ $e2 -ne 0 ] && grep -q 'secret scan error on the control (rc=99)' '$W/e2.log'"
+check "exit 99 with a report holding no finding on the control fails (rc=$e2b)" bash -c "[ $e2b -ne 0 ] && grep -q 'secret scan error on the control (rc=99)' '$W/e2b.log'"
+check "... and leaves nothing behind" noleft "$W/e2"
+set +e; FAKE_GL_RC=2 GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/e3" >"$W/e3.log" 2>&1; e3=$?; FAKE_GL_RC=1 GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/e3b" >"$W/e3b.log" 2>&1; e3b=$?; set -e
+check "a crash (exit 2) on the real archives after a good control fails (rc=$e3)" bash -c "[ $e3 -ne 0 ] && grep -q 'secret scan error (rc=2)' '$W/e3.log' && ! grep -q 'found something' '$W/e3.log'"
+check "an exit 1 on the real archives is an error, not a clean scan (rc=$e3b)" bash -c "[ $e3b -ne 0 ] && grep -q 'secret scan error (rc=1)' '$W/e3b.log'"
+check "... and leaves nothing behind" noleft "$W/e3"
 SYSPATH="$W/stubgo:/usr/bin:/bin"
 set +e; PATH="$SYSPATH" GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/noscan" >"$W/noscan.log" 2>&1; nrc=$?; set -e
 check "no gitleaks on PATH fails clearly (rc=$nrc)" bash -c "[ $nrc -ne 0 ] && grep -q 'gitleaks' '$W/noscan.log' && [ ! -e '$W/noscan/SHA256SUMS' ]"
