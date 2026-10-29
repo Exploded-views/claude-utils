@@ -247,8 +247,12 @@ func candidates(folder string, list func(dir string) *listing) (out []string, la
 func walk(root, rest string, fold func(string) string, list func(string) *listing) ([]string, bool) {
 	var out []string
 	large := false
+	poisoned := false
 	var rec func(dir, orig, rest string)
 	rec = func(dir, orig, rest string) {
+		if poisoned {
+			return
+		}
 		l := list(dir)
 		if l == nil {
 			return
@@ -256,8 +260,11 @@ func walk(root, rest string, fold func(string) string, list func(string) *listin
 		if l.large {
 			large = true
 			// Fail closed on any '-': it could be spelled several ways, and an
-			// unlisted sibling may be the one meant.
+			// unlisted sibling may be the one meant. The whole walk gives up,
+			// not just this branch: another split through small listed dirs
+			// would otherwise be the only candidate and win.
 			if strings.Contains(orig, "-") {
+				poisoned = true
 				return
 			}
 			p := filepath.Join(dir, orig)
@@ -295,6 +302,9 @@ func walk(root, rest string, fold func(string) string, list func(string) *listin
 		}
 	}
 	rec(root, rest, fold(rest))
+	if poisoned {
+		return nil, true
+	}
 	sort.Strings(out)
 	return out, large && len(out) == 0
 }
