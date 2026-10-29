@@ -647,6 +647,9 @@ func awaitPrivate(ctx context.Context, name string, cfg config.Config, first err
 		prefix = "[" + name + "] "
 	}
 	backoff := guardBackoffMin
+	// The record keeps the time the hold began, so a retry of the same failure
+	// leaves it byte-identical and the sessions that heard it are not told again.
+	since := time.Now().UTC().Format(time.RFC3339)
 	for err := first; err != nil; err = guardRelease(cfg, log.Printf) {
 		msg := heldMarker + "check failed, nothing syncs until it passes: " + strings.SplitN(err.Error(), "\n", 2)[0]
 		if errors.Is(err, errHeldEarlier) {
@@ -656,7 +659,7 @@ func awaitPrivate(ctx context.Context, name string, cfg config.Config, first err
 		_ = os.MkdirAll(filepath.Dir(failed), 0700)
 		// Replaced by rename, so status never reads a half-written record.
 		tmp := failed + ".tmp"
-		if os.WriteFile(tmp, []byte(time.Now().UTC().Format(time.RFC3339)+" "+msg+"\n"), 0600) == nil {
+		if os.WriteFile(tmp, []byte(since+" "+msg+"\n"), 0600) == nil {
 			_ = os.Rename(tmp, failed)
 		}
 		if !guardWait(ctx, backoff) || ctx.Err() != nil {

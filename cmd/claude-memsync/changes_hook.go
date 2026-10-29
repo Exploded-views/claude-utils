@@ -73,11 +73,13 @@ var hookWorkDone func()
 // stderr, nothing on stdout, and exit 0.
 //
 // The work runs in a goroutine that touches no marker and writes to no shared
-// stream. If it is not done within deadline (0: no limit), the hook prints
-// nothing, moves nothing and returns; the worker (and any git process it
-// started) dies with the process. Only the caller's goroutine prints the
-// report and moves markers, and only after the worker finished in time, so a
-// late finisher can never move one.
+// stream. If it is not done within deadline (0: no limit), the hook first
+// kills every git process it started (by process group) and logs the expiry,
+// then prints only the held-repo alerts, which were read before any git work,
+// and moves only their ".held" markers; change notices are deferred to the
+// next prompt and no change marker moves. Only the caller's goroutine prints
+// the report and moves markers, and only after the worker finished in time, so
+// a late finisher can never move one.
 func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag, project string, limit int, deadline time.Duration) int {
 	type outcome struct {
 		out      []byte
@@ -146,6 +148,8 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 		}
 		return 0
 	case <-expired:
+		// No git outlives the deadline: kill it before any file I/O below.
+		hookExpired(cfgPath, routesFlag)
 		// Held-repo alerts were read before any git work: they still go out.
 		select {
 		case p := <-pre:
@@ -159,7 +163,6 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 		default:
 		}
 		fmt.Fprintln(stderr, "changes: hook deadline exceeded; notices deferred to the next prompt")
-		hookExpired(cfgPath, routesFlag)
 		return 0
 	}
 }
@@ -208,7 +211,15 @@ func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project st
 	if len(targets) > 0 {
 		var held bool
 		if lk, held, err = lock.TryHook(targets[0].cfg.SyncDir); held {
-			return nil, nil, nil, nil
+			// Held alerts need no lock (per-session, git-free): tell them now.
+			if len(alerts) == 0 {
+				return nil, nil, nil, nil
+			}
+			b, rerr := hookReplyJSON(in.Event, alerts)
+			if rerr != nil {
+				return nil, nil, nil, rerr
+			}
+			return b, func() error { alertCommit(); return nil }, nil, nil
 		}
 	}
 	owned := false
