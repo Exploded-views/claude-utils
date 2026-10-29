@@ -687,7 +687,7 @@ func (s *routedSet) statusLines() []string {
 		lines = append(lines, fmt.Sprintf("  remote changed repos: folder %s is denied until routes.json is edited", h))
 	}
 	for _, h := range sum.TooLarge {
-		lines = append(lines, fmt.Sprintf("  unresolved: folder %s is a live project, but a directory on its path has too many entries to list, so it stays denied", h))
+		lines = append(lines, fmt.Sprintf("  unresolved: folder %s is a live project, but a directory on its path has too many entries to list: ambiguous, not synced (it stays denied)", h))
 	}
 	for _, sh := range s.Router.Shadowed() {
 		lines = append(lines, fmt.Sprintf("  shadowed: rule %d is never reached first (rule %d matches the same folders)", sh.Rule, sh.By))

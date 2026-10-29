@@ -63,6 +63,6 @@ func (r *Router) noteLargeLocked(folder string, d Decision, live bool) {
 	k := folder + "\x00toolarge"
 	if !r.logged[k] {
 		r.logged[k] = true
-		r.Logf("route: folder %s is not routed: a directory on its path has too many entries to list, so a name with an unusual character in it cannot be found; it stays denied", hash8(folder))
+		r.Logf("route: folder %s is ambiguous, not synced: a directory on its path has too many entries to list, so the name cannot be told apart from an unlisted sibling's; it stays denied", hash8(folder))
 	}
 }

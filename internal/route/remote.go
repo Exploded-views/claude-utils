@@ -233,46 +233,14 @@ func candidates(folder string, list func(dir string) *listing) (out []string, la
 	return nil, false
 }
 
-// A directory with more than maxList entries is not listed. The names under
-// it are found by probing: the next path component is spelled from the
-// escaped name, with a '-' standing for a separator or one of probeLiterals,
-// and each spelling is stat'ed. That costs the same however big the directory
-// is, and misses a name with any other character in it.
-const (
-	probeLiterals = "-._ "
-	probeMaxLits  = 3 // non-alphanumeric characters inside one component
-)
-
-type probeCand struct {
-	name string
-	end  int // rest[:end] is spelled by name; end == len(rest) when it is the last
-}
-
-func probeCands(rest string) []probeCand {
-	var out []probeCand
-	var rec func(comp string, lits, i int)
-	rec = func(comp string, lits, i int) {
-		for ; i < len(rest) && rest[i] != '-'; i++ {
-			comp += string(rest[i])
-		}
-		if i == len(rest) {
-			if comp != "" {
-				out = append(out, probeCand{comp, i})
-			}
-			return
-		}
-		if comp != "" && i+1 < len(rest) {
-			out = append(out, probeCand{comp, i})
-		}
-		if lits < probeMaxLits {
-			for _, lit := range probeLiterals {
-				rec(comp+string(lit), lits+1, i+1)
-			}
-		}
-	}
-	rec("", 0, 0)
-	return out
-}
+// A directory with more than maxList entries is not listed. A name under it is
+// found only by probing for the one path the escaped name spells, which is
+// sound only when that spelling is unambiguous: the escape turns every
+// character that is not a letter or digit into '-', so a '-' in the name may
+// stand for a separator, '-', '.', '_', ' ', '@', '+', a non-ASCII character...
+// and a sibling that was not listed cannot be ruled out. Such a name is left
+// unresolved (a wrong repo is worse than none); a name with no '-' in it is
+// exact and is probed. That costs the same however big the directory is.
 
 // walk finds the existing directories the escaped name spells under root. large
 // reports that a directory on the way was too big to list and nothing was found.
@@ -287,23 +255,22 @@ func walk(root, rest string, fold func(string) string, list func(string) *listin
 		}
 		if l.large {
 			large = true
-			for _, c := range probeCands(orig) {
-				p := filepath.Join(dir, c.name)
-				if info, err := os.Stat(p); err != nil || !info.IsDir() {
-					continue
-				}
-				// The stat matched however the name is cased on a case-folding
-				// host: spell it as the directory does. On any failure the
-				// spelling asked for stays.
-				if nm, ok := onDiskName(p); ok && fold(nm) == fold(c.name) {
-					p = filepath.Join(dir, nm)
-				}
-				if c.end == len(orig) {
-					out = append(out, p)
-				} else {
-					rec(p, orig[c.end+1:], rest[c.end+1:])
-				}
+			// Fail closed on any '-': it could be spelled several ways, and an
+			// unlisted sibling may be the one meant.
+			if strings.Contains(orig, "-") {
+				return
 			}
+			p := filepath.Join(dir, orig)
+			if info, err := os.Stat(p); err != nil || !info.IsDir() {
+				return
+			}
+			// The stat matched however the name is cased on a case-folding
+			// host: spell it as the directory does. On any failure the
+			// spelling asked for stays.
+			if nm, ok := onDiskName(p); ok && fold(nm) == fold(orig) {
+				p = filepath.Join(dir, nm)
+			}
+			out = append(out, p)
 			return
 		}
 		try := func(n string, full bool) {
