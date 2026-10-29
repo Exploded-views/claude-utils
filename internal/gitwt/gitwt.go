@@ -42,8 +42,7 @@ func (r *Repo) RunStdin(stdin []byte, args ...string) (string, error) {
 // run is RunStdin with extra environment variables for git (KEY=VALUE).
 func (r *Repo) run(env []string, stdin []byte, args ...string) (string, error) {
 	full := append([]string{"-C", r.Dir}, args...)
-	cmd := exec.Command("git", full...)
-	proc.HideWindow(cmd)
+	cmd := proc.Command("git", full...)
 	cmd.Env = repoEnv(env)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
@@ -51,7 +50,7 @@ func (r *Repo) run(env []string, stdin []byte, args ...string) (string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	if err := proc.Run(cmd); err != nil {
 		return stdout.String(), fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.String(), nil

@@ -129,6 +129,22 @@ func Enabled(repo *gitwt.Repo) bool {
 	return err == nil
 }
 
+// EnabledKnowing is Enabled for a caller that may already know whether
+// .age-recipients exists at HEAD (known false: ask git).
+func EnabledKnowing(repo *gitwt.Repo, atHead func() (has, known bool)) bool {
+	if Configured(repo) {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(repo.Dir, RecipientsFile)); err == nil {
+		return true
+	}
+	if has, known := atHead(); known {
+		return has
+	}
+	_, err := repo.Run("cat-file", "-e", "HEAD:"+RecipientsFile)
+	return err == nil
+}
+
 // IdentityPath is the clone's configured identity file ("" if unset).
 func IdentityPath(repo *gitwt.Repo) string {
 	out, _ := repo.Run("config", "--get", IdentityConfigKey)

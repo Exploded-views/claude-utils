@@ -200,7 +200,12 @@ func RecipientsChanged(repo *gitwt.Repo, pre, post string) bool {
 // encrypted one it decrypts age blobs with this host's identity and returns an
 // error when it cannot. Plaintext blobs pass through.
 func PlainReader(repo *gitwt.Repo) func([]byte) ([]byte, error) {
-	if !Enabled(repo) {
+	return PlainReaderFor(repo, Enabled(repo))
+}
+
+// PlainReaderFor is PlainReader for a caller that already asked Enabled.
+func PlainReaderFor(repo *gitwt.Repo, enabled bool) func([]byte) ([]byte, error) {
+	if !enabled {
 		return func(b []byte) ([]byte, error) { return b, nil }
 	}
 	var ids []age.Identity

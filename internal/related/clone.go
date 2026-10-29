@@ -135,9 +135,13 @@ func (c *ReadClone) command(ctx context.Context, useStore bool, args ...string) 
 		full = append(full, "--git-dir="+c.store)
 	}
 	full = append(full, args...)
-	cmd := exec.CommandContext(ctx, "git", full...)
-	proc.HideWindow(cmd)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND="+sshCommand())
+	cmd := proc.GroupedCommandContext(ctx, "git", full...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if len(args) > 0 && args[0] == "fetch" {
+		// Only a fetch talks to the remote; looking the ssh command up costs a
+		// git process, which the hook's calls must not pay.
+		cmd.Env = append(cmd.Env, "GIT_SSH_COMMAND="+sshCommand())
+	}
 	cmd.WaitDelay = 2 * time.Second
 	return cmd
 }
@@ -149,7 +153,7 @@ func (c *ReadClone) gitIn(ctx context.Context, useStore bool, stdin []byte, args
 	}
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
-	if err := cmd.Run(); err != nil {
+	if err := proc.Run(cmd); err != nil {
 		if ctx.Err() != nil {
 			return out.Bytes(), fmt.Errorf("git %s: %w", args[0], ctx.Err())
 		}
