@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/changes"
@@ -196,40 +197,66 @@ func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project st
 		marker string
 		res    changes.Result
 	}
-	var reports []repoReport
-	for _, tg := range targets {
-		markerDir := filepath.Join(tg.cfg.SyncDir, ".state", "hook-markers")
-		marker := filepath.Join(markerDir, in.SessionID)
-		pruneMarkers(markerDir, in.SessionID, markerMaxAge)
-		hide, hideAll := denylistFilter(tg.cfg, stderr)
-		res, err := changes.Compute(changes.Options{
-			SyncDir:      tg.cfg.SyncDir,
-			ClaudeDir:    tg.cfg.ClaudeProjectsDir,
-			Marker:       marker,
-			Upper:        syncedUpper(tg.cfg.SyncDir),
-			Keep:         tg.keep,
-			Hide:         hide,
-			HideAll:      hideAll,
-			CompareLocal: true,
-			Project:      project,
-			Limit:        limit,
-			UpdateMarker: true,
-			DeferMarker:  true,
-		})
-		if err != nil {
-			if len(targets) == 1 {
-				return nil, nil, nil, err
+	// The repos are independent (own marker, own git), so they run side by side;
+	// each keeps its stderr lines, joined in target order.
+	type targetOut struct {
+		rep  *repoReport
+		errs bytes.Buffer
+		err  error
+	}
+	outs := make([]targetOut, len(targets))
+	var wg sync.WaitGroup
+	for i, tg := range targets {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			o := &outs[i]
+			markerDir := filepath.Join(tg.cfg.SyncDir, ".state", "hook-markers")
+			marker := filepath.Join(markerDir, in.SessionID)
+			pruneMarkers(markerDir, in.SessionID, markerMaxAge)
+			hide, hideAll := denylistFilter(tg.cfg, &o.errs)
+			res, err := changes.Compute(changes.Options{
+				SyncDir:      tg.cfg.SyncDir,
+				ClaudeDir:    tg.cfg.ClaudeProjectsDir,
+				Marker:       marker,
+				Upper:        syncedUpper(tg.cfg.SyncDir),
+				Keep:         tg.keep,
+				Hide:         hide,
+				HideAll:      hideAll,
+				CompareLocal: true,
+				Project:      project,
+				Limit:        limit,
+				UpdateMarker: true,
+				DeferMarker:  true,
+			})
+			if err != nil {
+				o.err = err
+				return
 			}
-			fmt.Fprintf(stderr, "changes: repo %s: %v\n", tg.name, err)
+			if res.Busy {
+				return
+			}
+			if res.Reset {
+				fmt.Fprintf(&o.errs, "changes: marker for session %s named a commit that no longer exists; reset it\n", in.SessionID)
+			}
+			o.rep = &repoReport{tg.cfg, marker, res}
+		}()
+	}
+	wg.Wait()
+	var reports []repoReport
+	for i, tg := range targets {
+		o := &outs[i]
+		stderr.Write(o.errs.Bytes())
+		if o.err != nil {
+			if len(targets) == 1 {
+				return nil, nil, nil, o.err
+			}
+			fmt.Fprintf(stderr, "changes: repo %s: %v\n", tg.name, o.err)
 			continue
 		}
-		if res.Busy {
-			continue
+		if o.rep != nil {
+			reports = append(reports, *o.rep)
 		}
-		if res.Reset {
-			fmt.Fprintf(stderr, "changes: marker for session %s named a commit that no longer exists; reset it\n", in.SessionID)
-		}
-		reports = append(reports, repoReport{tg.cfg, marker, res})
 	}
 
 	lines := []string{hookFraming}
