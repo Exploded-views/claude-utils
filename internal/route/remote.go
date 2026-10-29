@@ -3,6 +3,7 @@ package route
 import (
 	"context"
 	"errors"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -104,16 +105,34 @@ func sanitizeSegment(s string) string {
 	return strings.TrimRight(b.String(), ".")
 }
 
-// readDir and walkHook are test seams: the directory reader, and a hook called
-// with the folder each time a walk starts.
+// readDir and walkHook are test seams: the directory reader (n > 0 reads at
+// most n entries, n <= 0 all of them), and a hook called with the folder each
+// time a walk starts.
 var (
-	readDir  = os.ReadDir
+	readDir  = ReadDirN
 	walkHook func(folder string)
 )
 
+// ReadDirN lists at most n entries of dir (all of them when n <= 0).
+func ReadDirN(dir string, n int) ([]os.DirEntry, error) {
+	if n <= 0 {
+		return os.ReadDir(dir)
+	}
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	es, err := f.ReadDir(n)
+	if err == io.EOF {
+		err = nil
+	}
+	return es, err
+}
+
 // SetReadDirForTest swaps the directory reader the walk uses (tests in other
 // packages count reads with it) and returns the function that puts it back.
-func SetReadDirForTest(f func(string) ([]os.DirEntry, error)) (restore func()) {
+func SetReadDirForTest(f func(dir string, n int) ([]os.DirEntry, error)) (restore func()) {
 	prev := readDir
 	readDir = f
 	return func() { readDir = prev }
@@ -125,7 +144,8 @@ var windowsDrive = regexp.MustCompile(`^([A-Za-z])--(.+)$`)
 // folder name. Usually one; the escaping is lossy, so it can be several
 // (src/my-app and src/my.app) or none (deleted, or on another machine).
 func Candidates(folder string) []string {
-	return candidates(folder, func(dir string) *listing { return readListing(dir) })
+	out, _ := candidates(folder, func(dir string) *listing { return readListing(dir) })
+	return out
 }
 
 // platformFold is the case fold used to compare path components.
@@ -136,10 +156,17 @@ func platformFold() func(string) string {
 	return func(s string) string { return s }
 }
 
+// maxList is the most entries a directory may have to be listed in full. A
+// bigger one (a busy temp dir) is never listed: names under it resolve only by
+// probing for the path they spell, which costs the same however big it is.
+const maxList = 256
+
 // listing is one directory's entries indexed by escaped, case-folded name,
-// with each child's is-a-directory answer filled in on first use.
+// with each child's is-a-directory answer filled in on first use. large means
+// the directory has more than maxList entries and was not listed.
 type listing struct {
 	dir   string
+	large bool
 	byKey map[string][]string
 	mu    sync.Mutex
 	isDir map[string]bool
@@ -148,8 +175,16 @@ type listing struct {
 // readListing reads dir; an unreadable one lists as empty.
 func readListing(dir string) *listing {
 	l := &listing{dir: dir, byKey: map[string][]string{}, isDir: map[string]bool{}}
-	entries, err := readDir(dir)
+	n := maxList + 1
+	if runtime.GOOS == "windows" {
+		n = 0 // listing is the only way there
+	}
+	entries, err := readDir(dir, n)
 	if err != nil {
+		return l
+	}
+	if n > 0 && len(entries) > maxList {
+		l.large = true
 		return l
 	}
 	fold := platformFold()
@@ -174,7 +209,10 @@ func (l *listing) subdir(name string) bool {
 	return d
 }
 
-func candidates(folder string, list func(dir string) *listing) []string {
+// candidates walks the folder name; large reports that a directory it needed
+// to list was too big, so the answer may be missing a name with an unusual
+// character in it.
+func candidates(folder string, list func(dir string) *listing) (out []string, large bool) {
 	if walkHook != nil {
 		walkHook(folder)
 	}
@@ -182,22 +220,81 @@ func candidates(folder string, list func(dir string) *listing) []string {
 	fold := platformFold()
 	if m := windowsDrive.FindStringSubmatch(folder); m != nil {
 		if runtime.GOOS != "windows" {
-			return nil
+			return nil, false
 		}
 		return walk(m[1]+`:\`, m[2], fold, list)
 	}
 	if strings.HasPrefix(folder, "-") && len(folder) > 1 {
 		return walk(string(filepath.Separator), folder[1:], fold, list)
 	}
-	return nil
+	return nil, false
 }
 
-func walk(root, rest string, fold func(string) string, list func(string) *listing) []string {
+// A directory with more than maxList entries is not listed. The names under
+// it are found by probing: the next path component is spelled from the
+// escaped name, with a '-' standing for a separator or one of probeLiterals,
+// and each spelling is stat'ed. That costs the same however big the directory
+// is, and misses a name with any other character in it.
+const (
+	probeLiterals = "-._ "
+	probeMaxLits  = 3 // non-alphanumeric characters inside one component
+)
+
+type probeCand struct {
+	name string
+	end  int // rest[:end] is spelled by name; end == len(rest) when it is the last
+}
+
+func probeCands(rest string) []probeCand {
+	var out []probeCand
+	var rec func(comp string, lits, i int)
+	rec = func(comp string, lits, i int) {
+		for ; i < len(rest) && rest[i] != '-'; i++ {
+			comp += string(rest[i])
+		}
+		if i == len(rest) {
+			if comp != "" {
+				out = append(out, probeCand{comp, i})
+			}
+			return
+		}
+		if comp != "" && i+1 < len(rest) {
+			out = append(out, probeCand{comp, i})
+		}
+		if lits < probeMaxLits {
+			for _, lit := range probeLiterals {
+				rec(comp+string(lit), lits+1, i+1)
+			}
+		}
+	}
+	rec("", 0, 0)
+	return out
+}
+
+// walk finds the existing directories the escaped name spells under root. large
+// reports that a directory on the way was too big to list and nothing was found.
+func walk(root, rest string, fold func(string) string, list func(string) *listing) ([]string, bool) {
 	var out []string
-	var rec func(dir, rest string)
-	rec = func(dir, rest string) {
+	large := false
+	var rec func(dir, orig, rest string)
+	rec = func(dir, orig, rest string) {
 		l := list(dir)
 		if l == nil {
+			return
+		}
+		if l.large {
+			large = true
+			for _, c := range probeCands(orig) {
+				p := filepath.Join(dir, c.name)
+				if info, err := os.Stat(p); err != nil || !info.IsDir() {
+					continue
+				}
+				if c.end == len(orig) {
+					out = append(out, p)
+				} else {
+					rec(p, orig[c.end+1:], rest[c.end+1:])
+				}
+			}
 			return
 		}
 		try := func(n string, full bool) {
@@ -209,7 +306,7 @@ func walk(root, rest string, fold func(string) string, list func(string) *listin
 				if full {
 					out = append(out, p)
 				} else {
-					rec(p, rest[len(n)+1:])
+					rec(p, orig[len(n)+1:], rest[len(n)+1:])
 				}
 			}
 		}
@@ -221,9 +318,9 @@ func walk(root, rest string, fold func(string) string, list func(string) *listin
 			}
 		}
 	}
-	rec(root, fold(rest))
+	rec(root, rest, fold(rest))
 	sort.Strings(out)
-	return out
+	return out, large && len(out) == 0
 }
 
 // stamp is what tells a directory changed: a new, removed or renamed entry
@@ -265,9 +362,10 @@ type dep struct {
 
 // candEntry is a Candidates answer and the stamps of the directories it read.
 type candEntry struct {
-	once sync.Once
-	deps []dep
-	v    []string
+	once  sync.Once
+	deps  []dep
+	v     []string
+	large bool
 }
 
 func newWalkCache() *walkCache {
@@ -297,6 +395,13 @@ func (c *walkCache) list(dir string) (*listing, stamp) {
 const maxWalks = 3
 
 func (c *walkCache) candidates(folder string) []string {
+	v, _ := c.candidatesLarge(folder)
+	return v
+}
+
+// candidatesLarge is candidates, and whether a directory on the way was too
+// big to list.
+func (c *walkCache) candidatesLarge(folder string) ([]string, bool) {
 	for try := 1; ; try++ {
 		c.mu.Lock()
 		e := c.cands[folder]
@@ -306,11 +411,21 @@ func (c *walkCache) candidates(folder string) []string {
 		}
 		c.mu.Unlock()
 		e.once.Do(func() {
-			e.v = candidates(folder, func(dir string) *listing {
+			bigDirs := map[string]bool{}
+			e.v, e.large = candidates(folder, func(dir string) *listing {
 				l, st := c.list(dir)
-				e.deps = append(e.deps, dep{dir, st})
+				if l != nil && l.large {
+					bigDirs[dir] = true // its stamp moves all the time: no dependency
+				} else if l != nil {
+					e.deps = append(e.deps, dep{dir, st})
+				}
 				return l
 			})
+			for _, p := range e.v { // a resolved dir that is removed or renamed
+				if d := filepath.Dir(p); !bigDirs[d] {
+					e.deps = append(e.deps, dep{d, stampOf(d)})
+				}
+			}
 		})
 		fresh := true
 		for _, d := range e.deps {
@@ -320,7 +435,7 @@ func (c *walkCache) candidates(folder string) []string {
 			}
 		}
 		if fresh {
-			return e.v
+			return e.v, e.large
 		}
 		// A directory it read has changed: drop this answer and walk again,
 		// or after the last walk hand it back without remembering it.
@@ -330,7 +445,7 @@ func (c *walkCache) candidates(folder string) []string {
 		}
 		c.mu.Unlock()
 		if try == maxWalks {
-			return e.v
+			return e.v, e.large
 		}
 	}
 }

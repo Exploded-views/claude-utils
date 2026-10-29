@@ -17,6 +17,8 @@ import (
 // B1: `changes --hook` takes under 200 ms (p95 over 20 runs) on the fixture
 // tree: a 10k-entry $TMPDIR-shaped dir, 1k project folders, 5 repos.
 func TestBudgetB1_HookP95(t *testing.T) {
+	fail, done := timingBudget(t)
+	defer done()
 	cfgs := routedHost(t, budgetRepos, "personal", budgetRoutes())
 	tree := newBudgetTree(t, t.TempDir(), 10000)
 	t.Setenv("TMPDIR", tree.tmp)
@@ -72,6 +74,6 @@ func TestBudgetB1_HookP95(t *testing.T) {
 	p95 := times[18]
 	t.Logf("B1 hook: min %v median %v p95 %v max %v", times[0], times[10], p95, times[19])
 	if p95 >= 200*time.Millisecond {
-		t.Errorf("B1: p95 %v, budget 200ms", p95)
+		fail("B1: p95 %v, budget 200ms", p95)
 	}
 }

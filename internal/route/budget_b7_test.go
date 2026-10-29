@@ -23,8 +23,8 @@ func TestBudgetB7_BytesReadFlatAsTmpdirGrows(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		restore := SetReadDirForTest(func(dir string) ([]os.DirEntry, error) {
-			es, err := os.ReadDir(dir)
+		restore := SetReadDirForTest(func(dir string, n int) ([]os.DirEntry, error) {
+			es, err := ReadDirN(dir, n)
 			if dir == big {
 				reads++
 				for _, e := range es {
@@ -44,7 +44,9 @@ func TestBudgetB7_BytesReadFlatAsTmpdirGrows(t *testing.T) {
 	r1, b1 := run(1000)
 	r2, b2 := run(100000)
 	t.Logf("B7 bytes read of the temp dir: 1k entries: %d reads, %d bytes; 100k entries: %d reads, %d bytes", r1, b1, r2, b2)
-	if b2 != b1 {
+	// Flat: both are the first maxList+1 names; which names are first differs a
+	// little with the directory's order, so allow half again.
+	if b2 > b1*3/2 {
 		t.Errorf("B7: bytes read grew from %d to %d as the temp dir grew 100x", b1, b2)
 	}
 }

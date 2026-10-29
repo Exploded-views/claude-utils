@@ -49,13 +49,13 @@ func TestHook_ProjectUnderHugeDirReadsItOnce(t *testing.T) {
 
 	var mu sync.Mutex
 	reads := 0
-	restore := route.SetReadDirForTest(func(dir string) ([]os.DirEntry, error) {
+	restore := route.SetReadDirForTest(func(dir string, n int) ([]os.DirEntry, error) {
 		if dir == big {
 			mu.Lock()
 			reads++
 			mu.Unlock()
 		}
-		return os.ReadDir(dir)
+		return route.ReadDirN(dir, n)
 	})
 	defer restore()
 

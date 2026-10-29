@@ -219,6 +219,9 @@ func loadRouted(path string) (*routedSet, error) {
 	}
 	s.Router = route.New(f, func(repo string) bool { _, ok := s.Cfgs[repo]; return ok })
 	s.Router.StatePath = filepath.Join(filepath.Dir(path), "owners.json")
+	if c, ok := s.Primary(); ok {
+		s.Router.ProjectsDir = c.ClaudeProjectsDir
+	}
 	return s, nil
 }
 
@@ -677,6 +680,9 @@ func (s *routedSet) statusLines() []string {
 	}
 	for _, h := range sum.Changed {
 		lines = append(lines, fmt.Sprintf("  remote changed repos: folder %s is denied until routes.json is edited", h))
+	}
+	for _, h := range sum.TooLarge {
+		lines = append(lines, fmt.Sprintf("  unresolved: folder %s is a live project, but a directory on its path has too many entries to list, so it stays denied", h))
 	}
 	for _, sh := range s.Router.Shadowed() {
 		lines = append(lines, fmt.Sprintf("  shadowed: rule %d is never reached first (rule %d matches the same folders)", sh.Rule, sh.By))

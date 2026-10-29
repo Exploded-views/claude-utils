@@ -32,14 +32,16 @@ func (m *memoTree) resetReads() {
 	m.reads = map[string]int{}
 }
 
-func newMemoTree(t *testing.T, nMissing int) *memoTree {
+func newMemoTree(t *testing.T, nMissing int) *memoTree { return newMemoTreeN(t, nMissing, 2000) }
+
+func newMemoTreeN(t *testing.T, nMissing, nFiller int) *memoTree {
 	t.Helper()
 	gitEnv(t)
 	m := &memoTree{big: filepath.Join(t.TempDir(), "big"), reads: map[string]int{}}
 	if err := os.MkdirAll(m.big, 0700); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 2000; i++ {
+	for i := 0; i < nFiller; i++ {
 		if err := os.WriteFile(filepath.Join(m.big, fmt.Sprintf("file%04d", i)), nil, 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -57,11 +59,11 @@ func newMemoTree(t *testing.T, nMissing int) *memoTree {
 		m.missing = append(m.missing, escape(filepath.Join(m.big, fmt.Sprintf("gone%03d", i))))
 	}
 	prev, prevHook := readDir, walkHook
-	readDir = func(dir string) ([]os.DirEntry, error) {
+	readDir = func(dir string, n int) ([]os.DirEntry, error) {
 		m.mu.Lock()
 		m.reads[dir]++
 		m.mu.Unlock()
-		return os.ReadDir(dir)
+		return ReadDirN(dir, n)
 	}
 	t.Cleanup(func() { readDir, walkHook = prev, prevHook })
 	return m
@@ -263,13 +265,13 @@ func TestMissingTmpdirFolderOneReadPerGeneration(t *testing.T) {
 	var mu sync.Mutex
 	reads := 0
 	prev := readDir
-	readDir = func(dir string) ([]os.DirEntry, error) {
+	readDir = func(dir string, n int) ([]os.DirEntry, error) {
 		if dir == tmp {
 			mu.Lock()
 			reads++
 			mu.Unlock()
 		}
-		return os.ReadDir(dir)
+		return ReadDirN(dir, n)
 	}
 	t.Cleanup(func() { readDir = prev })
 	r := memoRouter()
@@ -295,13 +297,13 @@ func TestMissingTmpdirFolderOneReadPerGeneration(t *testing.T) {
 // walk start over for ever: it gives up after three walks, returns the answer
 // it has, and does not remember it.
 func TestCandidatesBoundedWhenDirKeepsChanging(t *testing.T) {
-	m := newMemoTree(t, 0)
+	m := newMemoTreeN(t, 0, 50) // small enough to be listed
 	var mu sync.Mutex
 	walks, bumps := 0, 0
 	bumping := true
 	inner := readDir
-	readDir = func(dir string) ([]os.DirEntry, error) {
-		es, err := inner(dir)
+	readDir = func(dir string, n int) ([]os.DirEntry, error) {
+		es, err := inner(dir, n)
 		mu.Lock()
 		defer mu.Unlock()
 		// Bounded, so a missing cap fails the test instead of spinning.

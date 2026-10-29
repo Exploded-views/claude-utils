@@ -362,6 +362,12 @@ type Router struct {
 	Resolve func(folder string) (string, resolution)
 	// Candidates lists the directories a folder name may stand for.
 	Candidates func(folder string) []string
+	// largeFn reports that a directory on the folder's path was too large to
+	// list and nothing was found (set by New with Candidates).
+	largeFn func(folder string) bool
+	// ProjectsDir is Claude's projects directory, to tell live folders from
+	// the folders of deleted directories; "" counts none as live.
+	ProjectsDir string
 	// Logf receives the routing log lines (default log.Printf).
 	Logf func(format string, args ...any)
 	// StatePath, if set, remembers each folder's owner across restarts, so a
@@ -400,6 +406,7 @@ func New(f File, have func(repo string) bool) *Router {
 	r.cur_.Store(normalized(f))
 	r.walks.Store(newWalkCache())
 	r.Candidates = func(folder string) []string { return r.walks.Load().candidates(folder) }
+	r.largeFn = func(folder string) bool { _, large := r.walks.Load().candidatesLarge(folder); return large }
 	r.SSHHost = sshHostname
 	r.Resolve = r.defaultResolve
 	r.Roots = r.defaultRoots
@@ -498,6 +505,7 @@ func (r *Router) Decide(folder string) Decision {
 		}
 		d = r.identityLocked(folder, d, key, keyOK, roots, rootsOK)
 		r.cache[folder] = d
+		r.noteLargeLocked(folder, d)
 		r.noteLocked(folder, d)
 		r.mu.Unlock()
 		return d
@@ -670,6 +678,9 @@ type Summary struct {
 	Transferred []string
 	Different   []string
 	Unreadable  bool
+	// TooLarge: live folders left unresolved because a directory on their
+	// path has too many entries to list (by hash).
+	TooLarge []string
 }
 
 // RenamedFolder is a folder kept by its root commits until GraceEnds.
@@ -701,6 +712,9 @@ func (r *Router) Summarize(folders []string) Summary {
 				left = 0
 			}
 			s.Renamed = append(s.Renamed, RenamedFolder{Hash: hash8(f), DaysLeft: left})
+		}
+		if r.tooLargeLive(f, d) {
+			s.TooLarge = append(s.TooLarge, hash8(f))
 		}
 		if d.Repo == "" {
 			s.Denied++

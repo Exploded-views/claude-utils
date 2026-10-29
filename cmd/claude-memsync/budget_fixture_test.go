@@ -5,7 +5,10 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/MarimerLLC/claude-utils/internal/route"
@@ -87,3 +90,51 @@ func budgetRoutes() []map[string]string {
 }
 
 var budgetRepos = []string{"personal", "projects", "client-a", "client-b", "client-c"}
+
+// loadAvg1 is the 1-minute load average, or -1 when it cannot be read.
+func loadAvg1() float64 {
+	if b, err := os.ReadFile("/proc/loadavg"); err == nil {
+		if f := strings.Fields(string(b)); len(f) > 0 {
+			if v, err := strconv.ParseFloat(f[0], 64); err == nil {
+				return v
+			}
+		}
+	}
+	out, err := exec.Command("sysctl", "-n", "vm.loadavg").Output() // "{ 1.2 1.3 1.4 }"
+	if err != nil {
+		return -1
+	}
+	if f := strings.Fields(strings.Trim(string(out), "{} \n")); len(f) > 0 {
+		if v, err := strconv.ParseFloat(f[0], 64); err == nil {
+			return v
+		}
+	}
+	return -1
+}
+
+// maxLoad is the 1-minute load average above which a timing result means
+// nothing.
+const maxLoad = 8.0
+
+// timingBudget is for a test that gates on wall time or CPU: it logs the load
+// average at the start and the end, and when either is above maxLoad the test
+// is skipped as INVALID instead of passing or failing. Call fail for a missed
+// budget (not t.Errorf), and defer done.
+func timingBudget(t *testing.T) (fail func(format string, args ...any), done func()) {
+	t.Helper()
+	start := loadAvg1()
+	t.Logf("load average at start: %.2f", start)
+	var fails []string
+	fail = func(format string, args ...any) { fails = append(fails, fmt.Sprintf(format, args...)) }
+	done = func() {
+		end := loadAvg1()
+		t.Logf("load average at end: %.2f", end)
+		if start > maxLoad || end > maxLoad {
+			t.Skipf("INVALID: load average %.2f at start, %.2f at end, above %.0f; missed budgets would be %q", start, end, maxLoad, fails)
+		}
+		for _, f := range fails {
+			t.Error(f)
+		}
+	}
+	return fail, done
+}

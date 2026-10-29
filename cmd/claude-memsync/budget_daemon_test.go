@@ -62,6 +62,8 @@ func procStat(t *testing.T, pid int) (cpu time.Duration, rssKB int64) {
 // (averaged over 60 s) and holds under 64 MB. The start-up pass itself ends
 // within 10 s. Fixture: the budget tree and five repos with local bare remotes.
 func TestBudgetB2B3_DaemonIdle(t *testing.T) {
+	fail, done := timingBudget(t)
+	defer done()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
 	}
@@ -178,7 +180,7 @@ func TestBudgetB2B3_DaemonIdle(t *testing.T) {
 	}
 	t.Logf("start-up pass ended after %v", startup)
 	if startup >= 10*time.Second {
-		t.Errorf("B-startup: start-up pass took %v, budget 10s", startup)
+		fail("B-startup: start-up pass took %v, budget 10s", startup)
 	}
 
 	time.Sleep(3 * time.Second) // let the start-up settle
@@ -188,7 +190,7 @@ func TestBudgetB2B3_DaemonIdle(t *testing.T) {
 	pct := float64(cpu1-cpu0) / float64(60*time.Second) * 100
 	t.Logf("B2 idle CPU %.2f%% of one core over 60s (%v cpu); B3 RSS %.1f MB (%s/%s)", pct, cpu1-cpu0, float64(rss)/1024, runtime.GOOS, runtime.GOARCH)
 	if pct >= 1 {
-		t.Errorf("B2: idle CPU %.2f%%, budget 1%%", pct)
+		fail("B2: idle CPU %.2f%%, budget 1%%", pct)
 	}
 	if rss >= 64*1024 {
 		t.Errorf("B3: RSS %.1f MB, budget 64 MB", float64(rss)/1024)

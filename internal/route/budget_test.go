@@ -45,8 +45,8 @@ func TestBudgetB4_NoWorkProportionalToUnrelatedDirs(t *testing.T) {
 		}
 		var mu sync.Mutex
 		var got tally
-		restore := SetReadDirForTest(func(dir string) ([]os.DirEntry, error) {
-			es, err := os.ReadDir(dir)
+		restore := SetReadDirForTest(func(dir string, n int) ([]os.DirEntry, error) {
+			es, err := ReadDirN(dir, n)
 			if dir == big || dir == parent {
 				mu.Lock()
 				got.calls++
@@ -62,9 +62,12 @@ func TestBudgetB4_NoWorkProportionalToUnrelatedDirs(t *testing.T) {
 		}
 		return got
 	}
-	small, large := run(10), run(2000)
-	t.Logf("B4 reads of the two dirs: 10 siblings: %d calls, %d entries; 2000 siblings: %d calls, %d entries",
-		small.calls, small.entries, large.calls, large.entries)
+	// A directory with more than maxList entries is read only up to maxList+1 of
+	// them, so the cost stops growing there: 10 siblings is a small dir (listed
+	// whole, informational), 500 and 2,000 are big ones and must cost the same.
+	tiny, small, large := run(10), run(500), run(2000)
+	t.Logf("B4 reads of the two dirs: 10 siblings: %d calls, %d entries; 500: %d calls, %d entries; 2000: %d calls, %d entries",
+		tiny.calls, tiny.entries, small.calls, small.entries, large.calls, large.entries)
 	if small.calls != large.calls {
 		t.Errorf("B4: read calls grew from %d to %d with unrelated siblings", small.calls, large.calls)
 	}
