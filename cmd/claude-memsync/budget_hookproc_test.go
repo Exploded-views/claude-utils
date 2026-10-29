@@ -137,8 +137,8 @@ func TestBudgetB5_OverlappingHooks(t *testing.T) {
 		}
 	}
 	t.Logf("B5 %d hooks at once: %d did the work, %d skipped (slowest skip %v); batch %v; lone hook %v", n, working, skipped, slowestSkip, total, solo.took)
-	if working > 1 {
-		t.Errorf("B5: %d of %d overlapping hooks did the work, want at most 1", working, n)
+	if working != 1 {
+		t.Errorf("B5: %d of %d overlapping hooks did the work, want exactly 1", working, n)
 	}
 }
 
@@ -171,6 +171,9 @@ func TestBudgetB6_HookDeadline(t *testing.T) {
 	}
 	time.Sleep(500 * time.Millisecond)
 	b, _ := os.ReadFile(pids)
+	if len(strings.Fields(string(b))) == 0 {
+		t.Fatal("B6: the fake git never ran (no PID marker), so \"no child survives\" proves nothing")
+	}
 	alive := 0
 	for _, s := range strings.Fields(string(b)) {
 		if p, err := strconv.Atoi(s); err == nil && syscall.Kill(p, 0) == nil {
