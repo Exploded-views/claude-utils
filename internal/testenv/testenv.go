@@ -69,8 +69,14 @@ var (
 )
 
 // Binaries returns the paths of freshly built claude-memsync and claude-memmerge.
+//
+// With MEMSYNC_BUDGET_BIN_DIR and MEMSYNC_BUDGET_TAG set it returns the
+// prebuilt binaries from there (after checking their version) and never runs go.
 func Binaries(t testing.TB) (memsync, memmerge string) {
 	t.Helper()
+	if ms, mm, on := prebuiltOrFatal(t); on {
+		return ms, mm
+	}
 	once.Do(func() {
 		_, file, _, _ := runtime.Caller(0)
 		root := filepath.Join(filepath.Dir(file), "..", "..")

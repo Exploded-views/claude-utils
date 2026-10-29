@@ -26,6 +26,9 @@ import (
 // from the five sync loops by the directory git is run in.
 func TestBudgetB9_StartupSpawns(t *testing.T) {
 	logLoad(t)
+	if testenv.Prebuilt() {
+		t.Skip("not part of B1-B7; needs a source build (the budgetprobe tag)")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
 	}
