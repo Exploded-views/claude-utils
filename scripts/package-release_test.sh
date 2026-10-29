@@ -45,8 +45,8 @@ FAKE
 chmod +x "$W/fakegl/gitleaks"
 export FAKE_GL_LOG="$W/gl.log"
 ORIGPATH="$PATH"
-PATH="$W/fakegl:$PATH"
 REALGL="$(command -v gitleaks || true)"   # the real scanner, if this machine has one
+PATH="$W/fakegl:$PATH"
 mkdir -p "$W/out" "$W/all" "$W/x" "$W/home" "$W/stubs"
 GO="${GO:-go}" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/out" "$TARGET" >"$W/package.log" 2>&1 || { tail -20 "$W/package.log"; bad "package-release.sh exits 0"; }
 A="$W/out/$NAME.tar.gz"

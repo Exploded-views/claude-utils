@@ -27,6 +27,9 @@ printf '%s' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?
 if printf '%s' "$VERSION" | grep -q '[^A-Za-z0-9._+-]'; then echo "version has unexpected characters" >&2; exit 2; fi
 if [ $# -gt 0 ]; then TARGETS=("$@"); else TARGETS=(linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64); fi
 
+if [ "${PACKAGE_RELEASE_SKIP_GITLEAKS:-}" != 1 ] && ! command -v strings >/dev/null 2>&1; then
+  echo "strings (binutils) not found on PATH: the secret scan reads the strings of every binary" >&2; exit 2
+fi
 if [ "${PACKAGE_RELEASE_SKIP_GITLEAKS:-}" != 1 ] && ! command -v gitleaks >/dev/null 2>&1; then
   echo "gitleaks not found on PATH: install it (release.yml pins v8.30.1) or, for local development only, set PACKAGE_RELEASE_SKIP_GITLEAKS=1" >&2; exit 2
 fi
@@ -102,9 +105,28 @@ README
 done
 
 # Secret scan: gitleaks over the extracted contents of every archive, product
-# and budget, as a downloader would unpack them. Any finding fails the run.
+# and budget, as a downloader would unpack them. `gitleaks dir` skips binary
+# files, so the printable strings of every executable (and *.exe, *.test) are
+# written beside it as <file>.strings.txt in the extracted tree and scanned as
+# text. Any finding fails the run (the EXIT trap then removes the archives).
+scan_tree() { # dir: exit 1 on a finding
+  local d="$1" f
+  while IFS= read -r f; do
+    strings -a -n 8 -- "$f" >"$f.strings.txt" || return 2
+  done < <(find "$d" -type f \( -perm -u+x -o -name '*.exe' -o -name '*.test' \) ! -name '*.strings.txt')
+  gitleaks dir --no-banner --redact -c "$ROOT/.gitleaks.toml" "$d"
+}
 if [ "${PACKAGE_RELEASE_SKIP_GITLEAKS:-}" != 1 ]; then
   STAGE_ROOT="$(mktemp -d "$OUT/.stage.XXXXXX")"
+  # The scan checks itself first, on this path: a control executable holding a fake
+  # token (assembled from parts, so no source line holds it whole) must be found by
+  # the very routine that scans the archives. It is never packaged.
+  ctl="$STAGE_ROOT/memsync-scan-control"; mkdir -p "$ctl"
+  tok="ghp_""R7kL2mQ9xT4vB8nZ3c""W6yH1jD5fG0sA2eU9p"
+  printf '\177ELF\000\000\000%s\000\000\000' "$tok" >"$ctl/control.bin"; chmod 755 "$ctl/control.bin"
+  if scan_tree "$ctl" >/dev/null 2>&1; then
+    echo "secret scan cannot see inside binaries: the control binary scanned clean" >&2; exit 1
+  fi
   for a in "${ARCHIVES[@]}"; do
     case "$a" in
       *.zip) unzip -q "$OUT/$a" -d "$STAGE_ROOT" ;;
@@ -112,7 +134,7 @@ if [ "${PACKAGE_RELEASE_SKIP_GITLEAKS:-}" != 1 ]; then
     esac
     d="$STAGE_ROOT/${a%.tar.gz}"; d="${d%.zip}"
     echo "::group::gitleaks ${a}"
-    gitleaks dir --no-banner --redact -i "$ROOT/.gitleaksignore" "$d" || { echo "gitleaks found something in $a" >&2; exit 1; }
+    scan_tree "$d" || { echo "gitleaks found something in $a" >&2; exit 1; }
     echo "::endgroup::"
   done
   stage_cleanup

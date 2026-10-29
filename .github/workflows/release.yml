@@ -54,7 +54,8 @@ jobs:
           cache: false
 
       # Same pinned binary as fork-ci.yml's gitleaks job. package-release.sh scans
-      # the extracted contents of every archive and fails before SHA256SUMS exists.
+      # the extracted contents of every archive (and the strings of every binary, via
+      # binutils' strings, already on ubuntu-latest) and fails before SHA256SUMS exists.
       - name: install gitleaks v8.30.1
         env:
           GITLEAKS_VERSION: 8.30.1
