@@ -135,7 +135,7 @@ func (c *ReadClone) command(ctx context.Context, useStore bool, args ...string) 
 		full = append(full, "--git-dir="+c.store)
 	}
 	full = append(full, args...)
-	cmd := proc.CommandContext(ctx, "git", full...)
+	cmd := proc.GroupedCommandContext(ctx, "git", full...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	if len(args) > 0 && args[0] == "fetch" {
 		// Only a fetch talks to the remote; looking the ssh command up costs a
