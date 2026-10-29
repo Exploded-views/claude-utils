@@ -198,3 +198,42 @@ func TestLargeLivenessChecksOverlapDuringWarm(t *testing.T) {
 		}
 	}
 }
+
+// Under a huge dir the probe never settles for the first name it finds: every
+// spelling that exists is a candidate, so a folder two directories could
+// have made is ambiguous there exactly as it is in a small directory.
+func TestProbeUnderHugeDirReturnsEveryVariant(t *testing.T) {
+	gitEnv(t)
+	build := func(filler int) (string, string) {
+		big := hugeDir(t, filler, "a-b", "a.b", "a_b", "a")
+		if err := os.MkdirAll(filepath.Join(big, "a", "b"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return big, escape(filepath.Join(big, "a-b"))
+	}
+	rel := func(big string, paths []string) []string {
+		var out []string
+		for _, p := range paths {
+			r, _ := filepath.Rel(big, p)
+			out = append(out, r)
+		}
+		return out
+	}
+	smallBig, smallFolder := build(10)
+	hugeBig, hugeFolder := build(400)
+	want := rel(smallBig, Candidates(smallFolder))
+	if len(want) != 4 {
+		t.Fatalf("small dir: %v, want the four spellings", want)
+	}
+	if got := rel(hugeBig, Candidates(hugeFolder)); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("huge dir candidates %v, listing path gives %v", got, want)
+	}
+	decide := func(folder string) Decision {
+		r := New(fileOf(Rule{Remote: "github.com/me/*", Repo: "projects"}), func(string) bool { return true })
+		r.Logf = func(string, ...any) {}
+		return r.Decide(folder)
+	}
+	if ds, dh := decide(smallFolder), decide(hugeFolder); ds != dh || ds.Reason != ReasonUnresolved {
+		t.Errorf("decision under a huge dir %+v, small dir %+v", dh, ds)
+	}
+}
