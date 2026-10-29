@@ -53,14 +53,19 @@ no Go and no checkout. Verify both archives against `SHA256SUMS`, unpack both,
 then from any directory:
 
 ```sh
-MEMSYNC_BUDGET_BIN_DIR=<product dir> MEMSYNC_BUDGET_TAG=<tag> ./claude-memsync-budget.test -test.run Budget -test.v -test.timeout 900s
-MEMSYNC_BUDGET_BIN_DIR=<product dir> MEMSYNC_BUDGET_TAG=<tag> ./route-budget.test -test.run Budget -test.v -test.timeout 900s
+MEMSYNC_BUDGET_BIN_DIR=<product dir> MEMSYNC_BUDGET_TAG=<tag> ./claude-memsync-budget.test -test.run '^TestBudgetB' -test.v -test.timeout 900s
+MEMSYNC_BUDGET_BIN_DIR=<product dir> MEMSYNC_BUDGET_TAG=<tag> ./route-budget.test -test.run '^TestBudgetB' -test.v -test.timeout 900s
 ```
 
-Set both variables or neither (one alone fails). Both product binaries must
+Which bytes each gate measures: B1, B4, B7 and B8 run the code inside the
+budget test binaries (same source and flags as the product, in-process), and
+B2/B3, B5 and B6 run the product archive's `claude-memsync`. Both are checked
+against the tag, so a budget archive from another release beside this product
+archive fails before any gate. Set both variables or neither (one alone fails);
+the tag must be a release tag (the regex below), never `dev`. Both product binaries must
 print `claude-memsync <tag>` / `claude-memmerge <tag>` from `version`, or the run
-fails before any gate. The test binary then moves `HOME`, the `XDG_*`
-directories and `TMPDIR` into a fresh temp directory and refuses to run if any
+fails before any gate, and so must the test binary's own version. The test binary then moves `HOME`, the `XDG_*`
+directories and `TMPDIR` into a fresh temp directory, points `GIT_CONFIG_GLOBAL` at a file there, sets `GIT_CONFIG_NOSYSTEM=1` and a failing `GIT_SSH_COMMAND`, drops inherited `GIT_*`, `CLAUDE_PROJECT_DIR` and `SSH_AUTH_SOCK`, and refuses to run if `HOME` was unset or any
 path it would use resolves under the original `HOME`. B9 skips in this mode (it
 needs a source build and is not part of B1-B7). Read the `--- PASS/FAIL/SKIP`
 lines and the load-average lines; an INVALID skip means the host was too busy.

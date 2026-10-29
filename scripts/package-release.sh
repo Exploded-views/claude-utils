@@ -88,11 +88,13 @@ for target in "${TARGETS[@]}"; do
     GOOS="$GOOS" GOARCH="$GOARCH" $GO test -c -tags budget -trimpath -ldflags "$LDFLAGS" -o "$bstage/route-budget.test" ./internal/route
     echo "::endgroup::"
     cat >"$bstage/README" <<README
-Budget gates B1-B7 against the shipped binaries (no Go, no checkout). Unpack the
-product archive claude-utils-${VERSION}-${GOOS}-${GOARCH}.tar.gz (after checking SHA256SUMS) and
-this one, then, from any directory:
-  MEMSYNC_BUDGET_BIN_DIR=<product dir> MEMSYNC_BUDGET_TAG=${VERSION} ./claude-memsync-budget.test -test.run Budget -test.v -test.timeout 900s
-  MEMSYNC_BUDGET_BIN_DIR=<product dir> MEMSYNC_BUDGET_TAG=${VERSION} ./route-budget.test -test.run Budget -test.v -test.timeout 900s
+Budget gates B1-B8 (B9 needs a source build and skips) against the shipped bytes, with no Go and no
+checkout. Unpack the product archive claude-utils-${VERSION}-${GOOS}-${GOARCH}.tar.gz (after checking
+SHA256SUMS) and this one, then, from any directory:
+  MEMSYNC_BUDGET_BIN_DIR=<product dir> MEMSYNC_BUDGET_TAG=${VERSION} ./claude-memsync-budget.test -test.run '^TestBudgetB' -test.v -test.timeout 900s
+  MEMSYNC_BUDGET_BIN_DIR=<product dir> MEMSYNC_BUDGET_TAG=${VERSION} ./route-budget.test -test.run '^TestBudgetB' -test.v -test.timeout 900s
+Which bytes each gate measures: B1, B4, B7 and B8 run the code inside these test binaries; B2/B3, B5 and B6
+run the product archive's claude-memsync. Both must carry the tag, and both are checked: a mismatch fails.
 README
     (cd "$STAGE_ROOT" && tar -czf "$OUT/${bname}.tar.gz" "$bname"); ARCHIVES+=("${bname}.tar.gz")
     stage_cleanup

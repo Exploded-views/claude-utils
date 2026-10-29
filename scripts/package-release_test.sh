@@ -81,7 +81,7 @@ check "budget binary with a wrong tag exits 1 before any gate (rc=$g1)" bash -c 
 check "budget binary with the dir alone exits 1 (rc=$g2)" bash -c "[ $g2 -eq 1 ] && grep -q 'go together' '$W/g2.log'"
 check "budget binary with the tag alone exits 1 (rc=$g3)" bash -c "[ $g3 -eq 1 ] && grep -q 'go together' '$W/g3.log'"
 check "budget binary, right tag: B9 skips and exits 0 (rc=$g4)" bash -c "[ $g4 -eq 0 ] && grep -q -- '--- SKIP: TestBudgetB9' '$W/g4.log'"
-check "budget README and docs select the gates with ^TestBudgetB" bash -c "grep -q \"-test.run '^TestBudgetB'\" '$BD/README' && grep -q \"-test.run '^TestBudgetB'\" '$ROOT/docs/releases.md' && ! grep -q -- '-test.run Budget' '$BD/README' '$ROOT/docs/releases.md'"
+check "budget README and docs select the gates with ^TestBudgetB" bash -c "grep -qF -- \"\$1\" '$BD/README' && grep -qF -- \"\$1\" '$ROOT/docs/releases.md' && ! grep -q -- '-test.run Budget' '$BD/README' '$ROOT/docs/releases.md'" _ "-test.run '^TestBudgetB'"
 check "budget README and docs say which gates run which binary" bash -c "grep -q 'B1, B4, B7 and B8' '$BD/README' && grep -q 'B1, B4, B7 and B8' '$ROOT/docs/releases.md' && grep -q 'B2/B3, B5 and B6' '$BD/README' && grep -q 'B2/B3, B5 and B6' '$ROOT/docs/releases.md'"
 
 # Every default target, with a stub Go that only writes its -o file: the release

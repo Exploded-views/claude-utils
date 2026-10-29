@@ -1,13 +1,17 @@
 package testenv
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/MarimerLLC/claude-utils/internal/version"
 )
 
 // Prebuilt mode runs the budget gates against binaries built elsewhere (the
@@ -18,6 +22,14 @@ const (
 	// EnvTag is the release tag both binaries must report from `version`.
 	EnvTag = "MEMSYNC_BUDGET_TAG"
 )
+
+// releaseTagRE is the release tag rule of package-release.sh, release.yml and
+// bootstrap.sh --prebuilt-dir: prebuilt mode only certifies release-stamped bytes.
+var releaseTagRE = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$`)
+
+// selfVersion is the running test binary's own version. B1, B4, B7 and B8 run
+// this binary's code in-process, so it must be the tag too.
+var selfVersion = version.String
 
 var (
 	prebuiltMu    sync.Mutex
@@ -35,6 +47,9 @@ func prebuiltBinaries(getenv func(string) string) (ms, mm string, on bool, err e
 	}
 	if dir == "" || tag == "" {
 		return "", "", true, fmt.Errorf("%s and %s go together: set both or neither (dir=%q tag=%q)", EnvBinDir, EnvTag, dir, tag)
+	}
+	if !releaseTagRE.MatchString(tag) {
+		return "", "", true, fmt.Errorf("%s=%q is not a release tag (vX.Y.Z or vX.Y.Z-suffix)", EnvTag, tag)
 	}
 	if dir, err = filepath.Abs(dir); err != nil {
 		return "", "", true, err
@@ -135,11 +150,26 @@ func isolateHome(orig, base string, paths func(home string) []string) (home stri
 		"XDG_CACHE_HOME":  filepath.Join(home, ".cache"),
 		"TMPDIR":          filepath.Join(home, "tmp"),
 	}
+	// Nothing inherited may steer git, ssh or the project lookup of a binary under test.
+	set["GIT_CONFIG_GLOBAL"] = filepath.Join(home, ".gitconfig")
+	set["GIT_CONFIG_NOSYSTEM"] = "1"
+	set["GIT_SSH_COMMAND"] = "false" // the fixtures use file:// remotes; ssh must never be reached
+	var unset []string
+	for _, kv := range os.Environ() {
+		k, _, _ := strings.Cut(kv, "=")
+		if _, mine := set[k]; strings.HasPrefix(k, "GIT_") && !mine {
+			unset = append(unset, k)
+		}
+	}
+	unset = append(unset, "CLAUDE_PROJECT_DIR", "SSH_AUTH_SOCK")
+	if err := os.WriteFile(set["GIT_CONFIG_GLOBAL"], nil, 0o600); err != nil {
+		os.RemoveAll(home)
+		return "", nil, err
+	}
 	old := map[string]*string{}
-	for k, v := range set {
-		if err := os.MkdirAll(v, 0o700); err != nil && k != "HOME" && k != "USERPROFILE" {
-			os.RemoveAll(home)
-			return "", nil, err
+	remember := func(k string) {
+		if _, done := old[k]; done {
+			return
 		}
 		if cur, ok := os.LookupEnv(k); ok {
 			c := cur
@@ -147,7 +177,20 @@ func isolateHome(orig, base string, paths func(home string) []string) (home stri
 		} else {
 			old[k] = nil
 		}
+	}
+	for k, v := range set {
+		if strings.HasPrefix(k, "XDG_") || k == "TMPDIR" {
+			if err := os.MkdirAll(v, 0o700); err != nil {
+				os.RemoveAll(home)
+				return "", nil, err
+			}
+		}
+		remember(k)
 		os.Setenv(k, v)
+	}
+	for _, k := range unset {
+		remember(k)
+		os.Unsetenv(k)
 	}
 	return home, func() {
 		for k, v := range old {
@@ -171,6 +214,12 @@ func prebuiltSetup(getenv func(string) string, orig, base string) (cleanup func(
 	}
 	if !on {
 		return func() {}, nil
+	}
+	if orig == "" {
+		return nil, errors.New("HOME is not set in the start environment: cannot tell the original HOME from the temp one, refusing to run")
+	}
+	if got, tag := selfVersion(), getenv(EnvTag); got != tag {
+		return nil, fmt.Errorf("this test binary reports version %q, want %q (%s): B1, B4, B7 and B8 run its own code, so use the budget archive of the same release", got, tag, EnvTag)
 	}
 	_, cleanup, err = isolateHome(orig, base, nil)
 	return cleanup, err
