@@ -691,3 +691,282 @@ func TestRouted_ReleasedPushGuardUsesTheTokenThatPassed(t *testing.T) {
 		t.Fatalf("pushed=%d, %d requests with the old token after release", pushed.Load(), staleAfter.Load())
 	}
 }
+
+// privateOnly with no token source at all: the daemon cannot check, so the
+// repo is held with a status line saying so, never started.
+func TestStartSingle_PrivateOnlyWithoutTokenSourceIsHeld(t *testing.T) {
+	fastGuardRetry(t)
+	cfg := guardCfg(t, privateH(), false)
+	var started atomic.Int32
+	old := runLoop
+	runLoop = func(ctx context.Context, l *syncpkg.Loop) error { started.Add(1); <-ctx.Done(); return nil }
+	t.Cleanup(func() { runLoop = old })
+	r, err := startSingle(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	waitFor(t, "the held record", func() bool {
+		b, _ := os.ReadFile(loopFailedPath(cfg.SyncDir))
+		return strings.Contains(string(b), heldMarker) && strings.Contains(string(b), "no GitHub token")
+	})
+	time.Sleep(20 * time.Millisecond)
+	if n := started.Load(); n != 0 {
+		t.Fatalf("a privateOnly repo with no token source started %d times", n)
+	}
+}
+
+// Across a restart: a repo with a held record on disk stays held until the
+// release check (an API answer) passes, whatever the start check says. The
+// start check is stubbed to pass, as a check skipped for want of a token
+// used to; the release check still fails, so no loop may start.
+func TestStartSingle_HeldRecordOnDiskNeedsReleaseCheck(t *testing.T) {
+	fastGuardRetry(t)
+	cfg := guardCfg(t, privateH(), true)
+	failed := loopFailedPath(cfg.SyncDir)
+	os.MkdirAll(filepath.Dir(failed), 0700)
+	if err := os.WriteFile(failed, []byte("2026-01-01T00:00:00Z "+heldMarker+"public\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	oldC, oldR := guardCheck, guardRelease
+	t.Cleanup(func() { guardCheck, guardRelease = oldC, oldR })
+	guardCheck = func(config.Config, func(string, ...any)) error { return nil }
+	var releases atomic.Int32
+	guardRelease = func(config.Config, func(string, ...any)) error {
+		releases.Add(1)
+		return errNotAPIVerified
+	}
+	var started atomic.Int32
+	old := runLoop
+	runLoop = func(ctx context.Context, l *syncpkg.Loop) error { started.Add(1); <-ctx.Done(); return nil }
+	t.Cleanup(func() { runLoop = old })
+	r, err := startSingle(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	waitFor(t, "release checks", func() bool { return releases.Load() >= 3 })
+	if n := started.Load(); n != 0 {
+		t.Fatalf("a repo held before the restart started %d times on a start check alone", n)
+	}
+	if _, err := os.Stat(failed); err != nil {
+		t.Errorf("the held record must stay: %v", err)
+	}
+}
+
+// Routed twin.
+func TestRouted_HeldRecordOnDiskNeedsReleaseCheck(t *testing.T) {
+	fastGuardRetry(t)
+	cfgs := privateRouted(t, map[string]string{"a": "git@github.com:Org/mem-project-a.git"}, routedAPI(""))
+	failed := loopFailedPath(cfgs["a"].SyncDir)
+	os.MkdirAll(filepath.Dir(failed), 0700)
+	if err := os.WriteFile(failed, []byte("2026-01-01T00:00:00Z "+heldMarker+"public\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	oldC, oldR := guardCheck, guardRelease
+	t.Cleanup(func() { guardCheck, guardRelease = oldC, oldR })
+	guardCheck = func(config.Config, func(string, ...any)) error { return nil }
+	var releases atomic.Int32
+	guardRelease = func(config.Config, func(string, ...any)) error {
+		releases.Add(1)
+		return errNotAPIVerified
+	}
+	set, err := loadRouted(os.Getenv(routesEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loops := stubLoops(t, nil)
+	r, err := set.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	waitFor(t, "release checks", func() bool { return releases.Load() >= 3 })
+	if n := loops.started("a"); n != 0 {
+		t.Fatalf("a repo held before the restart started %d times on a start check alone", n)
+	}
+}
+
+// End to end: held as public, config.json turns
+// untrusted (its token sources are dropped), the daemon restarts: the repo
+// stays held. Covered twice: by the held-record rule and by "no token source
+// holds" at start.
+func TestStartSingle_HeldThenUntrustedConfigThenRestartStaysHeld(t *testing.T) {
+	fastGuardRetry(t)
+	h := func(w http.ResponseWriter, r *http.Request) {
+		jsonH(200, repoJSON{Name: "mem-personal", Private: tb(false), Visibility: "public"})(w, r)
+	}
+	cfg := savedAndLoaded(t, guardCfg(t, h, true))
+	var started atomic.Int32
+	old := runLoop
+	runLoop = func(ctx context.Context, l *syncpkg.Loop) error { started.Add(1); <-ctx.Done(); return nil }
+	t.Cleanup(func() { runLoop = old })
+	r, err := startSingle(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the held record", func() bool {
+		b, _ := os.ReadFile(loopFailedPath(cfg.SyncDir))
+		return isHeldRecord(b)
+	})
+	if err := r.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cfg.Path(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err = startSingle(context.Background(), cfg) // the restart
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	time.Sleep(30 * time.Millisecond)
+	if n := started.Load(); n != 0 {
+		t.Fatalf("released %d times after a restart with an untrusted config", n)
+	}
+	if b, _ := os.ReadFile(loopFailedPath(cfg.SyncDir)); !isHeldRecord(b) {
+		t.Errorf("held record gone after the restart: %q", b)
+	}
+}
+
+// Decision (A): a hold outlives privateOnly being switched off. Release is a
+// deliberate manual step, which the held record (and so status) spells out.
+func TestStartSingle_HeldRecordStaysHeldWhenPrivateOnlyTurnedOff(t *testing.T) {
+	fastGuardRetry(t)
+	cfg := guardCfg(t, privateH(), true) // a working token: not the reason
+	cfg.PrivateOnly = false
+	failed := loopFailedPath(cfg.SyncDir)
+	os.MkdirAll(filepath.Dir(failed), 0700)
+	if err := os.WriteFile(failed, []byte("2026-01-01T00:00:00Z "+heldMarker+"public\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var started atomic.Int32
+	old := runLoop
+	runLoop = func(ctx context.Context, l *syncpkg.Loop) error { started.Add(1); <-ctx.Done(); return nil }
+	t.Cleanup(func() { runLoop = old })
+	r, err := startSingle(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	waitFor(t, "the release step in the held record", func() bool {
+		b, _ := os.ReadFile(failed)
+		s := string(b)
+		return isHeldRecord(b) && strings.Contains(s, heldMarker+"held from an earlier run") && strings.Contains(s, "privateOnly is off") &&
+			strings.Contains(s, "claude-memsync stop") && strings.Contains(s, ".state/loop-failed") &&
+			strings.Contains(s, "claude-memsync start")
+	})
+	time.Sleep(20 * time.Millisecond)
+	if n := started.Load(); n != 0 {
+		t.Fatalf("switching privateOnly off released a held repo %d times", n)
+	}
+	if l := loopFailedLine(mustRead(t, failed)); !strings.Contains(l, "claude-memsync stop") {
+		t.Errorf("status line lacks the release step: %q", l)
+	}
+}
+
+// The no-token error names the sources the daemon can actually use: with
+// recheckTokenCmd false, not githubTokenCmd.
+func TestDaemonGuard_NoTokenMessageFitsTheConfig(t *testing.T) {
+	cfg := guardCfg(t, privateH(), false)
+	cfg.GitHubTokenCmd = []string{"true"}
+	off := false
+	cfg.RecheckTokenCmd = &off
+	err := daemonGuard(cfg, func(string, ...any) {})
+	if !errors.Is(err, errNoToken) {
+		t.Fatalf("want errNoToken, got %v", err)
+	}
+	if msg := err.Error(); strings.Contains(msg, "githubTokenCmd") || !strings.Contains(msg, "githubApp") || !strings.Contains(msg, "githubTokenFile") {
+		t.Errorf("message must point at githubApp/githubTokenFile, not githubTokenCmd: %q", msg)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "githubTokenEnv") || !strings.Contains(msg, "MEMSYNC_GITHUB_TOKEN") {
+		t.Errorf("message must name the env token too (it still works): %q", msg)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "recheckTokenCmd") {
+		t.Errorf("with a token command configured, the message must say why it is not run: %q", msg)
+	}
+}
+
+// Bootstrap's case: recheckTokenCmd false and no token command at all. The
+// message must not talk about a token command that does not exist.
+func TestDaemonGuard_NoTokenMessageWithoutATokenCommand(t *testing.T) {
+	cfg := guardCfg(t, privateH(), false)
+	cfg.GitHubTokenCmd = nil
+	off := false
+	cfg.RecheckTokenCmd = &off
+	err := daemonGuard(cfg, func(string, ...any) {})
+	if !errors.Is(err, errNoToken) {
+		t.Fatalf("want errNoToken, got %v", err)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "token command") || strings.Contains(msg, "recheckTokenCmd") {
+		t.Errorf("no token command is configured, so the message must not mention one: %q", msg)
+	}
+	for _, want := range []string{"githubApp", "githubTokenFile", "githubTokenEnv", "MEMSYNC_GITHUB_TOKEN"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message lacks %s: %q", want, msg)
+		}
+	}
+}
+
+// A hold from an earlier run, with privateOnly now off, is not waiting for
+// anything: status must not say it re-checks, and must say it is released by
+// hand.
+func TestLoopFailedLine_HeldEarlierIsNotWaiting(t *testing.T) {
+	rec := []byte("2026-01-01T00:00:00Z " + heldMarker + heldEarlierError("/s").Error() + "\n")
+	l := loopFailedLine(rec)
+	if strings.Contains(l, "re-checking") || strings.Contains(l, "waiting for") {
+		t.Errorf("a held-earlier record shows as waiting: %q", l)
+	}
+	if !strings.Contains(l, "released by hand") || !strings.Contains(l, "claude-memsync stop") {
+		t.Errorf("status line must say the hold is released by hand, with the steps: %q", l)
+	}
+	// Regression: an ordinary hold still reads as re-checking.
+	if l := loopFailedLine([]byte("2026-01-01T00:00:00Z " + heldMarker + "check failed, nothing syncs until it passes: public\n")); !strings.Contains(l, "re-checking with backoff") {
+		t.Errorf("an ordinary hold lost its re-checking prefix: %q", l)
+	}
+}
+
+// Routed twin of TestStartSingle_HeldRecordStaysHeldWhenPrivateOnlyTurnedOff.
+func TestRouted_HeldRecordStaysHeldWhenPrivateOnlyTurnedOff(t *testing.T) {
+	fastGuardRetry(t)
+	cfgs := privateRouted(t, map[string]string{"a": "git@github.com:Org/mem-project-a.git"}, routedAPI(""))
+	cfg := cfgs["a"]
+	cfg.PrivateOnly = false
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	failed := loopFailedPath(cfg.SyncDir)
+	os.MkdirAll(filepath.Dir(failed), 0700)
+	if err := os.WriteFile(failed, []byte("2026-01-01T00:00:00Z "+heldMarker+"public\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	set, err := loadRouted(os.Getenv(routesEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loops := stubLoops(t, nil)
+	r, err := set.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	waitFor(t, "the release step in the held record", func() bool {
+		b, _ := os.ReadFile(failed)
+		s := string(b)
+		return isHeldRecord(b) && strings.Contains(s, heldMarker+"held from an earlier run") && strings.Contains(s, "claude-memsync stop")
+	})
+	time.Sleep(20 * time.Millisecond)
+	if n := loops.started("a"); n != 0 {
+		t.Fatalf("switching privateOnly off released a held routed repo %d times", n)
+	}
+}
+
+func mustRead(t *testing.T, p string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
