@@ -78,3 +78,42 @@ func TestHookGitOnARelatedRepoGoesThroughProc(t *testing.T) {
 		}
 	}
 }
+
+// A fetch that times out kills git's whole process group, so the ssh child a
+// real fetch starts does not outlive it. Here git is a script that starts a
+// sleeping child of its own.
+func TestFetchTimeoutKillsGitsChildren(t *testing.T) {
+	bin := t.TempDir()
+	childPID := filepath.Join(bin, "child.pid")
+	script := "#!/bin/sh\nsleep 60 &\necho $! > " + childPID + "\nwait\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { // stop a stray child by its exact PID
+		b, _ := os.ReadFile(childPID)
+		if p, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+			_ = syscall.Kill(p, syscall.SIGKILL)
+		}
+	})
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GIT_SSH_COMMAND", "ssh")
+	c, err := NewReadClone(t.TempDir(), "mem-other", "git@github.com:me/mem-other.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Timeout = 400 * time.Millisecond
+	if err := c.Fetch(); err == nil {
+		t.Fatal("Fetch succeeded with a git that hangs")
+	}
+	b, _ := os.ReadFile(childPID)
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		t.Fatalf("the fake git's child never started: %q", b)
+	}
+	for i := 0; i < 50 && syscall.Kill(pid, 0) == nil; i++ {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if syscall.Kill(pid, 0) == nil {
+		t.Errorf("git's child %d still running after the fetch timed out", pid)
+	}
+}
