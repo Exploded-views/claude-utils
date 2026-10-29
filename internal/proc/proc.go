@@ -1,6 +1,7 @@
 package proc
 
 import (
+	"context"
 	"errors"
 	"os/exec"
 	"sync"
@@ -44,6 +45,23 @@ func Command(name string, args ...string) *exec.Cmd {
 	HideWindow(c)
 	if grouped.Load() {
 		setGroup(c)
+	}
+	return c
+}
+
+// CommandContext is Command with exec.CommandContext's cancellation; after
+// Group, cancelling kills the child's whole process group.
+func CommandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
+	c := exec.CommandContext(ctx, name, args...)
+	HideWindow(c)
+	if grouped.Load() {
+		setGroup(c)
+		c.Cancel = func() error {
+			if c.Process != nil {
+				killGroup(c.Process.Pid)
+			}
+			return nil
+		}
 	}
 	return c
 }
