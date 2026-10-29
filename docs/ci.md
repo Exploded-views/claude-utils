@@ -44,6 +44,8 @@ gitleaks runs as a binary pinned by version and sha256 rather than through
 
 `release.yml` is changed in this fork only (a comment at its top says so): the packaging loop lives in `scripts/package-release.sh <version> <outdir> [os/arch ...]`, which `release.yml` calls. Every archive `claude-utils-<tag>-<os>-<arch>` now also contains `scripts/bootstrap.sh`, so `SHA256SUMS` covers it, and a host can bootstrap from a verified download with `--prebuilt-dir` (see `docs/bootstrap.md`, "Crewkit host"). The `release-layout` job and `scripts/package-release_test.sh` (runnable locally; `GO="sh /path/to/dev.sh go"` wraps Go) test the same script, so the release workflow's packaging is exercised on every push.
 
+`package-release.sh` also builds, for each linux and darwin target, `claude-utils-<tag>-budget-<os>-<arch>.tar.gz` holding the budget gates as `go test -c -tags budget` binaries (`claude-memsync-budget.test`, `route-budget.test`) and a `README` with the run commands; `SHA256SUMS` covers these and the product archives, and `release.yml` uploads them with the same `dist/*.tar.gz` glob. `package-release_test.sh` checks the layout and, with a stub Go, that all four budget archives (and none for Windows) are produced and listed in `SHA256SUMS`. How to run them is in [releases.md](releases.md#the-budget-bench).
+
 ## Workflow lint
 
 The house rule is GitHub-hosted runners only and pinned actions. `scripts/lint-workflows.sh [dir]` (bash and python3 standard library only, no YAML library, self-contained so a shared version can replace it) fails, one line per finding, on any `*.yml` or `*.yaml` under `.github/workflows` that has:

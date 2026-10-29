@@ -6,11 +6,15 @@
 # With no targets: linux, darwin and windows, amd64 and arm64. Each archive
 # holds claude-utils-<version>-<os>-<arch>/ with the binaries, LICENSE,
 # README.md and scripts/bootstrap.sh (so a downloaded, verified archive can
-# bootstrap a host with --prebuilt-dir, without a clone). SHA256SUMS covers
-# every archive. GO="sh /path/to/dev.sh go" wraps Go. Run from anywhere.
+# bootstrap a host with --prebuilt-dir, without a clone). For each linux and
+# darwin target it also builds claude-utils-<version>-budget-<os>-<arch>.tar.gz:
+# the budget gates as `go test -c -tags budget` binaries (claude-memsync-budget.test,
+# route-budget.test), to run against the product archive's binaries on a host with
+# no Go and no checkout. SHA256SUMS covers every archive of both kinds.
+# GO="sh /path/to/dev.sh go" wraps Go. Run from anywhere.
 set -euo pipefail
 
-[ $# -ge 2 ] || { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+[ $# -ge 2 ] || { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 VERSION="$1"; OUT="$2"; shift 2
 # The same rule as bootstrap.sh --prebuilt-dir and release.yml (v0.3.0, v0.3.0-ev.1).
 printf '%s' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' \
@@ -55,6 +59,27 @@ for target in "${TARGETS[@]}"; do
     (cd "$STAGE_ROOT" && tar -czf "$OUT/${name}.tar.gz" "$name"); ARCHIVES+=("${name}.tar.gz")
   fi
   stage_cleanup
+
+  # The budget bench for this target (none for windows: the gates are for linux and darwin hosts).
+  if [ "$GOOS" != windows ]; then
+    bname="claude-utils-${VERSION}-budget-${GOOS}-${GOARCH}"
+    STAGE_ROOT="$(mktemp -d "$OUT/.stage.XXXXXX")"
+    bstage="$STAGE_ROOT/$bname"
+    mkdir -p "$bstage"
+    echo "::group::budget tests ${target}"
+    GOOS="$GOOS" GOARCH="$GOARCH" $GO test -c -tags budget -trimpath -ldflags "$LDFLAGS" -o "$bstage/claude-memsync-budget.test" ./cmd/claude-memsync
+    GOOS="$GOOS" GOARCH="$GOARCH" $GO test -c -tags budget -trimpath -ldflags "$LDFLAGS" -o "$bstage/route-budget.test" ./internal/route
+    echo "::endgroup::"
+    cat >"$bstage/README" <<README
+Budget gates B1-B7 against the shipped binaries (no Go, no checkout). Unpack the
+product archive claude-utils-${VERSION}-${GOOS}-${GOARCH}.tar.gz (after checking SHA256SUMS) and
+this one, then, from any directory:
+  MEMSYNC_BUDGET_BIN_DIR=<product dir> MEMSYNC_BUDGET_TAG=${VERSION} ./claude-memsync-budget.test -test.run Budget -test.v -test.timeout 900s
+  MEMSYNC_BUDGET_BIN_DIR=<product dir> MEMSYNC_BUDGET_TAG=${VERSION} ./route-budget.test -test.run Budget -test.v -test.timeout 900s
+README
+    (cd "$STAGE_ROOT" && tar -czf "$OUT/${bname}.tar.gz" "$bname"); ARCHIVES+=("${bname}.tar.gz")
+    stage_cleanup
+  fi
 done
 
 # sha256sum on Linux, shasum on macOS: the same "<hash>  <file>" lines either way.
