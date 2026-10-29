@@ -292,6 +292,12 @@ func walk(root, rest string, fold func(string) string, list func(string) *listin
 				if info, err := os.Stat(p); err != nil || !info.IsDir() {
 					continue
 				}
+				// The stat matched however the name is cased on a case-folding
+				// host: spell it as the directory does. On any failure the
+				// spelling asked for stays.
+				if nm, ok := onDiskName(p); ok && fold(nm) == fold(c.name) {
+					p = filepath.Join(dir, nm)
+				}
 				if c.end == len(orig) {
 					out = append(out, p)
 				} else {
