@@ -127,6 +127,8 @@ func withSyncLocksStopping(stderr io.Writer, syncDirs []string, fn func() error)
 
 	sigs, stopSigs := notifySignals()
 	defer stopSigs()
+	syncOwnsSignals.Store(true)
+	defer syncOwnsSignals.Store(false)
 
 	fmt.Fprintln(stderr, "stopping the claude-memsync service for this change…")
 	var once sync.Once

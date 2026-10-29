@@ -14,6 +14,10 @@ func main() {
 		os.Exit(2)
 	}
 
+	if os.Args[1] != "run" { // the daemon has its own shutdown
+		guardChildren()
+	}
+
 	switch os.Args[1] {
 	case "version", "--version", "-v":
 		os.Exit(runVersion(os.Stdout, os.Stderr, os.Args[2:]))

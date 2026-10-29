@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MarimerLLC/claude-utils/internal/proc"
 	"github.com/MarimerLLC/claude-utils/internal/related"
 )
 
@@ -41,6 +42,7 @@ func TestInterruptKillsLiveGitBeforeExiting(t *testing.T) {
 			})
 			oN, oE := notifySignals, exitFn
 			t.Cleanup(func() { notifySignals, exitFn = oN, oE })
+			t.Cleanup(proc.Release) // KillAll makes Run refuse children until released
 			sig := make(chan os.Signal, 2)
 			notifySignals = func() (<-chan os.Signal, func()) { return sig, func() {} }
 			exited := make(chan int, 1)
