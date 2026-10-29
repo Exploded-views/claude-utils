@@ -296,3 +296,72 @@ func TestMaintainRemembersTheLastRunAcrossRestarts(t *testing.T) {
 		t.Errorf("a restart 25h after the run did not run it: %d runs", got)
 	}
 }
+
+// A loop never waits for another loop's housekeeping: it skips, and runs its
+// own on a later tick.
+func TestMaintainNeverBlocksBehindAnotherLoop(t *testing.T) {
+	dir := t.TempDir()
+	release := filepath.Join(dir, "release")
+	log := fakeGit(t, `while [ ! -e `+release+` ]; do sleep 0.05; done`)
+	now := time.Now()
+	a, repoA := maintLoop(t, &now)
+	b, repoB := maintLoop(t, &now)
+	doneA := make(chan struct{})
+	go func() { defer close(doneA); a.maybeMaintain(repoA) }()
+	for end := time.Now().Add(5 * time.Second); len(calls(t, log)) < 1 || calls(t, log)[0] == ""; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatal("first gc never started")
+		}
+	}
+	doneB := make(chan struct{})
+	go func() { defer close(doneB); b.maybeMaintain(repoB) }()
+	select {
+	case <-doneB:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a loop waited for another loop's housekeeping")
+	}
+	if n := len(calls(t, log)); n != 1 {
+		t.Fatalf("second loop ran gc while the first was running: %d calls", n)
+	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	<-doneA
+	b.maybeMaintain(repoB) // next tick
+	if n := len(calls(t, log)); n != 2 {
+		t.Errorf("skipped loop did not run housekeeping on a later tick: %d calls", n)
+	}
+}
+
+// A last-run time in the future (clock skew) does not stop housekeeping: it is
+// due, and the record is rewritten.
+func TestMaintainFutureRecordIsDue(t *testing.T) {
+	log := fakeGit(t, "exit 0")
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	l, repo := maintLoop(t, &now)
+	rec := maintainedPath(l.Cfg.SyncDir)
+	if err := os.MkdirAll(filepath.Dir(rec), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	future := now.Add(30 * 24 * time.Hour)
+	if err := os.WriteFile(rec, []byte(future.Format(time.RFC3339)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l.maybeMaintain(repo)
+	if n := len(calls(t, log)); n != 1 || calls(t, log)[0] == "" {
+		t.Fatalf("a future-dated record stopped housekeeping: calls=%q", calls(t, log))
+	}
+	b, _ := os.ReadFile(rec)
+	got, err := time.Parse(time.RFC3339, strings.TrimSpace(string(b)))
+	if err != nil || got.After(now) {
+		t.Errorf("record not rewritten: %q (%v)", b, err)
+	}
+	// A record a minute ahead is within skew: not treated as due.
+	l2, repo2 := maintLoop(t, &now)
+	os.MkdirAll(filepath.Dir(maintainedPath(l2.Cfg.SyncDir)), 0o700)
+	os.WriteFile(maintainedPath(l2.Cfg.SyncDir), []byte(now.Add(time.Minute).Format(time.RFC3339)+"\n"), 0o600)
+	l2.maybeMaintain(repo2)
+	if n := len(calls(t, log)); n != 1 {
+		t.Errorf("a record 1 minute ahead (within skew) ran housekeeping: %d calls", n)
+	}
+}
