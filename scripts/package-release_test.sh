@@ -126,18 +126,18 @@ GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/all" >"$W/a
 for bt in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
   check "all targets: budget-$bt archive is in the release and in SHA256SUMS" bash -c "[ -f '$W/all/claude-utils-$VER-budget-$bt.tar.gz' ] && grep -q ' claude-utils-$VER-budget-$bt.tar.gz\$' '$W/all/SHA256SUMS'"
 done
-check "all targets: no windows budget archive" bash -c "! ls '$W/all' | grep -q 'budget-windows'"
+check "all targets: no windows budget archive" bash -c "! compgen -G '$W/all/*budget-windows*' >/dev/null"
 check "all targets: SHA256SUMS holds 6 product and 4 budget archives, and verifies" bash -c "[ \"\$(grep -c -- '-budget-' '$W/all/SHA256SUMS')\" = 4 ] && [ \"\$(grep -vc -- '-budget-' '$W/all/SHA256SUMS')\" = 6 ] && cd '$W/all' && ${SUMC[*]} SHA256SUMS >/dev/null"
 
 # The secret scan: gitleaks runs over the extracted contents of every archive
 # (product and budget) before SHA256SUMS is written; any finding fails the run
 # and leaves nothing to upload. No scanner is an error unless the documented
 # local opt-out PACKAGE_RELEASE_SKIP_GITLEAKS=1 is set (release.yml never sets it).
-n=0; for a in $(cd "$W/all" && ls | grep '\.\(tar\.gz\|zip\)$'); do n=$((n + 1)); done
+n=0; for a in $(cd "$W/all" && find . -maxdepth 1 \( -name '*.tar.gz' -o -name '*.zip' \) | sed 's|^\./||' | sort); do n=$((n + 1)); done
 : >"$W/gl.log"
 GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/scanned" >"$W/scanned.log" 2>&1 || bad "package-release.sh with a clean scan exits 0"
 check "the scan ran once per archive ($n) and once on the control" bash -c "[ \"\$(grep -c . '$W/gl.log')\" = $((n + 1)) ] && grep -q 'memsync-scan-control' '$W/gl.log'"
-for a in $(cd "$W/all" && ls | grep '\.\(tar\.gz\|zip\)$'); do
+for a in $(cd "$W/all" && find . -maxdepth 1 \( -name '*.tar.gz' -o -name '*.zip' \) | sed 's|^\./||' | sort); do
   check "the scan covered $a" bash -c "grep -q 'dir.* [^ ]*${a%.tar.gz}' '$W/gl.log' || grep -q 'dir.* [^ ]*${a%.zip}' '$W/gl.log'"
 done
 check "the scan is gitleaks dir, redacted" bash -c "grep -q '^dir ' '$W/gl.log' && ! grep -qv -- '--redact' '$W/gl.log'"
