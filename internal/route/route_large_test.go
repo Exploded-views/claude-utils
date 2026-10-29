@@ -284,3 +284,42 @@ func TestGoneFoldersUnderHugeDirCostNoSpawn(t *testing.T) {
 		t.Errorf("%d git spawns for gone folders, want 0: %v", n, l.subs)
 	}
 }
+
+// H2: when the branch through a too-large dir gives up on a '-', the WHOLE walk
+// is unresolved, not just that branch. Otherwise a sibling that resolves
+// through small listed dirs (T-b/c next to a huge T holding b/c) becomes the
+// only candidate and routes the folder to the wrong repo.
+func TestHugeDirGiveUpPoisonsTheWholeWalk(t *testing.T) {
+	big := hugeDir(t, 400, "b/c")
+	sibling := filepath.Join(filepath.Dir(big), "T-b", "c")
+	if err := os.MkdirAll(sibling, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	folder := escape(filepath.Join(big, "b", "c"))
+	if got := Candidates(folder); len(got) != 0 {
+		t.Fatalf("candidates %v, want none (the sibling %s must not win alone)", got, sibling)
+	}
+	if _, large := candidates(folder, func(dir string) *listing { return readListing(dir) }); !large {
+		t.Error("large = false, want true so the folder is reported")
+	}
+	// The rule that matches only the sibling must not claim the folder.
+	f := fileOf(Rule{Path: filepath.Join(filepath.Dir(big), "T-b") + "/**", Repo: "projects"})
+	r := New(f, func(string) bool { return true })
+	r.Logf = func(string, ...any) {}
+	if d := r.Decide(folder); d.Repo != "" || d.Reason != ReasonUnresolved {
+		t.Errorf("decision %+v, want unresolved", d)
+	}
+	// and a live one is reported in status.
+	projects := t.TempDir()
+	mem := filepath.Join(projects, folder, "memory")
+	if err := os.MkdirAll(mem, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mem, "n.md"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.ProjectsDir = projects
+	if s := r.Summarize([]string{folder}); len(s.TooLarge) != 1 || s.TooLarge[0] != hash8(folder) {
+		t.Errorf("summary lists %v, want %s", s.TooLarge, hash8(folder))
+	}
+}
