@@ -37,7 +37,15 @@ func TestHook_ExpiryKillsGitBeforeTheHeldAlertIsWritten(t *testing.T) {
 		child <- c
 		_ = proc.Run(c)
 	}
-	t.Cleanup(func() { hookTestHook = nil })
+	finished := make(chan struct{})
+	hookWorkDone = func() { close(finished) }
+	t.Cleanup(func() {
+		select { // the late worker must end before the next test swaps the seams
+		case <-finished:
+		case <-time.After(10 * time.Second):
+		}
+		hookTestHook, hookWorkDone = nil, nil
+	})
 
 	var out stdoutProbe
 	var errb bytes.Buffer
