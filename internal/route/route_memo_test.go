@@ -413,3 +413,59 @@ func TestConcurrentDecideOfOneFolderResolvesOnce(t *testing.T) {
 		t.Fatalf("Resolve ran %d times for 20 concurrent callers, want 1", calls)
 	}
 }
+
+// The probe of a directory too big to list stats the query's spelling; on a
+// case-folding host that succeeds for any case, so the candidate must still be
+// spelled as the directory is on disk, found at flat cost (the big directory
+// is read only up to maxList+1 entries, never in full). The directory is made
+// here, so the answer does not depend on how big TMPDIR is.
+func TestCandidatesFoldCaseUnderHugeDir(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
+		t.Skip("case-sensitive host")
+	}
+	// Its own root (not t.TempDir, which sits in TMPDIR) with a directory of
+	// 20,000 entries, so the probe path is taken whatever TMPDIR holds.
+	root, err := os.MkdirTemp("", "bigcase")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	big := filepath.Join(root, "BigDir")
+	if err := os.MkdirAll(big, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20000; i++ {
+		f, err := os.Create(filepath.Join(big, fmt.Sprintf("file%05d", i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+	}
+	dir := filepath.Join(big, "MixedCase", "SubDir")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	full, maxRead := 0, 0
+	defer SetReadDirForTest(func(d string, n int) ([]os.DirEntry, error) {
+		es, err := ReadDirN(d, n)
+		if d == big {
+			mu.Lock()
+			if n <= 0 {
+				full++
+			}
+			maxRead = max(maxRead, len(es))
+			mu.Unlock()
+		}
+		return es, err
+	})()
+	q := escape(strings.ToLower(dir))
+	for name, got := range map[string][]string{"package": Candidates(q), "router": memoRouter().Candidates(q)} {
+		if len(got) != 1 || got[0] != dir {
+			t.Errorf("%s: %v, want [%s]", name, got, dir)
+		}
+	}
+	if full != 0 || maxRead > maxList+1 {
+		t.Errorf("big dir listed: %d full reads, up to %d entries in one read (want 0 and at most %d)", full, maxRead, maxList+1)
+	}
+}
