@@ -258,10 +258,12 @@ func TestBudgetB9_StartupSpawns(t *testing.T) {
 	if perCheckout > nCheckouts || maxPerDir > 1 {
 		t.Errorf("resolution spawns per real checkout: %d in total (limit %d, one per checkout), up to %d for one dir", perCheckout, nCheckouts, maxPerDir)
 	}
-	if perOther != 0 {
-		t.Errorf("non-repo dirs cost %d git spawns, want 0", perOther)
+	// A direct "no" is never taken on its own: git confirms each existing
+	// non-repo once (a gone directory costs nothing).
+	if perOther != len(tree.other) {
+		t.Errorf("non-repo dirs cost %d git spawns, want exactly %d (one each)", perOther, len(tree.other))
 	}
-	if limit := 300 + 5*59; total > limit {
+	if limit := 300 + 100 + 5*59; total > limit {
 		t.Errorf("start-up spawned %d git children, limit %d", total, limit)
 	}
 	if peakRes > 4 {

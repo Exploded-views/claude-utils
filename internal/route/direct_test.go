@@ -150,6 +150,13 @@ func newDirectFixture(t *testing.T) *directFixture {
 		f.add("unreadable-HEAD", unread)
 	}
 
+	// A symlink above the checkout root, same volume: git walks the physical
+	// path and finds the checkout, a walk of the path as written does not.
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(filepath.Join(plain, "sub"), link); err == nil {
+		f.add("symlinked-ancestor", filepath.Join(link, "deep"))
+	}
+
 	nonrepo := filepath.Join(root, "nonrepo")
 	if err := os.MkdirAll(nonrepo, 0o700); err != nil {
 		t.Fatal(err)
@@ -190,7 +197,7 @@ func TestDirectReadsEqualGit(t *testing.T) {
 // direct read doubted: a symlinked .git, and a broken .git inside a good one.
 func TestDirectDoubtAsksGit(t *testing.T) {
 	f := newDirectFixture(t)
-	for _, name := range []string{"symlinked-.git", "corrupt-HEAD", "unreadable-HEAD", "submodule", "linked-worktree"} {
+	for _, name := range []string{"symlinked-.git", "corrupt-HEAD", "unreadable-HEAD", "submodule", "linked-worktree", "symlinked-ancestor"} {
 		dir, ok := f.dirs[name]
 		if !ok {
 			continue
@@ -235,13 +242,13 @@ func (l *spawnLog) n() int {
 func TestResolutionSpawnCounts(t *testing.T) {
 	f := newDirectFixture(t)
 	l := countSpawns(t)
-	for _, name := range []string{"non-repo", "missing"} {
+	for name, want := range map[string]int{"non-repo": 1, "missing": 0} {
 		before := l.n()
 		if _, ok := remoteURL(f.dirs[name]); ok {
 			t.Errorf("%s: remoteURL ok", name)
 		}
-		if d := l.n() - before; d != 0 {
-			t.Errorf("%s: %d git spawns, want 0 (%v)", name, d, l.subs[before:])
+		if d := l.n() - before; d != want {
+			t.Errorf("%s: %d git spawns, want %d (%v)", name, d, want, l.subs[before:])
 		}
 	}
 	for _, name := range []string{"plain", "subdir", "linked-worktree", "detached", "packed-only", "unborn", "no-origin", "submodule"} {
@@ -291,4 +298,62 @@ func TestDirectReadsEqualGitMixedTree(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// A directory that is gone costs no git process, however many there are.
+func TestMissingDirsCostNoGitSpawn(t *testing.T) {
+	gitEnv(t)
+	root := t.TempDir()
+	l := countSpawns(t)
+	for i := 0; i < 50; i++ {
+		if _, ok := remoteURL(filepath.Join(root, "gone", strings.Repeat("x", i%5+1))); ok {
+			t.Fatal("remoteURL ok for a missing dir")
+		}
+	}
+	if n := l.n(); n != 0 {
+		t.Fatalf("%d git spawns for missing dirs, want 0: %v", n, l.subs)
+	}
+}
+
+// git's confirmation that a directory is no checkout is kept for the routes
+// generation: any number of callers deciding the same folder cost one spawn,
+// and a Replace or Refresh costs one more.
+func TestNonRepoConfirmationIsAskedOncePerGeneration(t *testing.T) {
+	gitEnv(t)
+	dir := filepath.Join(t.TempDir(), "plainfolder")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	r := New(fileOf(Rule{Remote: "github.com/me/*", Repo: "projects"}), func(string) bool { return true })
+	r.Logf = func(string, ...any) {}
+	l := countSpawns(t)
+	folder := escape(dir)
+	decideMany := func() {
+		var wg sync.WaitGroup
+		for i := 0; i < 20; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if d := r.Decide(folder); d.Repo != "" {
+					t.Errorf("non-repo routed: %+v", d)
+				}
+			}()
+		}
+		wg.Wait()
+		r.Warm([]string{folder, folder})
+	}
+	decideMany()
+	if n := l.n(); n != 1 {
+		t.Fatalf("%d spawns for one non-repo in one generation, want 1: %v", n, l.subs)
+	}
+	r.Refresh()
+	decideMany()
+	if n := l.n(); n != 2 {
+		t.Fatalf("%d spawns after Refresh, want 2: %v", n, l.subs)
+	}
+	r.Replace(fileOf(Rule{Remote: "github.com/me/*", Repo: "projects"}))
+	decideMany()
+	if n := l.n(); n != 3 {
+		t.Fatalf("%d spawns after Replace, want 3: %v", n, l.subs)
+	}
 }
