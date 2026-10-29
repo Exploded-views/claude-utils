@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -116,54 +117,206 @@ var windowsDrive = regexp.MustCompile(`^([A-Za-z])--(.+)$`)
 // folder name. Usually one; the escaping is lossy, so it can be several
 // (src/my-app and src/my.app) or none (deleted, or on another machine).
 func Candidates(folder string) []string {
+	return candidates(folder, func(dir string) *listing { return readListing(dir) })
+}
+
+// platformFold is the case fold used to compare path components.
+func platformFold() func(string) string {
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		return strings.ToLower
+	}
+	return func(s string) string { return s }
+}
+
+// listing is one directory's entries indexed by escaped, case-folded name,
+// with each child's is-a-directory answer filled in on first use.
+type listing struct {
+	dir   string
+	byKey map[string][]string
+	mu    sync.Mutex
+	isDir map[string]bool
+}
+
+// readListing reads dir; an unreadable one lists as empty.
+func readListing(dir string) *listing {
+	l := &listing{dir: dir, byKey: map[string][]string{}, isDir: map[string]bool{}}
+	entries, err := readDir(dir)
+	if err != nil {
+		return l
+	}
+	fold := platformFold()
+	for _, e := range entries {
+		k := fold(escape(e.Name()))
+		l.byKey[k] = append(l.byKey[k], e.Name())
+	}
+	return l
+}
+
+// subdir reports whether dir/name is a directory (following symlinks). The
+// answer lives and dies with this listing.
+func (l *listing) subdir(name string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	d, ok := l.isDir[name]
+	if !ok {
+		info, err := os.Stat(filepath.Join(l.dir, name))
+		d = err == nil && info.IsDir()
+		l.isDir[name] = d
+	}
+	return d
+}
+
+func candidates(folder string, list func(dir string) *listing) []string {
 	if walkHook != nil {
 		walkHook(folder)
 	}
 	folder = escape(folder)
-	fold := func(s string) string { return s }
-	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
-		fold = strings.ToLower
-	}
+	fold := platformFold()
 	if m := windowsDrive.FindStringSubmatch(folder); m != nil {
 		if runtime.GOOS != "windows" {
 			return nil
 		}
-		return walk(m[1]+`:\`, m[2], fold)
+		return walk(m[1]+`:\`, m[2], fold, list)
 	}
 	if strings.HasPrefix(folder, "-") && len(folder) > 1 {
-		return walk(string(filepath.Separator), folder[1:], fold)
+		return walk(string(filepath.Separator), folder[1:], fold, list)
 	}
 	return nil
 }
 
-func walk(root, rest string, fold func(string) string) []string {
+func walk(root, rest string, fold func(string) string, list func(string) *listing) []string {
 	var out []string
 	var rec func(dir, rest string)
 	rec = func(dir, rest string) {
-		entries, err := readDir(dir)
-		if err != nil {
+		l := list(dir)
+		if l == nil {
 			return
 		}
-		for _, e := range entries {
-			n := fold(escape(e.Name()))
-			full := n == rest
-			if !full && !(strings.HasPrefix(rest, n+"-") && len(rest) > len(n)+1) {
-				continue
+		try := func(n string, full bool) {
+			for _, name := range l.byKey[n] {
+				if !l.subdir(name) {
+					continue
+				}
+				p := filepath.Join(dir, name)
+				if full {
+					out = append(out, p)
+				} else {
+					rec(p, rest[len(n)+1:])
+				}
 			}
-			p := filepath.Join(dir, e.Name())
-			if info, err := os.Stat(p); err != nil || !info.IsDir() {
-				continue
-			}
-			if full {
-				out = append(out, p)
-			} else {
-				rec(p, rest[len(n)+1:])
+		}
+		try(rest, true)
+		// A shorter entry name followed by '-' and something more.
+		for i := 1; i < len(rest)-1; i++ {
+			if rest[i] == '-' {
+				try(rest[:i], false)
 			}
 		}
 	}
 	rec(root, fold(rest))
 	sort.Strings(out)
 	return out
+}
+
+// stamp is what tells a directory changed: a new, removed or renamed entry
+// moves its mtime (and usually its size).
+type stamp struct {
+	mod, size int64
+	ok        bool
+}
+
+func stampOf(dir string) stamp {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return stamp{}
+	}
+	return stamp{info.ModTime().UnixNano(), info.Size(), true}
+}
+
+// walkCache holds one generation's directory listings and Candidates answers.
+// A listing is used only while its directory's stamp is unchanged, so a folder
+// created after the first look is seen by the next decision; each listing is
+// read once however many callers ask at the same time. The Router swaps in a
+// fresh cache on Replace and Refresh.
+type walkCache struct {
+	mu    sync.Mutex
+	dirs  map[string]*stamped
+	cands map[string]*candEntry
+}
+
+type stamped struct {
+	st   stamp
+	once sync.Once
+	l    *listing
+}
+
+type dep struct {
+	dir string
+	st  stamp
+}
+
+// candEntry is a Candidates answer and the stamps of the directories it read.
+type candEntry struct {
+	once sync.Once
+	deps []dep
+	v    []string
+}
+
+func newWalkCache() *walkCache {
+	return &walkCache{dirs: map[string]*stamped{}, cands: map[string]*candEntry{}}
+}
+
+// list gives the listing of dir for its current stamp, with that stamp; nil
+// when dir cannot be stat'ed.
+func (c *walkCache) list(dir string) (*listing, stamp) {
+	st := stampOf(dir)
+	if !st.ok {
+		return nil, st
+	}
+	c.mu.Lock()
+	e := c.dirs[dir]
+	if e == nil || e.st != st {
+		e = &stamped{st: st}
+		c.dirs[dir] = e
+	}
+	c.mu.Unlock()
+	e.once.Do(func() { e.l = readListing(dir) })
+	return e.l, st
+}
+
+func (c *walkCache) candidates(folder string) []string {
+	for {
+		c.mu.Lock()
+		e := c.cands[folder]
+		if e == nil {
+			e = &candEntry{}
+			c.cands[folder] = e
+		}
+		c.mu.Unlock()
+		e.once.Do(func() {
+			e.v = candidates(folder, func(dir string) *listing {
+				l, st := c.list(dir)
+				e.deps = append(e.deps, dep{dir, st})
+				return l
+			})
+		})
+		fresh := true
+		for _, d := range e.deps {
+			if stampOf(d.dir) != d.st {
+				fresh = false
+				break
+			}
+		}
+		if fresh {
+			return e.v
+		}
+		// A directory it read has changed: drop this answer and walk again.
+		c.mu.Lock()
+		if c.cands[folder] == e {
+			delete(c.cands, folder)
+		}
+		c.mu.Unlock()
+	}
 }
 
 // remoteURL is the origin URL of the checkout that contains dir, with the

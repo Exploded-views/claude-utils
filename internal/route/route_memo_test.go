@@ -98,23 +98,29 @@ func TestCandidatesReadsEachDirOncePerGeneration(t *testing.T) {
 func TestCacheInvalidatedOnReplaceAndRefresh(t *testing.T) {
 	m := newMemoTree(t, 0)
 	r := memoRouter()
-	for _, step := range []struct {
+	// Both checkouts exist up front and only their git config changes later,
+	// so the big dir itself never changes: only a reload can drop its listing.
+	var dirs []string
+	for _, name := range []string{"Replace", "Refresh"} {
+		dir := filepath.Join(m.big, "late-"+name)
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		gitIn(t, dir, "init", "-q")
+		dirs = append(dirs, dir)
+	}
+	for i, step := range []struct {
 		name  string
 		reset func()
 	}{
 		{"Replace", func() { r.Replace(r.cur()) }},
 		{"Refresh", r.Refresh},
 	} {
-		dir := filepath.Join(m.big, "late-"+step.name)
-		folder := escape(dir)
+		folder := escape(dirs[i])
 		if d := r.Decide(folder); d.Reason != ReasonUnresolved {
-			t.Fatalf("%s: before the dir exists: %+v", step.name, d)
+			t.Fatalf("%s: before the origin exists: %+v", step.name, d)
 		}
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			t.Fatal(err)
-		}
-		gitIn(t, dir, "init", "-q")
-		gitIn(t, dir, "remote", "add", "origin", "git@github.com:me/a.git")
+		gitIn(t, dirs[i], "remote", "add", "origin", "git@github.com:me/a.git")
 		if d := r.Decide(folder); d.Reason != ReasonUnresolved {
 			t.Fatalf("%s: cached answer changed without a reload: %+v", step.name, d)
 		}
@@ -126,6 +132,31 @@ func TestCacheInvalidatedOnReplaceAndRefresh(t *testing.T) {
 		if n := m.bigReads(); n != 1 {
 			t.Fatalf("%s: big dir read %d times after reload, want 1", step.name, n)
 		}
+	}
+}
+
+// A folder created after the first look at its parent is seen by the very
+// next decision, without a reload; the parent is re-read once.
+func TestChangedDirIsReadAgainOnce(t *testing.T) {
+	m := newMemoTree(t, 3)
+	r := memoRouter()
+	r.Decide(m.missing[0])
+	r.Decide(m.missing[1])
+	if n := m.bigReads(); n != 1 {
+		t.Fatalf("big dir read %d times before the change, want 1", n)
+	}
+	dir := filepath.Join(m.big, "fresh")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, dir, "init", "-q")
+	gitIn(t, dir, "remote", "add", "origin", "git@github.com:me/a.git")
+	if d := r.Decide(escape(dir)); d.Repo != "projects" {
+		t.Fatalf("new dir not seen: %+v", d)
+	}
+	r.Decide(m.missing[2])
+	if n := m.bigReads(); n != 2 {
+		t.Fatalf("big dir read %d times after the change, want 2", n)
 	}
 }
 
@@ -160,21 +191,29 @@ func TestDecideCallsCandidatesOncePerFolder(t *testing.T) {
 		walks[folder]++
 		mu.Unlock()
 	}
-	r := memoRouter()
 	folder := m.real[0]
-	// A path rule, then a remote rule: both need the directory.
-	if d := r.Decide(folder); d.Repo != "projects" {
-		t.Fatalf("decision: %+v", d)
+	// A path rule, then a remote rule: both need the directory. An ancestor
+	// directory changing under the test (the system temp dir is busy) makes a
+	// walk legitimately run again, so an attempt is retried when that happens.
+	var first, afterRefresh int
+	for try := 0; try < 5; try++ {
+		r := memoRouter()
+		mu.Lock()
+		walks[folder] = 0
+		mu.Unlock()
+		if d := r.Decide(folder); d.Repo != "projects" {
+			t.Fatalf("decision: %+v", d)
+		}
+		r.Decide(folder)
+		first = walks[folder]
+		r.Refresh()
+		r.Decide(folder)
+		afterRefresh = walks[folder]
+		if first == 1 && afterRefresh == 2 {
+			return
+		}
 	}
-	r.Decide(folder)
-	if walks[folder] != 1 {
-		t.Fatalf("%d walks for one folder, want 1", walks[folder])
-	}
-	r.Refresh()
-	r.Decide(folder)
-	if walks[folder] != 2 {
-		t.Fatalf("%d walks after Refresh, want 2", walks[folder])
-	}
+	t.Fatalf("%d walks for one folder, %d after Refresh; want 1 and 2", first, afterRefresh)
 }
 
 func BenchmarkDecideManyMissingFolders(b *testing.B) {

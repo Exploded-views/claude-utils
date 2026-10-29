@@ -344,6 +344,9 @@ const (
 type Router struct {
 	cur_ atomic.Pointer[File]
 	gen  atomic.Uint64 // bumped on every Replace and Refresh
+	// walks is this generation's directory and Candidates cache. A walk keeps
+	// the one it started with, so a stale walk cannot fill a newer generation.
+	walks atomic.Pointer[walkCache]
 
 	// afterCompute, if set, runs between computing a decision and storing it
 	// (a test seam for the race with Replace).
@@ -395,7 +398,8 @@ type Router struct {
 func New(f File, have func(repo string) bool) *Router {
 	r := &Router{have: have, cache: map[string]Decision{}, logged: map[string]bool{}, Logf: log.Printf}
 	r.cur_.Store(normalized(f))
-	r.Candidates = Candidates
+	r.walks.Store(newWalkCache())
+	r.Candidates = func(folder string) []string { return r.walks.Load().candidates(folder) }
 	r.SSHHost = sshHostname
 	r.Resolve = r.defaultResolve
 	r.Roots = r.defaultRoots
@@ -430,22 +434,24 @@ func normalized(f File) *File {
 }
 
 // Replace swaps in a new routing table atomically and drops the cached
-// decisions. The repos a host runs are fixed at start: a rule naming a repo that
+// decisions and directory listings. The repos a host runs are fixed at start: a rule naming a repo that
 // has no running loop only denies.
 func (r *Router) Replace(f File) {
 	r.mu.Lock()
 	r.cur_.Store(normalized(f))
 	r.gen.Add(1)
+	r.walks.Store(newWalkCache())
 	r.cache = map[string]Decision{}
 	r.reloadIDsLocked()
 	r.mu.Unlock()
 }
 
-// Refresh drops the cached decisions, so changed checkouts and remotes are
+// Refresh drops the cached decisions and directory listings, so changed checkouts and remotes are
 // seen. The daemon calls it on its pull tick.
 func (r *Router) Refresh() {
 	r.mu.Lock()
 	r.gen.Add(1)
+	r.walks.Store(newWalkCache())
 	r.cache = map[string]Decision{}
 	r.reloadIDsLocked()
 	r.mu.Unlock()
