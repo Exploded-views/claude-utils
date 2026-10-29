@@ -109,12 +109,15 @@ done
 # files, so the printable strings of every executable (and *.exe, *.test) are
 # written beside it as <file>.strings.txt in the extracted tree and scanned as
 # text. Any finding fails the run (the EXIT trap then removes the archives).
-scan_tree() { # dir: exit 1 on a finding
+# gitleaks exits 1 for a finding and for an error alike, so it is asked for 99 on a
+# finding and for a JSON report: scan_tree returns gitleaks's own exit code, and only
+# 0 (clean) and 99 (findings) mean the scan worked.
+scan_tree() { # dir report
   local d="$1" f
   while IFS= read -r f; do
     strings -a -n 8 -- "$f" >"$f.strings.txt" || return 2
   done < <(find "$d" -type f \( -perm -u+x -o -name '*.exe' -o -name '*.test' \) ! -name '*.strings.txt')
-  gitleaks dir --no-banner --redact -c "$ROOT/.gitleaks.toml" "$d"
+  gitleaks dir --no-banner --redact --exit-code 99 --report-format json --report-path "$2" -c "$ROOT/.gitleaks.toml" "$d"
 }
 if [ "${PACKAGE_RELEASE_SKIP_GITLEAKS:-}" != 1 ]; then
   STAGE_ROOT="$(mktemp -d "$OUT/.stage.XXXXXX")"
@@ -124,8 +127,10 @@ if [ "${PACKAGE_RELEASE_SKIP_GITLEAKS:-}" != 1 ]; then
   ctl="$STAGE_ROOT/memsync-scan-control"; mkdir -p "$ctl"
   tok="ghp_""R7kL2mQ9xT4vB8nZ3c""W6yH1jD5fG0sA2eU9p"
   printf '\177ELF\000\000\000%s\000\000\000' "$tok" >"$ctl/control.bin"; chmod 755 "$ctl/control.bin"
-  if scan_tree "$ctl" >/dev/null 2>&1; then
-    echo "secret scan cannot see inside binaries: the control binary scanned clean" >&2; exit 1
+  rc=0; scan_tree "$ctl" "$STAGE_ROOT/control.json" >/dev/null 2>&1 || rc=$?
+  # Seen only if the scanner reports findings (99) AND the report holds one.
+  if [ "$rc" -ne 99 ] || ! grep -q '"RuleID"' "$STAGE_ROOT/control.json" 2>/dev/null; then
+    echo "secret scan error on the control (rc=$rc): secret scan cannot see inside binaries" >&2; exit 1
   fi
   for a in "${ARCHIVES[@]}"; do
     case "$a" in
@@ -134,7 +139,12 @@ if [ "${PACKAGE_RELEASE_SKIP_GITLEAKS:-}" != 1 ]; then
     esac
     d="$STAGE_ROOT/${a%.tar.gz}"; d="${d%.zip}"
     echo "::group::gitleaks ${a}"
-    scan_tree "$d" || { echo "gitleaks found something in $a" >&2; exit 1; }
+    rc=0; scan_tree "$d" "$STAGE_ROOT/${a}.json" || rc=$?
+    case "$rc" in
+      0) ;;
+      99) echo "gitleaks found something in $a" >&2; exit 1 ;;
+      *) echo "secret scan error (rc=$rc) in $a" >&2; exit 1 ;;
+    esac
     echo "::endgroup::"
   done
   stage_cleanup
