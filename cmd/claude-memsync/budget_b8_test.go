@@ -70,6 +70,11 @@ func TestBudgetB8_HookGitSpawns(t *testing.T) {
 	if seam > 10 || shimmed > 10 {
 		t.Errorf("B8: %d spawns through the seam, %d by the shim, budget 10", seam, shimmed)
 	}
+	// The skip is the point: with nothing new no repo needs even one git process
+	// (a full scan costs two each, which the 10 above would let through).
+	if seam > 4 {
+		t.Errorf("B8: %d spawns when nothing is new, want fewer than one per repo (0 today)", seam)
+	}
 	// The seam must see every git the shim sees, or the count means nothing.
 	if news != newsShim || seam != shimmed {
 		t.Errorf("B8: the proc seam counted %d and %d spawns, the PATH shim %d and %d", news, seam, newsShim, shimmed)
