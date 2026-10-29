@@ -111,6 +111,14 @@ var (
 	walkHook func(folder string)
 )
 
+// SetReadDirForTest swaps the directory reader the walk uses (tests in other
+// packages count reads with it) and returns the function that puts it back.
+func SetReadDirForTest(f func(string) ([]os.DirEntry, error)) (restore func()) {
+	prev := readDir
+	readDir = f
+	return func() { readDir = prev }
+}
+
 var windowsDrive = regexp.MustCompile(`^([A-Za-z])--(.+)$`)
 
 // Candidates returns every existing directory whose escaped path equals the
