@@ -457,7 +457,7 @@ func startSingle(ctx context.Context, cfg config.Config) (*running, error) {
 		l.Release()
 		return nil, fmt.Errorf("refresh encryption settings: %w", err)
 	}
-	first := guardCheck(cfg, log.Printf)
+	first := startCheck(cfg)
 	ctx, cancel := context.WithCancel(ctx)
 	loop := &syncpkg.Loop{Cfg: cfg}
 	if first == nil {
@@ -493,7 +493,7 @@ func (s *routedSet) Start(ctx context.Context) (*running, error) {
 	// repo that fails it is held (see awaitPrivate); the others sync meanwhile.
 	unverified := map[string]error{}
 	for _, name := range s.names() {
-		if err := guardCheck(s.Cfgs[name], log.Printf); err != nil {
+		if err := startCheck(s.Cfgs[name]); err != nil {
 			unverified[name] = err
 		}
 	}
@@ -627,6 +627,17 @@ var (
 	}
 )
 
+// startCheck is the first private-only check of a repo at daemon start. A
+// repo held when the daemon last stopped (a held record on disk) stays held
+// until the release check passes on an API answer: a restart is not a way
+// out of a hold.
+func startCheck(cfg config.Config) error {
+	if b, err := os.ReadFile(loopFailedPath(cfg.SyncDir)); err == nil && isHeldRecord(b) {
+		return guardRelease(cfg, log.Printf)
+	}
+	return guardCheck(cfg, log.Printf)
+}
+
 // awaitPrivate holds a repo whose check failed with first, re-running the
 // check until it passes (true) or ctx ends (false).
 func awaitPrivate(ctx context.Context, name string, cfg config.Config, first error) bool {
@@ -641,6 +652,9 @@ func awaitPrivate(ctx context.Context, name string, cfg config.Config, first err
 	since := time.Now().UTC().Format(time.RFC3339)
 	for err := first; err != nil; err = guardRelease(cfg, log.Printf) {
 		msg := heldMarker + "check failed, nothing syncs until it passes: " + strings.SplitN(err.Error(), "\n", 2)[0]
+		if errors.Is(err, errHeldEarlier) {
+			msg = heldMarker + strings.SplitN(err.Error(), "\n", 2)[0]
+		}
 		log.Printf("%s%s; retrying in %s", prefix, msg, backoff)
 		_ = os.MkdirAll(filepath.Dir(failed), 0700)
 		// Replaced by rename, so status never reads a half-written record.
@@ -694,6 +708,11 @@ func loopFailedPath(syncDir string) string { return filepath.Join(syncDir, ".sta
 // the private-only check, or a loop that died.
 func loopFailedLine(b []byte) string {
 	if isHeldRecord(b) {
+		_, reason, _ := strings.Cut(string(b), " ")
+		if strings.HasPrefix(reason, heldMarker+errHeldEarlier.Error()) {
+			// privateOnly is off: no re-check can release it.
+			return "held, released by hand only: " + strings.TrimSpace(string(b))
+		}
 		return "waiting for the private-only check, re-checking with backoff: " + strings.TrimSpace(string(b))
 	}
 	return "loop stopped, restarting with backoff: " + strings.TrimSpace(string(b))
