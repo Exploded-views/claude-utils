@@ -77,3 +77,53 @@ func TestHungGitDoesNotBlockWarm(t *testing.T) {
 		}
 	}
 }
+
+// Warm held to a deadline: more hung gits than semaphore slots, and
+// WarmWithin still returns at the deadline, saying it did not finish. The
+// folders keep resolving in the background and are decided when git answers.
+func TestWarmWithinReturnsAtTheDeadline(t *testing.T) {
+	gitEnv(t)
+	root := t.TempDir()
+	var folders []string
+	for i := 0; i < 9; i++ { // more than the 4 git slots
+		d := filepath.Join(root, "r"+strconv.Itoa(i))
+		initRepo(t, d, "git@github.com:me/r"+strconv.Itoa(i)+".git")
+		folders = append(folders, escape(d))
+	}
+	realPath := os.Getenv("PATH")
+	bin := t.TempDir()
+	pids := filepath.Join(bin, "pids")
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\necho $$ >> "+pids+"\nexec sleep 60\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { // stop any stray fake git by its exact PID
+		b, _ := os.ReadFile(pids)
+		for _, s := range strings.Fields(string(b)) {
+			if p, err := strconv.Atoi(s); err == nil {
+				_ = syscall.Kill(p, syscall.SIGKILL)
+			}
+		}
+	})
+	t.Cleanup(SetGitTimeoutForTest(2 * time.Second))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+realPath)
+	r := New(fileOf(Rule{Remote: "github.com/me/*", Repo: "projects"}), func(string) bool { return true })
+	r.Logf = func(string, ...any) {}
+	start := time.Now()
+	if r.WarmWithin(folders, 300*time.Millisecond) {
+		t.Error("WarmWithin said it finished while every git hung")
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("WarmWithin took %v, want about its 300ms deadline", took)
+	}
+	// The workers go on: with a working git the rest of the folders get decided.
+	t.Setenv("PATH", realPath)
+	r.Refresh()
+	if !r.WarmWithin(folders, 30*time.Second) {
+		t.Fatal("a working git did not finish within 30s")
+	}
+	for _, f := range folders {
+		if d := r.Decide(f); d.Repo != "projects" {
+			t.Errorf("%+v, want projects", d)
+		}
+	}
+}
