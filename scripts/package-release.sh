@@ -11,10 +11,15 @@
 # the budget gates as `go test -c -tags budget` binaries (claude-memsync-budget.test,
 # route-budget.test), to run against the product archive's binaries on a host with
 # no Go and no checkout. SHA256SUMS covers every archive of both kinds.
+# Before SHA256SUMS is written, gitleaks (from PATH; release.yml installs the
+# pinned one) scans the extracted contents of every archive; a finding fails the
+# run and removes the archives, so nothing is left to upload. No gitleaks is an
+# error unless PACKAGE_RELEASE_SKIP_GITLEAKS=1 (local development only; release.yml
+# never sets it).
 # GO="sh /path/to/dev.sh go" wraps Go. Run from anywhere.
 set -euo pipefail
 
-[ $# -ge 2 ] || { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+[ $# -ge 2 ] || { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 VERSION="$1"; OUT="$2"; shift 2
 # The same rule as bootstrap.sh --prebuilt-dir and release.yml (v0.3.0, v0.3.0-ev.1).
 printf '%s' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' \
@@ -22,6 +27,9 @@ printf '%s' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?
 if printf '%s' "$VERSION" | grep -q '[^A-Za-z0-9._+-]'; then echo "version has unexpected characters" >&2; exit 2; fi
 if [ $# -gt 0 ]; then TARGETS=("$@"); else TARGETS=(linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64); fi
 
+if [ "${PACKAGE_RELEASE_SKIP_GITLEAKS:-}" != 1 ] && ! command -v gitleaks >/dev/null 2>&1; then
+  echo "gitleaks not found on PATH: install it (release.yml pins v8.30.1) or, for local development only, set PACKAGE_RELEASE_SKIP_GITLEAKS=1" >&2; exit 2
+fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
 GO="${GO:-go}"
@@ -32,7 +40,16 @@ cd "$ROOT"
 ARCHIVES=()
 STAGE_ROOT=""
 stage_cleanup() { [ -z "$STAGE_ROOT" ] || rm -rf -- "$STAGE_ROOT"; STAGE_ROOT=""; }
-trap stage_cleanup EXIT
+# On any failure (a build, the secret scan) nothing is left to upload.
+finish() {
+  rc=$?
+  stage_cleanup
+  if [ "$rc" -ne 0 ]; then
+    for a in ${ARCHIVES[@]+"${ARCHIVES[@]}"}; do rm -f -- "$OUT/$a"; done
+    rm -f -- "$OUT/SHA256SUMS"
+  fi
+}
+trap finish EXIT
 for target in "${TARGETS[@]}"; do
   GOOS="${target%/*}"; GOARCH="${target#*/}"
   name="claude-utils-${VERSION}-${GOOS}-${GOARCH}"
@@ -81,6 +98,23 @@ README
     stage_cleanup
   fi
 done
+
+# Secret scan: gitleaks over the extracted contents of every archive, product
+# and budget, as a downloader would unpack them. Any finding fails the run.
+if [ "${PACKAGE_RELEASE_SKIP_GITLEAKS:-}" != 1 ]; then
+  STAGE_ROOT="$(mktemp -d "$OUT/.stage.XXXXXX")"
+  for a in "${ARCHIVES[@]}"; do
+    case "$a" in
+      *.zip) unzip -q "$OUT/$a" -d "$STAGE_ROOT" ;;
+      *) tar -xzf "$OUT/$a" -C "$STAGE_ROOT" ;;
+    esac
+    d="$STAGE_ROOT/${a%.tar.gz}"; d="${d%.zip}"
+    echo "::group::gitleaks ${a}"
+    gitleaks dir --no-banner --redact -i "$ROOT/.gitleaksignore" "$d" || { echo "gitleaks found something in $a" >&2; exit 1; }
+    echo "::endgroup::"
+  done
+  stage_cleanup
+fi
 
 # sha256sum on Linux, shasum on macOS: the same "<hash>  <file>" lines either way.
 if command -v sha256sum >/dev/null 2>&1; then SUM=(sha256sum --); else SUM=(shasum -a 256 --); fi

@@ -46,6 +46,8 @@ gitleaks runs as a binary pinned by version and sha256 rather than through
 
 `package-release.sh` also builds, for each linux and darwin target, `claude-utils-<tag>-budget-<os>-<arch>.tar.gz` holding the budget gates as `go test -c -tags budget` binaries (`claude-memsync-budget.test`, `route-budget.test`) and a `README` with the run commands; `SHA256SUMS` covers these and the product archives, and `release.yml` uploads them with the same `dist/*.tar.gz` glob. `package-release_test.sh` checks the layout and, with a stub Go, that all four budget archives (and none for Windows) are produced and listed in `SHA256SUMS`. How to run them is in [releases.md](releases.md#the-budget-bench).
 
+Before `SHA256SUMS` is written, `package-release.sh` extracts every archive (product and budget) and runs `gitleaks dir --redact` over it, with the repo's `.gitleaksignore`; a finding fails the run and removes the archives, so nothing is uploaded. `release.yml` installs the same pinned gitleaks as the `gitleaks` job. A local run needs `gitleaks` on `PATH`, or `PACKAGE_RELEASE_SKIP_GITLEAKS=1` (local development only; `release.yml` never sets it).
+
 ## Workflow lint
 
 The house rule is GitHub-hosted runners only and pinned actions. `scripts/lint-workflows.sh [dir]` (bash and python3 standard library only, no YAML library, self-contained so a shared version can replace it) fails, one line per finding, on any `*.yml` or `*.yaml` under `.github/workflows` that has:
