@@ -3,16 +3,20 @@
 package sync
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
+	"github.com/MarimerLLC/claude-utils/internal/proc"
 )
 
 // fakeGit puts a `git` first on PATH that appends its argv to log and then runs body.
@@ -121,24 +125,168 @@ func TestMaintainSkipsWhileHeld(t *testing.T) {
 	}
 }
 
-// Only the daemon's loop runs housekeeping: nothing else in the product (the
-// changes hook above all) calls Repo.Maintain.
-func TestMaintainIsOnlyCalledByTheLoop(t *testing.T) {
-	var bad []string
-	filepath.WalkDir("../..", func(p string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
-			return nil
+// spawnsOf counts the children proc starts whose argv contains word, until the
+// returned func is called.
+func countSpawns(word string) (n *atomic.Int64, stop func()) {
+	n = new(atomic.Int64)
+	restore := proc.SetSpawnHook(func(_ string, args []string) {
+		for _, a := range args {
+			if a == word {
+				n.Add(1)
+				return
+			}
 		}
-		b, _ := os.ReadFile(p)
-		if strings.Contains(string(b), ".Maintain(") && filepath.ToSlash(p) != "../../internal/sync/loop.go" {
-			bad = append(bad, p)
-		}
-		return nil
 	})
-	if len(bad) > 0 {
-		t.Errorf("Repo.Maintain called outside the daemon loop: %v", bad)
+	return n, restore
+}
+
+// Cancelling the loop's ctx during a hanging gc returns at once and takes the
+// gc's whole process group with it, though MaintainTimeout is long.
+func TestMaintainStopsWithTheLoopContext(t *testing.T) {
+	gpid := filepath.Join(t.TempDir(), "gpid")
+	fakeGit(t, "sleep 60 &\necho $! > "+gpid+"\nwait")
+	now := time.Now()
+	l, repo := maintLoop(t, &now)
+	l.MaintainTimeout = 10 * time.Minute
+	ctx, cancel := context.WithCancel(context.Background())
+	l.ctx = ctx
+	t.Cleanup(func() { killPidFile(gpid) })
+	done := make(chan struct{})
+	go func() { defer close(done); l.maybeMaintain(repo) }()
+	waitFile(t, gpid)
+	start := time.Now()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("housekeeping still running 2s after the loop's context was cancelled")
 	}
-	if b, _ := os.ReadFile("loop.go"); !strings.Contains(string(b), ".Maintain(") {
-		t.Error("the loop never calls Repo.Maintain")
+	t.Logf("returned %v after cancel", time.Since(start))
+	assertDead(t, gpid)
+}
+
+// The timeout kills the gc's children too (a real gc forks repack and
+// pack-objects), not just git itself.
+func TestMaintainTimeoutKillsTheProcessGroup(t *testing.T) {
+	gpid := filepath.Join(t.TempDir(), "gpid")
+	fakeGit(t, "sleep 60 &\necho $! > "+gpid+"\nwait")
+	now := time.Now()
+	l, repo := maintLoop(t, &now)
+	l.MaintainTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { killPidFile(gpid) })
+	l.maybeMaintain(repo)
+	assertDead(t, gpid)
+}
+
+func waitFile(t *testing.T, p string) {
+	t.Helper()
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		if b, _ := os.ReadFile(p); strings.TrimSpace(string(b)) != "" {
+			return
+		}
+	}
+	t.Fatalf("%s never written", p)
+}
+
+func killPidFile(p string) {
+	if b, _ := os.ReadFile(p); len(b) > 0 {
+		if n, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+			_ = syscall.Kill(n, syscall.SIGKILL)
+		}
+	}
+}
+
+func assertDead(t *testing.T, pidFile string) {
+	t.Helper()
+	b, _ := os.ReadFile(pidFile)
+	p, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		t.Fatalf("the fake gc never started its child: %q", b)
+	}
+	for end := time.Now().Add(2 * time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+		if syscall.Kill(p, 0) != nil {
+			return
+		}
+	}
+	t.Errorf("child %d of the gc is still running", p)
+}
+
+// A pull tick past 24 hours of the injected clock really runs gc (seen through
+// proc's spawn seam), and one inside the period does not.
+func TestPullTickRunsHousekeepingWhenDue(t *testing.T) {
+	f := newPullFixture(t, map[string]string{})
+	captureLog(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	f.loop.Now = func() time.Time { return now }
+	n, stop := countSpawns("gc")
+	defer stop()
+	f.loop.pullTick(f.repo, f.roots)
+	if got := n.Load(); got != 1 {
+		t.Fatalf("first tick: %d gc runs, want 1", got)
+	}
+	now = now.Add(time.Hour)
+	f.loop.pullTick(f.repo, f.roots)
+	if got := n.Load(); got != 1 {
+		t.Errorf("tick 1h later: %d gc runs, want 1", got)
+	}
+	now = now.Add(25 * time.Hour)
+	f.loop.pullTick(f.repo, f.roots)
+	if got := n.Load(); got != 2 {
+		t.Errorf("tick 26h later: %d gc runs, want 2", got)
+	}
+}
+
+// At most one housekeeping runs at a time across all loops of the process.
+func TestMaintainIsSerialisedAcrossLoops(t *testing.T) {
+	dir := t.TempDir()
+	live, max := filepath.Join(dir, "live"), filepath.Join(dir, "max")
+	if err := os.Mkdir(live, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Each live gc is a directory named by its pid; max is the highest count seen.
+	fakeGit(t, `mkdir `+live+`/$$
+n=$(ls `+live+` | wc -l | tr -d ' ')
+echo $n >> `+max+`
+sleep 0.3
+rmdir `+live+`/$$`)
+	now := time.Now()
+	var wg sync.WaitGroup
+	for i := 0; i < 3; i++ {
+		l, repo := maintLoop(t, &now)
+		wg.Add(1)
+		go func() { defer wg.Done(); l.maybeMaintain(repo) }()
+	}
+	wg.Wait()
+	b, _ := os.ReadFile(max)
+	for _, n := range strings.Fields(string(b)) {
+		if n != "1" {
+			t.Fatalf("concurrent gcs seen: %q, want only 1", strings.Fields(string(b)))
+		}
+	}
+	if len(strings.Fields(string(b))) != 3 {
+		t.Errorf("gcs run = %d, want 3", len(strings.Fields(string(b))))
+	}
+}
+
+// A restart does not redo housekeeping done within the period: the last run
+// is kept in the sync dir's .state.
+func TestMaintainRemembersTheLastRunAcrossRestarts(t *testing.T) {
+	log := fakeGit(t, "exit 0")
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	l, repo := maintLoop(t, &now)
+	l.maybeMaintain(repo)
+	restarted := &Loop{Cfg: l.Cfg, Now: l.Now} // a new process: no in-memory state
+	now = now.Add(2 * time.Hour)
+	restarted.maybeMaintain(repo)
+	if got := len(calls(t, log)); got != 1 {
+		t.Errorf("a restart 2h later ran housekeeping again: %d runs", got)
+	}
+	if _, err := os.Stat(filepath.Join(l.Cfg.SyncDir, ".state", "maintained")); err != nil {
+		t.Errorf("no record of the run: %v", err)
+	}
+	now = now.Add(23 * time.Hour)
+	restarted.maybeMaintain(repo)
+	if got := len(calls(t, log)); got != 2 {
+		t.Errorf("a restart 25h after the run did not run it: %d runs", got)
 	}
 }

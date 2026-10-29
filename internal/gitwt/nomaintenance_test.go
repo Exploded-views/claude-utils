@@ -37,6 +37,14 @@ func TestRunStartsNoAutoMaintenance(t *testing.T) {
 	if _, err := r.Run("remote", "add", "origin", remote); err != nil {
 		t.Fatal(err)
 	}
+	// The bare is NOT told receive.autogc=false: the receive-pack a local push
+	// starts must be kept quiet by the pusher. (Local transport drops both -c
+	// and GIT_CONFIG_COUNT before receive-pack, so only --receive-pack works.)
+	for _, kv := range [][2]string{{"gc.auto", "1"}, {"gc.autoPackLimit", "1"}, {"receive.unpackLimit", "1"}} {
+		if _, err := New(t.TempDir()).Run("--git-dir="+remote, "config", kv[0], kv[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// Make auto gc due for sure: any pack beyond one counts as too many.
 	for _, kv := range [][2]string{{"gc.auto", "1"}, {"gc.autoPackLimit", "1"}, {"fetch.unpackLimit", "1"}, {"receive.unpackLimit", "1"}} {
 		if _, err := r.Run("config", kv[0], kv[1]); err != nil {
@@ -64,6 +72,9 @@ func TestRunStartsNoAutoMaintenance(t *testing.T) {
 		t.Fatalf("Commit = %v, %v", made, err)
 	}
 	if err := r.Fetch("main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Run("push", "origin", "main"); err != nil {
 		t.Fatal(err)
 	}
 	if got := maintenanceLines(t, trace); len(got) > 0 {

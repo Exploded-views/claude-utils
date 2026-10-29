@@ -59,6 +59,7 @@ type Loop struct {
 	// refused is the last pull-refused reason logged, so it is logged once.
 	refused    string
 	lastMaint  time.Time
+	ctx        context.Context // Run's ctx; housekeeping derives its timeout from it
 	expiryOnce sync.Once
 }
 

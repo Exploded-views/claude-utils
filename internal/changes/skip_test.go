@@ -120,3 +120,33 @@ func TestReadHeadSHAForms(t *testing.T) {
 		t.Fatalf("detached: %q want %q", got, head)
 	}
 }
+
+// The hook path never runs housekeeping: no child it spawns is a gc.
+func TestHookNeverSpawnsGC(t *testing.T) {
+	f := newFixture(t)
+	head := f.commit(map[string]string{mem(appHash, "MEMORY.md"): "# one\n"})
+	marker := filepath.Join(t.TempDir(), "marker")
+	if err := WriteMarker(marker, head); err != nil {
+		t.Fatal(err)
+	}
+	var gc atomic.Int64
+	restore := proc.SetSpawnHook(func(_ string, args []string) {
+		for _, a := range args {
+			if a == "gc" || a == "maintenance" {
+				gc.Add(1)
+			}
+		}
+	})
+	defer restore()
+	f.commit(map[string]string{mem(appHash, "new.md"): "n\n"})
+	res, err := Compute(f.markerOpts(marker))
+	if err != nil || res.Total == 0 {
+		t.Fatalf("hook computed nothing: %+v %v", res, err)
+	}
+	if err := SaveMarker(f.repo, marker, res); err != nil {
+		t.Fatal(err)
+	}
+	if n := gc.Load(); n != 0 {
+		t.Errorf("the hook path spawned gc/maintenance %d times", n)
+	}
+}
