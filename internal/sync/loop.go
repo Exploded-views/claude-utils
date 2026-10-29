@@ -401,6 +401,9 @@ func (l *Loop) maybeMaintain(repo *gitwt.Repo) {
 	if l.lastMaint.IsZero() {
 		l.lastMaint = readMaintained(l.Cfg.SyncDir)
 	}
+	if t := now(); l.lastMaint.After(t.Add(maintainSkew)) {
+		l.lastMaint = time.Time{} // recorded in the future (clock skew): due now
+	}
 	if t := now(); !l.lastMaint.IsZero() && t.Sub(l.lastMaint) < every {
 		return
 	}
@@ -409,11 +412,12 @@ func (l *Loop) maybeMaintain(repo *gitwt.Repo) {
 		parent = context.Background()
 	}
 	// One housekeeping at a time in the process: a Pi with many routed repos
-	// must not repack them all at once.
+	// must not repack them all at once. A loop never waits for another's run
+	// (it would stall its own sync cycles): it skips and retries next tick.
 	select {
 	case maintainSem <- struct{}{}:
 		defer func() { <-maintainSem }()
-	case <-parent.Done():
+	default:
 		return
 	}
 	l.lastMaint = now() // a failure or timeout waits for the next period too
@@ -426,6 +430,10 @@ func (l *Loop) maybeMaintain(repo *gitwt.Repo) {
 		l.logln("housekeeping:", newPathGuard(l.Cfg).Err(err))
 	}
 }
+
+// maintainSkew is how far ahead of the clock a recorded run may be before it
+// is taken for a clock error rather than a run.
+const maintainSkew = 5 * time.Minute
 
 // maintainSem lets one loop at a time run housekeeping.
 var maintainSem = make(chan struct{}, 1)

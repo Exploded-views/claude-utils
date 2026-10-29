@@ -88,7 +88,7 @@ func isLocalURL(u string) bool {
 	if strings.Contains(u, "://") {
 		return false
 	}
-	if len(u) >= 2 && u[1] == ':' && (u[2:3] == `\` || u[2:3] == "/") { // C:\repo
+	if len(u) >= 3 && u[1] == ':' && (u[2] == '\\' || u[2] == '/') { // C:\repo
 		return true
 	}
 	// scp-like host:path has a colon before any slash.

@@ -257,12 +257,17 @@ sleep 0.3
 rmdir `+live+`/$$`)
 	now := time.Now()
 	var wg sync.WaitGroup
-	for i := 0; i < 3; i++ {
-		l, repo := maintLoop(t, &now)
+	loops := make([]*Loop, 3)
+	repos := make([]*gitwt.Repo, 3)
+	for i := range loops {
+		loops[i], repos[i] = maintLoop(t, &now)
 		wg.Add(1)
-		go func() { defer wg.Done(); l.maybeMaintain(repo) }()
+		go func() { defer wg.Done(); loops[i].maybeMaintain(repos[i]) }()
 	}
 	wg.Wait()
+	for i := range loops { // a loop that skipped retries on its next tick
+		loops[i].maybeMaintain(repos[i])
+	}
 	b, _ := os.ReadFile(max)
 	for _, n := range strings.Fields(string(b)) {
 		if n != "1" {
@@ -302,6 +307,7 @@ func TestMaintainRemembersTheLastRunAcrossRestarts(t *testing.T) {
 func TestMaintainNeverBlocksBehindAnotherLoop(t *testing.T) {
 	dir := t.TempDir()
 	release := filepath.Join(dir, "release")
+	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0o600) }) // never leave the fake gc looping
 	log := fakeGit(t, `while [ ! -e `+release+` ]; do sleep 0.05; done`)
 	now := time.Now()
 	a, repoA := maintLoop(t, &now)
