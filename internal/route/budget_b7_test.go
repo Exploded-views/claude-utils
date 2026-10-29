@@ -13,6 +13,7 @@ import (
 // A fresh process (a new Router) resolves one live checkout and a few gone
 // folders; bytes are the entry-name bytes ReadDir returned for the big dir.
 func TestBudgetB7_BytesReadFlatAsTmpdirGrows(t *testing.T) {
+	logLoad(t)
 	run := func(entries int) (reads, bytes int) {
 		big := filepath.Join(t.TempDir(), "T")
 		if err := os.MkdirAll(filepath.Join(big, "live", "proj"), 0o700); err != nil {

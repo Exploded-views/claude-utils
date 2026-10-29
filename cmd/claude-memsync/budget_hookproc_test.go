@@ -97,6 +97,7 @@ func (f *hookProcFixture) run(env ...string) hookRun {
 // B5: 20 hooks started at once: at most one does the work and prints a report;
 // the rest skip fast, with no output and exit 0.
 func TestBudgetB5_OverlappingHooks(t *testing.T) {
+	logLoad(t)
 	f := newHookProcFixture(t)
 	solo := f.run()
 	if !strings.Contains(solo.out, "pending-") {
@@ -144,6 +145,7 @@ func TestBudgetB5_OverlappingHooks(t *testing.T) {
 // B6: a git that hangs does not hang the hook: it prints nothing, exits 0 within
 // about 2 s, and leaves no git child running.
 func TestBudgetB6_HookDeadline(t *testing.T) {
+	logLoad(t)
 	f := newHookProcFixture(t)
 	bin := t.TempDir()
 	pids := filepath.Join(bin, "pids")

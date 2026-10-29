@@ -138,3 +138,11 @@ func timingBudget(t *testing.T) (fail func(format string, args ...any), done fun
 	}
 	return fail, done
 }
+
+// logLoad logs the load average at the start of a budget test and again at its
+// end. Counted tests (B4-B8) are not gated on it.
+func logLoad(t *testing.T) {
+	t.Helper()
+	t.Logf("load average at start: %.2f", loadAvg1())
+	t.Cleanup(func() { t.Logf("load average at end: %.2f", loadAvg1()) })
+}

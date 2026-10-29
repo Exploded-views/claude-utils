@@ -48,10 +48,22 @@ func Command(name string, args ...string) *exec.Cmd {
 	return c
 }
 
+var spawnHook atomic.Pointer[func(name string, args []string)]
+
+// SetSpawnHook calls f for every child Run starts (tests count spawns with it)
+// and returns the function that removes it.
+func SetSpawnHook(f func(name string, args []string)) (restore func()) {
+	spawnHook.Store(&f)
+	return func() { spawnHook.Store(nil) }
+}
+
 // Run is cmd.Run that KillAll can find.
 func Run(cmd *exec.Cmd) error {
 	if stopped.Load() {
 		return ErrStopped
+	}
+	if h := spawnHook.Load(); h != nil {
+		(*h)(cmd.Path, cmd.Args[1:])
 	}
 	if err := cmd.Start(); err != nil {
 		return err
