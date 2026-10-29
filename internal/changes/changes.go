@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
@@ -145,6 +146,11 @@ func SaveMarker(repo *gitwt.Repo, path string, res Result) error {
 	if res.MovedBack || res.baseline {
 		return WriteMarker(path, res.Head)
 	}
+	// The marker still names where this report started, and head is not behind
+	// it (MovedBack is false): moving it forward needs no ancestry check.
+	if b, err := os.ReadFile(path); err == nil && res.Since != "" && markerLine(b) == res.Since {
+		return WriteMarker(path, res.Head)
+	}
 	return AdvanceMarker(repo, path, res.Head)
 }
 
@@ -165,12 +171,29 @@ func Compute(opts Options) (Result, error) {
 	repo := gitwt.New(opts.SyncDir)
 	res := Result{Changes: []Change{}}
 
-	head, ok := revParse(repo, "HEAD")
+	if opts.Since == "" && opts.Marker != "" {
+		if head, ok := unchangedSinceMarker(repo, opts); ok {
+			res.Head, res.Since = head, head
+			return res, nil
+		}
+	}
+	// HEAD, the synced head and the marker's commit are asked for together.
+	revs := []string{"HEAD", opts.Upper, "HEAD:" + agecrypt.RecipientsFile}
+	if opts.Since == "" && opts.Marker != "" {
+		if b, err := os.ReadFile(opts.Marker); err == nil {
+			if line := markerLine(b); commitID.MatchString(line) {
+				revs = append(revs, line)
+			}
+		}
+	}
+	rc := prefetch(repo, revs...)
+
+	head, ok := rc.resolve(repo, "HEAD")
 	if !ok {
 		return res, fmt.Errorf("%s has no commits yet", opts.SyncDir)
 	}
 	if opts.Upper != "" {
-		if up, ok := revParse(repo, opts.Upper); ok {
+		if up, ok := rc.resolve(repo, opts.Upper); ok {
 			head = up
 		}
 	}
@@ -191,7 +214,7 @@ func Compute(opts Options) (Result, error) {
 		return res, nil
 	}
 
-	since, err := resolveSince(repo, opts)
+	since, err := resolveSince(repo, rc, opts)
 	if err != nil {
 		return res, err
 	}
@@ -226,7 +249,15 @@ func Compute(opts Options) (Result, error) {
 		return res, err
 	}
 	all := parse(out, opts.ClaudeDir)
-	all = dropReencrypted(repo, since, head, all)
+	enabled := sync.OnceValue(func() bool { // asked only when there are changes
+		return agecrypt.EnabledKnowing(repo, func() (bool, bool) {
+			sha, known := rc["HEAD:"+agecrypt.RecipientsFile]
+			return sha != "", known
+		})
+	})
+	if len(all) > 0 {
+		all = dropReencrypted(repo, enabled(), since, head, all)
+	}
 	if opts.Keep != nil {
 		kept := all[:0]
 		for _, c := range all {
@@ -260,8 +291,8 @@ func Compute(opts Options) (Result, error) {
 	if res.Changes == nil {
 		res.Changes = []Change{}
 	}
-	if opts.CompareLocal {
-		markLocalKept(repo, head, res.Changes)
+	if opts.CompareLocal && len(res.Changes) > 0 {
+		markLocalKept(repo, enabled(), head, res.Changes)
 	}
 	if opts.UpdateMarker && !opts.DeferMarker {
 		if err := SaveMarker(repo, opts.Marker, res); err != nil {
@@ -277,8 +308,8 @@ func Compute(opts Options) (Result, error) {
 // not announce all of them. Plain repos are untouched (identical text is not a
 // diff there), and so is any file one end of which cannot be decrypted: when
 // in doubt a change is reported.
-func dropReencrypted(repo *gitwt.Repo, since, head string, list []Change) []Change {
-	if !agecrypt.Enabled(repo) {
+func dropReencrypted(repo *gitwt.Repo, encrypted bool, since, head string, list []Change) []Change {
+	if !encrypted {
 		return list
 	}
 	var idx []int
@@ -297,7 +328,7 @@ func dropReencrypted(repo *gitwt.Repo, since, head string, list []Change) []Chan
 	if err != nil {
 		return list
 	}
-	plain := agecrypt.PlainReader(repo)
+	plain := agecrypt.PlainReaderFor(repo, encrypted)
 	same := map[int]bool{}
 	for k, i := range idx {
 		a, errA := plain(blobs[2*k])
@@ -321,7 +352,7 @@ func dropReencrypted(repo *gitwt.Repo, since, head string, list []Change) []Chan
 // markLocalKept sets LocalKept on the non-deleted changes whose local file
 // differs from the blob at commit. All blobs come from one `git cat-file
 // --batch`. It is best effort: on an error nothing is flagged.
-func markLocalKept(repo *gitwt.Repo, commit string, list []Change) {
+func markLocalKept(repo *gitwt.Repo, encrypted bool, commit string, list []Change) {
 	var idx []int
 	var specs []string
 	var local [][]byte
@@ -342,7 +373,7 @@ func markLocalKept(repo *gitwt.Repo, commit string, list []Change) {
 	if err != nil {
 		return
 	}
-	plain := agecrypt.PlainReader(repo)
+	plain := agecrypt.PlainReaderFor(repo, encrypted)
 	for k, i := range idx {
 		b, err := plain(blobs[k])
 		if err != nil {
@@ -355,12 +386,12 @@ func markLocalKept(repo *gitwt.Repo, commit string, list []Change) {
 // resolveSince turns opts.Since or opts.Marker into a commit SHA. An empty SHA
 // with a nil error means the marker has to be (re)created: the file does not
 // exist yet, or names a commit that is gone, and opts.UpdateMarker is set.
-func resolveSince(repo *gitwt.Repo, opts Options) (string, error) {
+func resolveSince(repo *gitwt.Repo, rc revCache, opts Options) (string, error) {
 	if s := opts.Since; s != "" {
 		if strings.HasPrefix(s, "-") {
 			return "", fmt.Errorf("--since %q is not a revision", s)
 		}
-		sha, ok := revParse(repo, s)
+		sha, ok := rc.resolve(repo, s)
 		if !ok {
 			return "", fmt.Errorf("--since %q is not a commit in %s", s, opts.SyncDir)
 		}
@@ -388,7 +419,7 @@ func resolveSince(repo *gitwt.Repo, opts Options) (string, error) {
 	if !commitID.MatchString(line) {
 		return "", fmt.Errorf("marker %s does not contain a commit id", m)
 	}
-	sha, ok := revParse(repo, line)
+	sha, ok := rc.resolve(repo, line)
 	switch {
 	case ok:
 		return sha, nil
@@ -415,6 +446,14 @@ func markerExists(path string) bool {
 // is stopped half-way, when HEAD is not a meaningful point to diff against.
 func busy(repo *gitwt.Repo) bool {
 	names := []string{"rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD"}
+	if gd := plainGitDir(repo.Dir); gd != "" { // the usual clone: no git process needed
+		for _, name := range names {
+			if _, err := os.Stat(filepath.Join(gd, name)); err == nil {
+				return true
+			}
+		}
+		return false
+	}
 	args := []string{"rev-parse"}
 	for _, name := range names {
 		args = append(args, "--git-path", name)
@@ -437,6 +476,147 @@ func busy(repo *gitwt.Repo) bool {
 	return false
 }
 
+// plainGitDir is dir/.git when that is a directory (not a linked worktree's
+// pointer file), else "".
+func plainGitDir(dir string) string {
+	gd := filepath.Join(dir, ".git")
+	if info, err := os.Stat(gd); err == nil && info.IsDir() {
+		return gd
+	}
+	return ""
+}
+
+// readHeadSHA is the commit HEAD names, read from .git/HEAD and the ref file
+// or packed-refs, without git; "" when it cannot be told that way (a linked
+// worktree, a symbolic ref chain, a reftable repo).
+func readHeadSHA(dir string) string {
+	gd := plainGitDir(dir)
+	if gd == "" {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join(gd, "HEAD"))
+	if err != nil {
+		return ""
+	}
+	h := strings.TrimSpace(string(b))
+	if sha, ok := strings.CutPrefix(h, "ref: "); ok {
+		ref := strings.TrimSpace(sha)
+		if !strings.HasPrefix(ref, "refs/") || strings.Contains(ref, "..") {
+			return ""
+		}
+		if rb, err := os.ReadFile(filepath.Join(gd, filepath.FromSlash(ref))); err == nil {
+			if v := strings.TrimSpace(string(rb)); fullSHA.MatchString(v) {
+				return v
+			}
+			return ""
+		}
+		if pb, err := os.ReadFile(filepath.Join(gd, "packed-refs")); err == nil {
+			for _, l := range strings.Split(string(pb), "\n") {
+				if v, name, ok := strings.Cut(strings.TrimSpace(l), " "); ok && name == ref && fullSHA.MatchString(v) {
+					return v
+				}
+			}
+		}
+		return ""
+	}
+	if fullSHA.MatchString(h) {
+		return h
+	}
+	return ""
+}
+
+var fullSHA = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
+
+// unchangedSinceMarker is the quick answer to "anything new?": the marker names
+// the commit the report stops at (HEAD, or the synced head the daemon has
+// copied up to), and the repo is not busy. Then nothing can have changed, and
+// no git process is started. head is that commit.
+func unchangedSinceMarker(repo *gitwt.Repo, opts Options) (head string, ok bool) {
+	b, err := os.ReadFile(opts.Marker)
+	if err != nil {
+		return "", false
+	}
+	line := markerLine(b)
+	if !fullSHA.MatchString(line) {
+		return "", false
+	}
+	head = readHeadSHA(repo.Dir)
+	if head == "" {
+		return "", false
+	}
+	if opts.Upper != "" && opts.Upper != head {
+		if opts.Upper != line {
+			return "", false
+		}
+		head = opts.Upper
+	}
+	if line != head {
+		return "", false
+	}
+	gd := plainGitDir(repo.Dir)
+	for _, name := range []string{"rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD"} {
+		if _, err := os.Stat(filepath.Join(gd, name)); err == nil {
+			return "", false // busy: the slow path says so
+		}
+	}
+	return head, true
+}
+
+// revCache holds commits resolved in one git process.
+type revCache map[string]string
+
+// prefetch resolves revs with one `git cat-file --batch-check`; a rev that is
+// not a commit is left out. Revs with a newline or a leading '-' are left to
+// revParse.
+func prefetch(repo *gitwt.Repo, revs ...string) revCache {
+	rc := revCache{}
+	var in []string
+	for _, r := range revs {
+		if r == "" || strings.ContainsAny(r, "\n") || strings.HasPrefix(r, "-") {
+			continue
+		}
+		in = append(in, r)
+	}
+	if len(in) == 0 {
+		return rc
+	}
+	specs := make([]string, len(in))
+	for i, r := range in {
+		specs[i] = r + "^{commit}"
+		if strings.Contains(r, ":") { // an object path like HEAD:file, not a commit
+			specs[i] = r
+		}
+	}
+	out, err := repo.RunStdin([]byte(strings.Join(specs, "\n")+"\n"), "cat-file", "--batch-check=%(objectname)")
+	if err != nil {
+		return rc
+	}
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != len(in) {
+		return rc
+	}
+	for i, l := range lines {
+		l = strings.TrimSpace(l)
+		switch {
+		case fullSHA.MatchString(l):
+			rc[in[i]] = l
+		case strings.HasSuffix(l, " missing"):
+			rc[in[i]] = "" // known not to exist
+		}
+	}
+	return rc
+}
+
+// resolve is revParse that uses the prefetched answers: a rev missing from the
+// cache is asked of git again, so a miss costs a process only when the batch
+// did not know it.
+func (rc revCache) resolve(repo *gitwt.Repo, rev string) (string, bool) {
+	if sha, ok := rc[rev]; ok {
+		return sha, sha != ""
+	}
+	return revParse(repo, rev)
+}
+
 // revParse resolves rev to a full commit SHA.
 func revParse(repo *gitwt.Repo, rev string) (string, bool) {
 	out, err := repo.Run("rev-parse", "--verify", "--quiet", rev+"^{commit}")
@@ -452,7 +632,9 @@ func revParse(repo *gitwt.Repo, rev string) (string, bool) {
 // were reported already.
 func AdvanceMarker(repo *gitwt.Repo, path, head string) error {
 	if b, err := os.ReadFile(path); err == nil {
-		if line := markerLine(b); commitID.MatchString(line) {
+		if line := markerLine(b); line == head {
+			return WriteMarker(path, head) // already there: nothing to ask git
+		} else if commitID.MatchString(line) {
 			if cur, ok := revParse(repo, line); ok && cur != head {
 				if _, err := repo.Run("merge-base", "--is-ancestor", head, cur); err == nil {
 					return nil

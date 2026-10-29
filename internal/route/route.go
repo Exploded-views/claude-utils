@@ -393,16 +393,18 @@ type Router struct {
 	rootMu    sync.Mutex
 	rootCache map[string]rootEntry
 
-	mu     sync.Mutex
-	cache  map[string]Decision
-	logged map[string]bool
-	owners map[string]string
-	loaded bool
+	mu    sync.Mutex
+	cache map[string]Decision
+	// inflight holds a channel, closed when done, for each folder being decided.
+	inflight map[string]chan struct{}
+	logged   map[string]bool
+	owners   map[string]string
+	loaded   bool
 }
 
 // New returns a Router. have reports whether this host has the named repo.
 func New(f File, have func(repo string) bool) *Router {
-	r := &Router{have: have, cache: map[string]Decision{}, logged: map[string]bool{}, Logf: log.Printf}
+	r := &Router{have: have, cache: map[string]Decision{}, inflight: map[string]chan struct{}{}, logged: map[string]bool{}, Logf: log.Printf}
 	r.cur_.Store(normalized(f))
 	r.walks.Store(newWalkCache())
 	r.Candidates = func(folder string) []string { return r.walks.Load().candidates(folder) }
@@ -480,15 +482,33 @@ func (r *Router) defaultResolve(folder string) (string, resolution) {
 	return "", resolutionAmbiguous
 }
 
-// Decide routes one folder (Claude's escaped folder name).
+// Decide routes one folder (Claude's escaped folder name). Callers that ask for
+// the same folder at once share one computation.
 func (r *Router) Decide(folder string) Decision {
-	r.mu.Lock()
-	if d, ok := r.cache[folder]; ok {
+	for {
+		r.mu.Lock()
+		if d, ok := r.cache[folder]; ok {
+			r.mu.Unlock()
+			return d
+		}
+		if call, busy := r.inflight[folder]; busy {
+			r.mu.Unlock()
+			<-call // then look at the cache again
+			continue
+		}
+		call := make(chan struct{})
+		r.inflight[folder] = call
 		r.mu.Unlock()
+		d := r.compute(folder)
+		r.mu.Lock()
+		delete(r.inflight, folder)
+		r.mu.Unlock()
+		close(call)
 		return d
 	}
-	r.mu.Unlock()
+}
 
+func (r *Router) compute(folder string) Decision {
 	for {
 		gen := r.gen.Load()
 		d, key, keyOK := r.decide(folder)

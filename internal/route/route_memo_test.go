@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // memoTree is a directory with many entries, folder names that escape to
@@ -381,5 +382,34 @@ func TestMemoizedAnswerSeesDirCreatedLater(t *testing.T) {
 	}
 	if got := r.Candidates(escape(dir)); len(got) != 1 || got[0] != dir {
 		t.Fatalf("after the dir was made: %v, want [%s]", got, dir)
+	}
+}
+
+// Callers that ask for the same folder at once share one computation: the git
+// calls behind a remote rule run once, not once per caller.
+func TestConcurrentDecideOfOneFolderResolvesOnce(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	r := testRouter(t, fileOf(Rule{Remote: "github.com/me/*", Repo: "projects"}), []string{"projects"}, nil)
+	r.Resolve = func(string) (string, resolution) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		time.Sleep(50 * time.Millisecond)
+		return "github.com/me/a", resolutionOK
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if d := r.Decide("-some-folder"); d.Repo != "projects" {
+				t.Errorf("decision %+v", d)
+			}
+		}()
+	}
+	wg.Wait()
+	if calls != 1 {
+		t.Fatalf("Resolve ran %d times for 20 concurrent callers, want 1", calls)
 	}
 }
