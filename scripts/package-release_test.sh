@@ -44,6 +44,7 @@ fi
 rpath=""; prev=""; for a in "$@"; do [ "$prev" = --report-path ] && rpath="$a"; prev="$a"; done
 if [ "$(basename "$last")" = memsync-scan-control ]; then
   rc="${FAKE_GL_CONTROL_RC:-99}"; rep="${FAKE_GL_CONTROL_REPORT:-finding}"
+  echo "FAKE-GL-STDERR" >&2
 else
   rc="${FAKE_GL_RC:-0}"; rep=clean; [ "$rc" = 99 ] && rep=finding
 fi
@@ -158,6 +159,7 @@ noleft() { # dir: nothing to upload, no stage dirs
 check "the scan asks for exit code 99 and a JSON report" bash -c "grep -q -- '--exit-code 99' '$W/gl.log' && grep -q -- '--report-format json' '$W/gl.log' && grep -q -- '--report-path ' '$W/gl.log'"
 set +e; FAKE_GL_CONTROL_RC=1 FAKE_GL_CONTROL_REPORT=none GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/e1" >"$W/e1.log" 2>&1; e1=$?; set -e
 check "a scanner that errors (exit 1, no report) on the control fails the packaging (rc=$e1)" bash -c "[ $e1 -ne 0 ] && grep -q 'secret scan error on the control (rc=1)' '$W/e1.log'"
+check "... and prints the scanner's stderr" grep -q FAKE-GL-STDERR "$W/e1.log"
 check "... and leaves nothing behind" noleft "$W/e1"
 set +e; FAKE_GL_CONTROL_RC=1 FAKE_GL_CONTROL_REPORT=finding GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/e1b" >"$W/e1b.log" 2>&1; e1b=$?; set -e
 check "an error exit (1) on the control fails even when its report holds a finding (rc=$e1b)" bash -c "[ $e1b -ne 0 ] && grep -q 'secret scan error on the control (rc=1)' '$W/e1b.log'"
@@ -169,6 +171,7 @@ check "... and leaves nothing behind" noleft "$W/e2"
 set +e; FAKE_GL_RC=2 GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/e3" >"$W/e3.log" 2>&1; e3=$?; FAKE_GL_RC=1 GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/e3b" >"$W/e3b.log" 2>&1; e3b=$?; set -e
 check "a crash (exit 2) on the real archives after a good control fails (rc=$e3)" bash -c "[ $e3 -ne 0 ] && grep -q 'secret scan error (rc=2)' '$W/e3.log' && ! grep -q 'found something' '$W/e3.log'"
 check "an exit 1 on the real archives is an error, not a clean scan (rc=$e3b)" bash -c "[ $e3b -ne 0 ] && grep -q 'secret scan error (rc=1)' '$W/e3b.log'"
+check "... and closes its ::group:: (rc=1 and rc=2 and found-something)" bash -c "for l in e3 e3b leaky; do [ \"\$(grep -c '^::group::' '$W/'\$l.log)\" = \"\$(grep -c '^::endgroup::' '$W/'\$l.log)\" ] || exit 1; done; grep -q '^::group::gitleaks' '$W/e3.log'"
 check "... and leaves nothing behind" noleft "$W/e3"
 SYSPATH="$W/stubgo:/usr/bin:/bin"
 set +e; PATH="$SYSPATH" GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/noscan" >"$W/noscan.log" 2>&1; nrc=$?; set -e

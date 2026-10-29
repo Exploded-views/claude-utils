@@ -127,9 +127,10 @@ if [ "${PACKAGE_RELEASE_SKIP_GITLEAKS:-}" != 1 ]; then
   ctl="$STAGE_ROOT/memsync-scan-control"; mkdir -p "$ctl"
   tok="ghp_""R7kL2mQ9xT4vB8nZ3c""W6yH1jD5fG0sA2eU9p"
   printf '\177ELF\000\000\000%s\000\000\000' "$tok" >"$ctl/control.bin"; chmod 755 "$ctl/control.bin"
-  rc=0; scan_tree "$ctl" "$STAGE_ROOT/control.json" >/dev/null 2>&1 || rc=$?
+  rc=0; scan_tree "$ctl" "$STAGE_ROOT/control.json" >/dev/null 2>"$STAGE_ROOT/control.err" || rc=$?
   # Seen only if the scanner reports findings (99) AND the report holds one.
   if [ "$rc" -ne 99 ] || ! grep -q '"RuleID"' "$STAGE_ROOT/control.json" 2>/dev/null; then
+    cat "$STAGE_ROOT/control.err" >&2 # --redact is on, so no secret is printed
     echo "secret scan error on the control (rc=$rc): secret scan cannot see inside binaries" >&2; exit 1
   fi
   for a in "${ARCHIVES[@]}"; do
@@ -142,8 +143,8 @@ if [ "${PACKAGE_RELEASE_SKIP_GITLEAKS:-}" != 1 ]; then
     rc=0; scan_tree "$d" "$STAGE_ROOT/${a}.json" || rc=$?
     case "$rc" in
       0) ;;
-      99) echo "gitleaks found something in $a" >&2; exit 1 ;;
-      *) echo "secret scan error (rc=$rc) in $a" >&2; exit 1 ;;
+      99) echo "::endgroup::"; echo "gitleaks found something in $a" >&2; exit 1 ;;
+      *) echo "::endgroup::"; echo "secret scan error (rc=$rc) in $a" >&2; exit 1 ;;
     esac
     echo "::endgroup::"
   done
