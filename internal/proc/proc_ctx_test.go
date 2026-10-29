@@ -18,6 +18,7 @@ import (
 func TestSpawnHooksSeeEveryRunAndAreRemovable(t *testing.T) {
 	var starts, ends atomic.Int64
 	var gotArgs []string
+	t.Cleanup(func() { SetSpawnHook(nil)(); SetSpawnEndHook(nil)() })
 	r1 := SetSpawnHook(func(name string, args []string) { starts.Add(1); gotArgs = args })
 	r2 := SetSpawnEndHook(func(string, []string) { ends.Add(1) })
 	if err := Run(Command("sh", "-c", "exit 0")); err != nil {
@@ -65,7 +66,7 @@ func TestCommandContextUngroupedIsPlainAndGroupedLeadsItsOwnGroup(t *testing.T) 
 		t.Error("an ungrouped CommandContext set a process group")
 	}
 	Group()
-	defer Release()
+	t.Cleanup(Release)
 	g := CommandContext(context.Background(), "true")
 	if g.SysProcAttr == nil || !g.SysProcAttr.Setpgid {
 		t.Error("after Group, CommandContext did not set a process group")
@@ -138,12 +139,12 @@ func TestKillGroupFallsBackToTheSingleProcess(t *testing.T) {
 }
 
 func TestGroupReenablesRunAfterKillAll(t *testing.T) {
+	t.Cleanup(Release)
 	KillAll()
 	if err := Run(Command("true")); err != ErrStopped {
 		t.Fatalf("Run after KillAll = %v, want ErrStopped", err)
 	}
 	Group()
-	defer Release()
 	if err := Run(Command("true")); err != nil {
 		t.Errorf("Run after Group = %v", err)
 	}

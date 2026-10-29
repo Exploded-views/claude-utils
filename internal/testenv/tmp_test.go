@@ -3,6 +3,7 @@ package testenv
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 )
@@ -16,6 +17,9 @@ func TestHostTempDirIsFixedAtStartup(t *testing.T) {
 }
 
 func TestSmallTempDirLeavesASmallTempDirAlone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SmallTempDir swaps TMPDIR under /tmp; Windows reads TMP/TEMP and has no /tmp")
+	}
 	small := t.TempDir()
 	t.Setenv("TMPDIR", small)
 	cleanup := SmallTempDir()
@@ -26,6 +30,9 @@ func TestSmallTempDirLeavesASmallTempDirAlone(t *testing.T) {
 }
 
 func TestSmallTempDirSwapsABusyTempDirAndCleansUp(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SmallTempDir swaps TMPDIR under /tmp; Windows reads TMP/TEMP and has no /tmp")
+	}
 	busy := t.TempDir()
 	for i := 0; i < 205; i++ {
 		if err := os.WriteFile(filepath.Join(busy, "f"+strconv.Itoa(i)), nil, 0o600); err != nil {
