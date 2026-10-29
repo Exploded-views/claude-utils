@@ -1,6 +1,7 @@
 package route
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/MarimerLLC/claude-utils/internal/proc"
 )
 
 // Remote resolution, ported from the remote-key work: the escaped folder name
@@ -478,10 +481,12 @@ func remoteURL(dir string) (url string, ok bool) {
 
 // gitOut runs git in dir with the inherited GIT_* variables dropped.
 func gitOut(dir string, args ...string) (string, error) {
-	c := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	c := proc.Command("git", append([]string{"-C", dir}, args...)...)
 	c.Env = append(cleanGitEnv(os.Environ()), "LC_ALL=C", "LANGUAGE=C")
-	out, err := c.Output()
-	return strings.TrimSpace(string(out)), err
+	var out bytes.Buffer
+	c.Stdout = &out
+	err := proc.Run(c)
+	return strings.TrimSpace(out.String()), err
 }
 
 // sshHostname asks ssh which real host an alias stands for (ssh -G reads the

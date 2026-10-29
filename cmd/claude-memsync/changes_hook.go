@@ -16,6 +16,7 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/lock"
+	"github.com/MarimerLLC/claude-utils/internal/proc"
 	"github.com/MarimerLLC/claude-utils/internal/route"
 )
 
@@ -81,6 +82,9 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 		panicked bool
 		panicVal any
 	}
+	// git children lead their own group, so the deadline can kill them
+	proc.Group()
+	defer proc.Release()
 	var errBuf bytes.Buffer // the worker's until it reports back
 	done := make(chan outcome, 1)
 	go func() {
@@ -131,6 +135,7 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 		return 0
 	case <-expired:
 		fmt.Fprintln(stderr, "changes: hook deadline exceeded; notices deferred to the next prompt")
+		hookExpired(cfgPath, routesFlag)
 		return 0
 	}
 }
