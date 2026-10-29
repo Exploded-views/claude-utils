@@ -54,9 +54,10 @@ func (r *Router) tooLargeLive(folder string, d Decision) bool {
 }
 
 // noteLargeLocked logs, once per folder, a live folder left unresolved because
-// a directory on its path is too large to list. r.mu is held.
-func (r *Router) noteLargeLocked(folder string, d Decision) {
-	if !r.tooLargeLive(folder, d) {
+// a directory on its path is too large to list. live is tooLargeLive, decided
+// by the caller before taking the lock (it reads files); r.mu is held.
+func (r *Router) noteLargeLocked(folder string, d Decision, live bool) {
+	if !live || d.Repo != "" || d.Reason != ReasonUnresolved {
 		return
 	}
 	k := folder + "\x00toolarge"

@@ -513,6 +513,8 @@ func (r *Router) compute(folder string) Decision {
 		gen := r.gen.Load()
 		d, key, keyOK := r.decide(folder)
 		roots, rootsOK := r.rootsIfNeeded(folder, d, key, keyOK)
+		// File I/O: decided here, before the lock, and only stored under it.
+		live := r.tooLargeLive(folder, d)
 		if r.afterCompute != nil {
 			r.afterCompute()
 		}
@@ -525,7 +527,7 @@ func (r *Router) compute(folder string) Decision {
 		}
 		d = r.identityLocked(folder, d, key, keyOK, roots, rootsOK)
 		r.cache[folder] = d
-		r.noteLargeLocked(folder, d)
+		r.noteLargeLocked(folder, d, live)
 		r.noteLocked(folder, d)
 		r.mu.Unlock()
 		return d
