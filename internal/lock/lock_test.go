@@ -29,3 +29,20 @@ func TestSecondDaemonOnSameSyncDirRefused(t *testing.T) {
 	}
 	l3.Release()
 }
+
+func TestHookLockIsNonBlockingAndReleases(t *testing.T) {
+	dir := t.TempDir()
+	l, held, err := TryHook(dir)
+	if err != nil || held || l == nil {
+		t.Fatalf("first: %v %v %v", l, held, err)
+	}
+	if l2, held, err := TryHook(dir); err != nil || !held || l2 != nil {
+		t.Fatalf("second while held: %v %v %v", l2, held, err)
+	}
+	l.Release()
+	l3, held, err := TryHook(dir)
+	if err != nil || held {
+		t.Fatalf("after release: held=%v err=%v", held, err)
+	}
+	l3.Release()
+}

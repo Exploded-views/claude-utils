@@ -15,6 +15,7 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/changes"
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
+	"github.com/MarimerLLC/claude-utils/internal/lock"
 	"github.com/MarimerLLC/claude-utils/internal/route"
 )
 
@@ -75,6 +76,7 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 	type outcome struct {
 		out      []byte
 		commit   func() error
+		release  func() // drops the hook lock, once the markers moved or the output failed
 		err      error
 		panicked bool
 		panicVal any
@@ -92,7 +94,7 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 			}
 			done <- o
 		}()
-		o.out, o.commit, o.err = hookWork(stdin, &errBuf, cfgPath, routesFlag, project, limit)
+		o.out, o.commit, o.release, o.err = hookWork(stdin, &errBuf, cfgPath, routesFlag, project, limit)
 	}()
 	var expired <-chan time.Time
 	if deadline > 0 {
@@ -102,6 +104,9 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 	}
 	select {
 	case o := <-done:
+		if o.release != nil {
+			defer o.release()
+		}
 		if o.panicked {
 			panic(o.panicVal) // changesCmd turns it into one stderr line
 		}
@@ -133,24 +138,24 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 // hookWork computes the hook's report. It returns the bytes to print (nil:
 // nothing) and a function that moves the markers, which the caller runs once
 // the output was written. It moves no marker itself.
-func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project string, limit int) (out []byte, commit func() error, err error) {
+func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project string, limit int) (out []byte, commit func() error, release func(), err error) {
 	if hookTestHook != nil {
 		hookTestHook()
 	}
 	var in hookInput
 	if err := json.NewDecoder(io.LimitReader(stdin, 1<<20)).Decode(&in); err != nil {
-		return nil, nil, fmt.Errorf("read hook input: %w", err)
+		return nil, nil, nil, fmt.Errorf("read hook input: %w", err)
 	}
 	if !sessionIDPattern.MatchString(in.SessionID) {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	targets, err := hookTargets(cfgPath, routesFlag)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	if in.Event == "" {
-		return nil, nil, fmt.Errorf("hook input has no hook_event_name")
+		return nil, nil, nil, fmt.Errorf("hook input has no hook_event_name")
 	}
 	// Claude's cwd follows its `cd`, so the project it was started in is the
 	// better default.
@@ -160,6 +165,24 @@ func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project st
 	if project == "" {
 		project = in.Cwd
 	}
+
+	// Hooks that pile up (a slow prompt, many sessions) must not each do the
+	// work: one at a time, the others return at once and report on the next
+	// prompt. The lock lives in the first repo's state dir and is held until the
+	// markers moved.
+	var lk *lock.Lock
+	if len(targets) > 0 {
+		var held bool
+		if lk, held, err = lock.TryHook(targets[0].cfg.SyncDir); held {
+			return nil, nil, nil, nil
+		}
+	}
+	owned := false
+	defer func() {
+		if !owned {
+			lk.Release()
+		}
+	}()
 
 	// One report per repo, each against its own marker. A repo reports only the
 	// folders it owns; with one repo that is all of them, as before.
@@ -190,7 +213,7 @@ func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project st
 		})
 		if err != nil {
 			if len(targets) == 1 {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			fmt.Fprintf(stderr, "changes: repo %s: %v\n", tg.name, err)
 			continue
@@ -254,10 +277,11 @@ func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project st
 		reply.Out.Context = strings.Join(lines, "\n")
 		var buf bytes.Buffer
 		if err := json.NewEncoder(&buf).Encode(reply); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		out = buf.Bytes()
 	}
+	owned = true
 	commit = func() error {
 		if relCommit != nil {
 			relCommit()
@@ -269,7 +293,7 @@ func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project st
 		}
 		return nil
 	}
-	return out, commit, nil
+	return out, commit, lk.Release, nil
 }
 
 // hookTarget is one repo a hook reports on, and the gate on its folders.
