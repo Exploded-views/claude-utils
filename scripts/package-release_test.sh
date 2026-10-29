@@ -20,6 +20,7 @@ fi
 NAME="claude-utils-$VER-${TARGET%/*}-${TARGET#*/}"
 BOOT_BASH="${BOOT_BASH:-bash}"
 if command -v sha256sum >/dev/null 2>&1; then SUMC=(sha256sum -c); else SUMC=(shasum -a 256 -c); fi
+GO_BUILD="${GO:-go}"
 PASS=0 FAIL=0
 ok()    { PASS=$((PASS + 1)); printf 'PASS    %s\n' "$1"; }
 bad()   { FAIL=$((FAIL + 1)); printf 'FAIL    %s\n' "$1"; }
@@ -31,11 +32,21 @@ rm -rf "$W"; mkdir -p "$W/fakegl"
 cat >"$W/fakegl/gitleaks" <<'FAKE'
 #!/bin/sh
 echo "$@" >>"${FAKE_GL_LOG:?}"
+last=""; for a in "$@"; do last="$a"; done
+if [ -d "$last" ]; then
+  b="$(basename "$last")"
+  (cd "$last" && find . -name '*.strings.txt' | sed "s|^\./||; s|^|$b |") >>"${FAKE_GL_LOG}.strings"
+fi
+# Like the real one for the scan control: a finding (exit 1) when given the control
+# tree (named memsync-scan-control), unless FAKE_GL_CLEAN=1 (a scanner that reports nothing, whatever it is given).
+[ "${FAKE_GL_CLEAN:-}" != 1 ] && [ "${FAKE_GL_RC:-0}" = 0 ] && [ "$(basename "$last")" = memsync-scan-control ] && exit 1
 exit "${FAKE_GL_RC:-0}"
 FAKE
 chmod +x "$W/fakegl/gitleaks"
 export FAKE_GL_LOG="$W/gl.log"
+ORIGPATH="$PATH"
 PATH="$W/fakegl:$PATH"
+REALGL="$(command -v gitleaks || true)"   # the real scanner, if this machine has one
 mkdir -p "$W/out" "$W/all" "$W/x" "$W/home" "$W/stubs"
 GO="${GO:-go}" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/out" "$TARGET" >"$W/package.log" 2>&1 || { tail -20 "$W/package.log"; bad "package-release.sh exits 0"; }
 A="$W/out/$NAME.tar.gz"
@@ -109,7 +120,7 @@ check "all targets: SHA256SUMS holds 6 product and 4 budget archives, and verifi
 n=0; for a in $(cd "$W/all" && ls | grep '\.\(tar\.gz\|zip\)$'); do n=$((n + 1)); done
 : >"$W/gl.log"
 GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/scanned" >"$W/scanned.log" 2>&1 || bad "package-release.sh with a clean scan exits 0"
-check "the scan ran once per archive ($n)" bash -c "[ \"\$(grep -c . '$W/gl.log')\" = $n ]"
+check "the scan ran once per archive ($n) and once on the control" bash -c "[ \"\$(grep -c . '$W/gl.log')\" = $((n + 1)) ] && grep -q 'memsync-scan-control' '$W/gl.log'"
 for a in $(cd "$W/all" && ls | grep '\.\(tar\.gz\|zip\)$'); do
   check "the scan covered $a" bash -c "grep -q 'dir.* [^ ]*${a%.tar.gz}' '$W/gl.log' || grep -q 'dir.* [^ ]*${a%.zip}' '$W/gl.log'"
 done
@@ -117,12 +128,68 @@ check "the scan is gitleaks dir, redacted" bash -c "grep -q '^dir ' '$W/gl.log' 
 set +e; FAKE_GL_RC=1 GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/leaky" >"$W/leaky.log" 2>&1; lrc=$?; set -e
 check "a finding fails the packaging (rc=$lrc)" [ "$lrc" -ne 0 ]
 check "... and leaves no SHA256SUMS and no archive to upload" bash -c "[ ! -e '$W/leaky/SHA256SUMS' ] && [ -z \"\$(ls '$W/leaky' | grep '\.\(tar\.gz\|zip\)$')\" ]"
+# The scan checks itself on the release path: a control binary with a fake token must
+# be found by the same routine before the real archives are scanned. A scanner that
+# reports nothing fails the packaging, and the control never reaches the output.
+set +e; FAKE_GL_CLEAN=1 GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/blind" >"$W/blind.log" 2>&1; brc=$?; set -e
+check "a scanner that finds nothing in the control fails the packaging (rc=$brc)" bash -c "[ $brc -ne 0 ] && grep -q 'secret scan cannot see inside binaries' '$W/blind.log' && [ ! -e '$W/blind/SHA256SUMS' ]"
+check "the control is not in the output" bash -c "! grep -rqs control '$W/scanned/SHA256SUMS' && [ -z \"\$(find '$W/scanned' -name '*control*')\" ]"
 SYSPATH="$W/stubgo:/usr/bin:/bin"
 set +e; PATH="$SYSPATH" GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/noscan" >"$W/noscan.log" 2>&1; nrc=$?; set -e
 check "no gitleaks on PATH fails clearly (rc=$nrc)" bash -c "[ $nrc -ne 0 ] && grep -q 'gitleaks' '$W/noscan.log' && [ ! -e '$W/noscan/SHA256SUMS' ]"
 set +e; PATH="$SYSPATH" PACKAGE_RELEASE_SKIP_GITLEAKS=1 GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/optout" >"$W/optout.log" 2>&1; orc=$?; set -e
 check "the documented opt-out packages without gitleaks (rc=$orc)" bash -c "[ $orc -eq 0 ] && [ -f '$W/optout/SHA256SUMS' ]"
 check "release.yml never sets the opt-out and installs the pinned gitleaks" bash -c "! grep -q PACKAGE_RELEASE_SKIP_GITLEAKS '$ROOT/.github/workflows/release.yml' && grep -q 'GITLEAKS_VERSION: 8.30.1' '$ROOT/.github/workflows/release.yml' && grep -q 'GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb' '$ROOT/.github/workflows/release.yml'"
+
+# gitleaks dir skips binary files, so the printable strings of every executable
+# (product binaries, claude-focus.exe, both budget .test files, bootstrap.sh) are
+# written beside it in the extracted tree and scanned as text.
+: >"$W/gl.log.strings"; rm -f "$W/gl.log.strings"
+GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/strings1" >"$W/strings1.log" 2>&1 || bad "package-release.sh (strings run) exits 0"
+want_strings() { # archive-dir-name file...
+  for f in "${@:2}"; do
+    check "strings file for $1/$f" grep -qxF "$1 $f.strings.txt" "$W/gl.log.strings"
+  done
+}
+for os_arch in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
+  want_strings "claude-utils-$VER-$os_arch" claude-memsync claude-memmerge scripts/bootstrap.sh
+  want_strings "claude-utils-$VER-budget-$os_arch" claude-memsync-budget.test route-budget.test
+done
+for os_arch in windows-amd64 windows-arm64; do
+  want_strings "claude-utils-$VER-$os_arch" claude-memsync.exe claude-memmerge.exe claude-focus.exe scripts/bootstrap.sh
+done
+
+# A secret inside a binary fails the packaging: a tiny program embeds a test-only
+# token (assembled here from halves, so this file never holds it whole) and a stub
+# Go copies it in as every built binary. Needs the real gitleaks.
+if [ -n "$REALGL" ]; then
+  mkdir -p "$W/plant/src" "$W/realgl"; ln -sf "$REALGL" "$W/realgl/gitleaks"
+  H1=R7kL2mQ9xT4vB8nZ3c; H2=W6yH1jD5fG0sA2eU9p
+  printf 'package main\n\nvar t = "%s%s%s"\n\nfunc main() { println(t) }\n' ghp_ "$H1" "$H2" >"$W/plant/src/main.go"
+  printf 'package main\n\nvar t = "%s"\n\nfunc main() { println(t) }\n' "just a harmless string for the control" >"$W/plant/src/clean.go.txt"
+  mkdir -p "$W/plant/clean"; cp "$W/plant/src/clean.go.txt" "$W/plant/clean/main.go"
+  printf 'module planted\n\ngo 1.21\n' >"$W/plant/src/go.mod"; cp "$W/plant/src/go.mod" "$W/plant/clean/go.mod"
+  (cd "$W/plant/src" && CGO_ENABLED=0 $GO_BUILD build -o "$W/plant/leaky" .) || bad "build the planted-token program"
+  (cd "$W/plant/clean" && CGO_ENABLED=0 $GO_BUILD build -o "$W/plant/clean-bin" .) || bad "build the control program"
+  for which in leaky clean-bin; do
+    printf '#!/bin/sh\nout=""; prev=""\nfor a in "$@"; do if [ "$prev" = "-o" ]; then out="$a"; fi; prev="$a"; done\n[ -z "$out" ] || { cp "%s" "$out"; chmod 755 "$out"; }\n' "$W/plant/$which" >"$W/plant/go-$which"
+    chmod +x "$W/plant/go-$which"
+  done
+  set +e
+  PATH="$W/realgl:$ORIGPATH" GO="$W/plant/go-leaky" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/planted" linux/amd64 >"$W/planted.log" 2>&1; prc=$?
+  PATH="$W/realgl:$ORIGPATH" GO="$W/plant/go-clean-bin" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/control" linux/amd64 >"$W/control.log" 2>&1; crc=$?
+  set -e
+  check "control: a binary with no token packages under the real gitleaks (rc=$crc)" bash -c "[ $crc -eq 0 ] && [ -f '$W/control/SHA256SUMS' ]"
+  check "a token inside a binary fails the packaging (rc=$prc)" bash -c "[ $prc -ne 0 ] && grep -q 'gitleaks found something' '$W/planted.log' && [ ! -e '$W/planted/SHA256SUMS' ] && [ -z \"\$(ls '$W/planted' | grep '\.tar\.gz\$')\" ]"
+else
+  echo "SKIP    token-in-a-binary check: no gitleaks on PATH"
+fi
+
+# A budget test binary stamped with another tag, beside product binaries stamped
+# with the right one, is refused before any gate (real binaries, not an override).
+( cd "$ROOT" && CGO_ENABLED=0 $GO_BUILD test -c -tags budget -trimpath -ldflags "-X github.com/MarimerLLC/claude-utils/internal/version.Override=v9.9.9-other" -o "$W/other.test" ./internal/route ) || bad "build a budget test binary with another stamp"
+set +e; (cd "$W/guard" && MEMSYNC_BUDGET_BIN_DIR="$D" MEMSYNC_BUDGET_TAG="$VER" "$W/other.test" -test.run '^TestBudgetB' >"$W/g5.log" 2>&1); g5=$?; set -e
+check "a test binary stamped v9.9.9-other beside $VER product binaries exits 1 (rc=$g5)" bash -c "[ $g5 -eq 1 ] && grep -q 'this test binary reports' '$W/g5.log' && ! grep -q -- '--- ' '$W/g5.log'"
 
 # One release-version rule everywhere: package-release.sh refuses what bootstrap.sh
 # --prebuilt-dir would refuse, and release.yml's tag check is the same rule.
