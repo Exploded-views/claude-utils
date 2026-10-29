@@ -3,21 +3,19 @@
 [extend]
 useDefault = true
 
-# Two reviewed generic-api-key false positives, each allowlisted by its exact value and
-# only for the strings of the budget test binary (claude-memsync-budget.test), so the rule
-# stays on everywhere else and any other value still fails the packaging. Found by the
-# strings scan of the v0.0.0-ev.0 test package for all four budget targets:
-#  1. a run of glued Go string-table entries that follows the message "keyUsage:"
-#     (standard-library type-name strings in the linker's string table; all four targets).
-#  2. the tail of the fake token constant appTestToken in cmd/claude-memsync/app_test.go
-#     (a fixture compiled into this test binary; seen in the amd64 builds only, where the
-#     linker places the strings differently).
-# If a Go upgrade moves these strings the packaging fails with a new value: review it,
-# then replace the entry here; never loosen the rule.
+# One reviewed generic-api-key false positive, allowlisted by its exact value and only for
+# the strings of the budget test binary (claude-memsync-budget.test), so the rule stays on
+# everywhere else and any other value still fails the packaging. Found by the strings scan
+# of the v0.0.0-ev.0 test package for all four budget targets: a run of glued Go string-table
+# entries that follows the message "keyUsage:" (standard-library type-name strings in the
+# linker's string table), present in every budget target. It is not in any source file.
+# If a Go upgrade moves it the packaging fails with a new value: review it, then replace the
+# entry here; never loosen the rule. (The repo's own fixture token appTestToken used to be a
+# second hit; it is now assembled at run time instead of allowlisted.)
 [[allowlists]]
-description = "Reviewed generic-api-key false positives in the strings of claude-memsync-budget.test"
+description = "Reviewed generic-api-key false positive in the strings of claude-memsync-budget.test"
 condition = "AND"
 targetRules = ["generic-api-key"]
 paths = ['''(^|/)claude-memsync-budget\.test\.strings\.txt$''']
 regexTarget = "secret"
-regexes = ['''^\.pemghs_APPTEST_zzz999$''', '''^booleanbdoUxXvintegercomplex=$''']
+regexes = ['''^booleanbdoUxXvintegercomplex=$''']
