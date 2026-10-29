@@ -12,7 +12,6 @@ import (
 	"testing"
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
-	"github.com/MarimerLLC/claude-utils/internal/lock"
 	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
 
@@ -80,29 +79,6 @@ func TestRouted_DoctorChecksEveryRoutedRepo(t *testing.T) {
 	}
 	if code := runDoctor([]string{"--org", "Org"}); code == 0 {
 		t.Error("runDoctor with a routes file must check every routed repo")
-	}
-}
-
-// The private-only guard runs for each routed repo at start: one bad repo
-// refuses the whole daemon, and nothing is left locked.
-func TestRouted_StartRunsPrivateOnlyGuardPerRepo(t *testing.T) {
-	cfgs := privateRouted(t, map[string]string{
-		"a": "git@github.com:Org/mem-project-a.git",
-		"b": "git@github.com:Org/claude-memories.git", // not a mem-* name
-	}, routedAPI(""))
-	set, err := loadRouted(os.Getenv(routesEnv))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := set.Start(context.Background()); err == nil || !strings.Contains(err.Error(), `"b"`) {
-		t.Fatalf("Start = %v, want a refusal naming repo b", err)
-	}
-	for n, c := range cfgs {
-		l, err := lock.Acquire(c.SyncDir)
-		if err != nil {
-			t.Fatalf("repo %s left locked after a refused start: %v", n, err)
-		}
-		l.Release()
 	}
 }
 

@@ -720,10 +720,22 @@ the markers would have moved anyway). Change it with `--deadline <duration>`
 (for example `--deadline 3s`) or with `CLAUDE_MEMSYNC_HOOK_DEADLINE_MS`
 (milliseconds; the flag wins); `0` turns the deadline off. If the reports for
 all repos are not computed in time, for instance because the host's disk is
-saturated, the hook prints nothing, moves no marker, writes one line to stderr
+saturated, the hook prints no change notices (only the held-repo alerts below,
+if any), moves no change marker, writes one line to stderr
 (`changes: hook deadline exceeded; notices deferred to the next prompt`) and
 exits 0 at once. It is all or nothing: a repo that finished while another did
 not is not reported either, so the next prompt reports every change.
+
+**Held repos.** When the daemon holds a repo because its private-only check
+failed (see the table of checks), the hook leads its output with one line per
+held repo: ``memsync: repo <name> is HELD by the private-only check since <time>:
+<reason>. Nothing syncs for it (no pull, commit or push) until the check passes;
+see `claude-memsync status`.`` It reads only the repo's local `.state` files (no
+lock, git or network), so the alert goes out even when the deadline cuts the
+change report short. Each session is told once per hold: the session's `.held`
+marker under `.state/hook-markers/` records which hold it has seen, and it is
+written only after the output. Text taken from state files is cut to one line,
+with control and invisible format characters removed.
 
 Markers are kept, not deleted when a session ends: a session resumed with the
 same id needs its marker to report what changed while it was closed. Instead,
@@ -964,7 +976,7 @@ error, never a silent fall-through to the next. The token is never written to
 |---|---|---|
 | `init` | yes | Refuses before cloning or pushing if the remote is not a private `mem-*` repo, or if it cannot check. |
 | `doctor` | yes | Non-zero exit if it cannot check. |
-| daemon start | no | With a token: refuses to start on a non-private repo. Without one: logs once that visibility was verified only at init and by `doctor`, and starts. |
+| daemon start | no | With a token: a repo that fails the check (not private, or the check itself fails, such as a GitHub App lookup error) is held: its loop does not start, `status` shows `waiting for the private-only check, re-checking with backoff: …`, and the check is retried from 10 s, doubling to every 30 min, until it passes; other repos sync meanwhile and the daemon stays up. A configured token source that gives no token (a failing `githubTokenCmd`, an empty `githubTokenFile`, an unset `githubTokenEnv`, an App that mints nothing) counts as a failed check, not as "no token": the repo is held, and its push guard blocks pushes until the source works again and the API says private. A held repo is released only when the API says private, never by a check skipped for want of a token (for example after `config.json` stops being trusted and its token sources are ignored). With no token source configured at all (or `recheckTokenCmd: false` with only a command): logs once that visibility was verified only at init and by `doctor`, and starts. |
 
 With `privateOnly` on and a token configured, the daemon also re-checks at most
 once an hour (conditional request with the ETag; 304 means unchanged). If the
@@ -1350,7 +1362,7 @@ Editing a route moves a folder. The new repo treats the folder's files as Claude
 
 ### Service, PID and lock
 
-There is still one service unit (`claude-memsync`), one process and one PID file. The PID file lives in the personal repo's sync dir (else the first repo's by name). Each sync dir takes a lock (`.state/daemon.lock`) for the life of the process, and a daemon, routed or not, refuses to start when another one holds any of the dirs it needs. The lock is released when the process dies, so a crash leaves nothing stale. One loop failing does not stop the others.
+There is still one service unit (`claude-memsync`), one process and one PID file. The PID file lives in the personal repo's sync dir (else the first repo's by name). Each sync dir takes a lock (`.state/daemon.lock`) for the life of the process, and a daemon, routed or not, refuses to start when another one holds any of the dirs it needs. The lock is released when the process dies, so a crash leaves nothing stale. One loop failing does not stop the others, and neither does one repo failing the private-only check: that repo is held and re-checked with backoff (see the table of checks).
 
 Install the unit as usual; with a routes file present, `run` loads every repo of `routes.json` this host has, and `claude-memsync install` needs no legacy `~/.claudesync/config.json`: without `--config` it uses the personal (primary) repo's config (`--config <path>` still wins).
 

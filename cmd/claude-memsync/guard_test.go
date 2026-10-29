@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,9 +11,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
+	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
 )
 
 const cmdTok = "tok-CMD-SECRET-987654"
@@ -362,20 +365,36 @@ func TestRunInitPrivateOnlyPublicPushesNothing(t *testing.T) {
 	}
 }
 
-// Wiring: program.Start with a public repo refuses.
-func TestProgramStartRefusesPublicRepo(t *testing.T) {
-	cfg := guardCfg(t, jsonH(200, repoJSON{Name: "mem-personal", Private: tb(false), Visibility: "public"}), true)
+// A public repo is held, never synced: Start succeeds (a service manager has
+// nothing to restart), no loop runs, and the state file says "not private".
+func TestProgramStartHoldsPublicRepo(t *testing.T) {
+	fastGuardRetry(t)
+	var checks atomic.Int32
+	h := func(w http.ResponseWriter, r *http.Request) {
+		checks.Add(1)
+		jsonH(200, repoJSON{Name: "mem-personal", Private: tb(false), Visibility: "public"})(w, r)
+	}
+	cfg := guardCfg(t, h, true)
 	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
+	var started atomic.Int32
+	old := runLoop
+	runLoop = func(ctx context.Context, l *syncpkg.Loop) error { started.Add(1); <-ctx.Done(); return nil }
+	t.Cleanup(func() { runLoop = old })
 	p := &program{configPath: cfg.Path()}
-	err := p.Start(nil)
-	if err == nil {
-		_ = p.Stop(nil)
-		t.Fatal("Start must refuse a public repo")
+	if err := p.Start(nil); err != nil {
+		t.Fatalf("a public repo must be held, not refuse the daemon: %v", err)
 	}
-	if !strings.Contains(err.Error(), "not private") {
-		t.Errorf("wrong refusal: %v", err)
+	waitFor(t, "a few re-checks", func() bool { return checks.Load() >= 4 })
+	if n := started.Load(); n != 0 {
+		t.Fatalf("a public repo's loop started %d times", n)
+	}
+	if b, err := os.ReadFile(loopFailedPath(cfg.SyncDir)); err != nil || !strings.Contains(string(b), "not private") {
+		t.Errorf("state file = %q, %v; want the refusal", b, err)
+	}
+	if err := p.Stop(nil); err != nil {
+		t.Fatal(err)
 	}
 }
 
