@@ -211,7 +211,15 @@ func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project st
 	if len(targets) > 0 {
 		var held bool
 		if lk, held, err = lock.TryHook(targets[0].cfg.SyncDir); held {
-			return nil, nil, nil, nil
+			// Held alerts need no lock (per-session, git-free): tell them now.
+			if len(alerts) == 0 {
+				return nil, nil, nil, nil
+			}
+			b, rerr := hookReplyJSON(in.Event, alerts)
+			if rerr != nil {
+				return nil, nil, nil, rerr
+			}
+			return b, func() error { alertCommit(); return nil }, nil, nil
 		}
 	}
 	owned := false
