@@ -25,7 +25,18 @@ ok()    { PASS=$((PASS + 1)); printf 'PASS    %s\n' "$1"; }
 bad()   { FAIL=$((FAIL + 1)); printf 'FAIL    %s\n' "$1"; }
 check() { if "${@:2}"; then ok "$1"; else bad "$1"; fi; }
 
-rm -rf "$W"; mkdir -p "$W/out" "$W/all" "$W/x" "$W/home" "$W/stubs"
+rm -rf "$W"; mkdir -p "$W/fakegl"
+# A fake gitleaks (the real scan is release.yml's and the maintainer's; see the checks below):
+# it records its arguments and exits $FAKE_GL_RC (default 0).
+cat >"$W/fakegl/gitleaks" <<'FAKE'
+#!/bin/sh
+echo "$@" >>"${FAKE_GL_LOG:?}"
+exit "${FAKE_GL_RC:-0}"
+FAKE
+chmod +x "$W/fakegl/gitleaks"
+export FAKE_GL_LOG="$W/gl.log"
+PATH="$W/fakegl:$PATH"
+mkdir -p "$W/out" "$W/all" "$W/x" "$W/home" "$W/stubs"
 GO="${GO:-go}" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/out" "$TARGET" >"$W/package.log" 2>&1 || { tail -20 "$W/package.log"; bad "package-release.sh exits 0"; }
 A="$W/out/$NAME.tar.gz"
 check "archive exists" [ -f "$A" ]
@@ -74,6 +85,28 @@ for bt in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
 done
 check "all targets: no windows budget archive" bash -c "! ls '$W/all' | grep -q 'budget-windows'"
 check "all targets: SHA256SUMS holds 6 product and 4 budget archives, and verifies" bash -c "[ \"\$(grep -c -- '-budget-' '$W/all/SHA256SUMS')\" = 4 ] && [ \"\$(grep -vc -- '-budget-' '$W/all/SHA256SUMS')\" = 6 ] && cd '$W/all' && ${SUMC[*]} SHA256SUMS >/dev/null"
+
+# The secret scan: gitleaks runs over the extracted contents of every archive
+# (product and budget) before SHA256SUMS is written; any finding fails the run
+# and leaves nothing to upload. No scanner is an error unless the documented
+# local opt-out PACKAGE_RELEASE_SKIP_GITLEAKS=1 is set (release.yml never sets it).
+n=0; for a in $(cd "$W/all" && ls | grep '\.\(tar\.gz\|zip\)$'); do n=$((n + 1)); done
+: >"$W/gl.log"
+GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/scanned" >"$W/scanned.log" 2>&1 || bad "package-release.sh with a clean scan exits 0"
+check "the scan ran once per archive ($n)" bash -c "[ \"\$(grep -c . '$W/gl.log')\" = $n ]"
+for a in $(cd "$W/all" && ls | grep '\.\(tar\.gz\|zip\)$'); do
+  check "the scan covered $a" bash -c "grep -q 'dir.* [^ ]*${a%.tar.gz}' '$W/gl.log' || grep -q 'dir.* [^ ]*${a%.zip}' '$W/gl.log'"
+done
+check "the scan is gitleaks dir, redacted" bash -c "grep -q '^dir ' '$W/gl.log' && ! grep -qv -- '--redact' '$W/gl.log'"
+set +e; FAKE_GL_RC=1 GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/leaky" >"$W/leaky.log" 2>&1; lrc=$?; set -e
+check "a finding fails the packaging (rc=$lrc)" [ "$lrc" -ne 0 ]
+check "... and leaves no SHA256SUMS and no archive to upload" bash -c "[ ! -e '$W/leaky/SHA256SUMS' ] && [ -z \"\$(ls '$W/leaky' | grep '\.\(tar\.gz\|zip\)$')\" ]"
+SYSPATH="$W/stubgo:/usr/bin:/bin"
+set +e; PATH="$SYSPATH" GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/noscan" >"$W/noscan.log" 2>&1; nrc=$?; set -e
+check "no gitleaks on PATH fails clearly (rc=$nrc)" bash -c "[ $nrc -ne 0 ] && grep -q 'gitleaks' '$W/noscan.log' && [ ! -e '$W/noscan/SHA256SUMS' ]"
+set +e; PATH="$SYSPATH" PACKAGE_RELEASE_SKIP_GITLEAKS=1 GO="$W/stubgo/go" bash "$ROOT/scripts/package-release.sh" "$VER" "$W/optout" >"$W/optout.log" 2>&1; orc=$?; set -e
+check "the documented opt-out packages without gitleaks (rc=$orc)" bash -c "[ $orc -eq 0 ] && [ -f '$W/optout/SHA256SUMS' ]"
+check "release.yml never sets the opt-out and installs the pinned gitleaks" bash -c "! grep -q PACKAGE_RELEASE_SKIP_GITLEAKS '$ROOT/.github/workflows/release.yml' && grep -q 'GITLEAKS_VERSION: 8.30.1' '$ROOT/.github/workflows/release.yml' && grep -q 'GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb' '$ROOT/.github/workflows/release.yml'"
 
 # One release-version rule everywhere: package-release.sh refuses what bootstrap.sh
 # --prebuilt-dir would refuse, and release.yml's tag check is the same rule.
