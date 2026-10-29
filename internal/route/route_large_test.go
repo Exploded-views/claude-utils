@@ -127,3 +127,37 @@ func TestLiveFolderUnderHugeDirIsReported(t *testing.T) {
 		t.Errorf("summary lists %v, want only %s", s.TooLarge, hash8(live))
 	}
 }
+
+// The documented limit: under a directory of more than maxList entries a name
+// the probe cannot spell (non-ASCII, '+', '@', or four or more separators in
+// one component) stays unresolved, and a live one is reported as such.
+func TestLiveUnspellableNamesUnderHugeDirAreReported(t *testing.T) {
+	names := []string{"café-app", "a+b", "my-very-long-project-name"}
+	big := hugeDir(t, 400, names...)
+	projects := t.TempDir()
+	r := New(fileOf(Rule{Path: "/nowhere-at-all/**", Repo: "projects"}), func(string) bool { return true })
+	r.Logf = func(string, ...any) {}
+	r.ProjectsDir = projects
+	var folders []string
+	for _, n := range names {
+		folder := escape(filepath.Join(big, n))
+		mem := filepath.Join(projects, folder, "memory")
+		if err := os.MkdirAll(mem, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(mem, "n.md"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		folders = append(folders, folder)
+	}
+	s := r.Summarize(folders)
+	got := map[string]bool{}
+	for _, h := range s.TooLarge {
+		got[h] = true
+	}
+	for i, f := range folders {
+		if !got[hash8(f)] {
+			t.Errorf("%s is live and unresolved under a huge dir but not listed (TooLarge %v)", names[i], s.TooLarge)
+		}
+	}
+}
