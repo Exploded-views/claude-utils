@@ -174,7 +174,13 @@ func TestMaintainTimeoutKillsTheProcessGroup(t *testing.T) {
 	l, repo := maintLoop(t, &now)
 	l.MaintainTimeout = 300 * time.Millisecond
 	t.Cleanup(func() { killPidFile(gpid) })
-	l.maybeMaintain(repo)
+	done := make(chan struct{})
+	go func() { defer close(done); l.maybeMaintain(repo) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("housekeeping still waiting 5s after its 300ms timeout: the gc's children outlive the kill")
+	}
 	assertDead(t, gpid)
 }
 
