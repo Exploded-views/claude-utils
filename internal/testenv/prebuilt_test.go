@@ -98,18 +98,20 @@ func TestBudgetPrebuiltVersionMismatchFails(t *testing.T) {
 }
 
 func TestBudgetPrebuiltNeedsBothVars(t *testing.T) {
+	ms0, _ := BinariesVersion(t, prebuiltTestTag) // real binaries: only the missing variable can be the reason
 	for name, env := range map[string]map[string]string{
-		"dir only": {EnvBinDir: t.TempDir()},
+		"dir only": {EnvBinDir: filepath.Dir(ms0)},
 		"tag only": {EnvTag: prebuiltTestTag},
 	} {
-		if _, _, _, err := prebuiltBinaries(envMap(env)); err == nil {
-			t.Errorf("%s: no error", name)
+		if _, _, _, err := prebuiltBinaries(envMap(env)); err == nil || !strings.Contains(err.Error(), "together") {
+			t.Errorf("%s: err = %v, want the set-both-or-neither error", name, err)
 		}
 		if _, err := prebuiltSetup(envMap(env), filepath.Join(t.TempDir(), "o"), t.TempDir()); err == nil {
 			t.Errorf("%s: set-up did not fail", name)
 		}
 	}
-	t.Setenv(EnvBinDir, t.TempDir())
+	t.Setenv(EnvBinDir, filepath.Dir(ms0))
+	t.Setenv(EnvTag, "")
 	os.Unsetenv(EnvTag)
 	if f := runRecorded(func(tb testing.TB) { Binaries(tb) }); !f.fatal || f.skipped {
 		t.Errorf("Binaries with the dir alone: fatal=%v skipped=%v, want a failure", f.fatal, f.skipped)
