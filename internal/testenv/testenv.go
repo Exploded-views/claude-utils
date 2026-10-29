@@ -18,6 +18,14 @@ import (
 // pointed HOME at a temp dir.
 var startEnv = os.Environ()
 
+// hostTmp is the temp dir this process started with, before SmallTempDir
+// swaps TMPDIR.
+var hostTmp = os.TempDir()
+
+// HostTempDir returns the temp dir the test process started with, whatever
+// SmallTempDir set TMPDIR to since.
+func HostTempDir() string { return hostTmp }
+
 var (
 	cachesOnce sync.Once
 	caches     []string
