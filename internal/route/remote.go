@@ -103,12 +103,22 @@ func sanitizeSegment(s string) string {
 	return strings.TrimRight(b.String(), ".")
 }
 
+// readDir and walkHook are test seams: the directory reader, and a hook called
+// with the folder each time a walk starts.
+var (
+	readDir  = os.ReadDir
+	walkHook func(folder string)
+)
+
 var windowsDrive = regexp.MustCompile(`^([A-Za-z])--(.+)$`)
 
 // Candidates returns every existing directory whose escaped path equals the
 // folder name. Usually one; the escaping is lossy, so it can be several
 // (src/my-app and src/my.app) or none (deleted, or on another machine).
 func Candidates(folder string) []string {
+	if walkHook != nil {
+		walkHook(folder)
+	}
 	folder = escape(folder)
 	fold := func(s string) string { return s }
 	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
@@ -130,7 +140,7 @@ func walk(root, rest string, fold func(string) string) []string {
 	var out []string
 	var rec func(dir, rest string)
 	rec = func(dir, rest string) {
-		entries, err := os.ReadDir(dir)
+		entries, err := readDir(dir)
 		if err != nil {
 			return
 		}
