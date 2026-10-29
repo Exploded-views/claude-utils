@@ -7,8 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -23,8 +21,8 @@ import (
 
 // B9: the daemon's start-up pass on the B2/B3 fixture, counted. The daemon is
 // built with the budgetprobe tag (every proc.Run child is recorded through the
-// proc spawn seam) and a zsh git shim on PATH logs start and end of each git
-// child, for the peak number running at once. Route resolution is told apart
+// proc spawn seam, with the peak number running at once) and a POSIX sh git
+// shim on PATH counts calls, to cross-check the seam. Route resolution is told apart
 // from the five sync loops by the directory git is run in.
 func TestBudgetB9_StartupSpawns(t *testing.T) {
 	logLoad(t)
@@ -119,7 +117,7 @@ func TestBudgetB9_StartupSpawns(t *testing.T) {
 	// git shim, installed after the fixture is built so setup is not logged
 	shimDir := t.TempDir()
 	shimLog := filepath.Join(shimDir, "log")
-	shim := "#!/bin/zsh\nzmodload zsh/datetime\necho \"S $EPOCHREALTIME $$ $*\" >> " + shimLog + "\n" + realGit + " \"$@\"\nrc=$?\necho \"E $EPOCHREALTIME $$\" >> " + shimLog + "\nexit $rc\n"
+	shim := "#!/bin/sh\necho x \"$@\" >> " + shimLog + "\nexec " + realGit + " \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(shimDir, "git"), []byte(shim), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -166,9 +164,13 @@ func TestBudgetB9_StartupSpawns(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	_ = cmd.Process.Signal(syscall.SIGUSR1)
-	var spawns [][]string
+	var probe struct {
+		Spawns  [][]string `json:"spawns"`
+		PeakAll int        `json:"peak_all"`
+		PeakRes int        `json:"peak_res"`
+	}
 	for i := 0; i < 100; i++ {
-		if b, err := os.ReadFile(probeOut); err == nil && json.Unmarshal(b, &spawns) == nil {
+		if b, err := os.ReadFile(probeOut); err == nil && json.Unmarshal(b, &probe) == nil {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -180,6 +182,7 @@ func TestBudgetB9_StartupSpawns(t *testing.T) {
 	syncRoot := filepath.Join(home, ".claudesync.d")
 	var total, loops, perCheckout, perOther, otherRes int
 	perDir := map[string]int{}
+	spawns := probe.Spawns
 	for _, a := range spawns {
 		total++
 		dir := ""
@@ -209,50 +212,13 @@ func TestBudgetB9_StartupSpawns(t *testing.T) {
 		}
 	}
 	resolution := perCheckout + perOther
-	// Peak number of resolution git children running at once, from the shim.
+	// Peak children running at once come from the daemon's spawn seam; the
+	// shim only counts calls, to cross-check the seam.
 	sb, _ := os.ReadFile(shimLog)
-	type pt struct {
-		t float64
-		d int
-	}
-	var pts []pt
-	res := map[string]bool{} // pid -> is a resolution child
-	allPts := []pt{}
-	for _, l := range strings.Split(string(sb), "\n") {
-		f := strings.Fields(l)
-		if len(f) < 3 {
-			continue
-		}
-		ts, _ := strconv.ParseFloat(f[1], 64)
-		switch f[0] {
-		case "S":
-			isRes := strings.Contains(l, " -C "+tree.tmp) || strings.Contains(l, string(filepath.Separator)+"other"+string(filepath.Separator)+"o")
-			res[f[2]] = isRes
-			allPts = append(allPts, pt{ts, 1})
-			if isRes {
-				pts = append(pts, pt{ts, 1})
-			}
-		case "E":
-			allPts = append(allPts, pt{ts, -1})
-			if res[f[2]] {
-				pts = append(pts, pt{ts, -1})
-			}
-		}
-	}
-	peakOf := func(p []pt) int {
-		sort.SliceStable(p, func(i, j int) bool { return p[i].t < p[j].t })
-		cur, peak := 0, 0
-		for _, e := range p {
-			cur += e.d
-			if cur > peak {
-				peak = cur
-			}
-		}
-		return peak
-	}
-	peakRes, peakAll := peakOf(pts), peakOf(allPts)
-	t.Logf("COUNTS total=%d loops=%d resolution=%d (checkouts %d over %d dirs, max %d per dir; non-repo %d; no -C (loops) %d) peak resolution children=%d peak all git children=%d",
-		total, loops, resolution, perCheckout, len(perDir)-perOther, maxPerDir, perOther, otherRes, peakRes, peakAll)
+	shimmed := strings.Count(string(sb), "x ")
+	peakRes, peakAll := probe.PeakRes, probe.PeakAll
+	t.Logf("COUNTS total=%d loops=%d resolution=%d (checkouts %d over %d dirs, max %d per dir; non-repo %d; no -C (loops) %d) peak resolution children=%d peak all git children=%d shim calls=%d",
+		total, loops, resolution, perCheckout, len(perDir)-perOther, maxPerDir, perOther, otherRes, peakRes, peakAll, shimmed)
 
 	nCheckouts := len(tree.real)
 	if perCheckout > nCheckouts || maxPerDir > 1 {
@@ -265,6 +231,9 @@ func TestBudgetB9_StartupSpawns(t *testing.T) {
 	}
 	if limit := 300 + 100 + 5*59; total > limit {
 		t.Errorf("start-up spawned %d git children, limit %d", total, limit)
+	}
+	if shimmed != total {
+		t.Errorf("the git shim saw %d calls, the spawn seam %d", shimmed, total)
 	}
 	if peakRes > 4 {
 		t.Errorf("peak concurrent resolution git children %d, limit 4", peakRes)

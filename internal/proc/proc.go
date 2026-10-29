@@ -85,6 +85,17 @@ func SetSpawnHook(f func(name string, args []string)) (restore func()) {
 	return func() { spawnHook.Store(nil) }
 }
 
+var spawnEndHook atomic.Pointer[func(name string, args []string)]
+
+// SetSpawnEndHook calls f when a child that Run started has exited (after the
+// spawn hook ran for it; tests measure how many run at once with the pair). It
+// is nil by default, so production pays one atomic load per child. It returns
+// the function that removes it.
+func SetSpawnEndHook(f func(name string, args []string)) (restore func()) {
+	spawnEndHook.Store(&f)
+	return func() { spawnEndHook.Store(nil) }
+}
+
 // Run is cmd.Run that KillAll can find.
 func Run(cmd *exec.Cmd) error {
 	if stopped.Load() {
@@ -94,7 +105,13 @@ func Run(cmd *exec.Cmd) error {
 		(*h)(cmd.Path, cmd.Args[1:])
 	}
 	if err := cmd.Start(); err != nil {
+		if h := spawnEndHook.Load(); h != nil {
+			(*h)(cmd.Path, cmd.Args[1:])
+		}
 		return err
+	}
+	if h := spawnEndHook.Load(); h != nil {
+		defer (*h)(cmd.Path, cmd.Args[1:])
 	}
 	pid := cmd.Process.Pid
 	mu.Lock()
