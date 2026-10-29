@@ -68,6 +68,22 @@ check "budget README names the run commands" bash -c "grep -q 'MEMSYNC_BUDGET_BI
 check "the budget binaries hold the budget gates (-test.list)" bash -c "'$BD/claude-memsync-budget.test' -test.list 'Budget' | grep -q '^TestBudgetB8' && '$BD/route-budget.test' -test.list 'Budget' | grep -q '^TestBudgetB4'"
 check "SHA256SUMS lists the product and the budget archive" bash -c "grep -q ' $NAME.tar.gz\$' '$W/out/SHA256SUMS' && grep -q ' $BNAME.tar.gz\$' '$W/out/SHA256SUMS'"
 
+# The packaged budget binaries guard themselves: a wrong tag, one variable alone,
+# and (B9) the skip in prebuilt mode, run from outside the checkout.
+mkdir -p "$W/guard"
+set +e
+(cd "$W/guard" && MEMSYNC_BUDGET_BIN_DIR="$D" MEMSYNC_BUDGET_TAG=v9.9.9 "$BD/claude-memsync-budget.test" -test.run '^TestBudgetB' >"$W/g1.log" 2>&1); g1=$?
+(cd "$W/guard" && MEMSYNC_BUDGET_BIN_DIR="$D" "$BD/route-budget.test" -test.run '^TestBudgetB' >"$W/g2.log" 2>&1); g2=$?
+(cd "$W/guard" && MEMSYNC_BUDGET_TAG="$VER" "$BD/route-budget.test" -test.run '^TestBudgetB' >"$W/g3.log" 2>&1); g3=$?
+(cd "$W/guard" && MEMSYNC_BUDGET_BIN_DIR="$D" MEMSYNC_BUDGET_TAG="$VER" "$BD/claude-memsync-budget.test" -test.run '^TestBudgetB9' -test.v >"$W/g4.log" 2>&1); g4=$?
+set -e
+check "budget binary with a wrong tag exits 1 before any gate (rc=$g1)" bash -c "[ $g1 -eq 1 ] && grep -q 'version mismatch' '$W/g1.log' && ! grep -q -- '--- ' '$W/g1.log'"
+check "budget binary with the dir alone exits 1 (rc=$g2)" bash -c "[ $g2 -eq 1 ] && grep -q 'go together' '$W/g2.log'"
+check "budget binary with the tag alone exits 1 (rc=$g3)" bash -c "[ $g3 -eq 1 ] && grep -q 'go together' '$W/g3.log'"
+check "budget binary, right tag: B9 skips and exits 0 (rc=$g4)" bash -c "[ $g4 -eq 0 ] && grep -q -- '--- SKIP: TestBudgetB9' '$W/g4.log'"
+check "budget README and docs select the gates with ^TestBudgetB" bash -c "grep -q \"-test.run '^TestBudgetB'\" '$BD/README' && grep -q \"-test.run '^TestBudgetB'\" '$ROOT/docs/releases.md' && ! grep -q -- '-test.run Budget' '$BD/README' '$ROOT/docs/releases.md'"
+check "budget README and docs say which gates run which binary" bash -c "grep -q 'B1, B4, B7 and B8' '$BD/README' && grep -q 'B1, B4, B7 and B8' '$ROOT/docs/releases.md' && grep -q 'B2/B3, B5 and B6' '$BD/README' && grep -q 'B2/B3, B5 and B6' '$ROOT/docs/releases.md'"
+
 # Every default target, with a stub Go that only writes its -o file: the release
 # set is four budget archives (linux and darwin, amd64 and arm64; none for
 # windows), and SHA256SUMS covers them and the six product archives alike.

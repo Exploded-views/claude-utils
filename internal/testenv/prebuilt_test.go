@@ -38,6 +38,14 @@ func runRecorded(fn func(tb testing.TB)) *fatalTB {
 	return f
 }
 
+// asTestBinaryVersion makes the running test binary report v, as a release-stamped one would.
+func asTestBinaryVersion(t *testing.T, v string) {
+	t.Helper()
+	old := selfVersion
+	selfVersion = func() string { return v }
+	t.Cleanup(func() { selfVersion = old })
+}
+
 func envMap(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 
 // A fake go first on PATH, recording any call. The caller builds its binaries
@@ -55,6 +63,7 @@ func installFakeGo(t *testing.T) (marker string) {
 }
 
 func TestBudgetPrebuiltModeNeverRunsGo(t *testing.T) {
+	asTestBinaryVersion(t, prebuiltTestTag)
 	ms0, _ := BinariesVersion(t, prebuiltTestTag) // out of band, with the real go
 	dir := filepath.Dir(ms0)
 	marker := installFakeGo(t)
@@ -83,6 +92,7 @@ func TestBudgetPrebuiltModeNeverRunsGo(t *testing.T) {
 }
 
 func TestBudgetPrebuiltVersionMismatchFails(t *testing.T) {
+	asTestBinaryVersion(t, "v1.2.3-other")
 	ms0, _ := BinariesVersion(t, prebuiltTestTag)
 	dir := filepath.Dir(ms0)
 	t.Setenv(EnvBinDir, dir)
@@ -122,6 +132,7 @@ func TestBudgetPrebuiltNeedsBothVars(t *testing.T) {
 }
 
 func TestBudgetPrebuiltRefusesRealHome(t *testing.T) {
+	asTestBinaryVersion(t, prebuiltTestTag)
 	ms0, _ := BinariesVersion(t, prebuiltTestTag)
 	env := map[string]string{EnvBinDir: filepath.Dir(ms0), EnvTag: prebuiltTestTag}
 	for _, k := range []string{"HOME", "XDG_CONFIG_HOME", "TMPDIR"} {
@@ -159,6 +170,7 @@ func TestBudgetPrebuiltRefusesRealHome(t *testing.T) {
 }
 
 func TestBudgetPrebuiltIsolatesHome(t *testing.T) {
+	asTestBinaryVersion(t, prebuiltTestTag)
 	ms0, _ := BinariesVersion(t, prebuiltTestTag)
 	env := map[string]string{EnvBinDir: filepath.Dir(ms0), EnvTag: prebuiltTestTag}
 	keys := []string{"HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "TMPDIR"}
@@ -182,5 +194,117 @@ func TestBudgetPrebuiltIsolatesHome(t *testing.T) {
 	cleanup()
 	if _, err := os.Stat(home); err == nil {
 		t.Errorf("cleanup left %s", home)
+	}
+}
+
+// B1, B4, B7 and B8 run the test binary's own code, so its version must be the
+// tag too: an old budget archive unpacked beside a new product archive must fail.
+func TestBudgetPrebuiltTestBinaryVersionMustMatch(t *testing.T) {
+	ms0, _ := BinariesVersion(t, prebuiltTestTag) // the product binaries match the tag
+	env := envMap(map[string]string{EnvBinDir: filepath.Dir(ms0), EnvTag: prebuiltTestTag})
+	for _, k := range []string{"HOME", "XDG_CONFIG_HOME", "TMPDIR"} {
+		t.Setenv(k, os.Getenv(k))
+	}
+	asTestBinaryVersion(t, "v0.0.1-old-budget-archive")
+	home := os.Getenv("HOME")
+	cleanup, err := prebuiltSetup(env, filepath.Join(t.TempDir(), "orig"), t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "test binary") {
+		t.Fatalf("a test binary stamped with another tag: err = %v, want a refusal naming the test binary", err)
+	}
+	if cleanup != nil {
+		t.Error("a cleanup came back with the error")
+	}
+	if os.Getenv("HOME") != home {
+		t.Error("HOME changed although the set-up refused")
+	}
+	asTestBinaryVersion(t, prebuiltTestTag)
+	cleanup, err = prebuiltSetup(env, filepath.Join(t.TempDir(), "orig"), t.TempDir())
+	if err != nil {
+		t.Fatalf("a matching test binary: %v", err)
+	}
+	cleanup()
+}
+
+func TestBudgetPrebuiltScrubsGitAndClaudeEnv(t *testing.T) {
+	asTestBinaryVersion(t, prebuiltTestTag)
+	ms0, _ := BinariesVersion(t, prebuiltTestTag)
+	env := envMap(map[string]string{EnvBinDir: filepath.Dir(ms0), EnvTag: prebuiltTestTag})
+	for _, k := range []string{"HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "TMPDIR", "USERPROFILE"} {
+		t.Setenv(k, os.Getenv(k))
+	}
+	stand := t.TempDir()
+	for k, v := range map[string]string{
+		"GIT_DIR": stand, "GIT_WORK_TREE": stand, "GIT_CONFIG_GLOBAL": filepath.Join(stand, "gitconfig"),
+		"GIT_CONFIG_PARAMETERS": "'a.b=c'", "GIT_SSH_COMMAND": "ssh -i " + stand + "/key", "GIT_AUTHOR_NAME": "inherited",
+		"CLAUDE_PROJECT_DIR": stand, "SSH_AUTH_SOCK": stand + "/agent", "GIT_CONFIG_NOSYSTEM": "",
+	} {
+		t.Setenv(k, v)
+	}
+	cleanup, err := prebuiltSetup(env, filepath.Join(t.TempDir(), "orig"), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("env").Output() // what a binary under test starts with
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, l := range strings.Split(string(out), "\n") {
+		if k, v, ok := strings.Cut(l, "="); ok {
+			got[k] = v
+		}
+	}
+	home := got["HOME"]
+	for _, k := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_CONFIG_PARAMETERS", "GIT_AUTHOR_NAME", "CLAUDE_PROJECT_DIR", "SSH_AUTH_SOCK"} {
+		if v, ok := got[k]; ok {
+			t.Errorf("%s=%s is inherited by the binaries under test", k, v)
+		}
+	}
+	if g := got["GIT_CONFIG_GLOBAL"]; g != filepath.Join(home, ".gitconfig") {
+		t.Errorf("GIT_CONFIG_GLOBAL = %q, want a file under the temp HOME %s", g, home)
+	}
+	if got["GIT_CONFIG_NOSYSTEM"] != "1" {
+		t.Errorf("GIT_CONFIG_NOSYSTEM = %q, want 1", got["GIT_CONFIG_NOSYSTEM"])
+	}
+	if c := got["GIT_SSH_COMMAND"]; c == "" || strings.Contains(c, stand) {
+		t.Errorf("GIT_SSH_COMMAND = %q, want a command that fails", c)
+	} else if err := exec.Command("sh", "-c", c).Run(); err == nil {
+		t.Errorf("GIT_SSH_COMMAND %q succeeds; ssh must never be reachable", c)
+	}
+	cleanup()
+	if os.Getenv("GIT_DIR") != stand || os.Getenv("CLAUDE_PROJECT_DIR") != stand {
+		t.Error("cleanup did not restore the inherited variables")
+	}
+}
+
+func TestBudgetPrebuiltRefusesMissingHome(t *testing.T) {
+	asTestBinaryVersion(t, prebuiltTestTag)
+	ms0, _ := BinariesVersion(t, prebuiltTestTag)
+	env := envMap(map[string]string{EnvBinDir: filepath.Dir(ms0), EnvTag: prebuiltTestTag})
+	base := t.TempDir()
+	if _, err := prebuiltSetup(env, "", base); err == nil || !strings.Contains(err.Error(), "HOME") {
+		t.Fatalf("no HOME at start: err = %v, want a refusal naming HOME", err)
+	}
+	if ents, _ := os.ReadDir(base); len(ents) != 0 {
+		t.Errorf("the refused set-up left %d entries", len(ents))
+	}
+	// Source mode needs no HOME check: nothing is isolated there.
+	if _, err := prebuiltSetup(envMap(nil), "", base); err != nil {
+		t.Errorf("source mode with no HOME: %v", err)
+	}
+}
+
+func TestBudgetPrebuiltTagMustBeAReleaseTag(t *testing.T) {
+	ms0, _ := BinariesVersion(t, prebuiltTestTag)
+	for _, tag := range []string{"dev", "1.2.3", "v1", "v1.2", "v1.2.3+meta", "v1.2.3-", "vfoo"} {
+		env := envMap(map[string]string{EnvBinDir: filepath.Dir(ms0), EnvTag: tag})
+		if _, _, _, err := prebuiltBinaries(env); err == nil || !strings.Contains(err.Error(), "release tag") {
+			t.Errorf("tag %q: err = %v, want a release-tag refusal", tag, err)
+		}
+	}
+	for _, tag := range []string{"v0.3.0", "v0.3.0-ev.1", "v9.9.9-prebuilt.test"} {
+		if !releaseTagRE.MatchString(tag) {
+			t.Errorf("%q should be a release tag", tag)
+		}
 	}
 }
