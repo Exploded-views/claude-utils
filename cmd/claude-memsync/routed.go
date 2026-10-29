@@ -726,7 +726,7 @@ func superviseLoopWith(ctx context.Context, loop *syncpkg.Loop, recheck func(), 
 		msg := strings.SplitN(err.Error(), "\n", 2)[0]
 		log.Printf("[%s] stopped: %s; restarting in %s", loop.Name, msg, backoff)
 		_ = os.MkdirAll(filepath.Dir(failed), 0700)
-		_ = os.WriteFile(failed, []byte(since+" "+msg+"\n"), 0600)
+		_ = os.WriteFile(failed, []byte(time.Now().UTC().Format(time.RFC3339)+" "+msg+"\n"), 0600)
 		if time.Since(started) > loopHealthy {
 			backoff = backoffMin
 		}
