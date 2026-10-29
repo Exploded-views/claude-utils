@@ -709,8 +709,34 @@ type RenamedFolder struct {
 	DaysLeft int
 }
 
+// warmWorkers is how many folders Warm resolves side by side; the git children
+// among them are bounded by gitSem.
+const warmWorkers = 16
+
+// Warm decides every folder, side by side, so the first pass over many folders
+// is not one resolution after another. The answers are cached like any Decide.
+func (r *Router) Warm(folders []string) {
+	work := make(chan string)
+	var wg sync.WaitGroup
+	for i := 0; i < warmWorkers && i < len(folders); i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for f := range work {
+				r.Decide(f)
+			}
+		}()
+	}
+	for _, f := range folders {
+		work <- f
+	}
+	close(work)
+	wg.Wait()
+}
+
 // Summarize routes every folder and counts the outcome.
 func (r *Router) Summarize(folders []string) Summary {
+	r.Warm(folders)
 	s := Summary{Owned: map[string]int{}}
 	for name := range r.cur().Repos {
 		s.Owned[name] = 0

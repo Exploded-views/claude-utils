@@ -515,6 +515,11 @@ func (s *routedSet) Start(ctx context.Context) (*running, error) {
 		log.Printf("routing: repo %q is not on this host; folders routed to it are denied", m)
 	}
 	s.recheckForeign()
+	// Resolve every folder side by side before the loops each ask for theirs
+	// one by one (the git children among them are bounded).
+	if primary, ok := s.Primary(); ok {
+		s.Router.Warm(claudeFolders(primary.ClaudeProjectsDir))
+	}
 	interval := time.Hour
 	for _, name := range s.names() {
 		cfg := s.Cfgs[name]

@@ -460,13 +460,20 @@ func (c *walkCache) candidatesLarge(folder string) ([]string, bool) {
 // is not in a work tree or git could not answer; url "" means no origin.
 func remoteURL(dir string) (url string, ok bool) {
 	git := func(args ...string) (string, error) { return gitOut(dir, args...) }
-	if in, err := git("rev-parse", "--is-inside-work-tree"); err != nil || in != "true" {
+	switch directInside(dir) {
+	case directNo:
 		return "", false
-	}
-	// The shared config holds the remote; this also proves a worktree's
-	// common dir resolves.
-	if _, err := git("rev-parse", "--git-common-dir"); err != nil {
-		return "", false
+	case directYes:
+		// Read from the files: is-inside-work-tree and git-common-dir would say yes.
+	default:
+		if in, err := git("rev-parse", "--is-inside-work-tree"); err != nil || in != "true" {
+			return "", false
+		}
+		// The shared config holds the remote; this also proves a worktree's
+		// common dir resolves.
+		if _, err := git("rev-parse", "--git-common-dir"); err != nil {
+			return "", false
+		}
 	}
 	u, err := git("remote", "get-url", "origin")
 	if err != nil {
@@ -479,8 +486,17 @@ func remoteURL(dir string) (url string, ok bool) {
 	return u, true
 }
 
-// gitOut runs git in dir with the inherited GIT_* variables dropped.
+// gitSem bounds the git children route resolution runs at once: the start-up
+// pass resolves hundreds of directories side by side and the computer is small.
+var gitSem = make(chan struct{}, gitConcurrency)
+
+const gitConcurrency = 4
+
+// gitOut runs git in dir with the inherited GIT_* variables dropped, at most
+// gitConcurrency at a time.
 func gitOut(dir string, args ...string) (string, error) {
+	gitSem <- struct{}{}
+	defer func() { <-gitSem }()
 	c := proc.Command("git", append([]string{"-C", dir}, args...)...)
 	c.Env = append(cleanGitEnv(os.Environ()), "LC_ALL=C", "LANGUAGE=C")
 	var out bytes.Buffer
