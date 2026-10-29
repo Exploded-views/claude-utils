@@ -344,6 +344,9 @@ const (
 type Router struct {
 	cur_ atomic.Pointer[File]
 	gen  atomic.Uint64 // bumped on every Replace and Refresh
+	// walks is this generation's directory and Candidates cache. A walk keeps
+	// the one it started with, so a stale walk cannot fill a newer generation.
+	walks atomic.Pointer[walkCache]
 
 	// afterCompute, if set, runs between computing a decision and storing it
 	// (a test seam for the race with Replace).
@@ -359,6 +362,12 @@ type Router struct {
 	Resolve func(folder string) (string, resolution)
 	// Candidates lists the directories a folder name may stand for.
 	Candidates func(folder string) []string
+	// largeFn reports that a directory on the folder's path was too large to
+	// list and nothing was found (set by New with Candidates).
+	largeFn func(folder string) bool
+	// ProjectsDir is Claude's projects directory, to tell live folders from
+	// the folders of deleted directories; "" counts none as live.
+	ProjectsDir string
 	// Logf receives the routing log lines (default log.Printf).
 	Logf func(format string, args ...any)
 	// StatePath, if set, remembers each folder's owner across restarts, so a
@@ -384,18 +393,22 @@ type Router struct {
 	rootMu    sync.Mutex
 	rootCache map[string]rootEntry
 
-	mu     sync.Mutex
-	cache  map[string]Decision
-	logged map[string]bool
-	owners map[string]string
-	loaded bool
+	mu    sync.Mutex
+	cache map[string]Decision
+	// inflight holds a channel, closed when done, for each folder being decided.
+	inflight map[string]chan struct{}
+	logged   map[string]bool
+	owners   map[string]string
+	loaded   bool
 }
 
 // New returns a Router. have reports whether this host has the named repo.
 func New(f File, have func(repo string) bool) *Router {
-	r := &Router{have: have, cache: map[string]Decision{}, logged: map[string]bool{}, Logf: log.Printf}
+	r := &Router{have: have, cache: map[string]Decision{}, inflight: map[string]chan struct{}{}, logged: map[string]bool{}, Logf: log.Printf}
 	r.cur_.Store(normalized(f))
-	r.Candidates = Candidates
+	r.walks.Store(newWalkCache())
+	r.Candidates = func(folder string) []string { return r.walks.Load().candidates(folder) }
+	r.largeFn = func(folder string) bool { _, large := r.walks.Load().candidatesLarge(folder); return large }
 	r.SSHHost = sshHostname
 	r.Resolve = r.defaultResolve
 	r.Roots = r.defaultRoots
@@ -430,22 +443,24 @@ func normalized(f File) *File {
 }
 
 // Replace swaps in a new routing table atomically and drops the cached
-// decisions. The repos a host runs are fixed at start: a rule naming a repo that
+// decisions and directory listings. The repos a host runs are fixed at start: a rule naming a repo that
 // has no running loop only denies.
 func (r *Router) Replace(f File) {
 	r.mu.Lock()
 	r.cur_.Store(normalized(f))
 	r.gen.Add(1)
+	r.walks.Store(newWalkCache())
 	r.cache = map[string]Decision{}
 	r.reloadIDsLocked()
 	r.mu.Unlock()
 }
 
-// Refresh drops the cached decisions, so changed checkouts and remotes are
+// Refresh drops the cached decisions and directory listings, so changed checkouts and remotes are
 // seen. The daemon calls it on its pull tick.
 func (r *Router) Refresh() {
 	r.mu.Lock()
 	r.gen.Add(1)
+	r.walks.Store(newWalkCache())
 	r.cache = map[string]Decision{}
 	r.reloadIDsLocked()
 	r.mu.Unlock()
@@ -467,19 +482,39 @@ func (r *Router) defaultResolve(folder string) (string, resolution) {
 	return "", resolutionAmbiguous
 }
 
-// Decide routes one folder (Claude's escaped folder name).
+// Decide routes one folder (Claude's escaped folder name). Callers that ask for
+// the same folder at once share one computation.
 func (r *Router) Decide(folder string) Decision {
-	r.mu.Lock()
-	if d, ok := r.cache[folder]; ok {
+	for {
+		r.mu.Lock()
+		if d, ok := r.cache[folder]; ok {
+			r.mu.Unlock()
+			return d
+		}
+		if call, busy := r.inflight[folder]; busy {
+			r.mu.Unlock()
+			<-call // then look at the cache again
+			continue
+		}
+		call := make(chan struct{})
+		r.inflight[folder] = call
 		r.mu.Unlock()
+		d := r.compute(folder)
+		r.mu.Lock()
+		delete(r.inflight, folder)
+		r.mu.Unlock()
+		close(call)
 		return d
 	}
-	r.mu.Unlock()
+}
 
+func (r *Router) compute(folder string) Decision {
 	for {
 		gen := r.gen.Load()
 		d, key, keyOK := r.decide(folder)
 		roots, rootsOK := r.rootsIfNeeded(folder, d, key, keyOK)
+		// File I/O: decided here, before the lock, and only stored under it.
+		live := r.tooLargeLive(folder, d)
 		if r.afterCompute != nil {
 			r.afterCompute()
 		}
@@ -492,6 +527,7 @@ func (r *Router) Decide(folder string) Decision {
 		}
 		d = r.identityLocked(folder, d, key, keyOK, roots, rootsOK)
 		r.cache[folder] = d
+		r.noteLargeLocked(folder, d, live)
 		r.noteLocked(folder, d)
 		r.mu.Unlock()
 		return d
@@ -664,6 +700,9 @@ type Summary struct {
 	Transferred []string
 	Different   []string
 	Unreadable  bool
+	// TooLarge: live folders left unresolved because a directory on their
+	// path has too many entries to list (by hash).
+	TooLarge []string
 }
 
 // RenamedFolder is a folder kept by its root commits until GraceEnds.
@@ -672,8 +711,55 @@ type RenamedFolder struct {
 	DaysLeft int
 }
 
+// warmWorkers is how many folders Warm resolves side by side; the git children
+// among them are bounded by gitSem.
+const warmWorkers = 16
+
+// Warm decides every folder, side by side, so the first pass over many folders
+// is not one resolution after another. The answers are cached like any Decide.
+func (r *Router) Warm(folders []string) {
+	work := make(chan string)
+	var wg sync.WaitGroup
+	for i := 0; i < warmWorkers && i < len(folders); i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for f := range work {
+				r.Decide(f)
+			}
+		}()
+	}
+	for _, f := range folders {
+		work <- f
+	}
+	close(work)
+	wg.Wait()
+}
+
+// WarmWithin is Warm held to a deadline. It returns true when every folder was
+// decided in time. Otherwise it returns false at the deadline and the workers
+// keep resolving in the background: a folder not yet decided is decided when
+// its git answers (or times out), and a caller that asks for it meanwhile
+// shares that one computation.
+func (r *Router) WarmWithin(folders []string, d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.Warm(folders)
+	}()
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-done:
+		return true
+	case <-t.C:
+		return false
+	}
+}
+
 // Summarize routes every folder and counts the outcome.
 func (r *Router) Summarize(folders []string) Summary {
+	r.Warm(folders)
 	s := Summary{Owned: map[string]int{}}
 	for name := range r.cur().Repos {
 		s.Owned[name] = 0
@@ -695,6 +781,9 @@ func (r *Router) Summarize(folders []string) Summary {
 				left = 0
 			}
 			s.Renamed = append(s.Renamed, RenamedFolder{Hash: hash8(f), DaysLeft: left})
+		}
+		if r.tooLargeLive(f, d) {
+			s.TooLarge = append(s.TooLarge, hash8(f))
 		}
 		if d.Repo == "" {
 			s.Denied++

@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/MarimerLLC/claude-utils/internal/testenv"
 )
 
 // No test may reach a real service: commands that meet a held sync lock ask
@@ -19,5 +21,8 @@ func TestMain(m *testing.M) {
 	userUnitPathFn = func() (string, error) {
 		return filepath.Join(os.TempDir(), "claude-memsync-test-no-such-dir", userUnitName), nil
 	}
-	os.Exit(m.Run())
+	cleanup := testenv.SmallTempDir()
+	code := m.Run()
+	cleanup()
+	os.Exit(code)
 }

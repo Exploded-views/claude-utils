@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/lock"
+	"github.com/MarimerLLC/claude-utils/internal/proc"
 	"github.com/kardianos/service"
 )
 
@@ -28,6 +29,7 @@ func installFakeSvc(t *testing.T, f *fakeSvc) {
 	oS, oP, oT := startFn, stopFn, statusFn
 	oW, oL, oRS := lockWait, lockPoll, restartSettle
 	oN, oE := notifySignals, exitFn
+	t.Cleanup(proc.Release) // a second signal calls KillAll, which refuses later children
 	t.Cleanup(func() {
 		startFn, stopFn, statusFn = oS, oP, oT
 		lockWait, lockPoll, restartSettle = oW, oL, oRS
