@@ -42,6 +42,10 @@ type Loop struct {
 	// Now is the clock the expiry check reads (nil: time.Now); tests inject one.
 	Now func() time.Time
 
+	// MaintainEvery is the gap between housekeeping runs (0: 24 h) and
+	// MaintainTimeout the longest one may take (0: 10 min).
+	MaintainEvery, MaintainTimeout time.Duration
+
 	// Name labels this loop's log lines when several repos run in one process.
 	Name string
 	// Owns gates which Claude folders this loop may touch (see Roots.Owns).
@@ -54,6 +58,8 @@ type Loop struct {
 	recovered *recovery
 	// refused is the last pull-refused reason logged, so it is logged once.
 	refused    string
+	lastMaint  time.Time
+	ctx        context.Context // Run's ctx; housekeeping derives its timeout from it
 	expiryOnce sync.Once
 }
 
@@ -87,6 +93,7 @@ type recovery struct{ err error }
 // Run blocks until ctx is canceled. Returns the first fatal error or nil
 // when ctx ends. Recoverable errors (transient git failures) are logged.
 func (l *Loop) Run(ctx context.Context) error {
+	l.ctx = ctx
 	if l.Branch == "" {
 		l.Branch = "main"
 	}
@@ -361,6 +368,92 @@ func (l *Loop) pullTick(repo *gitwt.Repo, roots Roots) {
 	if l.OnFlush != nil {
 		l.OnFlush(false, err)
 	}
+	l.maybeMaintain(repo)
+}
+
+// Housekeeping defaults: git's auto maintenance is off for every product git
+// call (gitwt.NoAutoMaintenance), so the loop runs `gc --auto` itself.
+const (
+	defaultMaintainEvery   = 24 * time.Hour
+	defaultMaintainTimeout = 10 * time.Minute
+)
+
+// maybeMaintain runs the daemon's own housekeeping when it is due: at most
+// once per MaintainEvery, in the foreground, killed after MaintainTimeout. It
+// runs on the loop's goroutine, so it never races a sync cycle of this sync
+// dir (the daemon holds the dir's lock for its lifetime), and it is never
+// called from the changes hook. A held loop does nothing.
+func (l *Loop) maybeMaintain(repo *gitwt.Repo) {
+	if l.held() {
+		return
+	}
+	now := time.Now
+	if l.Now != nil {
+		now = l.Now
+	}
+	every, timeout := l.MaintainEvery, l.MaintainTimeout
+	if every <= 0 {
+		every = defaultMaintainEvery
+	}
+	if timeout <= 0 {
+		timeout = defaultMaintainTimeout
+	}
+	if l.lastMaint.IsZero() {
+		l.lastMaint = readMaintained(l.Cfg.SyncDir)
+	}
+	if t := now(); l.lastMaint.After(t.Add(maintainSkew)) {
+		l.lastMaint = time.Time{} // recorded in the future (clock skew): due now
+	}
+	if t := now(); !l.lastMaint.IsZero() && t.Sub(l.lastMaint) < every {
+		return
+	}
+	parent := l.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	// One housekeeping at a time in the process: a Pi with many routed repos
+	// must not repack them all at once. A loop never waits for another's run
+	// (it would stall its own sync cycles): it skips and retries next tick.
+	select {
+	case maintainSem <- struct{}{}:
+		defer func() { <-maintainSem }()
+	default:
+		return
+	}
+	l.lastMaint = now() // a failure or timeout waits for the next period too
+	if err := writeSynced(maintainedPath(l.Cfg.SyncDir), []byte(l.lastMaint.UTC().Format(time.RFC3339)+"\n")); err != nil {
+		l.logln("housekeeping: cannot record the run:", newPathGuard(l.Cfg).Err(err))
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	if err := repo.Maintain(ctx); err != nil && parent.Err() == nil {
+		l.logln("housekeeping:", newPathGuard(l.Cfg).Err(err))
+	}
+}
+
+// maintainSkew is how far ahead of the clock a recorded run may be before it
+// is taken for a clock error rather than a run.
+const maintainSkew = 5 * time.Minute
+
+// maintainSem lets one loop at a time run housekeeping.
+var maintainSem = make(chan struct{}, 1)
+
+// maintainedPath records, in the sync dir's .state, when housekeeping last
+// ran, so a restart does not run it again within the period.
+func maintainedPath(syncDir string) string {
+	return filepath.Join(syncDir, manifestStateDir, "maintained")
+}
+
+func readMaintained(syncDir string) time.Time {
+	b, err := os.ReadFile(maintainedPath(syncDir))
+	if err != nil {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, strings.TrimSpace(string(b)))
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // handleEvent filters and reacts to a single fsnotify event. Returns

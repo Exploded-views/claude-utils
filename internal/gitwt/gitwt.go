@@ -6,6 +6,7 @@ package gitwt
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -26,6 +27,75 @@ type Repo struct {
 // not need to exist yet; pass it through Init or Clone first.
 func New(dir string) *Repo { return &Repo{Dir: dir} }
 
+// NoAutoMaintenance turns off the auto gc and auto maintenance a commit, fetch,
+// merge or rebase would start. git runs that as `maintenance run --auto
+// --detach`, which setsid()s out of proc's process group, so a deadline or
+// timeout could not kill it. With the trigger off nothing runs, detached or
+// not; the daemon runs its own bounded maintenance instead (see the sync
+// package). Do not use these for that explicit run: `--auto` reads gc.auto.
+var NoAutoMaintenance = []string{"-c", "gc.auto=0", "-c", "maintenance.auto=false"}
+
+// Maintain runs git's own auto housekeeping (`gc --auto`) in the foreground
+// and under ctx: cancelling kills git's whole process group. It deliberately
+// omits NoAutoMaintenance, because --auto reads gc.auto and would do nothing.
+// Callers hold the sync dir's lock.
+func (r *Repo) Maintain(ctx context.Context) error {
+	cmd := proc.GroupedCommandContext(ctx, "git", "-C", r.Dir,
+		"-c", "gc.autoDetach=false", "-c", "maintenance.autoDetach=false", "gc", "--auto", "--quiet")
+	cmd.Env = repoEnv(nil)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := proc.Run(cmd); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("git gc --auto: %w", ctx.Err())
+		}
+		return fmt.Errorf("git gc --auto: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// quietReceivePack keeps the receive-pack of a push to a local path from
+// starting auto maintenance. A local transport drops -c and GIT_CONFIG_COUNT
+// before it starts receive-pack (verified on git 2.56), so only the command
+// line reaches it. Remote (ssh, https) receive-packs run on the server and are
+// not ours to configure, so they get no such option.
+const quietReceivePack = "--receive-pack=git -c receive.autogc=false -c gc.auto=0 -c maintenance.auto=false receive-pack"
+
+// pushesToLocalPath reports whether the remote a push (its args after "push")
+// names is a path or file:// URL on this machine.
+func (r *Repo) pushesToLocalPath(args []string) bool {
+	remote := ""
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			remote = a
+			break
+		}
+	}
+	if remote == "" {
+		return false
+	}
+	out, err := r.run(nil, nil, "remote", "get-url", "--push", remote)
+	if err != nil {
+		return false
+	}
+	return isLocalURL(strings.TrimSpace(out))
+}
+
+func isLocalURL(u string) bool {
+	if strings.HasPrefix(u, "file://") {
+		return true
+	}
+	if strings.Contains(u, "://") {
+		return false
+	}
+	if len(u) >= 3 && u[1] == ':' && (u[2] == '\\' || u[2] == '/') { // C:\repo
+		return true
+	}
+	// scp-like host:path has a colon before any slash.
+	c, sl := strings.Index(u, ":"), strings.IndexAny(u, "/")
+	return c < 0 || (sl >= 0 && sl < c)
+}
+
 // Run executes `git -C <dir> <args...>` and returns stdout. Stderr is
 // included in the returned error on non-zero exit.
 func (r *Repo) Run(args ...string) (string, error) {
@@ -41,7 +111,12 @@ func (r *Repo) RunStdin(stdin []byte, args ...string) (string, error) {
 
 // run is RunStdin with extra environment variables for git (KEY=VALUE).
 func (r *Repo) run(env []string, stdin []byte, args ...string) (string, error) {
-	full := append([]string{"-C", r.Dir}, args...)
+	full := append([]string{"-C", r.Dir}, NoAutoMaintenance...)
+	sent := args
+	if len(args) > 0 && args[0] == "push" && r.pushesToLocalPath(args[1:]) {
+		sent = append([]string{"push", quietReceivePack}, args[1:]...)
+	}
+	full = append(full, sent...)
 	cmd := proc.Command("git", full...)
 	cmd.Env = repoEnv(env)
 	if stdin != nil {
