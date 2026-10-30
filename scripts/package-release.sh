@@ -98,6 +98,12 @@ SHA256SUMS) and this one, then, from any directory:
   MEMSYNC_BUDGET_BIN_DIR=<product dir> MEMSYNC_BUDGET_TAG=${VERSION} ./route-budget.test -test.run '^TestBudgetB' -test.v -test.timeout 900s
 Which bytes each gate measures: B1, B4, B7 and B8 run the code inside these test binaries; B2/B3, B5 and B6
 run the product archive's claude-memsync. Both must carry the tag, and both are checked: a mismatch fails.
+INVALID: a gate that prints a line starting INVALID is skipped, not passed or failed. Besides a high load
+average, the cause can be a directory that is, or is above, the gate's TMPDIR or temp HOME with more than 256 entries (the
+line names it and its entry count): the router will not list such a directory, so every fixture folder
+under it is denied and the gate would measure nothing. The gates already pick /tmp or /var/tmp when the
+default temp dir is too big; when none is fine, set TMPDIR to a directory whose ancestors each hold at
+most 256 entries (for example a new directory directly under /var/tmp) and run again.
 README
     (cd "$STAGE_ROOT" && tar -czf "$OUT/${bname}.tar.gz" "$bname"); ARCHIVES+=("${bname}.tar.gz")
     stage_cleanup

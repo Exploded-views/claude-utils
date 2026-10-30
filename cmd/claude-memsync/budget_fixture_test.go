@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/MarimerLLC/claude-utils/internal/route"
+	"github.com/MarimerLLC/claude-utils/internal/testenv"
 )
 
 // budgetTree is the owner's Mac in miniature: a $TMPDIR-shaped directory with
@@ -116,18 +117,23 @@ func loadAvg1() float64 {
 // nothing.
 const maxLoad = 8.0
 
+// loadAvgFn is loadAvg1; a test replaces it to pin the load.
+var loadAvgFn = loadAvg1
+
 // timingBudget is for a test that gates on wall time or CPU: it logs the load
 // average at the start and the end, and when either is above maxLoad the test
 // is skipped as INVALID instead of passing or failing. Call fail for a missed
 // budget (not t.Errorf), and defer done.
 func timingBudget(t *testing.T) (fail func(format string, args ...any), done func()) {
 	t.Helper()
-	start := loadAvg1()
+	dirs := testenv.SkipIfInvalid(t)
+	start := loadAvgFn()
 	t.Logf("load average at start: %.2f", start)
 	var fails []string
 	fail = func(format string, args ...any) { fails = append(fails, fmt.Sprintf(format, args...)) }
 	done = func() {
-		end := loadAvg1()
+		testenv.CheckDirs(t, dirs) // an ancestor may have crossed the limit during the run
+		end := loadAvgFn()
 		t.Logf("load average at end: %.2f", end)
 		if start > maxLoad || end > maxLoad {
 			t.Skipf("INVALID: load average %.2f at start, %.2f at end, above %.0f; missed budgets would be %q", start, end, maxLoad, fails)
@@ -143,6 +149,10 @@ func timingBudget(t *testing.T) (fail func(format string, args ...any), done fun
 // end. Counted tests (B4-B8) are not gated on it.
 func logLoad(t *testing.T) {
 	t.Helper()
-	t.Logf("load average at start: %.2f", loadAvg1())
-	t.Cleanup(func() { t.Logf("load average at end: %.2f", loadAvg1()) })
+	dirs := testenv.SkipIfInvalid(t)
+	t.Logf("load average at start: %.2f", loadAvgFn())
+	t.Cleanup(func() {
+		t.Logf("load average at end: %.2f", loadAvgFn())
+		testenv.EndCheck(t, dirs)
+	})
 }

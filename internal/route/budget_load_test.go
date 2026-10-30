@@ -8,13 +8,20 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/MarimerLLC/claude-utils/internal/testenv"
 )
 
 // logLoad logs the 1-minute load average at the start and end of a budget test.
-func logLoad(t *testing.T) {
+func logLoad(t *testing.T) (dirs []string) {
 	t.Helper()
+	dirs = testenv.SkipIfInvalid(t)
 	t.Logf("load average at start: %.2f", loadAvg1())
-	t.Cleanup(func() { t.Logf("load average at end: %.2f", loadAvg1()) })
+	t.Cleanup(func() {
+		t.Logf("load average at end: %.2f", loadAvg1())
+		testenv.EndCheck(t, dirs)
+	})
+	return dirs
 }
 
 func loadAvg1() float64 {

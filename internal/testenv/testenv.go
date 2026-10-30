@@ -143,21 +143,22 @@ func BinariesVersion(t testing.TB, ver string) (memsync, memmerge string) {
 	return filepath.Join(d, "claude-memsync"), filepath.Join(d, "claude-memmerge")
 }
 
-// SmallTempDir points TMPDIR at a fresh directory under /tmp
-// when the host's temp dir is too big for route resolution to list (a busy
-// macOS $TMPDIR holds hundreds of thousands of entries, so every directory
-// below it is unresolved by design). It returns the function that removes it;
-// call it before os.Exit.
+// SmallTempDir makes TMPDIR a directory the route walker can resolve
+// fixture folders under: every ancestor up to / has at most listlimit.Max
+// entries (a busy macOS $TMPDIR holds hundreds of thousands, and /tmp, a
+// symlink to /private/tmp there, can pass 256 too). It tries the current temp
+// dir, then /tmp, then /var/tmp, and leaves TMPDIR alone when the first
+// qualifies (or none does: the budget gates then skip as INVALID, see
+// SkipIfInvalid). No base is inside a checkout (a "not a repo" fixture must
+// stay one). It returns the function that removes the new dir; call it before
+// os.Exit.
 func SmallTempDir() (cleanup func()) {
-	if f, err := os.Open(os.TempDir()); err == nil {
-		names, _ := f.Readdirnames(201)
-		f.Close()
-		if len(names) <= 200 {
-			return func() {}
-		}
+	cands := tempCandidates()
+	base, ok := pickBase(cands)
+	if !ok || filepath.Clean(base) == filepath.Clean(os.TempDir()) {
+		return func() {}
 	}
-	// Not inside a checkout (a "not a repo" fixture must stay one): /tmp.
-	d, err := os.MkdirTemp("/tmp", "gotmp-")
+	d, err := os.MkdirTemp(base, "gotmp-")
 	if err != nil {
 		return func() {}
 	}

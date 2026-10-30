@@ -215,6 +215,11 @@ func prebuiltSetup(getenv func(string) string, orig, base string) (cleanup func(
 	if !on {
 		return func() {}, nil
 	}
+	for _, sw := range []string{EnvForceEndInvalid, EnvForceVerdictFail} {
+		if getenv(sw) != "" {
+			return nil, fmt.Errorf("%s is set: it is a switch for the harness's own meta tests, and in a release budget run it would hide real failures as INVALID; unset it and run again", sw)
+		}
+	}
 	if orig == "" {
 		return nil, errors.New("HOME is not set in the start environment: cannot tell the original HOME from the temp one, refusing to run")
 	}
@@ -235,7 +240,11 @@ func PrebuiltSetup() (cleanup func(), err error) {
 			orig = strings.TrimPrefix(kv, "HOME=")
 		}
 	}
-	return prebuiltSetup(os.Getenv, orig, os.TempDir())
+	base := os.TempDir()
+	if b, ok := pickBase(tempCandidates()); ok {
+		base = b
+	}
+	return prebuiltSetup(os.Getenv, orig, base)
 }
 
 // prebuiltOrFatal is Binaries' prebuilt branch.

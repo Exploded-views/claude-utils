@@ -7,13 +7,15 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/MarimerLLC/claude-utils/internal/testenv"
 )
 
 // B7: the bytes read stay flat as the temp dir grows from 1k to 100k entries.
 // A fresh process (a new Router) resolves one live checkout and a few gone
 // folders; bytes are the entry-name bytes ReadDir returned for the big dir.
 func TestBudgetB7_BytesReadFlatAsTmpdirGrows(t *testing.T) {
-	logLoad(t)
+	dirs := logLoad(t)
 	run := func(entries int) (reads, bytes int) {
 		big := filepath.Join(t.TempDir(), "T")
 		if err := os.MkdirAll(filepath.Join(big, "live", "proj"), 0o700); err != nil {
@@ -45,9 +47,13 @@ func TestBudgetB7_BytesReadFlatAsTmpdirGrows(t *testing.T) {
 	r1, b1 := run(1000)
 	r2, b2 := run(100000)
 	t.Logf("B7 bytes read of the temp dir: 1k entries: %d reads, %d bytes; 100k entries: %d reads, %d bytes", r1, b1, r2, b2)
-	// Flat: both are the first maxList+1 names; which names are first differs a
-	// little with the directory's order, so allow half again.
-	if b2 > b1*3/2 {
-		t.Errorf("B7: bytes read grew from %d to %d as the temp dir grew 100x", b1, b2)
-	}
+	testenv.Judge(t, dirs, func() { // validity first, then the verdict
+		testenv.RequireReads(t, "B7 reads of the temp dir", r1)
+		testenv.RequireReads(t, "B7 reads of the temp dir", r2)
+		// Flat: both are the first maxList+1 names; which names are first differs a
+		// little with the directory's order, so allow half again.
+		if b2 > b1*3/2 {
+			t.Errorf("B7: bytes read grew from %d to %d as the temp dir grew 100x", b1, b2)
+		}
+	})
 }
