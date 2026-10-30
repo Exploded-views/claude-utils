@@ -155,7 +155,7 @@ func BinariesVersion(t testing.TB, ver string) (memsync, memmerge string) {
 func SmallTempDir() (cleanup func()) {
 	cands := tempCandidates()
 	base, ok := pickBase(cands)
-	if !ok || (len(cands) > 0 && base == cands[0]) {
+	if !ok || filepath.Clean(base) == filepath.Clean(os.TempDir()) {
 		return func() {}
 	}
 	d, err := os.MkdirTemp(base, "gotmp-")

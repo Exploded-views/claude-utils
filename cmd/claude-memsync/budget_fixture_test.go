@@ -129,6 +129,7 @@ func timingBudget(t *testing.T) (fail func(format string, args ...any), done fun
 	var fails []string
 	fail = func(format string, args ...any) { fails = append(fails, fmt.Sprintf(format, args...)) }
 	done = func() {
+		testenv.SkipIfInvalid(t) // an ancestor may have crossed the limit during the run
 		end := loadAvg1()
 		t.Logf("load average at end: %.2f", end)
 		if start > maxLoad || end > maxLoad {
@@ -147,5 +148,8 @@ func logLoad(t *testing.T) {
 	t.Helper()
 	testenv.SkipIfInvalid(t)
 	t.Logf("load average at start: %.2f", loadAvg1())
-	t.Cleanup(func() { t.Logf("load average at end: %.2f", loadAvg1()) })
+	t.Cleanup(func() {
+		t.Logf("load average at end: %.2f", loadAvg1())
+		testenv.EndCheck(t)
+	})
 }

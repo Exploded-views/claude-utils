@@ -17,7 +17,10 @@ func logLoad(t *testing.T) {
 	t.Helper()
 	testenv.SkipIfInvalid(t)
 	t.Logf("load average at start: %.2f", loadAvg1())
-	t.Cleanup(func() { t.Logf("load average at end: %.2f", loadAvg1()) })
+	t.Cleanup(func() {
+		t.Logf("load average at end: %.2f", loadAvg1())
+		testenv.EndCheck(t)
+	})
 }
 
 func loadAvg1() float64 {

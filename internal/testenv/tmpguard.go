@@ -1,6 +1,7 @@
 package testenv
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -36,7 +37,7 @@ var countEntries = func(dir string) (int, error) {
 		return 0, err
 	}
 	defer f.Close()
-	names, err := f.Readdirnames(-1)
+	names, err := f.Readdirnames(readCap)
 	if err != nil && err != io.EOF {
 		return 0, err
 	}
@@ -73,11 +74,27 @@ type endT interface {
 // ancestor crossed the limit during the run, a passing gate is reported as
 // INVALID (skipped). A gate that already failed stays failed; the INVALID line
 // is logged beside the failure.
-func EndCheck(t endT) {}
+func EndCheck(t endT) {
+	t.Helper()
+	big, n, err := firstInvalid()
+	switch {
+	case big == "" && err == nil:
+		return
+	case t.Failed():
+		t.Logf("%s", invalidMsg(big, n, err))
+	default:
+		t.Skipf("%s", invalidMsg(big, n, err))
+	}
+}
 
 // RequireReads fails the gate when the walk made no reads at all: a gate that
 // counts reads must not pass at 0 == 0.
-func RequireReads(t errorer, what string, n int) {}
+func RequireReads(t errorer, what string, n int) {
+	t.Helper()
+	if n == 0 {
+		t.Errorf("%s: the walk made 0 reads, so the gate measured nothing", what)
+	}
+}
 
 // errorer is the part of testing.TB that RequireReads uses.
 type errorer interface {
@@ -141,13 +158,25 @@ func pickBase(cands []string) (string, bool) {
 // INVALID, never failed.
 func SkipIfInvalid(t skipper) {
 	t.Helper()
+	if big, n, err := firstInvalid(); big != "" || err != nil {
+		t.Skipf("%s", invalidMsg(big, n, err))
+	}
+}
+
+// firstInvalid is the first too-big or unreadable ancestor of any invalidDirs
+// entry, with its entry count or read error.
+func firstInvalid() (dir string, n int, err error) {
 	for _, d := range invalidDirs() {
-		big, n, err := BigAncestor(d)
-		switch {
-		case err != nil:
-			t.Skipf("INVALID: %s cannot be read (%v); it is an ancestor of %s, and the route walker cannot resolve fixture folders under a directory it cannot list. Point TMPDIR at a directory whose ancestors all have at most %d entries", big, err, d, listlimit.Max)
-		case big != "":
-			t.Skipf("INVALID: %s has %d entries (more than %d); it is an ancestor of %s, and the route walker will not list it, so every fixture folder is denied. Point TMPDIR at a directory whose ancestors all have at most %d entries", big, n, listlimit.Max, d, listlimit.Max)
+		if big, n, err := BigAncestor(d); big != "" {
+			return big, n, err
 		}
 	}
+	return "", 0, nil
+}
+
+func invalidMsg(big string, n int, err error) string {
+	if err != nil {
+		return fmt.Sprintf("INVALID: %s cannot be read (%v); it is an ancestor of the budget fixture, and the route walker cannot resolve fixture folders under a directory it cannot list. Point TMPDIR at a directory whose ancestors all have at most %d entries", big, err, listlimit.Max)
+	}
+	return fmt.Sprintf("INVALID: %s has %d entries (more than %d); it is an ancestor of the budget fixture, and the route walker will not list it, so every fixture folder is denied. Point TMPDIR at a directory whose ancestors all have at most %d entries", big, n, listlimit.Max, listlimit.Max)
 }

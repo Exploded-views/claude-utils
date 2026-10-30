@@ -7,7 +7,7 @@ fork are upstream's own releases.
 
 ## Unreleased
 
-- **The budget gates no longer fail falsely under a big temp dir**: the harness picks a TMPDIR (and, for the release archive, a temp HOME) whose every ancestor up to `/` holds at most 256 entries, the route walker's listing limit (a shared constant, so the two cannot drift), trying the temp dir, then `/tmp`, then `/var/tmp`. When none qualifies, every timing and functional gate is skipped with an `INVALID: <dir> has N entries` line instead of failing (B1/B5) or passing with no reads (B4/B7); the budget archive README explains it. On a Mac whose `/private/tmp` passes 256 entries the gates used to report B1/B5 FAIL. *Fork-only.*
+- **The budget gates no longer fail falsely under a big temp dir**: the harness picks a TMPDIR (and, for the release archive, a temp HOME) whose every ancestor up to `/` holds at most 256 entries, the route walker's listing limit (a shared constant, so the two cannot drift), trying the temp dir, then `/tmp`, then `/var/tmp`. When none qualifies, every timing and functional gate is skipped with an `INVALID: <dir> has N entries` line instead of failing (B1/B5) or passing with no reads (B4/B7); the budget archive README explains it. The check runs again at the end of each gate (a run that was valid at the start but not at the end is INVALID, not PASS), and B4 and B7 fail on 0 reads instead of passing at 0 == 0. On a Mac whose `/private/tmp` passes 256 entries the gates used to report B1/B5 FAIL. *Fork-only.*
 
 ## v0.5.0-ev.1 (2026-10-30)
 

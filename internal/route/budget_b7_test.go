@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/MarimerLLC/claude-utils/internal/testenv"
 )
 
 // B7: the bytes read stay flat as the temp dir grows from 1k to 100k entries.
@@ -45,6 +47,8 @@ func TestBudgetB7_BytesReadFlatAsTmpdirGrows(t *testing.T) {
 	r1, b1 := run(1000)
 	r2, b2 := run(100000)
 	t.Logf("B7 bytes read of the temp dir: 1k entries: %d reads, %d bytes; 100k entries: %d reads, %d bytes", r1, b1, r2, b2)
+	testenv.RequireReads(t, "B7 reads of the temp dir", r1)
+	testenv.RequireReads(t, "B7 reads of the temp dir", r2)
 	// Flat: both are the first maxList+1 names; which names are first differs a
 	// little with the directory's order, so allow half again.
 	if b2 > b1*3/2 {
