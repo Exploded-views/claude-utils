@@ -70,13 +70,15 @@ type endT interface {
 	Skipf(format string, args ...any)
 }
 
-// EndCheck is the last check of a counted gate, run from its cleanup: when an
+// EndCheck is the last check of a counted gate, run from its cleanup, on the dirs
+// SkipIfInvalid returned at the start (never the TMPDIR of the moment: B1 points
+// it at its own big fixture). When an
 // ancestor crossed the limit during the run, a passing gate is reported as
 // INVALID (skipped). A gate that already failed stays failed; the INVALID line
 // is logged beside the failure.
 func EndCheck(t endT, dirs []string) {
 	t.Helper()
-	big, n, err := firstInvalid(invalidDirs())
+	big, n, err := firstInvalid(dirs)
 	switch {
 	case big == "" && err == nil:
 		return
@@ -166,7 +168,12 @@ func SkipIfInvalid(t skipper) (dirs []string) {
 // CheckDirs skips the gate as INVALID when an ancestor of any of dirs is too
 // big or unreadable now. Gates call it with the dirs SkipIfInvalid returned at
 // their start, before they judge their result, so INVALID wins over FAIL.
-func CheckDirs(t skipper, dirs []string) {}
+func CheckDirs(t skipper, dirs []string) {
+	t.Helper()
+	if big, n, err := firstInvalid(dirs); big != "" || err != nil {
+		t.Skipf("%s", invalidMsg(big, n, err))
+	}
+}
 
 // firstInvalid is the first too-big or unreadable ancestor of any invalidDirs
 // entry, with its entry count or read error.
