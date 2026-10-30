@@ -7,6 +7,10 @@ fork are upstream's own releases.
 
 ## Unreleased
 
+Nothing yet.
+
+## v0.5.0-ev.1 (2026-10-30)
+
 - **A denied folder is fully contained**: a folder that routes to deny has none of its memory files mirrored, and `related suggest` (and the daemon's suggestion refresh) never lists or opens its transcripts and counts it toward no signal; tests pin both, including a deny pin listed ahead of a broader rule.
 - **Auto maintenance no longer escapes a deadline**: after a commit, fetch, merge or rebase git may start `maintenance run --auto --detach` (or a detached `gc --auto`), which leaves the process group via setsid and survives proc's group kill and `related fetch`'s 60 s timeout. Every `git` that can start it (the sync loops' and CLI's `gitwt` calls, and `related fetch`) now carries `-c gc.auto=0 -c maintenance.auto=false`, and a `push` to a remote that is a local path or `file://` URL also passes `--receive-pack` with `receive.autogc=false` (a local transport drops `-c` and `GIT_CONFIG_*` before receive-pack; a push to an ssh or https remote runs receive-pack on the server and is not ours to configure). To keep sync dirs from growing without bound, each daemon loop runs `git gc --auto` itself at most once per 24 hours per sync dir (recorded in `.state/maintained`, so a restart does not repeat it; foreground, `gc.autoDetach=false`; one at a time across all loops; stopped with the daemon's context and killed with its process group at the daemon's stop or after 10 minutes; skipped while the loop is held; the changes hook never runs it). Read clones are not housekept. *Upstream candidate.*
 - **The interrupt guard's `stop()` waits for its goroutine**: `guardChildren`'s stop func now joins the goroutine (idempotent; it does not wait for one already exiting the process or swallowing a signal the sync flow owns), so nothing of the guard reads package state after it returns. Fixes a data race seen in `TestInterruptDuringSyncFlow_SecondSignalKillsGitAndExits130` under `-race`; harmless in production. *Upstream candidate.*

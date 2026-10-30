@@ -10,6 +10,7 @@ that uses a release is in [setup.md](setup.md) and [bootstrap.md](bootstrap.md).
 
 | Tag | Commit | Notes |
 |---|---|---|
+| [v0.5.0-ev.1](https://github.com/Exploded-views/claude-utils/releases/tag/v0.5.0-ev.1) | `cc093f6` | Pre-release: a faster routed daemon and changes hook with a performance budget enforced by tests, budget archives to run that budget against the shipped binaries, git maintenance kept inside deadlines, and privateOnly repos held unless the daemon can verify them. After upgrading, some folders under very large directories show as "ambiguous, not synced" in `status` (pin them with a `folder` rule), and a `privateOnly` repo needs a token source that gives a token (see the changelog). |
 | [v0.4.0-ev.1](https://github.com/Exploded-views/claude-utils/releases/tag/v0.4.0-ev.1) | `80543d3` | Pre-release: routing for hosts that reach GitHub over port 443, `join --all`, `identity backup`, selectable host bootstrap, autostart and install re-run fixes. After upgrading, rewrite any `routes.json` rule or alias that uses `ssh.github.com/…` as `github.com/…`; on Linux re-run `claude-memsync install` or `start`; on macOS re-install the launchd agent (see the changelog). |
 | [v0.3.0-ev.1](https://github.com/Exploded-views/claude-utils/releases/tag/v0.3.0-ev.1) | `37fa564` | First release of the fork (pre-release): post-quantum encryption by default, one config directory, host bootstrap with `--prebuilt-dir`, fork CI. |
 
