@@ -23,7 +23,10 @@ One archive per platform, named `claude-utils-<tag>-<os>-<arch>`:
 | `darwin` | `amd64`, `arm64` | `claude-utils-<tag>-darwin-<arch>.tar.gz` |
 | `windows` | `amd64`, `arm64` | `claude-utils-<tag>-windows-<arch>.zip` |
 
-plus one `SHA256SUMS` file that lists every archive (`<hash>  <file>`, the
+and, for each linux and darwin platform, a budget archive
+`claude-utils-<tag>-budget-<os>-<arch>.tar.gz` (see [The budget bench](#the-budget-bench)),
+
+plus one `SHA256SUMS` file that lists every archive, product and budget (`<hash>  <file>`, the
 format `sha256sum -c` reads).
 
 Each archive unpacks into a folder of the same name that holds:
@@ -37,6 +40,35 @@ Each archive unpacks into a folder of the same name that holds:
 
 The binaries are built with `CGO_ENABLED=0 -trimpath`, so they run on a plain
 system with no libraries to install.
+
+## The budget bench
+
+`claude-utils-<tag>-budget-<os>-<arch>.tar.gz` (linux and darwin, amd64 and
+arm64; none for Windows) unpacks into a folder of the same name with
+`claude-memsync-budget.test`, `route-budget.test` and a `README` with the run
+commands. They are `go test -c -tags budget` binaries of `./cmd/claude-memsync`
+and `./internal/route`, built with the same `CGO_ENABLED=0 -trimpath` as the
+product, so the gates B1-B7 can run against the shipped binaries on a host with
+no Go and no checkout. Verify both archives against `SHA256SUMS`, unpack both,
+then from any directory:
+
+```sh
+MEMSYNC_BUDGET_BIN_DIR=<product dir> MEMSYNC_BUDGET_TAG=<tag> ./claude-memsync-budget.test -test.run '^TestBudgetB' -test.v -test.timeout 900s
+MEMSYNC_BUDGET_BIN_DIR=<product dir> MEMSYNC_BUDGET_TAG=<tag> ./route-budget.test -test.run '^TestBudgetB' -test.v -test.timeout 900s
+```
+
+Which bytes each gate measures: B1, B4, B7 and B8 run the code inside the
+budget test binaries (same source and flags as the product, in-process), and
+B2/B3, B5 and B6 run the product archive's `claude-memsync`. Both are checked
+against the tag, so a budget archive from another release beside this product
+archive fails before any gate. Set both variables or neither (one alone fails);
+the tag must be a release tag (the regex below), never `dev`. Both product binaries must
+print `claude-memsync <tag>` / `claude-memmerge <tag>` from `version`, or the run
+fails before any gate, and so must the test binary's own version. The test binary then moves `HOME`, the `XDG_*`
+directories and `TMPDIR` into a fresh temp directory, points `GIT_CONFIG_GLOBAL` at a file there, sets `GIT_CONFIG_NOSYSTEM=1` and a failing `GIT_SSH_COMMAND`, drops inherited `GIT_*`, `CLAUDE_PROJECT_DIR` and `SSH_AUTH_SOCK`, and refuses to run if `HOME` was unset or any
+path it would use resolves under the original `HOME`. B9 skips in this mode (it
+needs a source build and is not part of B1-B7). Read the `--- PASS/FAIL/SKIP`
+lines and the load-average lines; an INVALID skip means the host was too busy.
 
 ## The version it reports
 

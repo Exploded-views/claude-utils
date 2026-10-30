@@ -1,0 +1,21 @@
+# The default gitleaks rules, unchanged. Used by fork-ci's history scan (gitleaks reads
+# this file by default) and by scripts/package-release.sh over the extracted archives.
+[extend]
+useDefault = true
+
+# One reviewed generic-api-key false positive, allowlisted by its exact value and only for
+# the strings of the budget test binary (claude-memsync-budget.test), so the rule stays on
+# everywhere else and any other value still fails the packaging. Found by the strings scan
+# of the v0.0.0-ev.0 test package for all four budget targets: a run of glued Go string-table
+# entries that follows the message "keyUsage:" (standard-library type-name strings in the
+# linker's string table), present in every budget target. It is not in any source file.
+# If a Go upgrade moves it the packaging fails with a new value: review it, then replace the
+# entry here; never loosen the rule. (The repo's own fixture token appTestToken used to be a
+# second hit; it is now assembled at run time instead of allowlisted.)
+[[allowlists]]
+description = "Reviewed generic-api-key false positive in the strings of claude-memsync-budget.test"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)claude-memsync-budget\.test\.strings\.txt$''']
+regexTarget = "secret"
+regexes = ['''^booleanbdoUxXvintegercomplex=$''']

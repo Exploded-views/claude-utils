@@ -20,17 +20,37 @@ func bareWithNotes(t *testing.T, name string, files map[string]string) (bare str
 	if _, err := gitwt.New(root).Run("init", "--bare", "-b", "main", bare); err != nil {
 		t.Fatal(err)
 	}
+	// The fixtures must not leave background maintenance behind either: git
+	// daemonizes it, and it would write into a TempDir after the test ended.
+	for _, kv := range [][2]string{{"receive.autogc", "false"}, {"gc.auto", "0"}, {"maintenance.auto", "false"}} {
+		if _, err := gitwt.New(root).Run("--git-dir="+bare, "config", kv[0], kv[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
 	pushFiles(t, bare, files)
 	return bare
 }
 
+// quietBare stops a bare repo from spawning gc or maintenance on receive.
+func quietBare(t *testing.T, bare string) {
+	t.Helper()
+	for _, kv := range [][2]string{{"receive.autogc", "false"}, {"gc.auto", "0"}, {"maintenance.auto", "false"}} {
+		if _, err := gitwt.New(filepath.Dir(bare)).Run("--git-dir="+bare, "config", kv[0], kv[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func pushFiles(t *testing.T, bare string, files map[string]string) {
 	t.Helper()
+	quietBare(t, bare)
 	work := t.TempDir()
 	w := gitwt.New(work)
 	if err := w.Clone(bare); err != nil {
 		t.Fatal(err)
 	}
+	w.Run("config", "maintenance.auto", "false")
+	w.Run("config", "gc.auto", "0")
 	w.Run("checkout", "-B", "main")
 	for rel, body := range files {
 		p := filepath.Join(work, filepath.FromSlash(rel))
@@ -172,6 +192,7 @@ func TestReadClone_FetchRefusesAChangedURL(t *testing.T) {
 	good := bareWithNotes(t, "mem-project-b", map[string]string{"a.md": "good"})
 	other := filepath.Join(t.TempDir(), "mem-project-b.git")
 	gitwt.New(filepath.Dir(other)).Run("clone", "--bare", good, other)
+	quietBare(t, other)
 	pushFiles(t, other, map[string]string{"a.md": "swapped"})
 	root := t.TempDir()
 	rc, _ := NewReadClone(root, "mem-project-b", good)
