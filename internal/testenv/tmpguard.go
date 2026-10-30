@@ -13,6 +13,16 @@ import (
 // directly under a busier one would be slow to list for no reason.
 const smallBase = 200
 
+// Fault-injection switches, honoured only in a -tags budget build (see
+// seam_budget.go). EnvForceEndInvalid makes the END validity checks report a
+// start dir as over the limit, as if an ancestor grew mid-run; EnvForceVerdictFail
+// makes RequireReads fail, as if the gate's verdict were a failure. Together they
+// pin that INVALID wins over FAIL.
+const (
+	EnvForceEndInvalid  = "MEMSYNC_BUDGET_FORCE_END_INVALID"
+	EnvForceVerdictFail = "MEMSYNC_BUDGET_FORCE_VERDICT_FAIL"
+)
+
 // readCap is the most names countEntries reads: one past the larger limit.
 const readCap = listlimit.Max + 1
 
