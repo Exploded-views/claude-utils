@@ -88,7 +88,7 @@ type endT interface {
 // is logged beside the failure.
 func EndCheck(t endT, dirs []string) {
 	t.Helper()
-	big, n, err := firstInvalid(dirs)
+	big, n, err := endInvalid(dirs)
 	switch {
 	case big == "" && err == nil:
 		return
@@ -103,7 +103,7 @@ func EndCheck(t endT, dirs []string) {
 // counts reads must not pass at 0 == 0.
 func RequireReads(t errorer, what string, n int) {
 	t.Helper()
-	if n == 0 {
+	if n == 0 || forceVerdictFail() {
 		t.Errorf("%s: the walk made 0 reads, so the gate measured nothing", what)
 	}
 }
@@ -171,7 +171,7 @@ func pickBase(cands []string) (string, bool) {
 func SkipIfInvalid(t skipper) (dirs []string) {
 	t.Helper()
 	dirs = invalidDirs()
-	CheckDirs(t, dirs)
+	skipOn(t, dirs, firstInvalid) // the start check has no fault injection
 	return dirs
 }
 
@@ -180,11 +180,26 @@ func SkipIfInvalid(t skipper) (dirs []string) {
 // their start, before they judge their result, so INVALID wins over FAIL.
 func CheckDirs(t skipper, dirs []string) (skipped bool) {
 	t.Helper()
-	if big, n, err := firstInvalid(dirs); big != "" || err != nil {
+	return skipOn(t, dirs, endInvalid)
+}
+
+// skipOn skips the gate when find reports a bad directory among dirs.
+func skipOn(t skipper, dirs []string, find func([]string) (string, int, error)) bool {
+	t.Helper()
+	if big, n, err := find(dirs); big != "" || err != nil {
 		t.Skipf("%s", invalidMsg(big, n, err))
 		return true
 	}
 	return false
+}
+
+// endInvalid is firstInvalid for the END checks, with the budget-build fault
+// injection: EnvForceEndInvalid reports the first start dir as over the limit.
+func endInvalid(dirs []string) (string, int, error) {
+	if forceEndInvalid() && len(dirs) > 0 {
+		return dirs[0], readCap, fmt.Errorf("forced by %s", EnvForceEndInvalid)
+	}
+	return firstInvalid(dirs)
 }
 
 // Judge runs a gate's verdict (its floors and comparisons) only after the
