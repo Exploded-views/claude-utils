@@ -180,6 +180,10 @@ func CheckDirs(t skipper, dirs []string) (skipped bool) {
 // Judge runs a gate's verdict (its floors and comparisons) only after the
 // validity check on the start dirs passes, so INVALID always wins over FAIL.
 func Judge(t skipper, dirs []string, verdict func()) {
+	t.Helper()
+	if CheckDirs(t, dirs) {
+		return
+	}
 	verdict()
 }
 

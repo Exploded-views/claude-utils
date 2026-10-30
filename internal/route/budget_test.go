@@ -71,14 +71,15 @@ func TestBudgetB4_NoWorkProportionalToUnrelatedDirs(t *testing.T) {
 	tiny, small, large := run(10), run(500), run(2000)
 	t.Logf("B4 reads of the two dirs: 10 siblings: %d calls, %d entries; 500: %d calls, %d entries; 2000: %d calls, %d entries",
 		tiny.calls, tiny.entries, small.calls, small.entries, large.calls, large.entries)
-	testenv.CheckDirs(t, dirs) // validity first, then the verdict
-	testenv.RequireReads(t, "B4 reads of the big dir", tiny.calls)
-	testenv.RequireReads(t, "B4 reads of the big dir", small.calls)
-	testenv.RequireReads(t, "B4 reads of the big dir", large.calls)
-	if small.calls != large.calls {
-		t.Errorf("B4: read calls grew from %d to %d with unrelated siblings", small.calls, large.calls)
-	}
-	if small.entries != large.entries {
-		t.Errorf("B4: entries read grew from %d to %d with unrelated siblings", small.entries, large.entries)
-	}
+	testenv.Judge(t, dirs, func() { // validity first, then the verdict
+		testenv.RequireReads(t, "B4 reads of the big dir", tiny.calls)
+		testenv.RequireReads(t, "B4 reads of the big dir", small.calls)
+		testenv.RequireReads(t, "B4 reads of the big dir", large.calls)
+		if small.calls != large.calls {
+			t.Errorf("B4: read calls grew from %d to %d with unrelated siblings", small.calls, large.calls)
+		}
+		if small.entries != large.entries {
+			t.Errorf("B4: entries read grew from %d to %d with unrelated siblings", small.entries, large.entries)
+		}
+	})
 }
