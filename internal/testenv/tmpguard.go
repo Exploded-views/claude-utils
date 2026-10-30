@@ -74,9 +74,9 @@ type endT interface {
 // ancestor crossed the limit during the run, a passing gate is reported as
 // INVALID (skipped). A gate that already failed stays failed; the INVALID line
 // is logged beside the failure.
-func EndCheck(t endT) {
+func EndCheck(t endT, dirs []string) {
 	t.Helper()
-	big, n, err := firstInvalid()
+	big, n, err := firstInvalid(invalidDirs())
 	switch {
 	case big == "" && err == nil:
 		return
@@ -156,17 +156,22 @@ func pickBase(cands []string) (string, bool) {
 // listlimit.Max entries or cannot be read, the route walker would refuse every
 // fixture folder and the gate would measure nothing, so it is skipped as
 // INVALID, never failed.
-func SkipIfInvalid(t skipper) {
+func SkipIfInvalid(t skipper) (dirs []string) {
 	t.Helper()
-	if big, n, err := firstInvalid(); big != "" || err != nil {
-		t.Skipf("%s", invalidMsg(big, n, err))
-	}
+	dirs = invalidDirs()
+	CheckDirs(t, dirs)
+	return dirs
 }
+
+// CheckDirs skips the gate as INVALID when an ancestor of any of dirs is too
+// big or unreadable now. Gates call it with the dirs SkipIfInvalid returned at
+// their start, before they judge their result, so INVALID wins over FAIL.
+func CheckDirs(t skipper, dirs []string) {}
 
 // firstInvalid is the first too-big or unreadable ancestor of any invalidDirs
 // entry, with its entry count or read error.
-func firstInvalid() (dir string, n int, err error) {
-	for _, d := range invalidDirs() {
+func firstInvalid(dirs []string) (dir string, n int, err error) {
+	for _, d := range dirs {
 		if big, n, err := BigAncestor(d); big != "" {
 			return big, n, err
 		}

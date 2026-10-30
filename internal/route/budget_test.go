@@ -17,7 +17,7 @@ import (
 // big dir and in its parent). Reads are counted by calls and by entries
 // delivered, which is the work proportional to the unrelated names.
 func TestBudgetB4_NoWorkProportionalToUnrelatedDirs(t *testing.T) {
-	logLoad(t)
+	dirs := logLoad(t)
 	type tally struct{ calls, entries int }
 	run := func(siblings int) tally {
 		root := t.TempDir()
@@ -71,6 +71,7 @@ func TestBudgetB4_NoWorkProportionalToUnrelatedDirs(t *testing.T) {
 	tiny, small, large := run(10), run(500), run(2000)
 	t.Logf("B4 reads of the two dirs: 10 siblings: %d calls, %d entries; 500: %d calls, %d entries; 2000: %d calls, %d entries",
 		tiny.calls, tiny.entries, small.calls, small.entries, large.calls, large.entries)
+	testenv.CheckDirs(t, dirs) // validity first, then the verdict
 	testenv.RequireReads(t, "B4 reads of the big dir", tiny.calls)
 	testenv.RequireReads(t, "B4 reads of the big dir", small.calls)
 	testenv.RequireReads(t, "B4 reads of the big dir", large.calls)

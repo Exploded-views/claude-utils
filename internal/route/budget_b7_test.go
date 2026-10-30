@@ -15,7 +15,7 @@ import (
 // A fresh process (a new Router) resolves one live checkout and a few gone
 // folders; bytes are the entry-name bytes ReadDir returned for the big dir.
 func TestBudgetB7_BytesReadFlatAsTmpdirGrows(t *testing.T) {
-	logLoad(t)
+	dirs := logLoad(t)
 	run := func(entries int) (reads, bytes int) {
 		big := filepath.Join(t.TempDir(), "T")
 		if err := os.MkdirAll(filepath.Join(big, "live", "proj"), 0o700); err != nil {
@@ -47,6 +47,7 @@ func TestBudgetB7_BytesReadFlatAsTmpdirGrows(t *testing.T) {
 	r1, b1 := run(1000)
 	r2, b2 := run(100000)
 	t.Logf("B7 bytes read of the temp dir: 1k entries: %d reads, %d bytes; 100k entries: %d reads, %d bytes", r1, b1, r2, b2)
+	testenv.CheckDirs(t, dirs) // validity first, then the verdict
 	testenv.RequireReads(t, "B7 reads of the temp dir", r1)
 	testenv.RequireReads(t, "B7 reads of the temp dir", r2)
 	// Flat: both are the first maxList+1 names; which names are first differs a

@@ -123,13 +123,13 @@ const maxLoad = 8.0
 // budget (not t.Errorf), and defer done.
 func timingBudget(t *testing.T) (fail func(format string, args ...any), done func()) {
 	t.Helper()
-	testenv.SkipIfInvalid(t)
+	dirs := testenv.SkipIfInvalid(t)
 	start := loadAvg1()
 	t.Logf("load average at start: %.2f", start)
 	var fails []string
 	fail = func(format string, args ...any) { fails = append(fails, fmt.Sprintf(format, args...)) }
 	done = func() {
-		testenv.SkipIfInvalid(t) // an ancestor may have crossed the limit during the run
+		testenv.CheckDirs(t, dirs) // an ancestor may have crossed the limit during the run
 		end := loadAvg1()
 		t.Logf("load average at end: %.2f", end)
 		if start > maxLoad || end > maxLoad {
@@ -146,10 +146,10 @@ func timingBudget(t *testing.T) (fail func(format string, args ...any), done fun
 // end. Counted tests (B4-B8) are not gated on it.
 func logLoad(t *testing.T) {
 	t.Helper()
-	testenv.SkipIfInvalid(t)
+	dirs := testenv.SkipIfInvalid(t)
 	t.Logf("load average at start: %.2f", loadAvg1())
 	t.Cleanup(func() {
 		t.Logf("load average at end: %.2f", loadAvg1())
-		testenv.EndCheck(t)
+		testenv.EndCheck(t, dirs)
 	})
 }

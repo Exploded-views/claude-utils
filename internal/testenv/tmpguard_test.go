@@ -218,7 +218,7 @@ func TestEndCheckSkipsAPassingGateWhoseAncestorGrew(t *testing.T) {
 	fakeFS(t, nil, map[string]int{"/fakebig": 300})
 	fakeInvalidDirs(t, "/fakebig/T")
 	e := &endRec{}
-	EndCheck(e)
+	EndCheck(e, invalidDirs())
 	if !strings.HasPrefix(e.msg, "INVALID: ") || !strings.Contains(e.msg, "300") {
 		t.Errorf("EndCheck skip = %q, want INVALID naming 300", e.msg)
 	}
@@ -228,7 +228,7 @@ func TestEndCheckLogsButDoesNotHideAFailure(t *testing.T) {
 	fakeFS(t, nil, map[string]int{"/fakebig": 300})
 	fakeInvalidDirs(t, "/fakebig/T")
 	e := &endRec{failed: true}
-	EndCheck(e)
+	EndCheck(e, invalidDirs())
 	if e.msg != "" || len(e.logs) != 1 || !strings.HasPrefix(e.logs[0], "INVALID: ") {
 		t.Errorf("skip %q, logs %q; want no skip and one INVALID log", e.msg, e.logs)
 	}
@@ -238,7 +238,7 @@ func TestEndCheckLeavesAGoodRunAlone(t *testing.T) {
 	fakeFS(t, nil, nil)
 	fakeInvalidDirs(t, "/fakeok/T")
 	e := &endRec{}
-	EndCheck(e)
+	EndCheck(e, invalidDirs())
 	if e.msg != "" || len(e.logs) != 0 {
 		t.Errorf("skip %q logs %q on a good run", e.msg, e.logs)
 	}
@@ -286,5 +286,43 @@ func TestCountEntriesStopsReadingPastTheLimit(t *testing.T) {
 	}
 	if readCap <= listlimit.Max || readCap <= smallBase {
 		t.Errorf("readCap %d must exceed both limits", readCap)
+	}
+}
+
+func TestEndCheckRechecksTheStartDirsNotTheCurrentTMPDIR(t *testing.T) {
+	// A gate (B1) points TMPDIR at its own big fixture mid-run; the end check
+	// must look at what was captured at the start.
+	fakeFS(t, nil, map[string]int{"/fakefixture": 10000})
+	fakeInvalidDirs(t, "/fakeok/T")
+	start := SkipIfInvalid(&rec{})
+	fakeInvalidDirs(t, "/fakefixture/T") // TMPDIR moved to the big fixture
+	e := &endRec{}
+	EndCheck(e, start)
+	if e.msg != "" || len(e.logs) != 0 {
+		t.Errorf("end check looked at the moved TMPDIR: skip %q logs %q", e.msg, e.logs)
+	}
+}
+
+func TestCheckDirsSkipsAsINVALIDWhenAStartDirGrew(t *testing.T) {
+	fakeFS(t, nil, map[string]int{"/fakegrew": 300})
+	r := &rec{}
+	CheckDirs(r, []string{"/fakegrew/T"})
+	if !strings.HasPrefix(r.msg, "INVALID: ") || !strings.Contains(r.msg, "300") {
+		t.Errorf("CheckDirs skip = %q", r.msg)
+	}
+}
+
+func TestCheckDirsBeforeAFailingVerdictGivesINVALIDNotFAIL(t *testing.T) {
+	// The gate order: validity first, then the verdict. A gate that would fail
+	// (0 reads) is skipped before RequireReads runs.
+	fakeFS(t, nil, map[string]int{"/fakegrew": 300})
+	r := &rec{}
+	CheckDirs(r, []string{"/fakegrew/T"})
+	e := &errRec{}
+	if r.msg == "" {
+		RequireReads(e, "B4", 0)
+	}
+	if r.msg == "" || len(e.errs) != 0 {
+		t.Errorf("skip %q, errors %q: want INVALID before any verdict", r.msg, e.errs)
 	}
 }
