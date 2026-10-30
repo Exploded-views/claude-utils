@@ -237,6 +237,9 @@ func firstInvalid(dirs []string) (dir string, n int, err error) {
 }
 
 func invalidMsg(big string, n int, err error) string {
+	if errors.Is(err, errForced) {
+		return fmt.Sprintf("INVALID: forced by %s: the end check reports %s as over the limit (a test switch, not a real directory)", EnvForceEndInvalid, big)
+	}
 	if err != nil {
 		return fmt.Sprintf("INVALID: %s cannot be read (%v); it is an ancestor of the budget fixture, and the route walker cannot resolve fixture folders under a directory it cannot list. Point TMPDIR at a directory whose ancestors all have at most %d entries", big, err, listlimit.Max)
 	}

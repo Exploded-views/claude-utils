@@ -16,6 +16,10 @@ import (
 // requires it to be INVALID (skipped, naming the forced check), never PASS or FAIL.
 func runGateForcedInvalid(t *testing.T, gate string) {
 	t.Helper()
+	if testenv.Prebuilt() {
+		t.Skip("the fault switches are refused in prebuilt mode, so this meta test cannot run there")
+	}
+	testenv.SkipIfInvalid(t) // a host that is already INVALID would skip the gate at its start, not at its end
 	cmd := exec.Command(os.Args[0], "-test.run", "^"+gate+"$", "-test.v", "-test.count=1")
 	cmd.Env = append(os.Environ(), testenv.EnvForceEndInvalid+"=1", testenv.EnvForceVerdictFail+"=1")
 	out, err := cmd.CombinedOutput()
