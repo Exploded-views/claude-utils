@@ -187,3 +187,19 @@ func TestSmallTempDirLeavesTMPDIRWhenNoBaseQualifies(t *testing.T) {
 		t.Errorf("TMPDIR = %q, want it unchanged", got)
 	}
 }
+
+func TestDefaultCandidatesOrder(t *testing.T) {
+	t.Setenv(EnvTmpCandidates, "")
+	want := []string{os.TempDir(), "/tmp", "/var/tmp"}
+	got := tempCandidates()
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("tempCandidates = %v, want %v (current temp dir, /tmp, /var/tmp)", got, want)
+	}
+}
+
+func TestCandidatesEnvOverride(t *testing.T) {
+	t.Setenv(EnvTmpCandidates, "/x/one"+string(os.PathListSeparator)+"/y/two")
+	if got := tempCandidates(); fmt.Sprint(got) != "[/x/one /y/two]" {
+		t.Errorf("tempCandidates = %v, want the override list", got)
+	}
+}

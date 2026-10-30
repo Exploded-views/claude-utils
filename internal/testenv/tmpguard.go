@@ -14,7 +14,16 @@ const smallBase = 200
 
 // tempCandidates are the bases SmallTempDir may use, in order: the temp dir the
 // process started with, then /tmp, then /var/tmp. A test replaces it.
-var tempCandidates = func() []string { return []string{os.TempDir(), "/tmp", "/var/tmp"} }
+var tempCandidates = func() []string {
+	if v := os.Getenv(EnvTmpCandidates); v != "" {
+		return filepath.SplitList(v)
+	}
+	return []string{os.TempDir(), "/tmp", "/var/tmp"}
+}
+
+// EnvTmpCandidates replaces the candidate list with a path list (as PATH is
+// spelled), for forcing every base bad when showing the INVALID skip.
+const EnvTmpCandidates = "MEMSYNC_BUDGET_TMP_CANDIDATES"
 
 // countEntries is the number of entries in dir. A test replaces it, so no
 // check depends on the host's real directories.
