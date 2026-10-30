@@ -235,7 +235,11 @@ func PrebuiltSetup() (cleanup func(), err error) {
 			orig = strings.TrimPrefix(kv, "HOME=")
 		}
 	}
-	return prebuiltSetup(os.Getenv, orig, os.TempDir())
+	base := os.TempDir()
+	if b, ok := pickBase(tempCandidates()); ok {
+		base = b
+	}
+	return prebuiltSetup(os.Getenv, orig, base)
 }
 
 // prebuiltOrFatal is Binaries' prebuilt branch.

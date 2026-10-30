@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MarimerLLC/claude-utils/internal/listlimit"
 	"github.com/MarimerLLC/claude-utils/internal/proc"
 )
 
@@ -162,7 +163,7 @@ func platformFold() func(string) string {
 // maxList is the most entries a directory may have to be listed in full. A
 // bigger one (a busy temp dir) is never listed: names under it resolve only by
 // probing for the path they spell, which costs the same however big it is.
-const maxList = 256
+const maxList = listlimit.Max
 
 // listing is one directory's entries indexed by escaped, case-folded name,
 // with each child's is-a-directory answer filled in on first use. large means

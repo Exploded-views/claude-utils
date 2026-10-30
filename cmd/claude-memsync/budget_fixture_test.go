@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/MarimerLLC/claude-utils/internal/route"
+	"github.com/MarimerLLC/claude-utils/internal/testenv"
 )
 
 // budgetTree is the owner's Mac in miniature: a $TMPDIR-shaped directory with
@@ -122,6 +123,7 @@ const maxLoad = 8.0
 // budget (not t.Errorf), and defer done.
 func timingBudget(t *testing.T) (fail func(format string, args ...any), done func()) {
 	t.Helper()
+	testenv.SkipIfInvalid(t)
 	start := loadAvg1()
 	t.Logf("load average at start: %.2f", start)
 	var fails []string
@@ -143,6 +145,7 @@ func timingBudget(t *testing.T) (fail func(format string, args ...any), done fun
 // end. Counted tests (B4-B8) are not gated on it.
 func logLoad(t *testing.T) {
 	t.Helper()
+	testenv.SkipIfInvalid(t)
 	t.Logf("load average at start: %.2f", loadAvg1())
 	t.Cleanup(func() { t.Logf("load average at end: %.2f", loadAvg1()) })
 }
