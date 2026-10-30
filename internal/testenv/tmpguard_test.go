@@ -353,3 +353,10 @@ func TestBigAncestorCountsTheDirectoryItself(t *testing.T) {
 		t.Errorf("BigAncestor = %q, %d; want the dir itself (B1's fixture is such a dir)", dir, n)
 	}
 }
+
+func TestForcedInvalidMessageNamesTheSwitch(t *testing.T) {
+	m := invalidMsg("/d", readCap, errForced)
+	if !strings.HasPrefix(m, "INVALID: ") || !strings.Contains(m, "forced by "+EnvForceEndInvalid) || strings.Contains(m, "cannot be read") {
+		t.Errorf("message = %q, want INVALID: forced by %s, not a read error", m, EnvForceEndInvalid)
+	}
+}

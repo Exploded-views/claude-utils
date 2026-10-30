@@ -308,3 +308,33 @@ func TestBudgetPrebuiltTagMustBeAReleaseTag(t *testing.T) {
 		}
 	}
 }
+
+// The release budget binaries carry the fault-injection switches; a stray one in
+// an operator's shell would turn real FAILs into INVALID, so prebuilt mode refuses.
+func TestBudgetPrebuiltRefusesTheFaultSwitches(t *testing.T) {
+	asTestBinaryVersion(t, prebuiltTestTag)
+	ms0, _ := BinariesVersion(t, prebuiltTestTag)
+	keys := []string{"HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "TMPDIR"}
+	for _, k := range keys {
+		t.Setenv(k, os.Getenv(k))
+	}
+	for _, sw := range []string{EnvForceEndInvalid, EnvForceVerdictFail} {
+		env := map[string]string{EnvBinDir: filepath.Dir(ms0), EnvTag: prebuiltTestTag, sw: "1"}
+		cleanup, err := prebuiltSetup(envMap(env), filepath.Join(t.TempDir(), "orig-home"), t.TempDir())
+		if err == nil || !strings.Contains(err.Error(), sw) {
+			if cleanup != nil {
+				cleanup()
+			}
+			t.Errorf("%s set in prebuilt mode: err = %v, want a refusal naming it", sw, err)
+		}
+	}
+	// Outside prebuilt mode the switches are left alone (the meta tests use them).
+	env := map[string]string{EnvForceEndInvalid: "1", EnvForceVerdictFail: "1"}
+	cleanup, err := prebuiltSetup(envMap(env), "", t.TempDir())
+	if err != nil {
+		t.Errorf("source mode with the switches set: %v, want no error", err)
+	}
+	if cleanup != nil {
+		cleanup()
+	}
+}

@@ -1,6 +1,7 @@
 package testenv
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -22,6 +23,10 @@ const (
 	EnvForceEndInvalid  = "MEMSYNC_BUDGET_FORCE_END_INVALID"
 	EnvForceVerdictFail = "MEMSYNC_BUDGET_FORCE_VERDICT_FAIL"
 )
+
+// errForced marks the error endInvalid returns for a forced end check, so the
+// message can say so.
+var errForced = errors.New("forced")
 
 // readCap is the most names countEntries reads: one past the larger limit.
 const readCap = listlimit.Max + 1
@@ -197,7 +202,7 @@ func skipOn(t skipper, dirs []string, find func([]string) (string, int, error)) 
 // injection: EnvForceEndInvalid reports the first start dir as over the limit.
 func endInvalid(dirs []string) (string, int, error) {
 	if forceEndInvalid() && len(dirs) > 0 {
-		return dirs[0], readCap, fmt.Errorf("forced by %s", EnvForceEndInvalid)
+		return dirs[0], readCap, errForced
 	}
 	return firstInvalid(dirs)
 }
