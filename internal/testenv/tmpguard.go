@@ -168,11 +168,27 @@ func SkipIfInvalid(t skipper) (dirs []string) {
 // CheckDirs skips the gate as INVALID when an ancestor of any of dirs is too
 // big or unreadable now. Gates call it with the dirs SkipIfInvalid returned at
 // their start, before they judge their result, so INVALID wins over FAIL.
-func CheckDirs(t skipper, dirs []string) {
+func CheckDirs(t skipper, dirs []string) (skipped bool) {
 	t.Helper()
 	if big, n, err := firstInvalid(dirs); big != "" || err != nil {
 		t.Skipf("%s", invalidMsg(big, n, err))
+		return true
 	}
+	return false
+}
+
+// Judge runs a gate's verdict (its floors and comparisons) only after the
+// validity check on the start dirs passes, so INVALID always wins over FAIL.
+func Judge(t skipper, dirs []string, verdict func()) {
+	verdict()
+}
+
+// SetCountEntriesForTest replaces the directory entry counter and returns the
+// function that restores it, so a gate test can make an ancestor grow mid-run.
+func SetCountEntriesForTest(f func(dir string) (int, error)) (restore func()) {
+	old := countEntries
+	countEntries = f
+	return func() { countEntries = old }
 }
 
 // firstInvalid is the first too-big or unreadable ancestor of any invalidDirs

@@ -326,3 +326,30 @@ func TestCheckDirsBeforeAFailingVerdictGivesINVALIDNotFAIL(t *testing.T) {
 		t.Errorf("skip %q, errors %q: want INVALID before any verdict", r.msg, e.errs)
 	}
 }
+
+func TestJudgeSkipsBeforeTheVerdictWhenInvalid(t *testing.T) {
+	fakeFS(t, nil, map[string]int{"/fakegrew": 300})
+	r := &rec{}
+	ran := false
+	Judge(r, []string{"/fakegrew/T"}, func() { ran = true })
+	if ran || !strings.HasPrefix(r.msg, "INVALID: ") {
+		t.Errorf("verdict ran %v, skip %q; want INVALID and no verdict", ran, r.msg)
+	}
+}
+
+func TestJudgeRunsTheVerdictWhenValid(t *testing.T) {
+	fakeFS(t, nil, nil)
+	r := &rec{}
+	ran := false
+	Judge(r, []string{"/fakeok/T"}, func() { ran = true })
+	if !ran || r.msg != "" {
+		t.Errorf("verdict ran %v, skip %q; want the verdict and no skip", ran, r.msg)
+	}
+}
+
+func TestBigAncestorCountsTheDirectoryItself(t *testing.T) {
+	fakeFS(t, nil, map[string]int{"/fakeself/T": 300})
+	if dir, n, _ := BigAncestor("/fakeself/T"); dir != "/fakeself/T" || n != 300 {
+		t.Errorf("BigAncestor = %q, %d; want the dir itself (B1's fixture is such a dir)", dir, n)
+	}
+}
