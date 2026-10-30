@@ -74,6 +74,7 @@ scan:
 			folder := e.Name()
 			d := rc.set.Router.Decide(folder)
 			if d.Repo == "" {
+				// denied or unowned: the folder is never listed, opened or counted
 				continue
 			}
 			name := rc.set.remoteName(d.Repo)
