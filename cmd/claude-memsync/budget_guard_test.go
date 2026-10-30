@@ -90,3 +90,36 @@ func TestLogLoadIgnoresTheFixtureTMPDIR(t *testing.T) {
 		t.Errorf("skipped=%v failed=%v; want a pass", sub.Skipped(), sub.Failed())
 	}
 }
+
+// A gate whose ancestors are already too big is skipped before its body runs
+// (no fixture work, no failure from a fixture that cannot be built).
+func TestTimingBudgetSkipsBeforeTheBody(t *testing.T) {
+	needQuiet(t)
+	growable(t, map[string]int{"/": 300})
+	ran := false
+	var sub *testing.T
+	t.Run("gate", func(s *testing.T) {
+		sub = s
+		_, done := timingBudget(s)
+		defer done()
+		ran = true
+	})
+	if ran || !sub.Skipped() {
+		t.Errorf("body ran %v, skipped %v; want skipped before the body", ran, sub.Skipped())
+	}
+}
+
+func TestLogLoadSkipsBeforeTheBody(t *testing.T) {
+	needQuiet(t)
+	growable(t, map[string]int{"/": 300})
+	ran := false
+	var sub *testing.T
+	t.Run("gate", func(s *testing.T) {
+		sub = s
+		logLoad(s)
+		ran = true
+	})
+	if ran || !sub.Skipped() {
+		t.Errorf("body ran %v, skipped %v; want skipped before the body", ran, sub.Skipped())
+	}
+}
