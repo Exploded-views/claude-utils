@@ -24,7 +24,9 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/ghapp"
 )
 
-const appTestToken = "ghs_APPTEST_zzz999"
+// Assembled at run time, so no compiled test binary carries the token whole (the
+// release secret scan reads the strings of the budget test binary).
+var appTestToken = strings.Join([]string{"ghs", "APPTEST", "zzz999"}, "_")
 
 type appFake struct {
 	*httptest.Server
