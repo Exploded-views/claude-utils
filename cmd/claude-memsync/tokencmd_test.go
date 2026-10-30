@@ -150,8 +150,9 @@ func TestRecheckTokenCmdFalseSkipsCommand(t *testing.T) {
 		t.Fatal("local checks still apply")
 	}
 	allowed()
-	if err := daemonGuard(cfg, func(string, ...any) {}); err != nil {
-		t.Fatal(err)
+	// With the command off for the daemon it has no token source: held.
+	if err := daemonGuard(cfg, func(string, ...any) {}); err == nil {
+		t.Fatal("privateOnly with the daemon's only token source turned off must not pass")
 	}
 	if _, err := os.Stat(marker); err == nil {
 		t.Error("token command ran although recheckTokenCmd is false")

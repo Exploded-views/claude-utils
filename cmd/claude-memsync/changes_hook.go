@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/MarimerLLC/claude-utils/internal/changes"
 	"github.com/MarimerLLC/claude-utils/internal/config"
@@ -69,11 +73,13 @@ var hookWorkDone func()
 // stderr, nothing on stdout, and exit 0.
 //
 // The work runs in a goroutine that touches no marker and writes to no shared
-// stream. If it is not done within deadline (0: no limit), the hook prints
-// nothing, moves nothing and returns; the worker (and any git process it
-// started) dies with the process. Only the caller's goroutine prints the
-// report and moves markers, and only after the worker finished in time, so a
-// late finisher can never move one.
+// stream. If it is not done within deadline (0: no limit), the hook first
+// kills every git process it started (by process group) and logs the expiry,
+// then prints only the held-repo alerts, which were read before any git work,
+// and moves only their ".held" markers; change notices are deferred to the
+// next prompt and no change marker moves. Only the caller's goroutine prints
+// the report and moves markers, and only after the worker finished in time, so
+// a late finisher can never move one.
 func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag, project string, limit int, deadline time.Duration) int {
 	type outcome struct {
 		out      []byte
@@ -88,6 +94,7 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 	defer proc.Release()
 	var errBuf bytes.Buffer // the worker's until it reports back
 	done := make(chan outcome, 1)
+	pre := make(chan hookPre, 1) // the held-repo alerts, before any git work
 	go func() {
 		var o outcome
 		defer func() {
@@ -99,7 +106,13 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 			}
 			done <- o
 		}()
-		o.out, o.commit, o.release, o.err = hookWork(stdin, &errBuf, cfgPath, routesFlag, project, limit)
+		buf, rerr := io.ReadAll(io.LimitReader(stdin, 1<<20))
+		var p hookPre
+		if rerr == nil {
+			p = hookPrelude(buf, cfgPath, routesFlag)
+		}
+		pre <- p
+		o.out, o.commit, o.release, o.err = hookWork(bytes.NewReader(buf), &errBuf, cfgPath, routesFlag, project, limit, p)
 	}()
 	var expired <-chan time.Time
 	if deadline > 0 {
@@ -135,8 +148,21 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 		}
 		return 0
 	case <-expired:
-		fmt.Fprintln(stderr, "changes: hook deadline exceeded; notices deferred to the next prompt")
+		// No git outlives the deadline: kill it before any file I/O below.
 		hookExpired(cfgPath, routesFlag)
+		// Held-repo alerts were read before any git work: they still go out.
+		select {
+		case p := <-pre:
+			if len(p.alerts) > 0 {
+				if b, err := hookReplyJSON(p.event, p.alerts); err == nil {
+					if _, err := stdout.Write(b); err == nil {
+						p.commit()
+					}
+				}
+			}
+		default:
+		}
+		fmt.Fprintln(stderr, "changes: hook deadline exceeded; notices deferred to the next prompt")
 		return 0
 	}
 }
@@ -144,7 +170,7 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 // hookWork computes the hook's report. It returns the bytes to print (nil:
 // nothing) and a function that moves the markers, which the caller runs once
 // the output was written. It moves no marker itself.
-func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project string, limit int) (out []byte, commit func() error, release func(), err error) {
+func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project string, limit int, p hookPre) (out []byte, commit func() error, release func(), err error) {
 	if hookTestHook != nil {
 		hookTestHook()
 	}
@@ -172,6 +198,11 @@ func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project st
 		project = in.Cwd
 	}
 
+	alerts, alertCommit := p.alerts, p.commit
+	if alertCommit == nil {
+		alertCommit = func() {}
+	}
+
 	// Hooks that pile up (a slow prompt, many sessions) must not each do the
 	// work: one at a time, the others return at once and report on the next
 	// prompt. The lock lives in the first repo's state dir and is held until the
@@ -180,7 +211,15 @@ func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project st
 	if len(targets) > 0 {
 		var held bool
 		if lk, held, err = lock.TryHook(targets[0].cfg.SyncDir); held {
-			return nil, nil, nil, nil
+			// Held alerts need no lock (per-session, git-free): tell them now.
+			if len(alerts) == 0 {
+				return nil, nil, nil, nil
+			}
+			b, rerr := hookReplyJSON(in.Event, alerts)
+			if rerr != nil {
+				return nil, nil, nil, rerr
+			}
+			return b, func() error { alertCommit(); return nil }, nil, nil
 		}
 	}
 	owned := false
@@ -296,25 +335,24 @@ func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project st
 		lines = append(lines, relLines...)
 		reported = true
 	}
+	if len(alerts) > 0 {
+		if reported {
+			lines = append(append(alerts, ""), lines...)
+		} else {
+			lines = alerts
+		}
+		reported = true
+	}
 	if !reported {
 		out = nil
 	} else {
-		var reply struct {
-			Out struct {
-				Event   string `json:"hookEventName"`
-				Context string `json:"additionalContext"`
-			} `json:"hookSpecificOutput"`
-		}
-		reply.Out.Event = in.Event
-		reply.Out.Context = strings.Join(lines, "\n")
-		var buf bytes.Buffer
-		if err := json.NewEncoder(&buf).Encode(reply); err != nil {
+		if out, err = hookReplyJSON(in.Event, lines); err != nil {
 			return nil, nil, nil, err
 		}
-		out = buf.Bytes()
 	}
 	owned = true
 	commit = func() error {
+		alertCommit()
 		if relCommit != nil {
 			relCommit()
 		}
@@ -396,6 +434,139 @@ func pruneMarkers(dir, keep string, maxAge time.Duration) {
 			os.Remove(filepath.Join(dir, e.Name()))
 		}
 	}
+}
+
+// hookPre is what the hook works out before any git work: the held-repo
+// alerts (and how to record them as told), so they survive a deadline.
+type hookPre struct {
+	event  string
+	alerts []string
+	commit func()
+}
+
+// hookPrelude reads the hook input and the held-repo alerts. Any problem gives
+// no alerts; the worker reports the input error itself.
+func hookPrelude(in []byte, cfgPath, routesFlag string) hookPre {
+	p := hookPre{commit: func() {}}
+	var h hookInput
+	if json.Unmarshal(in, &h) != nil || !sessionIDPattern.MatchString(h.SessionID) || h.Event == "" {
+		return p
+	}
+	targets, err := hookTargets(cfgPath, routesFlag)
+	if err != nil {
+		return p
+	}
+	p.event = h.Event
+	p.alerts, p.commit = heldAlerts(targets, h.SessionID)
+	return p
+}
+
+// hookReplyJSON is the hook's stdout: additionalContext for the event.
+func hookReplyJSON(event string, lines []string) ([]byte, error) {
+	var reply struct {
+		Out struct {
+			Event   string `json:"hookEventName"`
+			Context string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	reply.Out.Event = event
+	reply.Out.Context = strings.Join(lines, "\n")
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(reply); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// heldReasonMax caps the reason an alert quotes from a state file.
+const heldReasonMax = 200
+
+// oneLine makes state-file text safe to put in the agent's context: control
+// and format characters (newlines, bidi controls, zero-width characters) and
+// invalid bytes become spaces, runs of spaces (U+2028/2029 included) collapse,
+// and it is cut to max runes.
+func oneLine(s string, max int) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == utf8.RuneError {
+			return ' '
+		}
+		return r
+	}, s)
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max]) + "…"
+	}
+	return s
+}
+
+// heldAlerts is one context line per repo the private-only check holds (its
+// .state/loop-failed is a hold record), so the agent knows that repo is not
+// syncing (the design: hold only that repo, and alert the agents). Each
+// session hears about a given record once: commit records the record's digest
+// in the session's ".held" marker, and runs only after the output went out.
+// It reads local files only: no lock, no git, no network.
+func heldAlerts(targets []hookTarget, session string) (lines []string, commit func()) {
+	type seen struct{ path, digest string }
+	var marks []seen
+	for _, tg := range targets {
+		b, ok := readHeldRecord(loopFailedPath(tg.cfg.SyncDir))
+		if !ok || !isHeldRecord(b) {
+			continue
+		}
+		sum := sha256.Sum256(b)
+		digest := hex.EncodeToString(sum[:])
+		mark := filepath.Join(tg.cfg.SyncDir, ".state", "hook-markers", session+".held")
+		if prev, ok := readHeldRecord(mark); ok && strings.TrimSpace(string(prev)) == digest {
+			continue
+		}
+		when, reason, _ := strings.Cut(string(b), " ")
+		reason = strings.TrimPrefix(reason, heldMarker)
+		lines = append(lines, fmt.Sprintf("memsync: repo %s is HELD by the private-only check since %s: %s. Nothing syncs for it (no pull, commit or push) until the check passes; see `claude-memsync status`.", oneLine(tg.name, 80), oneLine(when, 40), oneLine(reason, heldReasonMax)))
+		marks = append(marks, seen{mark, digest})
+	}
+	return lines, func() {
+		for _, m := range marks {
+			_ = os.MkdirAll(filepath.Dir(m.path), 0o700)
+			writeMarker(m.path, m.digest+"\n")
+		}
+	}
+}
+
+// writeMarker replaces p with data through a fresh temp file in the same
+// directory (os.CreateTemp: O_EXCL with a random name, so no planted link is
+// followed) and a rename. Errors leave the old marker; the alert repeats.
+func writeMarker(p, data string) {
+	f, err := os.CreateTemp(filepath.Dir(p), filepath.Base(p)+".*.tmp")
+	if err != nil {
+		return
+	}
+	_, werr := f.WriteString(data)
+	if cerr := f.Close(); werr != nil || cerr != nil || os.Rename(f.Name(), p) != nil {
+		_ = os.Remove(f.Name())
+	}
+}
+
+// heldRecordMax bounds how much of a loop-failed record the hook reads.
+const heldRecordMax = 4 << 10
+
+// readHeldRecord reads at most heldRecordMax bytes of a loop-failed record,
+// and only from a regular file: a symlink is not followed and a FIFO does not
+// block (openStateFlags), so a stray file can neither hang the hook nor grow
+// its memory. ok is false for anything else or any error.
+func readHeldRecord(p string) (b []byte, ok bool) {
+	if fi, err := os.Lstat(p); err != nil || !fi.Mode().IsRegular() {
+		return nil, false
+	}
+	f, err := os.OpenFile(p, os.O_RDONLY|openStateFlags, 0)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return nil, false
+	}
+	b, err = io.ReadAll(io.LimitReader(f, heldRecordMax))
+	return b, err == nil
 }
 
 // hookHasRelated reports whether a routes file with a registry is in play.

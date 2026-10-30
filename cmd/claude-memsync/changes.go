@@ -50,7 +50,7 @@ func changesCmd(stdin io.Reader, stdout, stderr io.Writer, args []string) (code 
 	update := flags.Bool("update-marker", false, "with --marker, rewrite the file to the current HEAD afterwards (a missing or stale marker only records the baseline)")
 	synced := flags.Bool("synced", false, "compare with the commit last copied into ~/.claude (.state/synced-head) instead of HEAD")
 	routesFlag := flags.String("routes", "", "with --hook: path to routes.json, to report across several repos (default: $"+routesEnv+", then ~/.config/claude-memsync/routes.json if it exists)")
-	deadline := flags.Duration("deadline", defaultHookDeadline, "with --hook: give up after this long, print nothing and move no marker (0 = none; $"+hookDeadlineEnv+", in ms, sets the default)")
+	deadline := flags.Duration("deadline", defaultHookDeadline, "with --hook: give up after this long; then print only held-repo alerts and move no change marker (0 = none; $"+hookDeadlineEnv+", in ms, sets the default)")
 	hook := flags.Bool("hook", false, "run as a Claude Code hook: read its JSON from stdin, keep a per-session marker, print additionalContext JSON")
 	if err := flags.Parse(args); err != nil {
 		if hookRequested(args) {

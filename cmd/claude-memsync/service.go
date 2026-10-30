@@ -345,7 +345,7 @@ func runStatus(args []string) int {
 	}
 	if cfg, err := loadDistillConfig(""); err == nil {
 		if b, err := os.ReadFile(loopFailedPath(cfg.SyncDir)); err == nil {
-			fmt.Println("loop stopped, restarting with backoff: " + strings.TrimSpace(string(b)))
+			fmt.Println(loopFailedLine(b))
 			code = 1
 		}
 		if line := readOnlyLine(cfg); line != "" {

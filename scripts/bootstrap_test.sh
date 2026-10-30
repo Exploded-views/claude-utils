@@ -910,7 +910,7 @@ runboot --host testhost --role homelab --yes
 check "no PAT file: recheckTokenCmd false, no githubTokenFile" jsonok '
 import json,sys
 d=json.load(open(sys.argv[1])); assert d["recheckTokenCmd"] is False and "githubTokenFile" not in d' "$H/.claudesync.d/personal/config.json"
-check "no PAT file: warning printed, file not created" bash -c "printf '%s' \"\$1\" | grep -q 'hourly private re-check is OFF' && [ ! -e '$H/.config/claude-memsync/github-token' ]" _ "$OUT"
+check "no PAT file: warning printed, file not created" bash -c "printf '%s' \"\$1\" | grep -q 'holds every privateOnly repo' && [ ! -e '$H/.config/claude-memsync/github-token' ]" _ "$OUT"
 check "gh token not in any config" bash -c "! grep -rIl -- '$TOKEN' '$H/.claudesync.d' '$H/.config'"
 newhome tok2
 mkdir -p "$H/.config/claude-memsync"; printf 'pat-not-the-gh-token\n' >"$H/.config/claude-memsync/github-token"; chmod 600 "$H/.config/claude-memsync/github-token"
