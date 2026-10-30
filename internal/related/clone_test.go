@@ -458,3 +458,37 @@ func TestReadClone_HooksPathIsOff(t *testing.T) {
 		t.Fatal("a hook from the host's core.hooksPath ran during the fetch")
 	}
 }
+
+// A fetch must not start auto maintenance: it may detach (setsid) and outlive
+// the command's timeout.
+func TestReadClone_FetchStartsNoAutoMaintenance(t *testing.T) {
+	bare := bareWithNotes(t, "mem-other", map[string]string{"a.md": "a\n"})
+	c, err := NewReadClone(t.TempDir(), "mem-other", bare)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Fetch(); err != nil {
+		t.Fatal(err)
+	}
+	// Auto gc is due for sure: any pack beyond one counts as too many.
+	for _, kv := range [][2]string{{"gc.auto", "1"}, {"gc.autoPackLimit", "1"}, {"fetch.unpackLimit", "1"}} {
+		if _, err := gitwt.New(t.TempDir()).Run("--git-dir="+c.store, "config", kv[0], kv[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pushFiles(t, bare, map[string]string{"b.md": "b\n"})
+	trace := filepath.Join(t.TempDir(), "trace")
+	t.Setenv("GIT_TRACE", trace)
+	if err := c.Fetch(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if strings.Contains(l, "run_command") && (strings.Contains(l, "maintenance run") || strings.Contains(l, "gc --auto")) {
+			t.Errorf("auto maintenance was started by the fetch: %s", l)
+		}
+	}
+}

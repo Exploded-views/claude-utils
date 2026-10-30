@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/proc"
 )
 
@@ -126,11 +127,12 @@ func (c *ReadClone) git(ctx context.Context, useStore bool, args ...string) ([]b
 }
 
 func (c *ReadClone) command(ctx context.Context, useStore bool, args ...string) *exec.Cmd {
-	full := []string{"-c", "core.hooksPath=" + os.DevNull, "-c", "core.fsmonitor=false",
+	full := append([]string{}, gitwt.NoAutoMaintenance...) // a fetch must not leave a detached maintenance behind
+	full = append(full, "-c", "core.hooksPath="+os.DevNull, "-c", "core.fsmonitor=false",
 		"-c", "protocol.ext.allow=never",
 		// The host's config must not relax object checks on content the remote chose.
 		"-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true",
-		"-c", "fetch.fsck.hasDotgit=error", "-c", "fsck.hasDotgit=error"}
+		"-c", "fetch.fsck.hasDotgit=error", "-c", "fsck.hasDotgit=error")
 	if useStore {
 		full = append(full, "--git-dir="+c.store)
 	}
