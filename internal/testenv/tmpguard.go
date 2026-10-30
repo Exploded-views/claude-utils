@@ -12,6 +12,9 @@ import (
 // directly under a busier one would be slow to list for no reason.
 const smallBase = 200
 
+// readCap is the most names countEntries reads: one past the larger limit.
+const readCap = listlimit.Max + 1
+
 // tempCandidates are the bases SmallTempDir may use, in order: the temp dir the
 // process started with, then /tmp, then /var/tmp. A test replaces it.
 var tempCandidates = func() []string {
@@ -56,6 +59,30 @@ var invalidDirs = func() []string {
 type skipper interface {
 	Helper()
 	Skipf(format string, args ...any)
+}
+
+// endT is the part of testing.TB that EndCheck uses.
+type endT interface {
+	Helper()
+	Failed() bool
+	Logf(format string, args ...any)
+	Skipf(format string, args ...any)
+}
+
+// EndCheck is the last check of a counted gate, run from its cleanup: when an
+// ancestor crossed the limit during the run, a passing gate is reported as
+// INVALID (skipped). A gate that already failed stays failed; the INVALID line
+// is logged beside the failure.
+func EndCheck(t endT) {}
+
+// RequireReads fails the gate when the walk made no reads at all: a gate that
+// counts reads must not pass at 0 == 0.
+func RequireReads(t errorer, what string, n int) {}
+
+// errorer is the part of testing.TB that RequireReads uses.
+type errorer interface {
+	Helper()
+	Errorf(format string, args ...any)
 }
 
 // BigAncestor walks from path (symlinks resolved) up to / and returns the first

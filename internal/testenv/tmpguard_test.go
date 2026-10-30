@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -201,5 +202,89 @@ func TestCandidatesEnvOverride(t *testing.T) {
 	t.Setenv(EnvTmpCandidates, "/x/one"+string(os.PathListSeparator)+"/y/two")
 	if got := tempCandidates(); fmt.Sprint(got) != "[/x/one /y/two]" {
 		t.Errorf("tempCandidates = %v, want the override list", got)
+	}
+}
+
+type endRec struct {
+	rec
+	failed bool
+	logs   []string
+}
+
+func (e *endRec) Failed() bool            { return e.failed }
+func (e *endRec) Logf(f string, a ...any) { e.logs = append(e.logs, fmt.Sprintf(f, a...)) }
+
+func TestEndCheckSkipsAPassingGateWhoseAncestorGrew(t *testing.T) {
+	fakeFS(t, nil, map[string]int{"/fakebig": 300})
+	fakeInvalidDirs(t, "/fakebig/T")
+	e := &endRec{}
+	EndCheck(e)
+	if !strings.HasPrefix(e.msg, "INVALID: ") || !strings.Contains(e.msg, "300") {
+		t.Errorf("EndCheck skip = %q, want INVALID naming 300", e.msg)
+	}
+}
+
+func TestEndCheckLogsButDoesNotHideAFailure(t *testing.T) {
+	fakeFS(t, nil, map[string]int{"/fakebig": 300})
+	fakeInvalidDirs(t, "/fakebig/T")
+	e := &endRec{failed: true}
+	EndCheck(e)
+	if e.msg != "" || len(e.logs) != 1 || !strings.HasPrefix(e.logs[0], "INVALID: ") {
+		t.Errorf("skip %q, logs %q; want no skip and one INVALID log", e.msg, e.logs)
+	}
+}
+
+func TestEndCheckLeavesAGoodRunAlone(t *testing.T) {
+	fakeFS(t, nil, nil)
+	fakeInvalidDirs(t, "/fakeok/T")
+	e := &endRec{}
+	EndCheck(e)
+	if e.msg != "" || len(e.logs) != 0 {
+		t.Errorf("skip %q logs %q on a good run", e.msg, e.logs)
+	}
+}
+
+type errRec struct{ errs []string }
+
+func (e *errRec) Helper()                   {}
+func (e *errRec) Errorf(f string, a ...any) { e.errs = append(e.errs, fmt.Sprintf(f, a...)) }
+
+func TestRequireReadsFailsOnZero(t *testing.T) {
+	e := &errRec{}
+	RequireReads(e, "B4 reads", 0)
+	if len(e.errs) != 1 || !strings.Contains(e.errs[0], "B4 reads") {
+		t.Errorf("errors = %q, want one naming the gate", e.errs)
+	}
+	e = &errRec{}
+	RequireReads(e, "B4 reads", 1)
+	if len(e.errs) != 0 {
+		t.Errorf("errors = %q on 1 read", e.errs)
+	}
+}
+
+func TestSmallTempDirSwapsWhenTheOverrideFirstEntryQualifies(t *testing.T) {
+	good := t.TempDir()
+	fakeFS(t, []string{good}, nil)
+	t.Setenv("TMPDIR", "/fakebusy/T")
+	cleanup := SmallTempDir()
+	defer cleanup()
+	if got := os.Getenv("TMPDIR"); filepath.Dir(got) != good {
+		t.Errorf("TMPDIR = %q, want a fresh dir under %s", got, good)
+	}
+}
+
+func TestCountEntriesStopsReadingPastTheLimit(t *testing.T) {
+	d := t.TempDir()
+	for i := 0; i < 300; i++ {
+		if err := os.WriteFile(filepath.Join(d, "f"+strconv.Itoa(i)), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := countEntries(d)
+	if err != nil || n != readCap {
+		t.Errorf("countEntries = %d, %v; want %d (reads stop at the cap, which is above every limit)", n, err, readCap)
+	}
+	if readCap <= listlimit.Max || readCap <= smallBase {
+		t.Errorf("readCap %d must exceed both limits", readCap)
 	}
 }
