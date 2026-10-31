@@ -222,5 +222,27 @@ mkdir -p "$W/two"; cp "$W/good/w.yml" "$W/two/a.yml"; cp "$W/self/w.yml" "$W/two
 check "every .yml and .yaml in the dir is checked" rejects two 'b.yaml'
 check "this repo's .github/workflows pass with no exemptions" bash -c "bash '$ROOT/scripts/lint-workflows.sh' '$ROOT/.github/workflows'"
 
+# fork-ci.yml trigger policy, checked on the real file: it runs on same-repo pull
+# requests, never pull_request_target, reads no secrets, pins every action.
+F="$ROOT/.github/workflows/fork-ci.yml"
+fci_pr_types() { awk '/^  pull_request:/{f=1;next} f&&/^  [a-z_]+:/{f=0} f&&/^    types:/{print}' "$F" | tr -d ' ' | grep -qxF 'types:[opened,synchronize,reopened,ready_for_review]'; }
+fci_no_same_repo_skip() { ! grep -E '^    if:' "$F" | grep -q 'head\.repo'; }
+fci_job_guard_kept() { [ "$(grep -cE "^    if: github\.repository_owner != 'MarimerLLC'" "$F")" -eq "$(grep -cE '^    runs-on:' "$F")" ]; }
+no_prt_anywhere() { ! grep -rhE '^[[:space:]]*(on:.*)?pull_request_target|^[[:space:]]*-[[:space:]]*pull_request_target' "$ROOT/.github/workflows" | grep -qv '^[[:space:]]*#'; }
+fci_group_per_pr() { grep -E '^  group:' "$F" | grep -qF 'github.event.pull_request.number'; }
+all_uses_sha() { ! grep -rhE '^[[:space:]]*-?[[:space:]]*uses:' "$ROOT/.github/workflows" | grep -v '\./' | grep -vE 'uses: *[^ @]+@[0-9a-f]{40}( |$)' | grep -vE 'docker://.*@sha256:[0-9a-f]{64}' | grep -q .; }
+fci_no_secrets() { ! grep -v '^[[:space:]]*#' "$F" | grep -q 'secrets\.'; }
+fci_push_no_feat() { awk '/^  push:/{f=1;next} f&&/^  [a-z_]+:/{f=0} f' "$F" | grep -q 'branches: \[main, "integ/\*\*"\]'; }
+fci_perms_minimal() { grep -qx 'permissions: {}' "$F" && ! grep -E '^ +[a-z-]+: write' "$F" | grep -q .; }
+check "fork-ci: pull_request types are opened, synchronize, reopened, ready_for_review" fci_pr_types
+check "fork-ci: no job if: excludes same-repo heads" fci_no_same_repo_skip
+check "fork-ci: every job keeps the owner guard" fci_job_guard_kept
+check "no workflow uses pull_request_target" no_prt_anywhere
+check "fork-ci: concurrency group keys on the PR number" fci_group_per_pr
+check "every uses: is pinned to a 40-hex sha (or a docker digest)" all_uses_sha
+check "fork-ci: no secrets reference" fci_no_secrets
+check "fork-ci: push is main and integ/** only (PRs cover feature branches)" fci_push_no_feat
+check "fork-ci: top-level permissions empty, no write permission" fci_perms_minimal
+
 echo; echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
