@@ -3,27 +3,31 @@
 # 'MarimerLLC'`, so even if this file is merged upstream it never runs there.
 # Upstream's own ci.yml and release.yml are untouched. See docs/ci.md.
 #
-# Duplicate runs: push covers this repo's own branches, so a pull_request run is
-# skipped when the PR's head is in this same repo and only runs for forks of it.
+# Triggers: push to main and integ/**, and pull requests into main and integ/**
+# (same-repo heads included, so a fix/... branch gets a run from its PR).
+# feat/** is not a push trigger: its PR run covers it, so a commit is not run
+# twice. A pushed branch with no open PR gets no run: open a (draft) PR or dispatch. A new push to a PR cancels that PR's superseded run. No secrets, no
+# pull_request_target, read-only token.
 name: Fork CI (fork only)
 
 on:
   push:
-    branches: [main, "integ/**", "feat/**"]
+    branches: [main, "integ/**"]
   pull_request:
-    branches: [main, "integ/**", "feat/**"]
+    branches: [main, "integ/**"]
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 permissions: {}
 
 concurrency:
-  group: fork-ci-${{ github.workflow }}-${{ github.ref }}
+  group: fork-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   vet:
     name: go vet (${{ matrix.goos }})
-    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    if: github.repository_owner != 'MarimerLLC'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -48,7 +52,7 @@ jobs:
 
   gofmt:
     name: gofmt
-    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    if: github.repository_owner != 'MarimerLLC'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -73,7 +77,7 @@ jobs:
 
   test:
     name: go test -race, coverage floors
-    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    if: github.repository_owner != 'MarimerLLC'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -118,7 +122,7 @@ jobs:
   # skipped in a private repo.
   macos-launchagent:
     name: launchd plist (macOS)
-    if: github.repository_owner != 'MarimerLLC' && !github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    if: github.repository_owner != 'MarimerLLC' && !github.event.repository.private
     runs-on: macos-latest
     timeout-minutes: 10
     permissions:
@@ -136,7 +140,7 @@ jobs:
 
   shellcheck:
     name: shellcheck (scripts/*.sh)
-    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    if: github.repository_owner != 'MarimerLLC'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -169,7 +173,7 @@ jobs:
 
   bootstrap-harness:
     name: scripts/bootstrap_test.sh
-    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    if: github.repository_owner != 'MarimerLLC'
     runs-on: ubuntu-latest
     # The harness (about 380 checks, with daemon and upgrade sections) took just
     # over 20 minutes on ubuntu-latest; 45 is interim. A wall-time budget and
@@ -203,7 +207,7 @@ jobs:
 
   release-layout:
     name: release archive layout (${{ matrix.target }})
-    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    if: github.repository_owner != 'MarimerLLC'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     permissions:
@@ -244,7 +248,7 @@ jobs:
 
   job-runner:
     name: bootstrap job runner (${{ matrix.os }})
-    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    if: github.repository_owner != 'MarimerLLC'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     permissions:
@@ -276,7 +280,7 @@ jobs:
 
   workflow-lint:
     name: workflow lint (hosted runners, SHA pins)
-    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    if: github.repository_owner != 'MarimerLLC'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -292,7 +296,7 @@ jobs:
 
   gitleaks:
     name: gitleaks
-    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    if: github.repository_owner != 'MarimerLLC'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -321,7 +325,7 @@ jobs:
 
   reference-current:
     name: docs/reference.md is current
-    if: github.repository_owner != 'MarimerLLC' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    if: github.repository_owner != 'MarimerLLC'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

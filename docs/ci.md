@@ -6,10 +6,14 @@
 upstream it would still not run there. Upstream's `ci.yml` and `release.yml` are
 untouched. Enable Actions on the fork for it to run.
 
-It runs on push for `main`, `integ/**` and `feat/**`, and on manual dispatch. It
-also runs on pull requests into those branches, but only when the PR's head is a
-fork of this repository: a PR from a branch in this repo is already covered by the
-push run, so it is skipped to avoid running everything twice.
+It runs on push for `main` and `integ/**`, on pull requests into `main` and
+`integ/**` (opened, synchronize, reopened, ready_for_review), and on manual
+dispatch. Pull requests whose head is a branch in this same repo run too, so a
+branch such as `fix/...` gets a run from its PR. `feat/**` is not a push trigger:
+the PR run covers it, so a commit is not run twice. A pushed branch with no open
+PR gets no run: open a (draft) pull request, or dispatch the workflow by hand. Runs are grouped per PR
+number (per ref for push) and a newer run cancels the superseded one. There is no
+`pull_request_target`, no secrets, and each job has at most `contents: read`.
 
 Upstream's `ci.yml` is still in the tree and also runs on the fork for `main`
 (push and pull request), alongside this workflow.
