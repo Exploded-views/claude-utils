@@ -512,7 +512,7 @@ func TestJoinAcceptAll_PrintsTheAcceptingHostsKey(t *testing.T) {
 	}
 }
 
-// ---- round 2: a diverged clone, and a fetch that fails, must not hide origin's other key ----
+// ---- a diverged clone, and a fetch that fails, must not hide origin's other key ----
 
 // pushUnrelatedToOrigin moves origin on without touching joins/.
 func pushUnrelatedToOrigin(t *testing.T, cfg config.Config) {

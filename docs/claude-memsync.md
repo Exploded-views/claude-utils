@@ -720,11 +720,18 @@ the markers would have moved anyway). Change it with `--deadline <duration>`
 (for example `--deadline 3s`) or with `CLAUDE_MEMSYNC_HOOK_DEADLINE_MS`
 (milliseconds; the flag wins); `0` turns the deadline off. If the reports for
 all repos are not computed in time, for instance because the host's disk is
-saturated, the hook prints no change notices (only the held-repo alerts below,
-if any), moves no change marker, writes one line to stderr
+saturated, or there are very many repos, the hook kills its `git` processes,
+prints the held-repo alerts below (if any) and the notices of the repos that
+finished in time, moves only those repos' markers, writes one line to stderr
 (`changes: hook deadline exceeded; notices deferred to the next prompt`) and
-exits 0 at once. It is all or nothing: a repo that finished while another did
-not is not reported either, so the next prompt reports every change.
+exits 0 at once. A repo that did not finish keeps its marker and is reported
+whole on the next prompt, which starts from where this one stopped (the repos
+that finished cost no `git` then); the related repos are left to the next
+prompt too. At most 8 repos are worked on at once, in routes order, so the
+ones that finish form a prefix. If the reply cannot be written, no marker
+moves. Each call that gets one repo's work done in time settles at least one
+repo, so the hook converges; a single repo that alone needs more than the
+deadline is never reported, and each expiry is logged in `hook-expiry.log`.
 
 **Held repos.** When the daemon holds a repo because its private-only check
 failed (see the table of checks), the hook leads its output with one line per
@@ -1355,7 +1362,7 @@ As a safety net, when a folder is first routed by a remote rule the daemon also 
 - the new key matches no rule and the root commits are the recorded ones: the folder keeps routing to its recorded repo, `status` shows `renamed remote: add an alias` with the days left, and a line (folder hash only) is logged once. After `renameGraceDays` (a number in `routes.json`, default 30, `0` denies at once) the folder is denied. The period starts once and is not restarted by further name changes; adding an alias, or a rule matching the folder again, ends it. For a folder of a `client` or `orch` repo this only applies to a rename inside the same owner (`github.com/<client-org>/<old>` to `github.com/<client-org>/<new>`); a move to another owner is denied at once;
 - the new key routes to a **different** repo: the folder is never moved by itself. It is denied and `status` shows `remote changed repos` until you edit `routes.json`. The edit is the consent only when it lists a name for that repo that it did not list before (a new pattern or alias for the key; unrelated edits and reordering do not count). To take a folder out of a `client` or `orch` repo the name must be the literal key (a pattern or an alias without `*` or `?`).
 
-The fallback only returns a folder to the repo it was already recorded in, so it never moves a folder into a client or orchestrator repo, or out of one. It needs a record for that folder: a new folder that shares a root commit (a fork, a second clone) gets none. A shallow clone has no usable root commit, so it is recorded without one and is denied after a rename as before. A repo with several roots (merged histories) matches only when the whole sorted set equals the recorded one. Root commits are looked up once per checkout and `HEAD`.
+The fallback only returns a folder to the repo it was already recorded in, so it never moves a folder into a client or coordination repo, or out of one. It needs a record for that folder: a new folder that shares a root commit (a fork, a second clone) gets none. A shallow clone has no usable root commit, so it is recorded without one and is denied after a rename as before. A repo with several roots (merged histories) matches only when the whole sorted set equals the recorded one. Root commits are looked up once per checkout and `HEAD`.
 
 `identity.json` is written under a file lock and merged per folder, so two daemons do not lose each other's records. A file that does not parse is never overwritten: the folders that were routed before are denied and `status` says so, until you fix or delete the file. Only the daemon writes `owners.json` and `identity.json`; `status`, `distill` and the hooks only read.
 

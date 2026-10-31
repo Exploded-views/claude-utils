@@ -19,7 +19,7 @@
 #
 # Read this script before running it. --dry-run prints every step without doing
 # it. Everything lives under $HOME; the script never uses sudo, never prints a
-# private key or a token, and never creates or joins a client or orchestrator
+# private key or a token, and never creates or joins a client or coordination
 # repo. --org-app <name> mints the org token from the GitHub App entry <name> in
 # apps.json (claude-memsync app-token --app <name>), once per org call. With
 # --org-app-id and --org-app-key-cmd the script adds that entry (a key command,
@@ -38,7 +38,7 @@ esac
 # Role table. Edit here. A role lists repos as "key:kind:repo-name" and names
 # the repo key the home folder is pinned to. personal-dev also discovers one
 # mem-project-<name> repo per own git checkout (see discover_projects).
-# Client and orchestrator repos (mem-client-*, mem-orch-*) are never allowed.
+# Client and coordination repos (mem-client-*, mem-orch-*) are never allowed.
 # ---------------------------------------------------------------------------
 ROLE_homelab_REPOS="personal:personal:mem-personal infra-homelab:infra:mem-infra-homelab"
 ROLE_homelab_HOME="infra-homelab"
@@ -525,7 +525,7 @@ project_not_kept_out_check() { # owner repo
   echo "SAFE:project_not_kept_out"
 }
 
-repo_name_ok_check() { # repo name: only mem-* names, never client or orchestrator repos
+repo_name_ok_check() { # repo name: only mem-* names, never client or coordination repos
   local re='^mem-[a-z0-9][a-z0-9._-]*$'
   case "$1" in
     mem-client-* | mem-orch-*) g_refuse "refusing repo name '$1' (only mem-* names; never mem-client-* or mem-orch-*)"; return 1 ;;
@@ -957,7 +957,7 @@ validate_flags() {
   [ -n "$ROLE" ] || udie "--role is required"
   case "$ROLE" in
     homelab | personal-dev) ;;
-    *) udie "unknown role '$ROLE' (known: homelab, personal-dev). There is no role for client or orchestrator repos." ;;
+    *) udie "unknown role '$ROLE' (known: homelab, personal-dev). There is no role for client or coordination repos." ;;
   esac
   re='^[a-z0-9][a-z0-9-]{0,31}$'
   [[ $HOST =~ $re ]] || udie "bad --host label '$HOST' (it is the host's label in recipients, deploy keys and join requests: 1-32 characters of a-z, 0-9 and '-', starting with a letter or digit)"
@@ -1099,7 +1099,7 @@ OWN_OWNERS+=("$(lower "$ORG")")
 case "$ROLE" in
   homelab)      ROLE_REPOS="$ROLE_homelab_REPOS"; HOME_KEY="$ROLE_homelab_HOME" ;;
   personal-dev) ROLE_REPOS="$ROLE_personal_dev_REPOS"; HOME_KEY="$ROLE_personal_dev_HOME" ;;
-  *)            udie "unknown role '$ROLE' (known: homelab, personal-dev). There is no role for client or orchestrator repos." ;;
+  *)            udie "unknown role '$ROLE' (known: homelab, personal-dev). There is no role for client or coordination repos." ;;
 esac
 for spec in $ROLE_REPOS; do
   IFS=: read -r k kind name <<<"$spec"

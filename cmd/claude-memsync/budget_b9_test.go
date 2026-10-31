@@ -108,7 +108,7 @@ func TestBudgetB9_StartupSpawns(t *testing.T) {
 	// probe binary
 	scratch := t.TempDir()
 	probeBin := filepath.Join(scratch, "claude-memsync-probe")
-	root, _ := filepath.Abs("../..")
+	root, _ := filepath.Abs(filepath.Join(testenv.SrcDir(), "../.."))
 	bc := exec.Command("go", "build", "-tags", "budgetprobe", "-o", probeBin, "./cmd/claude-memsync")
 	bc.Dir = root
 	if len(goDirs) == 2 {

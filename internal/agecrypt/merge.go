@@ -9,7 +9,7 @@ import (
 	"strconv"
 
 	"filippo.io/age"
-	"github.com/MarimerLLC/claude-utils/internal/proc"
+	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
 
 // MergeContext holds what a merge driver needs when git hands it ciphertext.
@@ -101,8 +101,7 @@ func textMerge(markerSize int, union bool) MergeFunc {
 		if markerSize > 0 {
 			args = append(args, "--marker-size", strconv.Itoa(markerSize))
 		}
-		cmd := exec.Command("git", append(args, paths[:]...)...)
-		proc.HideWindow(cmd)
+		cmd := gitwt.Command(gitwt.Opts{}, append(args, paths[:]...)...)
 		var out, stderr bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &out, &stderr
 		err = cmd.Run()

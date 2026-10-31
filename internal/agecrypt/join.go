@@ -229,6 +229,7 @@ func SyncFromOrigin(repo *gitwt.Repo) error {
 	if anc, err := repo.IsAncestor("HEAD", tip); err != nil || !anc {
 		return errors.New("local branch has diverged from the remote; sync it first")
 	}
+	// lint:allow-commit: --ff-only only moves the branch to a tip refuseLocalOnly already checked; it makes no commit.
 	_, err := repo.Run("merge", "--ff-only", "-q", tip)
 	return err
 }

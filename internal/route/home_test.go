@@ -143,7 +143,7 @@ func TestSetHomePinDenyWritesDenyPinAndUnpinRemoves(t *testing.T) {
 	}
 }
 
-// N1: removing the pin would let the broader rule behind it take the home
+// removing the pin would let the broader rule behind it take the home
 // folder out of the client repo; deny keeps it denied.
 func TestHomeDenyKeepsClientFolderDeniedUnpinNeedsConsent(t *testing.T) {
 	f := fileOf(Rule{Folder: "-home-x", Repo: "client-a"}, Rule{Folder: "-home-x*", Repo: "projects"})

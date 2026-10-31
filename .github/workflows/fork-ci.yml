@@ -149,6 +149,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0 # the blob lint judges every object in base..HEAD
       # koalaman/shellcheck v0.10.0, pinned by digest. -S warning: info-level
       # notes (SC2016 on literal backticks in printf) are intentional.
       - name: shellcheck
@@ -170,6 +171,27 @@ jobs:
         run: |
           bash scripts/lint-portability_test.sh
           bash scripts/lint-portability.sh
+      # No blob over 1 MB and no non-.go file under cmd/*/, in every object this
+      # run introduces (base..HEAD, deleted files included): a built binary must
+      # never be committed. This run is the guarantee; the pre-commit hook is a
+      # convenience. The base is the merge-base with the pull request's target,
+      # the push's previous tip, or the integration branch.
+      - name: blob lint
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          bash scripts/lint-blobs_test.sh
+          base=
+          if [ "$EVENT" = pull_request ]; then base=$PR_BASE
+          elif [ "$EVENT" = push ]; then base=$BEFORE; fi
+          if ! git cat-file -e "${base:-missing}^{commit}" 2>/dev/null; then
+            base=$(git rev-parse --verify -q origin/integ/next || git rev-parse origin/main)
+          fi
+          base=$(git merge-base "$base" HEAD)
+          echo "blob lint: $base..HEAD"
+          bash scripts/lint-blobs.sh --range "$base"
 
   bootstrap-harness:
     name: scripts/bootstrap_test.sh

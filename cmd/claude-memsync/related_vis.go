@@ -204,6 +204,13 @@ func (v *ghVisibility) verify(repo, owner, name string) error {
 		return fmt.Errorf("%w: cannot check that %s is private: %v", errUnverified, repo, err)
 	}
 	private := r.Private != nil && *r.Private && r.Visibility == "private"
+	// A repo transferred to another owner is answered through a redirect and
+	// stays private; it is not the repo that was asked about, so hide it.
+	if _, ierr := ghguard.VerifyIdentity(owner, name, r); ierr != nil {
+		m[key] = verdict{Private: false, At: v.now()}
+		v.save(m)
+		return fmt.Errorf("%s: %w", repo, ierr)
+	}
 	m[key] = verdict{Private: private, At: v.now()}
 	v.save(m)
 	return privateErr(repo, private)

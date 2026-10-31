@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -25,6 +26,32 @@ type repoJSON struct {
 	Name       string `json:"name"`
 	Private    *bool  `json:"private,omitempty"`
 	Visibility string `json:"visibility,omitempty"`
+	// As, when set, is the owner the stub answers with (default "Org").
+	As string `json:"-"`
+}
+
+// MarshalJSON adds the identity the guard now requires (full_name and
+// owner.login, owner "Org") to any named repo, so fixtures stay short.
+func (r repoJSON) MarshalJSON() ([]byte, error) {
+	type plain repoJSON
+	o := struct {
+		plain
+		FullName string `json:"full_name,omitempty"`
+		Owner    *struct {
+			Login string `json:"login"`
+		} `json:"owner,omitempty"`
+	}{plain: plain(r)}
+	if r.Name != "" {
+		owner := "Org"
+		if r.As != "" {
+			owner = r.As
+		}
+		o.FullName = owner + "/" + r.Name
+		o.Owner = &struct {
+			Login string `json:"login"`
+		}{owner}
+	}
+	return json.Marshal(o)
 }
 
 func tb(b bool) *bool { return &b }
@@ -96,6 +123,30 @@ func TestGuardRemoteInit(t *testing.T) {
 	apiErr := guardCfg(t, jsonH(500, map[string]string{"message": "x"}), true)
 	if err := guardRemote(apiErr); err == nil {
 		t.Error("api error must refuse")
+	}
+}
+
+// A rename within the owner passes init's check and the warning reaches the
+// log (stderr for the CLI, the daemon's log for the loops); a transfer to
+// another owner is refused.
+func TestGuardClientWarnsOnRenameAndHoldsOnTransfer(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	renamed := guardCfg(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": "mem-renamed", "full_name": "Org/mem-renamed", "owner": map[string]string{"login": "Org"}, "private": true, "visibility": "private"})
+	}, true)
+	if err := guardRemote(renamed); err != nil {
+		t.Fatalf("same-owner rename must pass: %v", err)
+	}
+	if !strings.Contains(buf.String(), "repo renamed to Org/mem-renamed: update the remote") {
+		t.Errorf("warning not logged: %q", buf.String())
+	}
+	moved := guardCfg(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": "mem-personal", "full_name": "Other/mem-personal", "owner": map[string]string{"login": "Other"}, "private": true, "visibility": "private"})
+	}, true)
+	if err := guardRemote(moved); err == nil || !strings.Contains(err.Error(), "repo moved to Other/mem-personal") {
+		t.Errorf("transfer must be refused: %v", err)
 	}
 }
 
@@ -226,7 +277,13 @@ func TestRepoCreateOrgResolution(t *testing.T) {
 			path = r.URL.Path
 			w.WriteHeader(201)
 		}
-		_ = json.NewEncoder(w).Encode(repoJSON{Name: "mem-personal", Private: tb(true), Visibility: "private"})
+		// Answer with the identity of the org in the request path, as
+		// GitHub does: /orgs/<X>/repos and /repos/<X>/<name> both mean X.
+		var as string
+		if parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/"); len(parts) >= 2 && (parts[0] == "orgs" || parts[0] == "repos") {
+			as = parts[1]
+		}
+		_ = json.NewEncoder(w).Encode(repoJSON{Name: "mem-personal", Private: tb(true), Visibility: "private", As: as})
 	}
 	var out, errb bytes.Buffer
 	cfg := guardCfg(t, h, true)

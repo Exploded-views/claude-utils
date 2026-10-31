@@ -49,12 +49,19 @@ func CommitMirror(repo *gitwt.Repo, cfg config.Config, msg string) (bool, error)
 	if err := refuseConflictMarkers(repo); err != nil {
 		return false, err
 	}
+	// .gitignore is synced, so a remote can edit the per-PC lines out of it;
+	// .git/info/exclude is never transferred.
+	if err := repo.EnsureExclude(gitwt.LocalOnlyExcludes...); err != nil {
+		return false, fmt.Errorf("exclude per-PC files: %w", err)
+	}
 	if err := repo.AddAll(); err != nil {
 		return false, fmt.Errorf("add: %w", err)
 	}
-	// Per-PC file: never part of a commit, whatever the scrub setting. Matched
-	// case-insensitively so "Denylist.txt" from a copy or a case-folding file
-	// system is caught too.
+	// The denylist is never part of a commit, whatever the scrub setting. It is
+	// matched case-insensitively (a copy or a case-folding file system can spell
+	// "Denylist.txt"). Any other per-PC path or link that is staged is taken
+	// out, or refused, at the commit: a deletion of one an old version tracked
+	// is not, so it can still be cleaned out of the repo.
 	if err := repo.UnstageFold(denylistRel); err != nil {
 		return false, fmt.Errorf("unstage denylist: %w", err)
 	}
@@ -88,7 +95,7 @@ func CommitMirror(repo *gitwt.Repo, cfg config.Config, msg string) (bool, error)
 		}
 		msg = fmt.Sprintf("memsync: %d files", len(changes))
 	}
-	return repo.Commit(msg)
+	return repo.CommitUnstaging(msg)
 }
 
 // holdBack unstages every staged file the scanner flags. It returns false when

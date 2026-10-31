@@ -5,11 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,7 +25,6 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/lock"
 	"github.com/MarimerLLC/claude-utils/internal/proc"
-	"github.com/MarimerLLC/claude-utils/internal/route"
 )
 
 // sessionIDPattern is what a session id must match before it is used as a
@@ -64,6 +66,15 @@ func hookDeadlineFromEnv() time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
+// hookRepoTestHook, if set, runs in each repo's goroutine just before its
+// Compute; tests use it to hold a repo back.
+var hookRepoTestHook func(name string)
+
+// hookKilledTestHook, if set, runs on the deadline path right after the git
+// children were killed; tests use it to widen the window in which a killed
+// repo's goroutine finishes.
+var hookKilledTestHook func()
+
 // hookWorkDone, if set, runs when the hook's worker goroutine ends; tests use
 // it to wait for a worker that outlived the deadline.
 var hookWorkDone func()
@@ -73,13 +84,18 @@ var hookWorkDone func()
 // stderr, nothing on stdout, and exit 0.
 //
 // The work runs in a goroutine that touches no marker and writes to no shared
-// stream. If it is not done within deadline (0: no limit), the hook first
-// kills every git process it started (by process group) and logs the expiry,
-// then prints only the held-repo alerts, which were read before any git work,
-// and moves only their ".held" markers; change notices are deferred to the
-// next prompt and no change marker moves. Only the caller's goroutine prints
-// the report and moves markers, and only after the worker finished in time, so
-// a late finisher can never move one.
+// stream. It records each repo once that repo's report is complete. If it is
+// not done within deadline (0: no limit), the hook first freezes that record
+// (a repo killed mid-step is never in it), kills every git process it started
+// (by process group), logs the expiry, and prints in one reply the held-repo
+// alerts, which were read before any git work, and the notices of the repos
+// that finished. Only after that reply was written does it move markers: the
+// held ".held" markers and, with no git, the change marker of each finished
+// repo. Repos that did not finish keep their markers and are redone on the
+// next prompt, as are the related repos; a failed write moves nothing. Git
+// stays refused, and the worker starts no new repo, until the worker ended.
+// Only the caller's goroutine prints the report and moves markers, so a late
+// finisher can never move one.
 func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag, project string, limit int, deadline time.Duration) int {
 	type outcome struct {
 		out      []byte
@@ -90,11 +106,23 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 		panicVal any
 	}
 	// git children lead their own group, so the deadline can kill them
-	proc.Group()
-	defer proc.Release()
+	gen := proc.GroupGen()
+	exited := make(chan struct{}) // closed when the worker goroutine has ended
+	cut := false
+	defer func() {
+		if !cut {
+			proc.ReleaseGen(gen)
+			return
+		}
+		// A cut leaves the worker running (it may be held in something that is
+		// not git): git stays refused until it has ended, so nothing it still
+		// does can start a process. The process normally exits first.
+		go func() { <-exited; proc.ReleaseGen(gen) }()
+	}()
 	var errBuf bytes.Buffer // the worker's until it reports back
 	done := make(chan outcome, 1)
 	pre := make(chan hookPre, 1) // the held-repo alerts, before any git work
+	prog := &hookProgress{}      // what the worker has finished, for the deadline path
 	go func() {
 		var o outcome
 		defer func() {
@@ -104,6 +132,7 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 			if hookWorkDone != nil {
 				hookWorkDone()
 			}
+			close(exited)
 			done <- o
 		}()
 		buf, rerr := io.ReadAll(io.LimitReader(stdin, 1<<20))
@@ -112,7 +141,7 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 			p = hookPrelude(buf, cfgPath, routesFlag)
 		}
 		pre <- p
-		o.out, o.commit, o.release, o.err = hookWork(bytes.NewReader(buf), &errBuf, cfgPath, routesFlag, project, limit, p)
+		o.out, o.commit, o.release, o.err = hookWork(bytes.NewReader(buf), &errBuf, cfgPath, routesFlag, project, limit, p, prog)
 	}()
 	var expired <-chan time.Time
 	if deadline > 0 {
@@ -148,29 +177,185 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 		}
 		return 0
 	case <-expired:
+		cut = true
+		// Freeze the record of finished repos first, so a repo whose git is
+		// killed below (and whose last step swallows the error) is never added.
+		done, lk := prog.close()
+		defer lk.Release()
 		// No git outlives the deadline: kill it before any file I/O below.
-		hookExpired(cfgPath, routesFlag)
-		// Held-repo alerts were read before any git work: they still go out.
+		proc.KillAll()
+		if hookKilledTestHook != nil {
+			hookKilledTestHook()
+		}
+		// The prelude is git-free, so it has practically always finished; if
+		// not, its alerts and targets are not available and only the kill and
+		// the message remain.
+		var p hookPre
 		select {
-		case p := <-pre:
-			if len(p.alerts) > 0 {
-				if b, err := hookReplyJSON(p.event, p.alerts); err == nil {
-					if _, err := stdout.Write(b); err == nil {
-						p.commit()
-					}
+		case p = <-pre:
+		default:
+		}
+		hookExpired(p.targets)
+		// What finished is reported with the held-repo alerts (read before any
+		// git work); related repos are left to the next prompt.
+		reports := make([]repoReport, len(done))
+		for i, d := range done {
+			reports[i] = d.rep
+		}
+		lines, reported := hookLines(p.alerts, reports, nil)
+		wrote := true
+		if reported {
+			b, err := hookReplyJSON(p.event, lines)
+			if err == nil {
+				_, err = stdout.Write(b)
+			}
+			wrote = err == nil
+		}
+		// Only after the reply went out (or when there was none to send) do
+		// markers move, so a failed write repeats everything next time.
+		if wrote {
+			if len(p.alerts) > 0 && p.commit != nil {
+				p.commit()
+			}
+			for _, d := range done {
+				if _, err := changes.SaveMarkerNoGit(d.rep.marker, d.rep.res); err != nil {
+					fmt.Fprintln(stderr, "changes:", err)
 				}
 			}
-		default:
 		}
 		fmt.Fprintln(stderr, "changes: hook deadline exceeded; notices deferred to the next prompt")
 		return 0
 	}
 }
 
+// hookRepoParallel is how many repos the hook works on at once. Unbounded,
+// they all finish together, and a deadline cuts every one of them; bounded,
+// they finish in a steady stream and each call settles a prefix. The cost is
+// fork and exec latency, not CPU, so it is not NumCPU.
+const hookRepoParallel = 8
+
+// repoReport is one repo's finished report.
+type repoReport struct {
+	cfg    config.Config
+	marker string
+	res    changes.Result
+}
+
+type indexedReport struct {
+	idx int // position in the targets
+	rep repoReport
+}
+
+// hookProgress is what the worker has finished, for the deadline path: a repo
+// is added only once its Compute returned (not busy, no error). close is
+// called once, by the caller's goroutine, after proc.KillAll; after it, add
+// refuses and the hook lock belongs to the caller.
+type hookProgress struct {
+	mu      sync.Mutex
+	closed  bool
+	lk      *lock.Lock
+	lkTaken bool // close took lk; the worker must not release it
+	done    []indexedReport
+}
+
+// setLock records the hook lock the worker holds. It is false if close already
+// ran: the worker then releases the lock itself and stops.
+func (p *hookProgress) setLock(lk *lock.Lock) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return false
+	}
+	p.lk = lk
+	return true
+}
+
+// add records a finished repo; it is false (and nothing is recorded) after close.
+func (p *hookProgress) add(i int, r repoReport) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return false
+	}
+	p.done = append(p.done, indexedReport{i, r})
+	return true
+}
+
+// close freezes the progress: it returns what finished, in target order, and
+// the hook lock (nil if the worker held none), which is now the caller's.
+func (p *hookProgress) close() (done []indexedReport, lk *lock.Lock) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.closed = true
+	if p.lk != nil {
+		p.lkTaken, lk = true, p.lk
+	}
+	sort.Slice(p.done, func(a, b int) bool { return p.done[a].idx < p.done[b].idx })
+	return append([]indexedReport(nil), p.done...), lk
+}
+
+// isClosed reports whether close ran: the deadline passed.
+func (p *hookProgress) isClosed() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.closed
+}
+
+// releaseIfOwned is the worker's release of its lock: a no-op once close took it.
+func (p *hookProgress) releaseIfOwned(lk *lock.Lock) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.lkTaken {
+		lk.Release()
+	}
+}
+
+// hookLines is the hook's context: the held-repo alerts first, then the notices
+// of the repos in reports, then (if any) those of the related repos. reported
+// is false when there is nothing to say. The in-time and the deadline reply
+// both build their lines here, so they cannot drift apart.
+func hookLines(alerts []string, reports []repoReport, relLines []string) (lines []string, reported bool) {
+	lines = []string{hookFraming}
+	for _, r := range reports {
+		if r.res.Total == 0 && r.res.Hidden == 0 {
+			continue
+		}
+		reported = true
+		for _, c := range r.res.Changes {
+			lines = append(lines, c.Status+" "+c.Describe())
+		}
+		if r.res.More > 0 {
+			lines = append(lines, fmt.Sprintf("… and %d more", r.res.More))
+		}
+		if r.res.Hidden > 0 {
+			lines = append(lines, r.res.HiddenLine())
+		}
+	}
+	if len(relLines) > 0 {
+		if reported {
+			lines = append(lines, "")
+		} else {
+			lines = nil
+		}
+		lines = append(lines, "Memory notes changed in related, read-only repos (paths only; read a file before relying on it):")
+		lines = append(lines, relLines...)
+		reported = true
+	}
+	if len(alerts) > 0 {
+		if reported {
+			lines = append(append(alerts, ""), lines...)
+		} else {
+			lines = alerts
+		}
+		reported = true
+	}
+	return lines, reported
+}
+
 // hookWork computes the hook's report. It returns the bytes to print (nil:
 // nothing) and a function that moves the markers, which the caller runs once
 // the output was written. It moves no marker itself.
-func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project string, limit int, p hookPre) (out []byte, commit func() error, release func(), err error) {
+func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project string, limit int, p hookPre, prog *hookProgress) (out []byte, commit func() error, release func(), err error) {
 	if hookTestHook != nil {
 		hookTestHook()
 	}
@@ -181,7 +366,12 @@ func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project st
 	if !sessionIDPattern.MatchString(in.SessionID) {
 		return nil, nil, nil, nil
 	}
-	targets, err := hookTargets(cfgPath, routesFlag)
+	targets, err := p.targets, p.terr
+	if !p.loaded { // the prelude did not get to it (an unreadable input)
+		var set *routedSet
+		targets, set, err = hookTargetsSet(cfgPath, routesFlag)
+		p.set = set
+	}
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -222,20 +412,19 @@ func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project st
 			return b, func() error { alertCommit(); return nil }, nil, nil
 		}
 	}
+	if lk != nil && !prog.setLock(lk) {
+		lk.Release() // the deadline passed while we waited for the lock
+		return nil, nil, nil, nil
+	}
 	owned := false
 	defer func() {
 		if !owned {
-			lk.Release()
+			prog.releaseIfOwned(lk)
 		}
 	}()
 
 	// One report per repo, each against its own marker. A repo reports only the
 	// folders it owns; with one repo that is all of them, as before.
-	type repoReport struct {
-		cfg    config.Config
-		marker string
-		res    changes.Result
-	}
 	// The repos are independent (own marker, own git), so they run side by side;
 	// each keeps its stderr lines, joined in target order.
 	type targetOut struct {
@@ -245,11 +434,20 @@ func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project st
 	}
 	outs := make([]targetOut, len(targets))
 	var wg sync.WaitGroup
+	sem := make(chan struct{}, hookRepoParallel)
 	for i, tg := range targets {
+		sem <- struct{}{} // in target order: the first repos get the first slots
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() { <-sem }()
 			o := &outs[i]
+			if hookRepoTestHook != nil {
+				hookRepoTestHook(tg.name)
+			}
+			if prog.isClosed() { // the deadline passed: start nothing new
+				return
+			}
 			markerDir := filepath.Join(tg.cfg.SyncDir, ".state", "hook-markers")
 			marker := filepath.Join(markerDir, in.SessionID)
 			pruneMarkers(markerDir, in.SessionID, markerMaxAge)
@@ -279,6 +477,7 @@ func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project st
 				fmt.Fprintf(&o.errs, "changes: marker for session %s named a commit that no longer exists; reset it\n", in.SessionID)
 			}
 			o.rep = &repoReport{tg.cfg, marker, res}
+			prog.add(i, *o.rep)
 		}()
 	}
 	wg.Wait()
@@ -298,51 +497,17 @@ func hookWork(stdin io.Reader, stderr io.Writer, cfgPath, routesFlag, project st
 		}
 	}
 
-	lines := []string{hookFraming}
-	reported := false
-	for _, r := range reports {
-		if r.res.Total == 0 && r.res.Hidden == 0 {
-			continue
-		}
-		reported = true
-		for _, c := range r.res.Changes {
-			lines = append(lines, c.Status+" "+c.Describe())
-		}
-		if r.res.More > 0 {
-			lines = append(lines, fmt.Sprintf("… and %d more", r.res.More))
-		}
-		if r.res.Hidden > 0 {
-			lines = append(lines, r.res.HiddenLine())
-		}
-	}
 	// Read-only clones of the project's related repos: paths only.
 	var relLines []string
 	var relCommit func()
-	if hookHasRelated(routesFlag) {
+	if p.set != nil && p.set.File.Registry != "" {
 		var rerr error
-		relLines, relCommit, rerr = relatedHookLines(routesFlag, project, in.SessionID, limit, stderr)
+		relLines, relCommit, rerr = relatedHookLines(p.set, project, in.SessionID, limit, stderr)
 		if rerr != nil {
 			fmt.Fprintln(stderr, "changes: related:", rerr)
 		}
 	}
-	if len(relLines) > 0 {
-		if reported {
-			lines = append(lines, "")
-		} else {
-			lines = nil
-		}
-		lines = append(lines, "Memory notes changed in related, read-only repos (paths only; read a file before relying on it):")
-		lines = append(lines, relLines...)
-		reported = true
-	}
-	if len(alerts) > 0 {
-		if reported {
-			lines = append(append(alerts, ""), lines...)
-		} else {
-			lines = alerts
-		}
-		reported = true
-	}
+	lines, reported := hookLines(alerts, reports, relLines)
 	if !reported {
 		out = nil
 	} else {
@@ -373,24 +538,47 @@ type hookTarget struct {
 	keep func(changes.Change) bool // nil: every folder
 }
 
+// loadHookConfig is the config the hook reports on, without the sensitive keys
+// (see loadConfigHook); a missing file gives the defaults.
+func loadHookConfig(cfgPath string) (config.Config, error) {
+	if cfgPath == "" {
+		cfgPath = defaultConfigPath()
+	}
+	cfg, err := loadConfigHook(cfgPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return config.Defaults(), nil
+	}
+	return cfg, err
+}
+
 // hookTargets is the repos the hook reports on: the one --config names, else
 // every repo of routes.json this host has (each limited to its own folders),
-// else the default repo.
+// else the default repo. Their configs hold none of the keys the trust check
+// guards: the report path never uses them, so it need not judge the file, which
+// would cost 4 git processes per repo per load.
 func hookTargets(cfgPath, routesFlag string) ([]hookTarget, error) {
+	targets, _, err := hookTargetsSet(cfgPath, routesFlag)
+	return targets, err
+}
+
+// hookTargetsSet is hookTargets that also returns the routes set it read (nil
+// when no routes file is in play), so the hook loads the routes and the configs
+// once and the related-repos check works from the same load.
+func hookTargetsSet(cfgPath, routesFlag string) ([]hookTarget, *routedSet, error) {
 	path, ok, err := resolveRoutesPath(routesFlag)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !ok {
-		cfg, err := loadDistillConfig(cfgPath)
+		cfg, err := loadHookConfig(cfgPath)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return []hookTarget{{name: "default", cfg: cfg}}, nil
+		return []hookTarget{{name: "default", cfg: cfg}}, nil, nil
 	}
-	set, err := loadRouted(path)
+	set, err := loadRoutedWith(path, loadConfigHook)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	gate := func(n string) func(changes.Change) bool {
 		owns := set.Router.Owns(n)
@@ -399,21 +587,21 @@ func hookTargets(cfgPath, routesFlag string) ([]hookTarget, error) {
 	if cfgPath != "" {
 		// An explicit --config names one repo, but it still reports only the
 		// folders routes.json gives that repo, and it must be listed there.
-		cfg, err := loadDistillConfig(cfgPath)
+		cfg, err := loadHookConfig(cfgPath)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		name := set.repoForSyncDir(cfg.SyncDir)
 		if name == "" {
-			return nil, fmt.Errorf("routes file %s does not list the sync dir %s", path, cfg.SyncDir)
+			return nil, nil, fmt.Errorf("routes file %s does not list the sync dir %s", path, cfg.SyncDir)
 		}
-		return []hookTarget{{name, cfg, gate(name)}}, nil
+		return []hookTarget{{name, cfg, gate(name)}}, set, nil
 	}
 	var out []hookTarget
 	for _, n := range set.names() {
 		out = append(out, hookTarget{n, set.Cfgs[n], gate(n)})
 	}
-	return out, nil
+	return out, set, nil
 }
 
 // pruneMarkers deletes the markers in dir that were last written more than
@@ -442,6 +630,14 @@ type hookPre struct {
 	event  string
 	alerts []string
 	commit func()
+
+	// What the prelude loaded, so the worker, the related-repos check and the
+	// deadline path do not load it again: the hook reads routes.json and each
+	// config once. loaded is false when the prelude stopped before that.
+	loaded  bool
+	targets []hookTarget
+	set     *routedSet // nil: no routes file
+	terr    error
 }
 
 // hookPrelude reads the hook input and the held-repo alerts. Any problem gives
@@ -452,7 +648,8 @@ func hookPrelude(in []byte, cfgPath, routesFlag string) hookPre {
 	if json.Unmarshal(in, &h) != nil || !sessionIDPattern.MatchString(h.SessionID) || h.Event == "" {
 		return p
 	}
-	targets, err := hookTargets(cfgPath, routesFlag)
+	targets, set, err := hookTargetsSet(cfgPath, routesFlag)
+	p.loaded, p.targets, p.set, p.terr = true, targets, set, err
 	if err != nil {
 		return p
 	}
@@ -567,14 +764,4 @@ func readHeldRecord(p string) (b []byte, ok bool) {
 	}
 	b, err = io.ReadAll(io.LimitReader(f, heldRecordMax))
 	return b, err == nil
-}
-
-// hookHasRelated reports whether a routes file with a registry is in play.
-func hookHasRelated(routesFlag string) bool {
-	path, ok, err := resolveRoutesPath(routesFlag)
-	if err != nil || !ok {
-		return false
-	}
-	f, err := route.Load(path)
-	return err == nil && f.Registry != ""
 }

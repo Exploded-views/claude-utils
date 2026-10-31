@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/version"
@@ -83,6 +84,27 @@ func runningBinaries(cfg config.Config) (binSet, bool) {
 		}
 	}
 	return b, true
+}
+
+// pinOwnDrivers makes every git this process starts run this build's filter,
+// textconv and merge drivers (and the claude-memmerge beside it), whatever the
+// repo's .git/config names for them. Unlike runningBinaries it takes a build
+// under a temp dir too: the pin lives for this process only and names the
+// program that is running, so it cannot go stale or point at a throwaway.
+func pinOwnDrivers() {
+	exe, err := executable()
+	if err != nil {
+		return
+	}
+	res := resolveReal(exe)
+	if !fileExists(res) {
+		return
+	}
+	o := agecrypt.Opts{MemsyncExe: res}
+	if mm := filepath.Join(filepath.Dir(res), exeName("claude-memmerge")); fileExists(mm) {
+		o.MemmergeExe = resolveReal(mm)
+	}
+	agecrypt.PinDrivers(o)
 }
 
 // versionOf is what `<exe> version` prints after the program name ("" when it

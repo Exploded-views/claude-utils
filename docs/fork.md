@@ -45,7 +45,7 @@ repo:
 | project | `mem-project-<name>` | one of your own projects, keyed by its git remote | hosts that work on it |
 | infra | `mem-infra-<env>` | one environment you run: its services, network, quirks | hosts that manage it |
 | client | `mem-client-<client-codename>` | one client's systems, people and decisions | only hosts doing that client's work |
-| orchestrator | `mem-orch-<client-codename>` (later `mem-orch-all`) | a coordinating agent's own state for one client, kept apart from the client's technical notes | the coordinating host only |
+| coordination | `mem-orch-<client-codename>` (later `mem-orch-all`) | a coordinating agent's own state for one client, kept apart from the client's technical notes | the coordinating host only |
 
 A small `mem-registry` repo holds what hosts share about each other: routing
 templates, relations between repos, expiry dates and check-key records. Name
@@ -61,7 +61,7 @@ cannot decide (the checkout is missing, has no readable `origin`, or names a
 repo this host does not have) denies the folder on the spot instead of falling
 through to a broader rule.
 
-**Client boundary.** A client or orchestrator folder never leaks into another
+**Client boundary.** A client or coordination folder never leaks into another
 repo by accident: moving a folder out of a client repo needs an explicit
 `--confirm-move-out-of-client`, templates published to the registry replace
 client rules with denies, client folders never feed the shared catalog, and

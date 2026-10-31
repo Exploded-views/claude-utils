@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/merge"
+	"github.com/MarimerLLC/claude-utils/internal/testenv"
 )
 
 // These tests cover what happens to a file the scrub holds back when the
@@ -28,7 +30,14 @@ func TestMain(m *testing.M) {
 	if os.Getenv(mergeDriverEnv) == "1" && len(os.Args) >= 4 {
 		os.Exit(runAsMergeDriver(os.Args[1], os.Args[2], os.Args[3]))
 	}
-	os.Exit(m.Run())
+	cleanup, err := testenv.IsolateGitMain()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "FAIL git isolation:", err)
+		os.Exit(1)
+	}
+	code := m.Run()
+	cleanup()
+	os.Exit(code)
 }
 
 // runAsMergeDriver mirrors cmd/claude-memmerge: merge base/ours/theirs and

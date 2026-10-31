@@ -369,6 +369,10 @@ func labelCmd(stdout, stderr io.Writer, sel repoSel, args []string, label string
 type syncLocker func(stderr io.Writer, syncDir string, fn func() error) error
 
 func labelSelfOne(stdout, stderr io.Writer, cfg config.Config, label string, locker syncLocker) int {
+	if _, _, err := loadExisting(cfg.Path()); err != nil {
+		fmt.Fprintln(stderr, "recipients:", err)
+		return 1
+	}
 	repo := gitwt.New(cfg.SyncDir)
 	if !repo.IsRepo() || !agecrypt.Enabled(repo) {
 		fmt.Fprintf(stderr, "recipients: %s: the sync repo is not encrypted\n", cfg.SyncDir)
@@ -423,6 +427,10 @@ func labelSelfOne(stdout, stderr io.Writer, cfg config.Config, label string, loc
 // labelRecoveryOne marks the recipient line for key as the recovery key in one
 // repo and records the key in that repo's config as a recoveryRecipient.
 func labelRecoveryOne(stdout, stderr io.Writer, cfg config.Config, key string, locker syncLocker) int {
+	if _, _, err := loadExisting(cfg.Path()); err != nil {
+		fmt.Fprintln(stderr, "recipients:", err)
+		return 1
+	}
 	repo := gitwt.New(cfg.SyncDir)
 	if !repo.IsRepo() || !agecrypt.Enabled(repo) {
 		fmt.Fprintf(stderr, "recipients: %s: the sync repo is not encrypted\n", cfg.SyncDir)

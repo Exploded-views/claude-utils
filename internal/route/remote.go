@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/listlimit"
 	"github.com/MarimerLLC/claude-utils/internal/proc"
 )
@@ -511,8 +512,7 @@ func gitOut(dir string, args ...string) (string, error) {
 	defer func() { <-gitSem }()
 	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
 	defer cancel()
-	c := proc.GroupedCommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
-	c.Env = append(cleanGitEnv(os.Environ()), "LC_ALL=C", "LANGUAGE=C")
+	c := gitwt.Command(gitwt.Opts{Ctx: ctx, Dir: dir, DropGitEnv: true, Env: []string{"LC_ALL=C", "LANGUAGE=C"}}, args...)
 	c.WaitDelay = time.Second
 	var out bytes.Buffer
 	c.Stdout = &out
@@ -571,18 +571,4 @@ func rewriteSSHHost(raw string, lookup func(string) string) string {
 		}
 	}
 	return raw
-}
-
-// cleanGitEnv drops the inherited GIT_* variables (GIT_DIR, GIT_WORK_TREE,
-// GIT_CONFIG_*, ...): they can point git at another repository or config than
-// the project directory's own, and so at another remote.
-func cleanGitEnv(env []string) []string {
-	out := make([]string, 0, len(env))
-	for _, kv := range env {
-		if strings.HasPrefix(strings.ToUpper(kv), "GIT_") && !strings.HasPrefix(strings.ToUpper(kv), "GIT_EXEC_PATH=") {
-			continue
-		}
-		out = append(out, kv)
-	}
-	return out
 }

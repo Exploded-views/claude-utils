@@ -17,15 +17,16 @@ import (
 // fakeAPI is a GitHub stub: private unless the repo is in public, slow when
 // delay is set, and it counts the requests per path.
 type fakeAPI struct {
-	mu     sync.Mutex
-	public map[string]bool
-	delay  time.Duration
-	hits   map[string]int
-	srv    *httptest.Server
+	mu      sync.Mutex
+	public  map[string]bool
+	movedTo map[string]string // path -> owner the stub answers with (a transfer)
+	delay   time.Duration
+	hits    map[string]int
+	srv     *httptest.Server
 }
 
 func newFakeAPI(t *testing.T) *fakeAPI {
-	f := &fakeAPI{public: map[string]bool{}, hits: map[string]int{}}
+	f := &fakeAPI{public: map[string]bool{}, movedTo: map[string]string{}, hits: map[string]int{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.hits[r.URL.Path]++
@@ -36,7 +37,15 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		if pub {
 			vis = "public"
 		}
-		_ = json.NewEncoder(w).Encode(repoJSON{Name: "x", Private: tb(!pub), Visibility: vis})
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/") // repos/<owner>/<name>
+		owner, name := "Org", "x"
+		if len(parts) == 3 {
+			owner, name = parts[1], parts[2]
+		}
+		if o := f.movedTo[r.URL.Path]; o != "" {
+			owner = o
+		}
+		_ = json.NewEncoder(w).Encode(repoJSON{Name: name, As: owner, Private: tb(!pub), Visibility: vis})
 	}))
 	t.Cleanup(f.srv.Close)
 	return f
@@ -279,5 +288,25 @@ func TestVis_StaleVerdictBeyondTheCapFailsClosed(t *testing.T) {
 		if got := strings.Contains(ctx, "unverified"); got != tc.want {
 			t.Errorf("verdict %v old: unverified=%v, want %v\n%s", tc.age, got, tc.want, ctx)
 		}
+	}
+}
+
+// A related repo transferred to another owner still answers private through
+// GitHub's redirect; it must be hidden, not shown.
+func TestVis_TransferredRepoIsNotShown(t *testing.T) {
+	api := newFakeAPI(t)
+	api.set(func() { api.movedTo["/repos/Org/mem-project-b"] = "Other" })
+	visHost(t, api, nil)
+	rc, err := loadRelCtx("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = rc.vis.CheckCloneURL("mem-project-b", "git@github.com:Org/mem-project-b.git", nil)
+	if err == nil || !strings.Contains(err.Error(), "repo moved to Other/mem-project-b") {
+		t.Fatalf("err = %v", err)
+	}
+	// The cached verdict must not turn the moved repo back into a private one.
+	if err := rc.vis.CheckCloneURL("mem-project-b", "git@github.com:Org/mem-project-b.git", nil); err == nil {
+		t.Fatal("second look (cached verdict) passed a transferred repo")
 	}
 }

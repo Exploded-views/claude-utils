@@ -23,7 +23,7 @@ func commitEmpty(t *testing.T, r *gitwt.Repo, subject string) {
 	}
 }
 
-// S1: after the daemon synced a rekeyed repo, rerunning the same command is a
+// after the daemon synced a rekeyed repo, rerunning the same command is a
 // no-op that reports "already done", not a failed verification.
 func TestRekeyPQ_RerunAfterTheDaemonSyncedIsAlreadyDone(t *testing.T) {
 	c := newClassicRepo(t)
@@ -158,7 +158,7 @@ func rollbackCmd(t *testing.T, c classicRepo, extra ...string) (int, string, str
 	return rekey(t, c, append([]string{"--rollback"}, extra...)...)
 }
 
-// S2: local commits made after the rekey are not silently dropped.
+// local commits made after the rekey are not silently dropped.
 func TestRekeyPQ_RollbackRefusesToDropLocalCommits(t *testing.T) {
 	c, _, oldTip := unpublishedRekey(t)
 	head, _ := c.repo.Run("rev-parse", "HEAD")
@@ -195,7 +195,7 @@ func TestRekeyPQ_DiscardFlagGoesOnlyWithRollback(t *testing.T) {
 	}
 }
 
-// S3: a rollback needs the classic identity; it is renamed back if retired.
+// a rollback needs the classic identity; it is renamed back if retired.
 func TestRekeyPQ_RollbackRestoresARetiredClassicIdentity(t *testing.T) {
 	c, _, oldTip := unpublishedRekey(t)
 	if err := os.Rename(c.idPath, c.idPath+".classic-retired"); err != nil {
@@ -232,7 +232,7 @@ func TestRekeyPQ_RollbackRefusesWithoutAClassicIdentity(t *testing.T) {
 	}
 }
 
-// S3: a clone whose restore record names the classic identity still needs it
+// a clone whose restore record names the classic identity still needs it
 // for its rollback, so retirement keeps the file.
 func TestRekeyPQ_KeepsTheClassicIdentityNamedByAnotherClonesRecord(t *testing.T) {
 	c := newClassicRepo(t)
@@ -258,7 +258,7 @@ func TestRekeyPQ_KeepsTheClassicIdentityNamedByAnotherClonesRecord(t *testing.T)
 	}
 }
 
-// N1: a crash between SetScheme and PinCurrent leaves the pin stale. Every
+// a crash between SetScheme and PinCurrent leaves the pin stale. Every
 // resume stage repoints again, so the push guard does not refuse for ever.
 func TestRekeyPQ_ResumeRepinsAfterACrashBetweenSchemeAndPin(t *testing.T) {
 	c, newRec, _ := unpublishedRekey(t)
@@ -640,7 +640,7 @@ func setRecordStage(t *testing.T, syncDir, stage string) {
 	}
 }
 
-// S1: pushed, then a crash before config.json and the stage were saved, and
+// pushed, then a crash before config.json and the stage were saved, and
 // the daemon is blocked on the unfinished stage. The rerun must finish the tail.
 func TestRekeyPQ_SyncedButUnfinishedStageRunsThePublishTail(t *testing.T) {
 	c := newClassicRepo(t)
@@ -680,7 +680,7 @@ func dropBackup(t *testing.T, c classicRepo) (int, string) {
 	return code, o.String() + e.String()
 }
 
-// S3: the backup is the rollback point; it goes only once the rekey is published.
+// the backup is the rollback point; it goes only once the rekey is published.
 func TestRekeyPQ_DropBackupRefusesAnUnpublishedRekey(t *testing.T) {
 	c, _, _ := unpublishedRekey(t)
 	code, out := dropBackup(t, c)
@@ -781,7 +781,7 @@ func TestRekeyPQ_FailedBackupRefLeavesNoRecord(t *testing.T) {
 	}
 }
 
-// S5: with a legacy record the migrated commit is inferred, so the commits
+// with a legacy record the migrated commit is inferred, so the commits
 // made since are still listed, and --discard-local-commits still lists first.
 func TestRekeyPQ_LegacyRollbackListsTheCommitsItWouldDrop(t *testing.T) {
 	c, _, oldTip := unpublishedRekey(t)
@@ -812,7 +812,7 @@ func TestRekeyPQ_LegacyRollbackWithoutExtraCommitsNeedsNoFlag(t *testing.T) {
 	}
 }
 
-// S6: the scan covers the default sync dir and compares resolved paths.
+// the scan covers the default sync dir and compares resolved paths.
 func TestRetireClassic_KeepsTheFileForTheDefaultSyncDirClone(t *testing.T) {
 	c := newClassicRepo(t)
 	_, newRec := newPQKey(t, "newrec")

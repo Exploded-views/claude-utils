@@ -394,16 +394,27 @@ func bootstrapFull(cfg config.Config, force bool, denylist []byte, enc *encryptS
 	if err := writeGitignore(cfg.SyncDir); err != nil {
 		return fmt.Errorf("write .gitignore: %w", err)
 	}
+	// The same names in .git/info/exclude, which a remote cannot edit.
+	if err := repo.EnsureExclude(gitwt.LocalOnlyExcludes...); err != nil {
+		return fmt.Errorf("write .git/info/exclude: %w", err)
+	}
 
 	// Step 4: write config.json. A re-init keeps the guard settings of the
 	// config it replaces: the list is not an init flag, and dropping it would
 	// switch the foreign-writer guard off.
 	// Only a config this host already had: one that came with a clone is never
 	// read (the clone is refused above if the remote tracks one).
+	var oldCfg config.Config
 	if existed {
-		cfg = mergeReinit(cfg, cfg.Path())
+		// A config that cannot be read (too loose a mode, another owner, a parse
+		// error) is never replaced by defaults: that would drop readOnly and the
+		// foreign-writer list. Refuse and leave the file as it is.
+		var err error
+		if cfg, oldCfg, err = mergeReinit(cfg, cfg.Path()); err != nil {
+			return fmt.Errorf("the existing config.json cannot be read, so it is left as it is: %w", err)
+		}
 	}
-	if old, err := config.Load(cfg.Path()); existed && err == nil {
+	if old := oldCfg; existed {
 		if len(cfg.ForeignWriters) == 0 {
 			cfg.ForeignWriters = old.ForeignWriters
 		}
@@ -509,10 +520,13 @@ func bootstrapFull(cfg config.Config, force bool, denylist []byte, enc *encryptS
 // mergeReinit keeps, across a re-init, the settings init has no flag to clear:
 // a read-only host stays read-only (a re-init must never make it writable),
 // and the host label and check-key threshold survive.
-func mergeReinit(cfg config.Config, oldPath string) config.Config {
-	old, err := config.Load(oldPath)
+func mergeReinit(cfg config.Config, oldPath string) (config.Config, config.Config, error) {
+	old, exists, err := loadExisting(oldPath)
 	if err != nil {
-		return cfg
+		return cfg, old, err
+	}
+	if !exists {
+		return cfg, old, nil
 	}
 	if old.ReadOnly && !cfg.ReadOnly {
 		cfg.ReadOnly = true
@@ -530,7 +544,7 @@ func mergeReinit(cfg config.Config, oldPath string) config.Config {
 	if cfg.EncryptionScheme == "" {
 		cfg.EncryptionScheme = old.EncryptionScheme
 	}
-	return cfg
+	return cfg, old, nil
 }
 
 // prepareIdentity makes sure the identity file exists (generating an X25519 key

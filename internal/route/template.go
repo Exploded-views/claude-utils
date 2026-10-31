@@ -438,17 +438,7 @@ func PublishTemplate(routesPath, registryOverride, label, homeFolder, homeDir st
 		return "", err
 	}
 	g := gitwt.New(dir)
-	if _, err := g.Run("add", "--", rel); err != nil {
-		return "", err
-	}
-	st, err := g.Run("status", "--porcelain", "--", rel)
-	if err != nil {
-		return "", err
-	}
-	if strings.TrimSpace(st) == "" {
-		return out, nil
-	}
-	if _, err := g.Run("commit", "-q", "-m", "routing template for "+label, "--", rel); err != nil {
+	if _, err := g.CommitPath("routing template for "+label, rel); err != nil {
 		return "", err
 	}
 	return out, nil

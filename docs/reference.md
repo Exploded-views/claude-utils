@@ -337,7 +337,7 @@ Usage of changes:
   -config string
     	path to config.json (default: ~/.claudesync/config.json)
   -deadline duration
-    	with --hook: give up after this long; then print only held-repo alerts and move no change marker (0 = none; $CLAUDE_MEMSYNC_HOOK_DEADLINE_MS, in ms, sets the default) (default 1.5s)
+    	with --hook: give up after this long; then print the held-repo alerts and the notices of the repos that finished, and move only their markers (0 = none; $CLAUDE_MEMSYNC_HOOK_DEADLINE_MS, in ms, sets the default) (default 1.5s)
   -hook
     	run as a Claude Code hook: read its JSON from stdin, keep a per-session marker, print additionalContext JSON
   -json

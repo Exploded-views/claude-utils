@@ -460,7 +460,7 @@ func TestHook_ListsChangesInRelatedReadClones(t *testing.T) {
 	}
 }
 
-// ---- review round 2 ----
+// ---- more related-repo cases ----
 
 func syncOut() string {
 	_, out, _ := run(func(o, e *bytes.Buffer) int { return relatedSyncCmd(o, e, nil) })

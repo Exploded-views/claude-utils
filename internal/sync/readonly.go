@@ -22,19 +22,23 @@ func PopulateClaude(r Roots) (int, error) {
 	n := 0
 	for _, hash := range hashes {
 		dir := filepath.Join(r.Mirror, hash, "memory")
+		if !realDirOrMissing(filepath.Join(r.Mirror, hash)) || !realDirOrMissing(dir) {
+			warnSkipped(dir)
+			continue
+		}
 		ents, err := os.ReadDir(dir)
 		if err != nil {
 			continue
 		}
 		for _, e := range ents {
-			if e.IsDir() || shouldIgnoreFile(e.Name()) {
+			if e.IsDir() || shouldIgnoreFile(e.Name()) || skipIfLinked(r, hash, e.Name()) {
 				continue
 			}
-			src, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			src, err := readRegular(filepath.Join(dir, e.Name()))
 			if err != nil {
 				return n, err
 			}
-			if cur, err := os.ReadFile(filepath.Join(r.Claude, hash, "memory", e.Name())); err == nil && string(cur) == string(src) {
+			if cur, err := readRegular(filepath.Join(r.Claude, hash, "memory", e.Name())); err == nil && string(cur) == string(src) {
 				continue
 			}
 			switch err := CopyToClaude(r, hash, e.Name()); {

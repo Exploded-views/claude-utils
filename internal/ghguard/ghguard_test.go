@@ -15,13 +15,25 @@ import (
 const testToken = "tok-SECRET-1234567890"
 
 type fakeRepo struct {
-	Name       string `json:"name"`
-	FullName   string `json:"full_name,omitempty"`
+	Name     string `json:"name"`
+	FullName string `json:"full_name,omitempty"`
+	Owner    *struct {
+		Login string `json:"login"`
+	} `json:"owner,omitempty"`
 	Private    *bool  `json:"private,omitempty"`
 	Visibility string `json:"visibility,omitempty"`
 }
 
 func bp(b bool) *bool { return &b }
+
+// own returns an owner object for a fakeRepo.
+func own(login string) *struct {
+	Login string `json:"login"`
+} {
+	return &struct {
+		Login string `json:"login"`
+	}{login}
+}
 
 func TestValidName(t *testing.T) {
 	good := []string{"mem-registry", "mem-personal", "mem-project-widgets", "mem-infra-prod",
@@ -81,13 +93,13 @@ func TestCreateRepoRequestIsPrivate(t *testing.T) {
 	var path, auth string
 	c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
-			writeJSON(w, 200, fakeRepo{Name: "mem-personal", Private: bp(true), Visibility: "private"})
+			writeJSON(w, 200, fakeRepo{Name: "mem-personal", FullName: "Org/mem-personal", Owner: own("Org"), Private: bp(true), Visibility: "private"})
 			return
 		}
 		path, auth = r.URL.Path, r.Header.Get("Authorization")
 		b, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(b, &got)
-		writeJSON(w, 201, fakeRepo{Name: "mem-personal", Private: bp(true), Visibility: "private"})
+		writeJSON(w, 201, fakeRepo{Name: "mem-personal", FullName: "Org/mem-personal", Owner: own("Org"), Private: bp(true), Visibility: "private"})
 	})
 	if err := c.CreateRepo("Org", "mem-personal"); err != nil {
 		t.Fatal(err)
@@ -119,11 +131,11 @@ func TestCheckPrivateRefusals(t *testing.T) {
 		code int
 		body any
 	}{
-		"public":     {200, fakeRepo{Name: "mem-personal", Private: bp(false), Visibility: "public"}},
-		"internal":   {200, fakeRepo{Name: "mem-personal", Private: bp(true), Visibility: "internal"}},
-		"no-private": {200, fakeRepo{Name: "mem-personal", Visibility: "private"}},
-		"no-vis":     {200, fakeRepo{Name: "mem-personal", Private: bp(true)}},
-		"mismatch":   {200, fakeRepo{Name: "mem-personal", Private: bp(false), Visibility: "private"}},
+		"public":     {200, fakeRepo{Name: "mem-personal", FullName: "Org/mem-personal", Owner: own("Org"), Private: bp(false), Visibility: "public"}},
+		"internal":   {200, fakeRepo{Name: "mem-personal", FullName: "Org/mem-personal", Owner: own("Org"), Private: bp(true), Visibility: "internal"}},
+		"no-private": {200, fakeRepo{Name: "mem-personal", FullName: "Org/mem-personal", Owner: own("Org"), Visibility: "private"}},
+		"no-vis":     {200, fakeRepo{Name: "mem-personal", FullName: "Org/mem-personal", Owner: own("Org"), Private: bp(true)}},
+		"mismatch":   {200, fakeRepo{Name: "mem-personal", FullName: "Org/mem-personal", Owner: own("Org"), Private: bp(false), Visibility: "private"}},
 		"api-error":  {500, map[string]string{"message": "boom"}},
 		"not-found":  {404, map[string]string{"message": "Not Found"}},
 		"bad-json":   {200, "not an object"},
@@ -143,7 +155,7 @@ func TestCheckPrivateOK(t *testing.T) {
 		if r.URL.Path != "/repos/Org/mem-personal" {
 			t.Errorf("path %s", r.URL.Path)
 		}
-		writeJSON(w, 200, fakeRepo{Name: "mem-personal", Private: bp(true), Visibility: "private"})
+		writeJSON(w, 200, fakeRepo{Name: "mem-personal", FullName: "Org/mem-personal", Owner: own("Org"), Private: bp(true), Visibility: "private"})
 	})
 	if err := c.CheckPrivate("Org", "mem-personal"); err != nil {
 		t.Fatal(err)
@@ -160,7 +172,7 @@ func TestCheckPrivateRefusesNonMemWithoutRequest(t *testing.T) {
 
 func TestCheckRemote(t *testing.T) {
 	c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, fakeRepo{Name: "mem-personal", Private: bp(false), Visibility: "public"})
+		writeJSON(w, 200, fakeRepo{Name: "mem-personal", FullName: "Org/mem-personal", Owner: own("Org"), Private: bp(false), Visibility: "public"})
 	})
 	if err := c.CheckRemote("git@gh-mem-personal:Org/mem-personal.git"); err == nil {
 		t.Fatal("public must be refused")
@@ -260,7 +272,7 @@ func TestDoctorJoinedRemotes(t *testing.T) {
 			writeJSON(w, 200, []fakeRepo{})
 			return
 		}
-		writeJSON(w, 200, fakeRepo{Name: "mem-personal", Private: bp(false), Visibility: "public"})
+		writeJSON(w, 200, fakeRepo{Name: "mem-personal", FullName: "Org/mem-personal", Owner: own("Org"), Private: bp(false), Visibility: "public"})
 	})
 	bad, err := c.Doctor("Org", []string{"git@gh-mem-personal:Org/mem-personal.git", "git@github.com:Org/website.git"})
 	if err != nil {
@@ -426,7 +438,7 @@ func TestWatchFailsClosedAfterTooManyFailures(t *testing.T) {
 			return
 		}
 		w.Header().Set("ETag", `"a"`)
-		writeJSON(w, 200, fakeRepo{Name: "mem-personal", Private: bp(true), Visibility: "private"})
+		writeJSON(w, 200, fakeRepo{Name: "mem-personal", FullName: "Org/mem-personal", Owner: own("Org"), Private: bp(true), Visibility: "private"})
 	})
 	dir := t.TempDir()
 	clk := &clock{time.Unix(1000000, 0)}
@@ -462,7 +474,7 @@ func TestWatchFailsClosedAfterMaxAge(t *testing.T) {
 			writeJSON(w, 500, map[string]string{})
 			return
 		}
-		writeJSON(w, 200, fakeRepo{Name: "mem-personal", Private: bp(true), Visibility: "private"})
+		writeJSON(w, 200, fakeRepo{Name: "mem-personal", FullName: "Org/mem-personal", Owner: own("Org"), Private: bp(true), Visibility: "private"})
 	})
 	clk := &clock{time.Unix(1000000, 0)}
 	w := &Watch{C: c, Owner: "Org", Name: "mem-personal", Now: clk.now, StateDir: t.TempDir(), MaxFailures: 1000, MaxAge: 24 * time.Hour}
@@ -480,7 +492,7 @@ func TestWatchFailsClosedAfterMaxAge(t *testing.T) {
 
 func TestWatchFirstSuccessWritesStateAndClearsStale(t *testing.T) {
 	c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, fakeRepo{Name: "mem-personal", Private: bp(true), Visibility: "private"})
+		writeJSON(w, 200, fakeRepo{Name: "mem-personal", FullName: "Org/mem-personal", Owner: own("Org"), Private: bp(true), Visibility: "private"})
 	})
 	dir := t.TempDir()
 	if err := os.WriteFile(dir+"/visibility", []byte("not private since long ago\n"), 0600); err != nil {
@@ -497,10 +509,10 @@ func writeFile(p, s string) error { return os.WriteFile(p, []byte(s), 0600) }
 func TestCreateRepoReadBackMustBePrivate(t *testing.T) {
 	c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" {
-			writeJSON(w, 201, fakeRepo{Name: "mem-personal", Private: bp(true), Visibility: "private"})
+			writeJSON(w, 201, fakeRepo{Name: "mem-personal", FullName: "Org/mem-personal", Owner: own("Org"), Private: bp(true), Visibility: "private"})
 			return
 		}
-		writeJSON(w, 200, fakeRepo{Name: "mem-personal", Private: bp(false), Visibility: "public"})
+		writeJSON(w, 200, fakeRepo{Name: "mem-personal", FullName: "Org/mem-personal", Owner: own("Org"), Private: bp(false), Visibility: "public"})
 	})
 	if err := c.CreateRepo("Org", "mem-personal"); err == nil {
 		t.Fatal("a read-back that is public must fail the create")
@@ -528,11 +540,11 @@ func TestWatchHourlyETagAndStateChanges(t *testing.T) {
 		}
 		if public {
 			w.Header().Set("ETag", `"v2"`)
-			writeJSON(w, 200, fakeRepo{Name: "mem-personal", Private: bp(false), Visibility: "public"})
+			writeJSON(w, 200, fakeRepo{Name: "mem-personal", FullName: "Org/mem-personal", Owner: own("Org"), Private: bp(false), Visibility: "public"})
 			return
 		}
 		w.Header().Set("ETag", `"v1"`)
-		writeJSON(w, 200, fakeRepo{Name: "mem-personal", Private: bp(true), Visibility: "private"})
+		writeJSON(w, 200, fakeRepo{Name: "mem-personal", FullName: "Org/mem-personal", Owner: own("Org"), Private: bp(true), Visibility: "private"})
 	})
 	dir := t.TempDir()
 	clk := &clock{time.Unix(1000000, 0)}
@@ -642,7 +654,7 @@ func TestCraftedRemotesNeverPanic(t *testing.T) {
 
 func TestWatchPrecheckBlocksMidRun(t *testing.T) {
 	c := newServer(t, func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, fakeRepo{Name: "mem-personal", Private: bp(true), Visibility: "private"})
+		writeJSON(w, 200, fakeRepo{Name: "mem-personal", FullName: "Org/mem-personal", Owner: own("Org"), Private: bp(true), Visibility: "private"})
 	})
 	dir := t.TempDir()
 	var logs []string

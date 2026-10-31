@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/MarimerLLC/claude-utils/internal/testenv"
 )
 
 var joinNow = time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
@@ -468,7 +470,10 @@ var joinEntryRE = regexp.MustCompile(`\bjoin(Cmd|All|ChangeAll|ChangeOne)\b`)
 func TestNoDaemonPathAccepts(t *testing.T) {
 	dirs := []string{"../sync", "../../cmd/claude-memsync"}
 	for _, d := range dirs {
-		files, _ := filepath.Glob(filepath.Join(d, "*.go"))
+		files, _ := filepath.Glob(filepath.Join(testenv.SrcDir(), d, "*.go"))
+		if len(files) == 0 {
+			t.Fatalf("no Go files under %s: the walk is broken", d)
+		}
 		for _, f := range files {
 			b, _ := os.ReadFile(f)
 			for _, call := range acceptRefs(d, filepath.Base(f), b) {

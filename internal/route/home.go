@@ -39,7 +39,7 @@ func (f File) HasClientRepo() bool {
 // HomeOpts tunes SetHomePin.
 type HomeOpts struct {
 	// ConfirmMoveOutOfClient allows taking the folder out of a client or
-	// orchestrator repo into a non-client repo.
+	// coordination repo into a non-client repo.
 	ConfirmMoveOutOfClient bool
 	// Unpin removes the pin instead of writing one: the folder then routes by
 	// the other rules. With repo "" and Unpin unset, a deny pin is written.

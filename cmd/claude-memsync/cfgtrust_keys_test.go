@@ -41,6 +41,12 @@ func loadedWith(t *testing.T, k keyCase, mode os.FileMode, track bool) config.Co
 	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
+	// config.Load refuses a loose file, so the file is read while private and
+	// loosened afterwards: the trust check still judges the mode it finds.
+	raw, err := config.Load(cfg.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Chmod(cfg.Path(), mode); err != nil {
 		t.Fatal(err)
 	}
@@ -53,11 +59,7 @@ func loadedWith(t *testing.T, k keyCase, mode os.FileMode, track bool) config.Co
 			t.Fatal(err)
 		}
 	}
-	c, err := loadConfig(cfg.Path())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return c
+	return sanitizeCfg(raw)
 }
 
 func TestEveryKeyHonouredFromTrustedConfig(t *testing.T) {
@@ -110,9 +112,13 @@ func TestUntrustedConfigWarnsOncePerReason(t *testing.T) {
 	cfg.MergeDriverPath = "/tmp/x"
 	initEnv(t)
 	config.Save(cfg)
+	raw, err := config.Load(cfg.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
 	os.Chmod(cfg.Path(), 0o666)
 	for i := 0; i < 3; i++ {
-		loadConfig(cfg.Path())
+		sanitizeCfg(raw)
 	}
 	if len(*w) != 1 {
 		t.Errorf("want exactly one warning, got %d: %v", len(*w), *w)
@@ -150,11 +156,12 @@ func TestPlantedAPIURLNeverReceivesATokenRequest(t *testing.T) {
 	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
-	os.Chmod(cfg.Path(), 0o644)
-	loaded, err := loadConfig(cfg.Path())
+	raw, err := config.Load(cfg.Path())
 	if err != nil {
 		t.Fatal(err)
 	}
+	os.Chmod(cfg.Path(), 0o644)
+	loaded := sanitizeCfg(raw)
 	if loaded.GitHubAPIURL != "" {
 		t.Fatalf("planted githubApiUrl survived: %q", loaded.GitHubAPIURL)
 	}

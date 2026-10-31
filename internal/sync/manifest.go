@@ -123,6 +123,9 @@ func BuildFromClaudeTreeOwned(claudeRoot string, owns func(folder string) bool) 
 			continue
 		}
 		memDir := filepath.Join(claudeRoot, e.Name(), "memory")
+		if !realDirOrMissing(memDir) {
+			continue
+		}
 		files, err := os.ReadDir(memDir)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
@@ -131,6 +134,8 @@ func BuildFromClaudeTreeOwned(claudeRoot string, owns func(folder string) bool) 
 			return nil, err
 		}
 		for _, f := range files {
+			// A note that is a link stays in the manifest: removing the link
+			// later is still the user's delete.
 			if f.IsDir() || strings.HasPrefix(f.Name(), ".") {
 				continue
 			}

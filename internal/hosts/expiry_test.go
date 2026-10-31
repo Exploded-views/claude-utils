@@ -33,3 +33,11 @@ func TestWriteExpiry(t *testing.T) {
 		t.Error("a bad label is refused")
 	}
 }
+
+func TestCommitFile_RefusesAPerPCPath(t *testing.T) {
+	dir := newRegistryRepo(t)
+	os.WriteFile(filepath.Join(dir, "config.json"), []byte("{}"), 0o600)
+	if made, err := commitFile(dir, "config.json", "x"); err == nil || made {
+		t.Errorf("made=%v err=%v, want a refusal", made, err)
+	}
+}

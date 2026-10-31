@@ -5,12 +5,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"testing"
+
+	"github.com/MarimerLLC/claude-utils/internal/testenv"
 )
 
 // Every script a budget test writes onto PATH must be POSIX sh: the Docker CI
 // image, the Pi and the Ubuntu runners have no zsh (B9 once failed there).
 func TestBudgetShimsAreBinSh(t *testing.T) {
-	files, err := filepath.Glob("budget_*_test.go")
+	files, err := filepath.Glob(filepath.Join(testenv.SrcDir(), "budget_*_test.go"))
 	if err != nil || len(files) == 0 {
 		t.Fatalf("no budget test sources found: %v", err)
 	}

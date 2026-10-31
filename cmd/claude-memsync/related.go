@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/related"
 	"github.com/MarimerLLC/claude-utils/internal/route"
 	"github.com/MarimerLLC/claude-utils/internal/scrub"
@@ -100,6 +101,11 @@ func loadRelCtx(routesFlag string) (*relCtx, error) {
 	if err != nil {
 		return nil, err
 	}
+	return relCtxFromSet(path, set)
+}
+
+// relCtxFromSet is the rest of loadRelCtx, for a routes set already loaded.
+func relCtxFromSet(path string, set *routedSet) (*relCtx, error) {
 	if set.File.Registry == "" {
 		return nil, fmt.Errorf("%s has no \"registry\" (the directory of the registry repo)", path)
 	}
@@ -149,10 +155,47 @@ func (s *routedSet) relatedRoot() string {
 // offline (cached verdicts only, no token command, no network), and a missing
 // or stale verdict is reported once on warn.
 func loadRelCtxHook(routesFlag string, warn func(string)) (*relCtx, error) {
-	rc, err := loadRelCtx(routesFlag)
+	path, ok, err := resolveRoutesPath(routesFlag)
 	if err != nil {
 		return nil, err
 	}
+	if !ok {
+		return nil, fmt.Errorf("related projects need a routes file (--routes, $%s or ~/.config/claude-memsync/routes.json)", routesEnv)
+	}
+	set, err := loadRoutedWith(path, loadConfigHook)
+	if err != nil {
+		return nil, err
+	}
+	return relCtxHookFromSet(path, set, warn)
+}
+
+// relCtxHookFromSet is the hook's related context for a routes set the hook
+// loaded without the trust check. The offline visibility check looks at the
+// primary repo's token source (is one named?) and API URL (which git host is
+// allowed), so it is given that repo's config exactly as the file holds it
+// (config.Load: no trust check, so no git, and nothing is stripped), and it has
+// no way to build an API client (build is nil, and offline never asks for one):
+// no token command, token file or app is ever run or read. A file nobody
+// trusts can therefore only make this check stricter (a token source named: a
+// cached verdict is required) or change the host it allows for a related
+// repo's remote; it cannot run anything.
+func relCtxHookFromSet(path string, set *routedSet, warn func(string)) (*relCtx, error) {
+	var raw config.Config
+	name, havePrimary := set.primaryName()
+	if havePrimary {
+		var err error
+		if raw, err = config.Load(route.ExpandHome(set.File.Repos[name].Config)); err != nil {
+			return nil, fmt.Errorf("repo %q: %w", name, err)
+		}
+	}
+	rc, err := relCtxFromSet(path, set)
+	if err != nil {
+		return nil, err
+	}
+	if havePrimary {
+		rc.vis.cfg, rc.vis.hasCfg = raw, true
+	}
+	rc.vis.build = nil // offline: structurally unable to build a client
 	rc.vis.offline = true
 	rc.vis.quick = true
 	rc.vis.warn = warn
@@ -647,8 +690,8 @@ func relatedContextCmd(stdout, stderr io.Writer, args []string) int {
 // relatedHookLines reports the files that changed in the read clones of the
 // project's relations since this session last looked: paths only. It also moves
 // the session's markers, which the caller commits to only after output went out.
-func relatedHookLines(routesFlag, project, session string, limit int, stderr io.Writer) (lines []string, commit func(), err error) {
-	rc, err := loadRelCtxHook(routesFlag, func(s string) { fmt.Fprintln(stderr, "changes: related:", s) })
+func relatedHookLines(set *routedSet, project, session string, limit int, stderr io.Writer) (lines []string, commit func(), err error) {
+	rc, err := relCtxHookFromSet(set.Path, set, func(s string) { fmt.Fprintln(stderr, "changes: related:", s) })
 	if err != nil || rc.set.File.Registry == "" {
 		return nil, nil, err
 	}

@@ -196,10 +196,13 @@ func Reconcile(opts Options) (Result, error) {
 		// The origin folder is not on this host (the entry came from another
 		// one, perhaps a client folder routed elsewhere): its absence says
 		// nothing about the source, so the entry stays.
-		if info, err := os.Stat(filepath.Join(opts.ProjectsDir, e.OriginProject)); err != nil || !info.IsDir() {
+		if info, err := os.Lstat(filepath.Join(opts.ProjectsDir, e.OriginProject)); err != nil || !info.IsDir() {
 			continue
 		}
 		src := filepath.Join(opts.ProjectsDir, e.OriginProject, "memory", e.OriginFile)
+		if linkedAt(filepath.Join(opts.ProjectsDir, e.OriginProject, "memory"), src) {
+			continue // a link is never followed, and says nothing about the source
+		}
 		content, err := os.ReadFile(src)
 		stale := false
 		switch {
@@ -300,6 +303,9 @@ func analyzeSources(opts Options, catalog []Entry) ([]Origin, []Conflict) {
 			continue
 		}
 		memDir := filepath.Join(opts.ProjectsDir, d.Name(), "memory")
+		if st, err := os.Lstat(memDir); err != nil || !st.IsDir() {
+			continue // missing, or a link: never followed
+		}
 		files, err := os.ReadDir(memDir)
 		if err != nil {
 			continue
@@ -466,8 +472,18 @@ func parseFrontmatter(content string) (map[string]string, string, error) {
 	return meta, body, nil
 }
 
+// linkedAt reports whether dir or the file src exists but is not a real
+// directory or a regular file.
+func linkedAt(dir, src string) bool {
+	if st, err := os.Lstat(dir); err == nil && !st.IsDir() {
+		return true
+	}
+	st, err := os.Lstat(src)
+	return err == nil && !st.Mode().IsRegular()
+}
+
 func isEntryFile(f fs.DirEntry) bool {
-	if f.IsDir() {
+	if !f.Type().IsRegular() {
 		return false
 	}
 	n := f.Name()

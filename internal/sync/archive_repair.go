@@ -168,7 +168,7 @@ func repairEditedArchives(repo *gitwt.Repo, cfg config.Config, pre, post string)
 		}
 		msg = fmt.Sprintf("memsync: %d files", len(changes))
 	}
-	if _, err := repo.Commit(msg); err != nil {
+	if _, err := repo.CommitGuarded(msg); err != nil {
 		return 0, err
 	}
 	return len(bad), nil

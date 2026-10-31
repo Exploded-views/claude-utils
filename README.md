@@ -53,7 +53,7 @@ None has been proposed upstream.
 | Archive, never delete | `--archive-deletes` moves deleted notes to `archive/<date>/`; `archive list` and `archive search` | Upstream candidate |
 | Session notices | `changes --hook` tells a running Claude Code session which notes changed on another machine | Upstream candidate |
 | Safer operation | Foreign-writer guard, GitHub App and token-command auth, renamed-remote aliases, pinned releases with `SHA256SUMS` | Upstream candidate |
-| Layered `mem-*` repos | Repo kinds (personal, project, infra, client, orchestrator), home-folder routing, a client boundary that routing cannot cross by accident | Fork-only |
+| Layered `mem-*` repos | Repo kinds (personal, project, infra, client, coordination), home-folder routing, a client boundary that routing cannot cross by accident | Fork-only |
 | Private repos only | `mem-*` name allowlist, visibility verified at creation and re-checked hourly, `doctor` with a daily timer | Fork-only |
 | Related projects | Read-only copies of related repos and a session-start index, with suggestions from this host's own history | Fork-only |
 | Host lifecycle | Host labels on keys, `host list`, `host retire`, read-only members, expiry dates | Fork-only |

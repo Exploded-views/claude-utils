@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
 	"github.com/MarimerLLC/claude-utils/internal/gitwt"
@@ -154,6 +155,22 @@ func SaveMarker(repo *gitwt.Repo, path string, res Result) error {
 	return AdvanceMarker(repo, path, res.Head)
 }
 
+// SaveMarkerNoGit is SaveMarker for a caller that may not start git (the
+// hook's deadline path runs after its children were killed). It moves the
+// marker only when that needs no ancestry check: a baseline, history moved
+// back, or the marker still naming where the report started. Otherwise it
+// leaves it, and the next run reports from where it was: a repeat, never a
+// loss.
+func SaveMarkerNoGit(path string, res Result) (moved bool, err error) {
+	if res.MovedBack || res.baseline {
+		return true, WriteMarker(path, res.Head)
+	}
+	if b, rerr := os.ReadFile(path); rerr == nil && res.Since != "" && markerLine(b) == res.Since {
+		return true, WriteMarker(path, res.Head)
+	}
+	return false, nil
+}
+
 // HiddenLine is the one line that stands in for the hidden changes, or "".
 func (r Result) HiddenLine() string {
 	switch {
@@ -176,6 +193,9 @@ func Compute(opts Options) (Result, error) {
 			res.Head, res.Since = head, head
 			return res, nil
 		}
+	}
+	if res, ok := firstUseBaseline(repo, opts); ok {
+		return res, nil
 	}
 	// HEAD, the synced head and the marker's commit are asked for together.
 	revs := []string{"HEAD", opts.Upper, "HEAD:" + agecrypt.RecipientsFile}
@@ -553,13 +573,48 @@ func unchangedSinceMarker(repo *gitwt.Repo, opts Options) (head string, ok bool)
 	if line != head {
 		return "", false
 	}
-	gd := plainGitDir(repo.Dir)
-	for _, name := range []string{"rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD"} {
-		if _, err := os.Stat(filepath.Join(gd, name)); err == nil {
-			return "", false // busy: the slow path says so
-		}
+	if busyFS(plainGitDir(repo.Dir)) {
+		return "", false // busy: the slow path says so
 	}
 	return head, true
+}
+
+// busyFS reports, from the files of a plain .git dir gd, whether a rebase,
+// merge or cherry-pick is stopped half-way (see busy).
+func busyFS(gd string) bool {
+	for _, name := range []string{"rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD"} {
+		if _, err := os.Stat(filepath.Join(gd, name)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// firstUseBaseline is the quick answer to "first look of this session": the
+// marker file is missing (or empty), so this run only records the baseline, and
+// the baseline is HEAD (or the synced head when that is HEAD too), which the
+// files of a plain clone name without a git process. Anything else (a marker
+// naming a commit, a synced head that is not HEAD and so needs checking, a busy
+// repo, an unusual layout) is left to the slow path, which says the same where
+// it applies. The result is the one the slow path returns for the same case.
+func firstUseBaseline(repo *gitwt.Repo, opts Options) (Result, bool) {
+	if opts.Since != "" || opts.Marker == "" || !opts.UpdateMarker || !opts.DeferMarker {
+		return Result{}, false
+	}
+	exists := false
+	if b, err := os.ReadFile(opts.Marker); err == nil {
+		if markerLine(b) != "" {
+			return Result{}, false
+		}
+		exists = true
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return Result{}, false
+	}
+	head := readHeadSHA(repo.Dir)
+	if head == "" || (opts.Upper != "" && opts.Upper != head) || busyFS(plainGitDir(repo.Dir)) {
+		return Result{}, false
+	}
+	return Result{Head: head, Since: head, Reset: exists, Changes: []Change{}, baseline: true}, true
 }
 
 // revCache holds commits resolved in one git process.
@@ -656,6 +711,18 @@ func WriteMarker(path, sha string) (err error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
+	}
+	// A marker that already holds sha only needs its modification time
+	// refreshed (pruneMarkers keeps a marker alive by it): no temp file, no
+	// fsync, no rename. With nothing new, the hook did that for every repo on
+	// every prompt.
+	if b, err := os.ReadFile(path); err == nil && string(b) == sha+"\n" {
+		if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() && fi.Mode().Perm() == 0o600 {
+			now := time.Now()
+			if os.Chtimes(path, now, now) == nil {
+				return nil
+			}
+		}
 	}
 	tmp, err := os.CreateTemp(dir, ".marker-*")
 	if err != nil {

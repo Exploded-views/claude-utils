@@ -22,6 +22,7 @@ import (
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
 	"github.com/MarimerLLC/claude-utils/internal/ghapp"
+	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
 
 // Assembled at run time, so no compiled test binary carries the token whole (the
@@ -57,7 +58,8 @@ func newAppFake(t *testing.T) *appFake {
 				w.WriteHeader(401)
 				return
 			}
-			fmt.Fprint(w, `{"name":"mem-personal","private":true,"visibility":"private"}`)
+			own := strings.Split(strings.Trim(r.URL.Path, "/"), "/")[1] // the owner asked for
+			fmt.Fprintf(w, `{"name":"mem-personal","full_name":%q,"owner":{"login":%q},"private":true,"visibility":"private"}`, own+"/mem-personal", own)
 		default:
 			http.NotFound(w, r)
 		}
@@ -248,11 +250,12 @@ func TestPlantedGitHubAppInUntrustedConfigIsIgnored(t *testing.T) {
 	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
-	os.Chmod(cfg.Path(), 0o666)
-	loaded, err := loadConfig(cfg.Path())
+	raw, err := config.Load(cfg.Path())
 	if err != nil {
 		t.Fatal(err)
 	}
+	os.Chmod(cfg.Path(), 0o666)
+	loaded := sanitizeCfg(raw)
 	if loaded.GitHubApp != "" {
 		t.Fatal("githubApp from an untrusted config.json was kept")
 	}
@@ -290,7 +293,13 @@ func TestDoctorGitHubAppFlagIsHonouredFromAnyConfig(t *testing.T) {
 	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
-	os.Chmod(cfg.Path(), 0o666) // untrusted config, but the flag is the user's own
+	// An untrusted config (tracked by git; a loose mode is refused at load), but
+	// the flag is the user's own.
+	repo := gitwt.New(cfg.SyncDir)
+	repo.Run("add", "-f", "config.json")
+	if _, err := repo.Run("commit", "-q", "-m", "tracked"); err != nil {
+		t.Fatal(err)
+	}
 	var out, errb bytes.Buffer
 	doctorCmd(&out, &errb, []string{"--config", cfg.Path(), "--org", "orga", "--github-app", "check"})
 	if gh.mints != 0 && len(gh.orgs) == 0 {

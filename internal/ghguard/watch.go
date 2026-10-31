@@ -43,6 +43,8 @@ type Watch struct {
 	lastOK     time.Time
 	etag       string
 	notPrivate bool
+	moved      string // identity verdict of the last non-304 answer ("" = ok)
+	warned     string // last rename warning given
 	stale      bool
 	fails      int
 	failLogged bool
@@ -63,7 +65,7 @@ func (w *Watch) logf(f string, a ...any) {
 	}
 }
 
-func (w *Watch) ok() bool { return !w.notPrivate && !w.stale && !w.preBad }
+func (w *Watch) ok() bool { return !w.notPrivate && w.moved == "" && !w.stale && !w.preBad }
 
 // Allowed returns true while pushing is permitted.
 func (w *Watch) Allowed() bool {
@@ -134,6 +136,29 @@ func (w *Watch) Allowed() bool {
 				w.logf("repo %s/%s is private again: pushing resumed", w.Owner, w.Name)
 			}
 		}
+		// Identity: a transferred repo is answered through a redirect and stays
+		// private, so only the owner in the body shows it. A 304 keeps this verdict.
+		warn, ierr := VerifyIdentity(w.Owner, w.Name, repo)
+		moved := ""
+		if ierr != nil {
+			moved = ierr.Error()
+		}
+		if moved != w.moved {
+			changed = true
+			w.moved = moved
+			if moved != "" {
+				w.logf("repo %s/%s: %s: pushing stopped, commits stay local", w.Owner, w.Name, moved)
+			} else {
+				w.logf("repo %s/%s identity matches again: pushing resumed", w.Owner, w.Name)
+			}
+		}
+		if warn != "" && warn != w.warned {
+			w.warned = warn
+			if w.C.Warn != nil {
+				w.C.Warn(warn)
+			}
+			w.logf("%s", warn)
+		}
 	}
 	if changed || wasStale || !w.wrote {
 		w.writeState(w.stateText(now))
@@ -146,6 +171,8 @@ func (w *Watch) stateText(now time.Time) string {
 	switch {
 	case w.notPrivate:
 		return "not private since " + now.UTC().Format(time.RFC3339)
+	case w.moved != "":
+		return "held since " + now.UTC().Format(time.RFC3339) + ": " + w.moved
 	case w.stale:
 		return "unverifiable since " + now.UTC().Format(time.RFC3339)
 	}

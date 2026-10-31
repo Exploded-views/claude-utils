@@ -32,7 +32,7 @@ const (
 	kindOrch     = "orch"
 )
 
-// OrchAll is the all-work orchestrator's repo: the only repo that may relate
+// OrchAll is the all-work coordination repo: the only repo that may relate
 // across a client boundary, and only by read, to a mem-orch-<client> repo.
 const OrchAll = "mem-orch-all"
 
@@ -156,7 +156,7 @@ func (c Checker) Check(from, to string, mode Mode) error {
 		case b.Kind != kindOrch || to == OrchAll:
 			return fmt.Errorf("%s may only relate to a mem-orch-<client> repo, not %s", from, to)
 		case mode != ModeRead:
-			return fmt.Errorf("%s -> %s must be read: the all-work orchestrator never joins a client's repos", from, to)
+			return fmt.Errorf("%s -> %s must be read: the all-work coordination repo never joins a client's repos", from, to)
 		}
 		return nil
 	}

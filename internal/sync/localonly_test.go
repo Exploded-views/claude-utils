@@ -142,3 +142,64 @@ func TestPull_NoteNamedLikeATempFileIsNotRefused(t *testing.T) {
 		t.Error(line)
 	}
 }
+
+// A fetched tree that tracks a per-PC name under another spelling is refused
+// just the same: on a case-insensitive file system (simulated with
+// core.ignorecase where the file system is case-sensitive) the spelling lands
+// on this host's own file. The fetch goes through the daemon's pull cycle, the
+// host's untracked, ignored file is unchanged, and nothing is merged.
+func TestPull_RefusesCaseVariantLocalOnlyFiles(t *testing.T) {
+	for _, c := range []struct{ tracked, local string }{
+		{"Config.json", "config.json"},
+		{"CONFIG.JSON", "config.json"},
+		{"Denylist.txt", "denylist.txt"},
+		{".State/visibility", ".state/visibility"},
+		{"Daemon.pid", "daemon.pid"},
+		{"config.json.", "config.json"},
+		{"CONFIG~1.JSO", "config.json"},
+		{"config.json/x", "config.json"},
+		{"Config.json/x", "config.json"},
+		{"Daemon.pid/x", "daemon.pid"},
+		{".State", ".state/visibility"},
+		{".state", ".state/visibility"},
+		{"CO1A2B~1.JSO", "config.json"},
+	} {
+		t.Run(c.tracked, func(t *testing.T) {
+			f := newPullFixture(t, map[string]string{"clean.md": "a\n"})
+			captureLog(t)
+			mustGit(t, f.repo, "config", "core.ignorecase", "true")
+			local := filepath.Join(f.repo.Dir, filepath.FromSlash(c.local))
+			os.MkdirAll(filepath.Dir(local), 0o700)
+			if err := os.WriteFile(local, []byte("LOCAL-"+c.local), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			f.peerForce(c.tracked, `{"scrub":false,"privateOnly":false}`)
+
+			f.loop.pullTick(f.repo, f.roots)
+			f.editLocal("clean.md", "a\nlocal\n")
+			f.loop.pullTick(f.repo, f.roots)
+			if err := runPull(f.repo, "main"); !errors.Is(err, ErrLocalOnlyTracked) {
+				t.Fatalf("pull of %q must be refused, got %v", c.tracked, err)
+			}
+			if got, _ := os.ReadFile(local); string(got) != "LOCAL-"+c.local {
+				t.Errorf("host file changed: %q", got)
+			}
+			if strings.Contains(strings.ToLower(headFiles(t, f.repo)), strings.ToLower(c.tracked)) {
+				t.Errorf("HEAD tracks %q", c.tracked)
+			}
+			if line := PullRefusedLine(f.repo.Dir); !strings.Contains(line, "pull refused") {
+				t.Errorf("status line: %q", line)
+			}
+		})
+	}
+}
+
+// A sync dir that cannot be read (for instance a "~/" path that was never
+// expanded) must not read as "no remote branch yet": the guard fails closed.
+func TestRefuseLocalOnly_FailsClosedOnAnUnreadableDir(t *testing.T) {
+	repo := gitwt.New(filepath.Join(t.TempDir(), "~", "missing"))
+	err := refuseLocalOnly(repo, "main")
+	if err == nil {
+		t.Fatal("an unusable repo dir must be an error, not a pass")
+	}
+}

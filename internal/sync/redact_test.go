@@ -40,6 +40,21 @@ func requireNoName(t *testing.T, what, text string) {
 	}
 }
 
+// failWrites makes every atomic write whose target name contains substr fail
+// with an error, on every OS. (A directory or a link at the path is skipped now,
+// and read-only folders do nothing on Windows, so the write itself is failed.)
+func failWrites(t *testing.T, substr string) {
+	t.Helper()
+	old := renameFile
+	renameFile = func(from, to string) error {
+		if strings.Contains(strings.ToLower(filepath.Base(to)), strings.ToLower(substr)) {
+			return errors.New("forced write failure")
+		}
+		return old(from, to)
+	}
+	t.Cleanup(func() { renameFile = old })
+}
+
 // blockDir makes path a directory, so a rename of a file onto it fails.
 func blockDir(t *testing.T, path string) {
 	t.Helper()
@@ -53,7 +68,7 @@ func TestRedact_PropagateCopyError(t *testing.T) {
 	f := redactFixture(t, map[string]string{"keep.md": "k\n"})
 	logs := captureLog(t)
 	f.peerPush(secretName, "peer\n")
-	blockDir(t, filepath.Join(f.roots.Claude, "p1", "memory", secretName))
+	failWrites(t, secretName)
 
 	err := f.loop.flush(f.repo, f.roots, true)
 	if !strings.Contains(logs.String(), "propagate") {
@@ -100,7 +115,7 @@ func TestRedact_UnparkErrors(t *testing.T) {
 	old := propagate
 	propagate = func(*gitwt.Repo, Roots, string, string, map[string]bool, *pathGuard) error {
 		// Mid-cycle, after the park: get in the way of both restores.
-		blockDir(t, filepath.Join(f.roots.Mirror, "p1", "memory", secretName))
+		failWrites(t, secretName)
 		if err := os.RemoveAll(filepath.Join(f.repo.Dir, "distilled")); err != nil {
 			t.Fatal(err)
 		}
@@ -114,25 +129,34 @@ func TestRedact_UnparkErrors(t *testing.T) {
 	}
 	requireNoName(t, "flush error", err.Error())
 	requireNoName(t, "log", logs.String())
+	// Both restores must fail, not only one: the memory file (the forced write
+	// error) and the file outside projects/ (its folder is a plain file, so the
+	// mkdir fails).
+	if !strings.Contains(err.Error(), "forced write failure") {
+		t.Errorf("the memory-file restore did not fail: %v", err)
+	}
+	if !strings.Contains(err.Error(), "mkdir") || !strings.Contains(err.Error(), "distilled") {
+		t.Errorf("the restore outside projects/ did not fail: %v", err)
+	}
 }
 
-// A git failure whose stderr names a denylisted file (here from a hook).
+// A git failure whose stderr names a denylisted file (here a remote path).
 func TestRedact_GitStderrFromFailedPull(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("needs a shell hook")
+		t.Skip("the remote path is a POSIX one")
 	}
 	f := redactFixture(t, map[string]string{"keep.md": "k\n"})
 	logs := captureLog(t)
-	hook := "#!/bin/sh\necho 'cannot rebase " + secretName + "' >&2\nexit 1\n"
-	if err := os.WriteFile(filepath.Join(f.repo.Dir, ".git", "hooks", "pre-rebase"), []byte(hook), 0700); err != nil {
-		t.Fatal(err)
-	}
+	// git runs no hook of the repo's (core.hooksPath is pinned off), so the
+	// failure comes from the remote: its path names the file, and so does git's
+	// "does not appear to be a git repository".
+	mustGit(t, f.repo, "config", "remote.origin.url", filepath.Join(t.TempDir(), "gone-"+secretName+".git"))
 	f.editLocal("mine.md", "m\n") // a local commit forces a real rebase
 	f.peerPush("peer.md", "p\n")
 
 	err := f.loop.flush(f.repo, f.roots, true)
 	if !strings.Contains(logs.String(), "pull:") {
-		t.Fatalf("the pull error was not logged; log:\n%s", logs)
+		t.Fatalf("the pull error was not logged; err %v log:\n%s", err, logs)
 	}
 	requireNoName(t, "log", logs.String())
 	if err != nil {
@@ -150,7 +174,7 @@ func TestRedact_HandleEventErrors(t *testing.T) {
 	}
 	defer w.Close()
 	writeMem(t, f.roots.Claude, "p1", secretName, "mine\n")
-	blockDir(t, filepath.Join(f.roots.Mirror, "p1", "memory", secretName))
+	failWrites(t, secretName)
 
 	_, err = f.loop.handleEvent(w, f.roots, fsnotify.Event{
 		Name: filepath.Join(f.roots.Claude, "p1", "memory", secretName), Op: fsnotify.Write,
@@ -166,7 +190,7 @@ func TestRedact_RunReconcileError(t *testing.T) {
 	f := redactFixture(t, map[string]string{"keep.md": "k\n"})
 	logs := captureLog(t)
 	writeMem(t, f.roots.Claude, "p1", secretName, "mine\n")
-	blockDir(t, filepath.Join(f.roots.Mirror, "p1", "memory", secretName))
+	failWrites(t, secretName)
 
 	flushed := make(chan error, 4)
 	f.loop.OnFlush = func(_ bool, err error) { flushed <- err }
@@ -192,7 +216,7 @@ func TestRedact_OrdinaryNamesStillLogged(t *testing.T) {
 	f := redactFixture(t, map[string]string{"keep.md": "k\n"})
 	logs := captureLog(t)
 	f.peerPush("ordinary.md", "peer\n")
-	blockDir(t, filepath.Join(f.roots.Claude, "p1", "memory", "ordinary.md"))
+	failWrites(t, "ordinary.md")
 
 	_ = f.loop.flush(f.repo, f.roots, true)
 	if !strings.Contains(logs.String(), "ordinary.md") {
@@ -209,9 +233,12 @@ func TestRedact_UnreadableDenylistRedactsAllPaths(t *testing.T) {
 	}
 	logs := captureLog(t)
 	f.peerPush("ordinary.md", "peer\n")
-	blockDir(t, filepath.Join(f.roots.Claude, "p1", "memory", "ordinary.md"))
+	failWrites(t, "ordinary.md")
 
 	_ = f.loop.flush(f.repo, f.roots, true)
+	if !strings.Contains(logs.String(), "propagate") {
+		t.Fatalf("the copy error was not triggered, so nothing was tested; log:\n%s", logs)
+	}
 	if strings.Contains(logs.String(), "ordinary.md") {
 		t.Errorf("a path was logged although the denylist cannot be read:\n%s", logs)
 	}

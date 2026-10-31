@@ -836,7 +836,7 @@ func refreshMemoryWatches(w *fsnotify.Watcher, claudeRoot string) error {
 			continue
 		}
 		mem := filepath.Join(claudeRoot, e.Name(), "memory")
-		if info, err := os.Stat(mem); err == nil && info.IsDir() {
+		if info, err := os.Lstat(mem); err == nil && info.IsDir() {
 			_ = w.Add(mem) // no-op if already watching
 		}
 	}

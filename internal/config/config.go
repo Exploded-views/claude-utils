@@ -6,10 +6,13 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/foreign"
@@ -278,10 +281,36 @@ func (c Config) DistilledPath() string {
 	return filepath.Join(c.SyncDir, "distilled")
 }
 
+// ErrNotPrivate means a config.json is readable or writable by other users, or
+// owned by another user, and was not read.
+var ErrNotPrivate = errors.New("config.json is not private to this user")
+
 // Load reads the config from path. The path is typically Config.Path() but
-// callers can supply their own (e.g. for tests).
+// callers can supply their own (e.g. for tests). A file other users can read
+// or write, or that another user owns, is refused (see checkPrivate): the
+// daemon honours keys from it that decide what is scrubbed and where it goes.
 func Load(path string) (Config, error) {
-	b, err := os.ReadFile(path)
+	if path == "~" || strings.HasPrefix(path, "~/") || strings.HasPrefix(path, `~\`) {
+		// A "~/" path from routes.json is expanded by route.ExpandHome before it
+		// gets here; one that is still literal would name a directory called "~".
+		return Config{}, fmt.Errorf("config path %q was not expanded (a literal ~ is not read)", path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return Config{}, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return Config{}, err
+	}
+	if !st.Mode().IsRegular() {
+		return Config{}, fmt.Errorf("%s is not a regular file", path)
+	}
+	if err := checkPrivate(path, st); err != nil {
+		return Config{}, err
+	}
+	b, err := io.ReadAll(f)
 	if err != nil {
 		return Config{}, err
 	}

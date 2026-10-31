@@ -46,22 +46,46 @@ func MergeCommand(exe string, args ...string) string {
 
 func quote(p string) string { return ShellQuote(p) }
 
-// Configure sets the repo-local git config encryption needs: the filter
-// (required, so a missing binary fails closed), textconv, the identity path and
-// both merge drivers. Call it before the first checkout.
-func Configure(repo *gitwt.Repo, o Opts) error {
+// driverPairs are the settings that name the programs git runs for memsync's
+// own filter, textconv and merge drivers. The merge drivers are left out when
+// no claude-memmerge is named.
+func driverPairs(o Opts) [][2]string {
 	kv := [][2]string{
 		{"filter." + FilterName + ".process", quote(o.MemsyncExe) + " age-filter"},
 		{"filter." + FilterName + ".required", "true"},
 		{"diff." + FilterName + ".textconv", quote(o.MemsyncExe) + " age-textconv"},
-		{IdentityConfigKey, filepath.ToSlash(o.IdentityPath)},
-		{"merge.claude-memory-index.name", "claude memory index merge"},
-		{"merge.claude-memory-index.driver", MergeCommand(o.MemmergeExe)},
-		{"merge.memtext.name", "decrypting text merge"},
-		{"merge.memtext.driver", MergeCommand(o.MemmergeExe, "--text")},
-		{"merge.memunion.name", "decrypting union merge"},
-		{"merge.memunion.driver", MergeCommand(o.MemmergeExe, "--union")},
 	}
+	if o.MemmergeExe != "" {
+		kv = append(kv,
+			[2]string{"merge.claude-memory-index.driver", MergeCommand(o.MemmergeExe)},
+			[2]string{"merge.memtext.driver", MergeCommand(o.MemmergeExe, "--text")},
+			[2]string{"merge.memunion.driver", MergeCommand(o.MemmergeExe, "--union")})
+	}
+	return kv
+}
+
+// PinDrivers makes every git command this process starts run memsync's own
+// filter, textconv and merge drivers (the build o names, the running one), by
+// name, whatever a repo's .git/config says those drivers are. A repo whose
+// config was edited to name another program for them runs memsync's anyway.
+func PinDrivers(o Opts) {
+	var kv []string
+	for _, p := range driverPairs(o) {
+		kv = append(kv, p[0]+"="+p[1])
+	}
+	gitwt.SetConfigPins(kv...)
+}
+
+// Configure sets the repo-local git config encryption needs: the filter
+// (required, so a missing binary fails closed), textconv, the identity path and
+// both merge drivers. Call it before the first checkout.
+func Configure(repo *gitwt.Repo, o Opts) error {
+	kv := append(driverPairs(o),
+		[2]string{IdentityConfigKey, filepath.ToSlash(o.IdentityPath)},
+		[2]string{"merge.claude-memory-index.name", "claude memory index merge"},
+		[2]string{"merge.memtext.name", "decrypting text merge"},
+		[2]string{"merge.memunion.name", "decrypting union merge"},
+	)
 	if o.Scheme != "" {
 		if !ValidScheme(o.Scheme) {
 			return fmt.Errorf("unknown encryption scheme %q (use pq or classic)", o.Scheme)

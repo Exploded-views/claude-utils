@@ -156,3 +156,33 @@ func TestLocalOnlyPath(t *testing.T) {
 		}
 	}
 }
+
+// A commit never takes a per-PC path or a link, whatever put it in the index.
+func TestCommit_RefusesPerPCAndLinkEntries(t *testing.T) {
+	r := testRepo(t)
+	os.WriteFile(filepath.Join(r.Dir, "config.json"), []byte("{}"), 0o600)
+	if _, err := r.Run("add", "-f", "config.json"); err != nil {
+		t.Fatal(err)
+	}
+	if made, err := r.CommitGuarded("x"); err == nil || made {
+		t.Fatalf("a staged config.json must refuse the commit, got made=%v err=%v", made, err)
+	}
+}
+
+// A path commit takes one path and never a per-PC path or a link.
+func TestCommitPath_RefusesPerPCAndLinkPaths(t *testing.T) {
+	r := testRepo(t)
+	os.WriteFile(filepath.Join(r.Dir, "config.json"), []byte("{}"), 0o600)
+	os.WriteFile(filepath.Join(r.Dir, "ok.json"), []byte("{}"), 0o600)
+	if err := os.Symlink("/etc/hosts", filepath.Join(r.Dir, "ln.json")); err != nil {
+		t.Skip(err)
+	}
+	for _, rel := range []string{"config.json", "Config.json", "ln.json"} {
+		if made, err := r.CommitPath("x", rel); err == nil || made {
+			t.Errorf("CommitPath(%q): made=%v err=%v, want a refusal", rel, made, err)
+		}
+	}
+	if made, err := r.CommitPath("x", "ok.json"); err != nil || !made {
+		t.Errorf("a regular file commits: made=%v err=%v", made, err)
+	}
+}

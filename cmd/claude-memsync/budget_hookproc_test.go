@@ -33,6 +33,7 @@ type hookProcFixture struct {
 func newHookProcFixture(t *testing.T) *hookProcFixture {
 	t.Helper()
 	cfgs := routedHost(t, budgetRepos, "personal", budgetRoutes())
+	realisticConfigs(t, cfgs) // what init writes: the trust check runs on every load
 	ms, _ := testenv.Binaries(t)
 	tree := newBudgetTree(t, t.TempDir(), 10000)
 	t.Setenv("TMPDIR", tree.tmp)
@@ -54,6 +55,7 @@ func newHookProcFixture(t *testing.T) *hookProcFixture {
 		os.Remove(filepath.Join(cfg.SyncDir, ".state", "synced-head"))
 		bases = append(bases, repoBase{filepath.Join(cfg.SyncDir, ".state", "hook-markers", "bp"), strings.TrimSpace(base)})
 	}
+	requireTrusted(t, cfgs)
 	f := &hookProcFixture{
 		ms:    ms,
 		stdin: hookJSON("bp", filepath.Join(tree.tmp, "checkout000"), "UserPromptSubmit"),

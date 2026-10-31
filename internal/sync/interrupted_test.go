@@ -277,13 +277,19 @@ func TestInterrupted_DaemonStartedRebaseAbortedOnStart(t *testing.T) {
 	noMarkersAnywhere(t, f)
 }
 
-// The marker brackets the daemon's pull (a pre-rebase hook sees it) and is gone
+// The marker brackets the daemon's pull (a filter run by the rebase's checkout
+// sees it; a repo hook would not run, core.hooksPath is pinned off) and is gone
 // after a normal cycle and after one that stopped on a conflict.
 func TestPullMarker_ClearedAfterCycles(t *testing.T) {
 	f := newPullFixture(t, map[string]string{"clean.md": "a\nb\n"})
 	captureLog(t)
-	hook := "#!/bin/sh\n[ -e .state/pull-running ] && touch .state/hook-saw-marker\nexit 0\n"
-	if err := os.WriteFile(filepath.Join(f.repo.Dir, ".git", "hooks", "pre-rebase"), []byte(hook), 0700); err != nil {
+	for k, v := range map[string]string{
+		"filter.obs.clean":  "cat",
+		"filter.obs.smudge": "if [ -e .state/pull-running ]; then touch .state/hook-saw-marker; fi; cat",
+	} {
+		mustGit(t, f.repo, "config", k, v)
+	}
+	if err := os.WriteFile(filepath.Join(f.repo.Dir, ".git", "info", "attributes"), []byte("*.md filter=obs\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	f.peerPush("other.md", "o\n")

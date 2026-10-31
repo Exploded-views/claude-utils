@@ -20,6 +20,7 @@ func TestBudgetB1_HookP95(t *testing.T) {
 	fail, done := timingBudget(t)
 	defer done()
 	cfgs := routedHost(t, budgetRepos, "personal", budgetRoutes())
+	realisticConfigs(t, cfgs) // what init writes: the trust check runs on every load
 	tree := newBudgetTree(t, t.TempDir(), 10000)
 	t.Setenv("TMPDIR", tree.tmp)
 
@@ -49,6 +50,7 @@ func TestBudgetB1_HookP95(t *testing.T) {
 		bases = append(bases, repoBase{filepath.Join(cfg.SyncDir, ".state", "hook-markers", "b1"), strings.TrimSpace(base)})
 	}
 
+	requireTrusted(t, cfgs)
 	in := hookJSON("b1", projDir, "UserPromptSubmit")
 	var times []time.Duration
 	for i := 0; i < 20; i++ {
@@ -75,5 +77,35 @@ func TestBudgetB1_HookP95(t *testing.T) {
 	t.Logf("B1 hook: min %v median %v p95 %v max %v", times[0], times[10], p95, times[19])
 	if p95 >= 200*time.Millisecond {
 		fail("B1: p95 %v, budget 200ms", p95)
+	}
+}
+
+// B1 at 40 repos: with nothing new a hook is pure file I/O (40 config reads,
+// marker reads, synced-head reads and held-record stats), under 200 ms p95
+// over 20 runs. With the trust check on every load it was about 320 git
+// processes.
+func TestBudgetB1_HookP95At40(t *testing.T) {
+	fail, done := timingBudget(t)
+	defer done()
+	cfgs, names := realisticHost(t, 40)
+	for _, n := range names {
+		noteFor(t, cfgs, n, "base")
+	}
+	requireTrusted(t, cfgs)
+	in := hookJSON("b1-40", "", "UserPromptSubmit")
+	runHook(t, in, "--hook", "--deadline", "0") // baselines
+	var times []time.Duration
+	for i := 0; i < 20; i++ {
+		start := time.Now()
+		code, out, errs := runHook(t, in, "--hook", "--deadline", "0")
+		times = append(times, time.Since(start))
+		if code != 0 || errs != "" || out != "" {
+			t.Fatalf("run %d: exit %d stdout %q stderr %q, want nothing", i, code, out, errs)
+		}
+	}
+	sort.Slice(times, func(i, j int) bool { return times[i] < times[j] })
+	t.Logf("B1 at 40 repos: min %v median %v p95 %v max %v", times[0], times[10], times[18], times[19])
+	if times[18] >= 200*time.Millisecond {
+		fail("B1 at 40 repos: p95 %v, budget 200ms", times[18])
 	}
 }

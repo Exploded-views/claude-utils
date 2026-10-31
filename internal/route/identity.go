@@ -229,7 +229,7 @@ func matchingName(rule Rule, key string) string {
 // consented reports whether the user's route edit, not an old rule, sends the
 // folder to the repo of rule d.Rule: the pattern or alias that catches the new
 // key was not listed for that repo when the folder was last confirmed. A move
-// out of a client or orchestrator repo also needs that name to be the literal
+// out of a client or coordination repo also needs that name to be the literal
 // key, never a glob.
 func consented(rec identity, f File, d Decision, key string) bool {
 	if d.Rule < 0 || d.Rule >= len(f.Routes) {

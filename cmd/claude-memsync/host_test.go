@@ -65,7 +65,7 @@ func (f *fakeGH) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewEncoder(w).Encode(out)
 	case r.Method == "GET" && len(p) == 3 && p[0] == "repos":
-		_ = json.NewEncoder(w).Encode(map[string]any{"name": p[2], "private": true, "visibility": "private"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": p[2], "full_name": p[1] + "/" + p[2], "owner": map[string]any{"login": p[1]}, "private": true, "visibility": "private"})
 	case r.Method == "GET" && len(p) == 4 && p[0] == "repos" && p[3] == "keys":
 		ks := f.keys[p[2]]
 		page := 1

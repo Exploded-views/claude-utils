@@ -91,20 +91,7 @@ func commitFile(dir, rel, msg string) (bool, error) {
 	if !g.IsRepo() {
 		return false, fmt.Errorf("registry %s is not a git work-tree", dir)
 	}
-	if _, err := g.Run("add", "-A", "--", gitwt.Literal(rel)); err != nil {
-		return false, err
-	}
-	st, err := g.Run("status", "--porcelain", "--", gitwt.Literal(rel))
-	if err != nil {
-		return false, err
-	}
-	if strings.TrimSpace(st) == "" {
-		return false, nil
-	}
-	if _, err := g.Run("commit", "-q", "-m", msg, "--", gitwt.Literal(rel)); err != nil {
-		return false, err
-	}
-	return true, nil
+	return g.CommitPath(msg, rel)
 }
 
 func hostFile(dir, label, name string) (string, string, error) {

@@ -187,7 +187,11 @@ func (s *routedSet) foreignLines() []string {
 	return out
 }
 
-func loadRouted(path string) (*routedSet, error) {
+func loadRouted(path string) (*routedSet, error) { return loadRoutedWith(path, loadConfig) }
+
+// loadRoutedWith is loadRouted reading each repo's config through load, which
+// decides what is done about the keys the trust check guards.
+func loadRoutedWith(path string, load func(string) (config.Config, error)) (*routedSet, error) {
 	f, err := route.Load(path)
 	if err != nil {
 		return nil, err
@@ -195,7 +199,7 @@ func loadRouted(path string) (*routedSet, error) {
 	s := &routedSet{Path: path, File: f, Cfgs: map[string]config.Config{}, fglobal: f.ForeignWriters}
 	for _, name := range f.RepoNames() {
 		cp := route.ExpandHome(f.Repos[name].Config)
-		cfg, err := loadConfig(cp)
+		cfg, err := load(cp)
 		switch {
 		case err == nil:
 			if err := checkKindAgainstRemote(name, f.Repos[name].Kind, cfg.RemoteURL); err != nil {
@@ -226,7 +230,7 @@ func loadRouted(path string) (*routedSet, error) {
 }
 
 // checkKindAgainstRemote refuses a repo whose remote is named like a client or
-// orchestrator repo (mem-client-*, mem-orch-*) but whose kind says otherwise:
+// coordination repo (mem-client-*, mem-orch-*) but whose kind says otherwise:
 // that mistake would let a client's notes into the personal catalog.
 func checkKindAgainstRemote(name, kind, remote string) error {
 	base := strings.TrimSuffix(strings.TrimRight(remote, "/"), ".git")
@@ -260,15 +264,21 @@ func (s *routedSet) repoForSyncDir(dir string) string {
 // Primary is the config the daemon's PID file and the default commands use:
 // the personal repo if this host has it, else the first repo by name.
 func (s *routedSet) Primary() (config.Config, bool) {
-	if c, ok := s.Cfgs[s.File.Personal]; ok && s.File.Personal != "" {
-		return c, true
+	n, ok := s.primaryName()
+	return s.Cfgs[n], ok
+}
+
+// primaryName is the repo Primary returns the config of.
+func (s *routedSet) primaryName() (string, bool) {
+	if _, ok := s.Cfgs[s.File.Personal]; ok && s.File.Personal != "" {
+		return s.File.Personal, true
 	}
 	for _, n := range s.File.RepoNames() {
-		if c, ok := s.Cfgs[n]; ok {
-			return c, true
+		if _, ok := s.Cfgs[n]; ok {
+			return n, true
 		}
 	}
-	return config.Config{}, false
+	return "", false
 }
 
 // names lists the repos this host has, sorted.

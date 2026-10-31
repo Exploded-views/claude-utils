@@ -18,6 +18,8 @@ func main() {
 		guardChildren()
 	}
 
+	pinOwnDrivers()
+
 	switch os.Args[1] {
 	case "version", "--version", "-v":
 		os.Exit(runVersion(os.Stdout, os.Stderr, os.Args[2:]))

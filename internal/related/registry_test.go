@@ -3,6 +3,7 @@ package related
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -119,5 +120,27 @@ func TestRegistry_BadJSON(t *testing.T) {
 	os.WriteFile(dir+"/"+FileName, []byte("{"), 0600)
 	if _, err := LoadRegistry(dir); err == nil {
 		t.Fatal("bad json accepted")
+	}
+}
+
+// Save commits the registry file and nothing else: a per-PC file that is
+// staged in the registry's sync dir does not ride along.
+func TestRegistry_SaveNeverCommitsAStagedPerPCFile(t *testing.T) {
+	dir := newRegistryRepo(t)
+	reg, err := LoadRegistry(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Relate(Checker{}, "mem-project-a", "mem-project-b", ModeRead); err != nil {
+		t.Fatal(err)
+	}
+	g := gitwt.New(dir)
+	os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"scrub":false}`), 0o600)
+	if _, err := g.Run("add", "-f", "config.json"); err != nil {
+		t.Fatal(err)
+	}
+	_ = reg.Save("relate")
+	if out, _ := g.Run("ls-tree", "-r", "--name-only", "HEAD"); strings.Contains(out, "config.json") {
+		t.Errorf("HEAD holds config.json:\n%s", out)
 	}
 }

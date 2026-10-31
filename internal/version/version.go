@@ -77,6 +77,7 @@ func JSON(binary string) string {
 	// Built by hand: a map would sort the keys.
 	var sb strings.Builder
 	sb.WriteByte('{')
+	// lint:allow-commit: a JSON key, not a git subcommand.
 	for i, kv := range [][2]string{{"name", binary}, {"version", String()}, {"commit", commit}, {"go", runtime.Version()}, {"os", runtime.GOOS}, {"arch", runtime.GOARCH}} {
 		if i > 0 {
 			sb.WriteByte(',')

@@ -153,7 +153,11 @@ func initGuard(cfg config.Config, owns func(string) bool, opts guardOpts) error 
 		}
 		writers = f.ForeignWriters
 	}
-	if old, err := config.Load(cfg.Path()); err == nil {
+	old, exists, err := loadExisting(cfg.Path())
+	if err != nil {
+		return fmt.Errorf("the existing config.json cannot be read, so its foreign-writer list is unknown: %w", err)
+	}
+	if exists {
 		writers = append(append([]foreign.Writer{}, writers...), old.ForeignWriters...)
 		if !ok {
 			quiet = old.QuietSec()

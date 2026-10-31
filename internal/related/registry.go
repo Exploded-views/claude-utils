@@ -164,6 +164,6 @@ func (r *Registry) Save(message string) error {
 	if _, err := g.Run("add", "--", gitwt.Literal(FileName)); err != nil {
 		return err
 	}
-	_, err = g.Commit(message)
+	_, err = g.CommitGuarded(message)
 	return err
 }

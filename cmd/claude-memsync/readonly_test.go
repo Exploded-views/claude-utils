@@ -83,7 +83,7 @@ func TestInitReadOnly_FlagIsParsedAndKeptOnReinit(t *testing.T) {
 	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
-	if got := mergeReinit(config.Defaults(), cfg.Path()); !got.ReadOnly {
+	if got, _, err := mergeReinit(config.Defaults(), cfg.Path()); err != nil || !got.ReadOnly {
 		t.Error("a re-init without the flag must not make a read-only host writable")
 	}
 }

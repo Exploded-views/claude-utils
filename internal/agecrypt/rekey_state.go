@@ -569,6 +569,7 @@ func localCommitsError(repo *gitwt.Repo, migrated string) error {
 	}
 	noun := "commits"
 	if len(subs) == 1 {
+		// lint:allow-commit: a word in a message, not a git subcommand.
 		noun = "commit"
 	}
 	var b strings.Builder

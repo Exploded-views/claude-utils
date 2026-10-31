@@ -621,7 +621,7 @@ func gitConfigValue(path, section, key string) (val string, ok bool) {
 	if _, err := os.Stat(path); err != nil {
 		return "", true
 	}
-	out, err := exec.Command("git", "config", "--file", path, "--get", section+"."+key).Output()
+	out, err := gitwt.Command(gitwt.Opts{}, "config", "--file", path, "--get", section+"."+key).Output()
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && ee.ExitCode() == 1 {

@@ -40,9 +40,8 @@ var NoAutoMaintenance = []string{"-c", "gc.auto=0", "-c", "maintenance.auto=fals
 // omits NoAutoMaintenance, because --auto reads gc.auto and would do nothing.
 // Callers hold the sync dir's lock.
 func (r *Repo) Maintain(ctx context.Context) error {
-	cmd := proc.GroupedCommandContext(ctx, "git", "-C", r.Dir,
+	cmd := Command(Opts{Ctx: ctx, Dir: r.Dir, KeepMaintenance: true},
 		"-c", "gc.autoDetach=false", "-c", "maintenance.autoDetach=false", "gc", "--auto", "--quiet")
-	cmd.Env = repoEnv(nil)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := proc.Run(cmd); err != nil {
@@ -111,14 +110,11 @@ func (r *Repo) RunStdin(stdin []byte, args ...string) (string, error) {
 
 // run is RunStdin with extra environment variables for git (KEY=VALUE).
 func (r *Repo) run(env []string, stdin []byte, args ...string) (string, error) {
-	full := append([]string{"-C", r.Dir}, NoAutoMaintenance...)
 	sent := args
 	if len(args) > 0 && args[0] == "push" && r.pushesToLocalPath(args[1:]) {
 		sent = append([]string{"push", quietReceivePack}, args[1:]...)
 	}
-	full = append(full, sent...)
-	cmd := proc.Command("git", full...)
-	cmd.Env = repoEnv(env)
+	cmd := Command(Opts{Dir: r.Dir, Env: env}, sent...)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
@@ -138,25 +134,9 @@ func (r *Repo) RunEnv(env []string, stdin []byte, args ...string) (string, error
 }
 
 // RunClean is Run; kept for callers that want to say the output must not
-// depend on the environment (run already drops git's repository-location
-// variables, see repoEnv).
+// depend on the environment (Command already drops git's repository-location
+// variables and injected config, see gitEnv).
 func (r *Repo) RunClean(args ...string) (string, error) { return r.run(nil, nil, args...) }
-
-// repoEnv is the environment for git: the caller's, minus the variables that
-// would redirect git to another repository than the -C directory.
-func repoEnv(extra []string) []string {
-	var env []string
-	for _, e := range os.Environ() {
-		k, _, _ := strings.Cut(e, "=")
-		switch k {
-		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
-			"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_PREFIX":
-			continue
-		}
-		env = append(env, e)
-	}
-	return append(env, extra...)
-}
 
 // IsRepo reports whether r.Dir is inside an existing git work-tree.
 func (r *Repo) IsRepo() bool {
@@ -166,8 +146,7 @@ func (r *Repo) IsRepo() bool {
 
 // Clone clones url into r.Dir. r.Dir must not already exist or must be empty.
 func (r *Repo) Clone(url string) error {
-	cmd := exec.Command("git", "clone", url, r.Dir)
-	proc.HideWindow(cmd)
+	cmd := Command(Opts{}, "clone", url, r.Dir)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -179,8 +158,7 @@ func (r *Repo) Clone(url string) error {
 // CloneNoCheckout is Clone without populating the work-tree (`clone -n`), so
 // config that checkout depends on (filters) can be set first.
 func (r *Repo) CloneNoCheckout(url string) error {
-	cmd := exec.Command("git", "clone", "-n", url, r.Dir)
-	proc.HideWindow(cmd)
+	cmd := Command(Opts{}, "clone", "-n", url, r.Dir)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -197,8 +175,7 @@ func (r *Repo) HasHead() bool {
 
 // Init runs `git init` in r.Dir. The directory is created if missing.
 func (r *Repo) Init(defaultBranch string) error {
-	cmd := exec.Command("git", "init", "-b", defaultBranch, r.Dir)
-	proc.HideWindow(cmd)
+	cmd := Command(Opts{}, "init", "-b", defaultBranch, r.Dir)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -414,6 +391,45 @@ func (r *Repo) Commit(message string) (bool, error) {
 	return err == nil, err
 }
 
+// CommitGuarded is Commit for the sync repo's own commits: it fails closed,
+// whatever staged it, if a per-PC path or a link is in the index. It lists the
+// index once (in place of Commit's own "is anything staged" probe).
+func (r *Repo) CommitGuarded(message string) (bool, error) { return r.commitChecked(message, false) }
+
+// CommitUnstaging is CommitGuarded that first takes any per-PC path or link out
+// of the index and commits the rest, still failing closed if one stays staged.
+func (r *Repo) CommitUnstaging(message string) (bool, error) { return r.commitChecked(message, true) }
+
+func (r *Repo) commitChecked(message string, unstage bool) (bool, error) {
+	changes, err := r.StagedChanges()
+	if err != nil {
+		return false, err
+	}
+	if bad := forbidden(changes); len(bad) > 0 {
+		if !unstage {
+			return false, fmt.Errorf("%w (%s)", ErrPerPCStaged, strings.Join(bad, ", "))
+		}
+		specs := make([]string, len(bad))
+		for i, p := range bad {
+			specs[i] = Literal(p)
+		}
+		if err := r.withPathspecs(specs, "reset", "-q"); err != nil {
+			return false, err
+		}
+		if changes, err = r.StagedChanges(); err != nil {
+			return false, err
+		}
+		if bad = forbidden(changes); len(bad) > 0 {
+			return false, fmt.Errorf("%w (%s)", ErrPerPCStaged, strings.Join(bad, ", "))
+		}
+	}
+	if len(changes) == 0 {
+		return false, nil
+	}
+	_, err = r.Run("commit", "-m", message)
+	return err == nil, err
+}
+
 // Pull does `git pull --rebase --autostash origin <branch>`.
 func (r *Repo) Pull(branch string) error {
 	_, err := r.Run("pull", "--rebase", "--autostash", "origin", branch)
@@ -621,4 +637,29 @@ func (r *Repo) UnmergedEntries() ([]UnmergedEntry, error) {
 func (r *Repo) RebaseContinue(env ...string) error {
 	_, err := r.run(append([]string{"GIT_EDITOR=true"}, env...), nil, "-c", "core.editor=true", "rebase", "--continue")
 	return err
+}
+
+// CommitPath commits just rel, locally. It fails closed: rel must not be a
+// per-PC path, and what is at rel must not be a link or a gitlink.
+func (r *Repo) CommitPath(message, rel string) (bool, error) {
+	if LocalOnlyPath(rel) {
+		return false, fmt.Errorf("%w (%s)", ErrPerPCStaged, rel)
+	}
+	if st, err := os.Lstat(filepath.Join(r.Dir, filepath.FromSlash(rel))); err == nil && !st.Mode().IsRegular() {
+		return false, fmt.Errorf("%w (%s is not a regular file)", ErrPerPCStaged, rel)
+	}
+	if _, err := r.Run("add", "-A", "--", Literal(rel)); err != nil {
+		return false, err
+	}
+	st, err := r.Run("status", "--porcelain", "--", Literal(rel))
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(st) == "" {
+		return false, nil // nothing changed at rel
+	}
+	if _, err := r.Run("commit", "-q", "-m", message, "--", Literal(rel)); err != nil {
+		return false, err
+	}
+	return true, nil
 }

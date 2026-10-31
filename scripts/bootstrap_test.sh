@@ -582,7 +582,7 @@ check "no keep-out flags: exit 0 and exactly the calm note" bash -c "[ $NRC -eq 
 check "no keep-out flags: nothing reads as a warning or an error" bash -c "! printf '%s\n' \"\$1\" | grep -E 'keep-out|client owners' | grep -qE 'WARNING|ERROR|!!!'" _ "$OUTNONE"
 HELPOUT="$("$BASH" "$ROOT/scripts/bootstrap.sh" --help 2>&1 || true)"
 check "usage text names --keep-out-owner and --keep-out-term, not client owners" bash -c "printf '%s\n' \"\$1\" | grep -q -- '--keep-out-owner' && printf '%s\n' \"\$1\" | grep -q -- '--keep-out-term' && ! printf '%s\n' \"\$1\" | grep -qi 'client owner'" _ "$HELPOUT"
-check "the script says keep-out, not client, except for the mem-client-* repo kind" bash -c "! grep -i client '$ROOT/scripts/bootstrap.sh' | grep -viE 'mem-client|orchestrator'"
+check "the script says keep-out, not client, except for the mem-client-* repo kind" bash -c "! grep -i client '$ROOT/scripts/bootstrap.sh' | grep -viE 'mem-client|coordination'"
 for how in old new; do
   newhome "ko-$how"
   if [ "$how" = old ]; then KOF=(--deny-owner Some-Owner --deny-term 'a.b' --deny-term other); else KOF=(--keep-out-owner Some-Owner --keep-out-term 'a.b' --keep-out-term other); fi

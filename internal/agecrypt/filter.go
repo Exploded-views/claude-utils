@@ -8,9 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 )
 
 // RecipientsFile is the committed, plaintext list of public keys.
@@ -46,15 +47,13 @@ func NewFilter(dir string) (*Filter, error) {
 	f := &Filter{Dir: dir, CacheDir: filepath.Join(gitDir, "memage-cache"), PinPath: pinPathFor(gitDir)}
 	f.IdentityPath, _ = gitOut(dir, "config", "--get", IdentityConfigKey)
 	f.Indexed = func(p string) ([]byte, error) {
-		cmd := exec.Command("git", "-C", dir, "cat-file", "blob", ":0:"+p)
-		return cmd.Output()
+		return gitwt.Command(gitwt.Opts{Dir: dir}, "cat-file", "blob", ":0:"+p).Output()
 	}
 	return f, nil
 }
 
 func gitOut(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	out, err := cmd.Output()
+	out, err := gitwt.Command(gitwt.Opts{Dir: dir}, args...).Output()
 	return strings.TrimSpace(string(out)), err
 }
 

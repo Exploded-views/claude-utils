@@ -293,7 +293,7 @@ func TestProgramStart_AppNotInstalledHoldsUntilInstalled(t *testing.T) {
 				w.WriteHeader(401)
 				return
 			}
-			fmt.Fprint(w, `{"name":"mem-personal","private":true,"visibility":"private"}`)
+			fmt.Fprint(w, `{"name":"mem-personal","full_name":"Org/mem-personal","owner":{"login":"Org"},"private":true,"visibility":"private"}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -428,7 +428,7 @@ func TestPushWatch_ConfiguredSourceGivingNoTokenBlocksUntilItWorks(t *testing.T)
 	}
 }
 
-// S1: a held marker left by a stopped daemon is cleared when the next start's
+// a held marker left by a stopped daemon is cleared when the next start's
 // first check passes (single-repo mode has no supervisor to clear it).
 func TestStartSingle_StaleHeldMarkerClearedWhenCheckPasses(t *testing.T) {
 	cfg := guardCfg(t, privateH(), true)
@@ -450,7 +450,7 @@ func TestStartSingle_StaleHeldMarkerClearedWhenCheckPasses(t *testing.T) {
 	}
 }
 
-// S3: a check that passes after the daemon was told to stop releases nothing.
+// a check that passes after the daemon was told to stop releases nothing.
 func TestAwaitPrivate_PassAfterStopReleasesNothing(t *testing.T) {
 	oldCheck, oldMin := guardRelease, guardBackoffMin
 	t.Cleanup(func() { guardRelease, guardBackoffMin = oldCheck, oldMin })
@@ -476,7 +476,7 @@ func TestLoopFailedLine_MarkerNotPhrase(t *testing.T) {
 	}
 }
 
-// Review round 2, B1: a held repo is released only by a check that asked the
+// a held repo is released only by a check that asked the
 // API. Here config.json turns untrusted during the hold, so the daemon drops
 // every token source and the check would be "skipped"; that must not release
 // a repo the API called public.
@@ -512,7 +512,7 @@ func TestStartSingle_HeldRepoNotReleasedBySkippedCheck(t *testing.T) {
 	}
 }
 
-// Review round 2, S2: the push guard of a released repo is built after the
+// the push guard of a released repo is built after the
 // passing check, so it uses the token that passed. Here the token file is
 // rotated during the hold (the old token gets 401); no request may carry the
 // old token after release.
@@ -564,7 +564,7 @@ func TestStartSingle_ReleasedPushGuardUsesTheTokenThatPassed(t *testing.T) {
 	}
 }
 
-// Review round 2: an unset named env variable is a configured source that
+// an unset named env variable is a configured source that
 // gives no token.
 func TestDaemonGuard_UnsetNamedEnvHolds(t *testing.T) {
 	cfg := guardCfg(t, privateH(), false)
@@ -575,7 +575,7 @@ func TestDaemonGuard_UnsetNamedEnvHolds(t *testing.T) {
 	}
 }
 
-// Review round 2: the routed start clears a stale held marker too.
+// the routed start clears a stale held marker too.
 func TestRouted_StaleHeldMarkerClearedWhenCheckPasses(t *testing.T) {
 	cfgs := privateRouted(t, map[string]string{"a": "git@github.com:Org/mem-project-a.git"}, routedAPI(""))
 	failed := loopFailedPath(cfgs["a"].SyncDir)
@@ -598,7 +598,7 @@ func TestRouted_StaleHeldMarkerClearedWhenCheckPasses(t *testing.T) {
 	}
 }
 
-// Review round 2: when a configured source starts giving a token again, the
+// when a configured source starts giving a token again, the
 // push guard hands over only after the API accepts it; a 401 keeps pushes
 // blocked.
 func TestPushWatch_RecoveredSourceNeedsAnAPIPassFirst(t *testing.T) {
@@ -627,7 +627,7 @@ func TestPushWatch_RecoveredSourceNeedsAnAPIPassFirst(t *testing.T) {
 	}
 }
 
-// Review round 2: only a record whose reason starts with the marker is held.
+// only a record whose reason starts with the marker is held.
 func TestLoopFailedLine_MarkerOnlyAfterTimestamp(t *testing.T) {
 	dead := []byte("2026-01-01T00:00:00Z sync failed: remote said " + heldMarker + "x\n")
 	if l := loopFailedLine(dead); !strings.HasPrefix(l, "loop stopped") {

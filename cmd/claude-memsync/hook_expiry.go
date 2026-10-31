@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/MarimerLLC/claude-utils/internal/proc"
 )
 
 // hookExpiryWindow is how long expiries share one log line.
@@ -61,11 +59,11 @@ func noteHookExpiry(stateDir string, now time.Time) error {
 	return os.WriteFile(statePath, b, 0o600)
 }
 
-// hookExpired is what the hook does when its deadline passes: kill the git
-// processes it started, and leave the one-line trace.
-func hookExpired(cfgPath, routesFlag string) {
-	proc.KillAll()
-	if tg, err := hookTargets(cfgPath, routesFlag); err == nil && len(tg) > 0 {
-		_ = noteHookExpiry(filepath.Join(tg[0].cfg.SyncDir, ".state"), time.Now())
+// hookExpired leaves the one-line trace of an expiry in the first repo's state
+// dir. The caller killed the hook's git children before this (proc.KillAll),
+// and passes the targets the prelude loaded (none if it had not finished).
+func hookExpired(targets []hookTarget) {
+	if len(targets) > 0 {
+		_ = noteHookExpiry(filepath.Join(targets[0].cfg.SyncDir, ".state"), time.Now())
 	}
 }

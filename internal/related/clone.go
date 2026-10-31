@@ -106,19 +106,7 @@ func (c *ReadClone) timeout() time.Duration {
 // sshCommand is the host's ssh command with BatchMode added, so a key
 // passphrase or host-key question fails instead of waiting for a person.
 func sshCommand() string {
-	base := os.Getenv("GIT_SSH_COMMAND")
-	if base == "" {
-		if out, err := exec.Command("git", "config", "--get", "core.sshCommand").Output(); err == nil {
-			base = strings.TrimSpace(string(out))
-		}
-	}
-	if base == "" {
-		base = os.Getenv("GIT_SSH")
-	}
-	if base == "" {
-		base = "ssh"
-	}
-	return base + " -o BatchMode=yes"
+	return gitwt.SSHCommand() + " -o BatchMode=yes"
 }
 
 // git runs git against the bare store with every automatic behaviour off.
@@ -127,9 +115,10 @@ func (c *ReadClone) git(ctx context.Context, useStore bool, args ...string) ([]b
 }
 
 func (c *ReadClone) command(ctx context.Context, useStore bool, args ...string) *exec.Cmd {
-	full := append([]string{}, gitwt.NoAutoMaintenance...) // a fetch must not leave a detached maintenance behind
-	full = append(full, "-c", "core.hooksPath="+os.DevNull, "-c", "core.fsmonitor=false",
-		"-c", "protocol.ext.allow=never",
+	// Command pins the settings that run programs and keeps maintenance off (a
+	// fetch must not leave a detached one behind); these are this clone's own.
+	var full []string
+	full = append(full,
 		// The host's config must not relax object checks on content the remote chose.
 		"-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true",
 		"-c", "fetch.fsck.hasDotgit=error", "-c", "fsck.hasDotgit=error")
@@ -137,13 +126,13 @@ func (c *ReadClone) command(ctx context.Context, useStore bool, args ...string) 
 		full = append(full, "--git-dir="+c.store)
 	}
 	full = append(full, args...)
-	cmd := proc.GroupedCommandContext(ctx, "git", full...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	env := []string{"GIT_TERMINAL_PROMPT=0"}
 	if len(args) > 0 && args[0] == "fetch" {
-		// Only a fetch talks to the remote; looking the ssh command up costs a
-		// git process, which the hook's calls must not pay.
-		cmd.Env = append(cmd.Env, "GIT_SSH_COMMAND="+sshCommand())
+		// Only a fetch talks to the remote. BatchMode makes a key passphrase or
+		// host-key question fail instead of waiting for a person.
+		env = append(env, "GIT_SSH_COMMAND="+sshCommand())
 	}
+	cmd := gitwt.Command(gitwt.Opts{Ctx: ctx, Env: env}, full...)
 	cmd.WaitDelay = 2 * time.Second
 	return cmd
 }

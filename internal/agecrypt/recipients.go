@@ -428,6 +428,7 @@ func commitInfoMode(repo *gitwt.Repo, oldRev, msg, infoText string, headOID map[
 	if err != nil {
 		return err
 	}
+	// lint:allow-commit: the tree is built from HEAD with 100644 blobs only (no per-PC path, no link).
 	args := []string{"commit-tree", strings.TrimSpace(tree)}
 	if !orphan {
 		args = append(args, "-p", oldRev)

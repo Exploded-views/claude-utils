@@ -72,8 +72,8 @@ func TestBudgetB8_HookGitSpawns(t *testing.T) {
 	}
 	// The skip is the point: with nothing new no repo needs even one git process
 	// (a full scan costs two each, which the 10 above would let through).
-	if seam > 4 {
-		t.Errorf("B8: %d spawns when nothing is new, want fewer than one per repo (0 today)", seam)
+	if seam != 0 {
+		t.Errorf("B8: %d spawns when nothing is new, want 0 (any per-repo constant is the 36-repo livelock)", seam)
 	}
 	// The seam must see every git the shim sees, or the count means nothing.
 	if news != newsShim || seam != shimmed {

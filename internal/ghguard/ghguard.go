@@ -122,6 +122,10 @@ type Client struct {
 	// hostname (default: `ssh -G`); tests inject one.
 	Host    string
 	Resolve HostResolver
+
+	// Warn, when set, receives non-fatal findings such as "repo renamed to
+	// <full_name>: update the remote". Callers that can show one wire it.
+	Warn func(string)
 }
 
 // Repo holds the fields the guard reads. Pointers/empty strings distinguish
@@ -131,6 +135,36 @@ type Repo struct {
 	FullName   string `json:"full_name"`
 	Private    *bool  `json:"private"`
 	Visibility string `json:"visibility"`
+	Owner      struct {
+		Login string `json:"login"`
+	} `json:"owner"`
+}
+
+// VerifyIdentity checks that r, as the API answered it, is the repo asked for.
+// GitHub answers a renamed or transferred repo with a redirect that the HTTP
+// client follows, so a private repo that now lives under another account would
+// otherwise pass. It returns an error (hold the repo) unless both the owner of
+// full_name and owner.login equal wantOwner, ignoring case; a missing or
+// malformed identity fails closed. A rename within the same owner passes with a
+// warning. Neither text contains a token or a response body.
+func VerifyIdentity(wantOwner, wantName string, r Repo) (warn string, err error) {
+	if r.FullName == "" {
+		return "", errors.New("response lacks the full_name field")
+	}
+	if r.Owner.Login == "" {
+		return "", errors.New("response lacks the owner.login field")
+	}
+	owner, name, ok := strings.Cut(r.FullName, "/")
+	if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
+		return "", errors.New("response has a malformed full_name")
+	}
+	if !strings.EqualFold(owner, wantOwner) || !strings.EqualFold(r.Owner.Login, wantOwner) {
+		return "", fmt.Errorf("repo moved to %s: update routes.json and the remote", r.FullName)
+	}
+	if !strings.EqualFold(name, wantName) {
+		return "repo renamed to " + r.FullName + ": update the remote", nil
+	}
+	return "", nil
 }
 
 func (r Repo) verifyPrivate() error {
@@ -242,7 +276,8 @@ func (c *Client) GetRepo(owner, name string) (Repo, error) {
 }
 
 // CheckPrivate refuses unless owner/name is a mem-* repo that GitHub reports
-// as private:true and visibility "private". It fails closed.
+// as private:true and visibility "private" and whose answer names that same
+// owner (see VerifyIdentity). It fails closed.
 func (c *Client) CheckPrivate(owner, name string) error {
 	if err := ValidName(name); err != nil {
 		return err
@@ -253,6 +288,13 @@ func (c *Client) CheckPrivate(owner, name string) error {
 	}
 	if err := r.verifyPrivate(); err != nil {
 		return fmt.Errorf("%s/%s: %w", owner, name, err)
+	}
+	warn, err := VerifyIdentity(owner, name, r)
+	if err != nil {
+		return fmt.Errorf("%s/%s: %w", owner, name, err)
+	}
+	if warn != "" && c.Warn != nil {
+		c.Warn(warn)
 	}
 	return nil
 }

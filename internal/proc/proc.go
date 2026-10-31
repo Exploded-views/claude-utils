@@ -27,8 +27,27 @@ var ErrStopped = errors.New("stopped: the deadline passed")
 // children again after an earlier KillAll (one process runs one hook; tests
 // run several).
 func Group() {
+	gen.Add(1)
 	grouped.Store(true)
 	stopped.Store(false)
+}
+
+// gen counts Group calls, so a Release that comes late (after another hook
+// began in the same process) can tell it is stale.
+var gen atomic.Uint64
+
+// GroupGen is Group; it returns the generation to give ReleaseGen.
+func GroupGen() uint64 {
+	Group()
+	return gen.Load()
+}
+
+// ReleaseGen is Release unless a later Group began another hook: then it does
+// nothing, so a stale worker's late release cannot undo the new hook's group.
+func ReleaseGen(g uint64) {
+	if gen.Load() == g {
+		Release()
+	}
 }
 
 // Release undoes Group and KillAll: a process that ran one hook exits, but a

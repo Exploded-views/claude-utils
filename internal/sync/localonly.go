@@ -26,9 +26,18 @@ func pullRefusedPath(dir string) string {
 // records the reason in .state/pull-refused (for `status`) and returns an
 // error wrapping ErrLocalOnlyTracked; otherwise it clears that record.
 func refuseLocalOnly(repo *gitwt.Repo, branch string) error {
-	bad, err := repo.TrackedLocalOnly("refs/remotes/origin/" + branch)
-	if err != nil {
+	// A repo dir that cannot be read (a "~/" path never expanded, say) is not
+	// "no remote branch yet": the guard fails closed.
+	if st, err := os.Stat(repo.Dir); err != nil || !st.IsDir() {
+		return fmt.Errorf("cannot check the fetched tree: sync dir %q is not readable", repo.Dir)
+	}
+	ref := "refs/remotes/origin/" + branch
+	if _, err := repo.Run("rev-parse", "--verify", "--quiet", ref); err != nil {
 		return nil // no remote branch yet: nothing to refuse
+	}
+	bad, err := repo.TrackedLocalOnly(ref)
+	if err != nil {
+		return fmt.Errorf("cannot check the fetched tree: %w", err)
 	}
 	if len(bad) == 0 {
 		_ = os.Remove(pullRefusedPath(repo.Dir))
@@ -37,7 +46,7 @@ func refuseLocalOnly(repo *gitwt.Repo, branch string) error {
 	if len(bad) > 3 {
 		bad = append(bad[:3], "...")
 	}
-	msg := fmt.Sprintf("the remote tracks per-PC files (%s); nothing is merged until it stops (remove them upstream)", strings.Join(bad, ", "))
+	msg := fmt.Sprintf("the remote tracks per-PC files or links (%s); nothing is merged until it stops (remove them upstream)", strings.Join(bad, ", "))
 	_ = writeSynced(pullRefusedPath(repo.Dir), []byte(msg+"\n"))
 	return fmt.Errorf("%w: %s", ErrLocalOnlyTracked, msg)
 }

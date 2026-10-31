@@ -6,8 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
+	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -26,6 +27,15 @@ import (
 // means no token: none configured, or a configured source that gave none
 // (tokenSourceConfigured tells the two apart).
 func guardClient(cfg config.Config) (*ghguard.Client, error) {
+	c, err := guardClientRaw(cfg)
+	if c != nil {
+		// Doctor and init (stderr) and the daemon (its log) all show this.
+		c.Warn = func(w string) { log.Printf("warning: %s", w) }
+	}
+	return c, err
+}
+
+func guardClientRaw(cfg config.Config) (*ghguard.Client, error) {
 	cfg = sanitizeCfg(cfg)
 	if err := checkAPIHost(cfg); err != nil {
 		return nil, err
@@ -111,10 +121,11 @@ func checkSSHOverride(cfg config.Config) error {
 	if os.Getenv("GIT_SSH_COMMAND") != "" || os.Getenv("GIT_SSH") != "" {
 		return errors.New("GIT_SSH_COMMAND or GIT_SSH is set; the ssh host check cannot see it, so private-only mode refuses")
 	}
-	cmd := exec.Command("git", "config", "--get", "core.sshCommand")
+	dir := ""
 	if st, err := os.Stat(cfg.SyncDir); err == nil && st.IsDir() {
-		cmd.Dir = cfg.SyncDir
+		dir = cfg.SyncDir
 	}
+	cmd := gitwt.Command(gitwt.Opts{Dir: dir}, "config", "--get", "core.sshCommand")
 	if out, err := cmd.Output(); err == nil && strings.TrimSpace(string(out)) != "" {
 		return errors.New("git config core.sshCommand is set; the ssh host check cannot see it, so private-only mode refuses")
 	}
@@ -333,14 +344,36 @@ func doctorRunJoined(cfg config.Config, org string, joined []string, out, errw i
 	return 0
 }
 
-func loadCfgOptional(path string) config.Config {
+// loadCfgOptional reads the config at path (the default path when empty). A
+// file that does not exist gives the defaults; any other failure, a mode or
+// owner the private rule refuses included, is returned as it is so the caller
+// shows it: checking a default config instead would hide the problem.
+func loadCfgOptional(path string) (config.Config, error) {
 	if path == "" {
 		path = defaultConfigPath()
 	}
-	if c, err := loadConfig(path); err == nil {
-		return c
+	c, err := loadConfig(path)
+	switch {
+	case err == nil:
+		return c, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return config.Defaults(), nil
 	}
-	return config.Defaults()
+	return config.Config{}, err
+}
+
+// loadExisting reads a config this host may already have. exists is false only
+// when there is no file; every other failure is an error, so a caller that
+// rewrites or relies on the file never falls back to defaults silently.
+func loadExisting(path string) (cfg config.Config, exists bool, err error) {
+	cfg, err = config.Load(path)
+	switch {
+	case err == nil:
+		return cfg, true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return config.Config{}, false, nil
+	}
+	return config.Config{}, false, err
 }
 
 // runDoctor handles `claude-memsync doctor`.
@@ -364,7 +397,11 @@ func doctorCmd(stdout, stderr io.Writer, args []string) int {
 	if *unattended {
 		secretcmd.SetDaemon(true)
 	}
-	cfg := loadCfgOptional(*cfgPath)
+	cfg, err := loadCfgOptional(*cfgPath)
+	if err != nil {
+		fmt.Fprintln(stderr, "doctor:", err)
+		return 2
+	}
 	if *tokenFile != "" {
 		if abs, err := filepath.Abs(*tokenFile); err == nil {
 			*tokenFile = abs // a timer unit must not depend on the working directory
@@ -568,7 +605,11 @@ func runRepo(args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: claude-memsync repo create [--org <org>] [--config <path>] [--token-cmd \"<cmd>\"] <name>")
 		return 2
 	}
-	cfg := loadCfgOptional(*cfgPath)
+	cfg, err := loadCfgOptional(*cfgPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "repo create:", err)
+		return 2
+	}
 	applyTokenCmdFlag(&cfg, *tokenCmd)
 	return repoCreateRun(cfg, *org, flags.Arg(0), os.Stdout, os.Stderr)
 }
@@ -653,12 +694,19 @@ func pushWatch(cfg config.Config, logf func(string, ...any)) func() bool {
 	return watch(c)
 }
 
-// visibilityLine is the status line for a repo that stopped being private.
+// visibilityLine is the status line for a repo that stopped being private or
+// now belongs to another owner.
 func visibilityLine(cfg config.Config) string {
 	if !cfg.PrivateOnly {
 		return ""
 	}
-	if s := ghguard.ReadState(filepath.Join(cfg.SyncDir, ".state")); strings.HasPrefix(s, "not private") || strings.HasPrefix(s, "unverifiable") {
+	s := ghguard.ReadState(filepath.Join(cfg.SyncDir, ".state"))
+	if rest, ok := strings.CutPrefix(s, "held since "); ok {
+		since, _, _ := strings.Cut(rest, "Z:") // the RFC 3339 time ends in Z
+		since += "Z"
+		return "pushing stopped: held: repo now belongs to another owner, since " + since + "; commits stay local"
+	}
+	if strings.HasPrefix(s, "not private") || strings.HasPrefix(s, "unverifiable") {
 		return "pushing stopped: repo " + s + "; commits stay local"
 	}
 	return ""

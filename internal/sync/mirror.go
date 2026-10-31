@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
@@ -119,6 +120,10 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 	for _, hash := range hashes {
 		claudeMem := filepath.Join(r.Claude, hash, "memory")
 		mirrorMem := filepath.Join(r.Mirror, hash, "memory")
+		if !realDirOrMissing(filepath.Join(r.Claude, hash)) || !realDirOrMissing(claudeMem) ||
+			!realDirOrMissing(filepath.Join(r.Mirror, hash)) || !realDirOrMissing(mirrorMem) {
+			continue // a link where a folder belongs is never followed
+		}
 		if err := os.MkdirAll(mirrorMem, 0700); err != nil {
 			return rep, err
 		}
@@ -127,7 +132,8 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 		// Walk Claude side
 		if entries, err := os.ReadDir(claudeMem); err == nil {
 			for _, e := range entries {
-				if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+				if !e.Type().IsRegular() || strings.HasPrefix(e.Name(), ".") {
+					warnNotRegular(filepath.Join(claudeMem, e.Name()), e.Type())
 					continue
 				}
 				files[e.Name()] = struct{}{}
@@ -138,7 +144,8 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 		// Walk mirror side
 		if entries, err := os.ReadDir(mirrorMem); err == nil {
 			for _, e := range entries {
-				if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+				if !e.Type().IsRegular() || strings.HasPrefix(e.Name(), ".") {
+					warnNotRegular(filepath.Join(mirrorMem, e.Name()), e.Type())
 					continue
 				}
 				if strings.Contains(e.Name(), ".from-remote-") {
@@ -152,6 +159,9 @@ func Reconcile(r Roots, manifest *Manifest) (SyncReport, error) {
 			cp := filepath.Join(claudeMem, name)
 			mp := filepath.Join(mirrorMem, name)
 			rel := filepath.ToSlash(filepath.Join(hash, "memory", name))
+			if skipIfLinked(r, hash, name) {
+				continue // present but not a regular file: neither missing nor ours to touch
+			}
 
 			cExists, cBytes := readIfExists(cp)
 			mExists, mBytes := readIfExists(mp)
@@ -251,7 +261,13 @@ func writeBackup(mp string, content []byte) error {
 func CopyToMirror(r Roots, hash, name string) error {
 	src := filepath.Join(r.Claude, hash, "memory", name)
 	dst := filepath.Join(r.Mirror, hash, "memory", name)
-	b, err := os.ReadFile(src)
+	if _, err := os.Lstat(src); errors.Is(err, fs.ErrNotExist) {
+		return err // the caller treats a vanished source as a delete (but see RemoveFromMirror)
+	}
+	if skipIfLinked(r, hash, name) {
+		return nil
+	}
+	b, err := readRegular(src)
 	if err != nil {
 		return err
 	}
@@ -271,7 +287,13 @@ var ErrCiphertext = errors.New("file holds ciphertext this host cannot read; lef
 func CopyToClaude(r Roots, hash, name string) error {
 	src := filepath.Join(r.Mirror, hash, "memory", name)
 	dst := filepath.Join(r.Claude, hash, "memory", name)
-	b, err := os.ReadFile(src)
+	if _, err := os.Lstat(src); errors.Is(err, fs.ErrNotExist) {
+		return err // the caller treats a vanished source as a delete (but see RemoveFromMirror)
+	}
+	if skipIfLinked(r, hash, name) {
+		return nil
+	}
+	b, err := readRegular(src)
 	if err != nil {
 		return err
 	}
@@ -287,6 +309,9 @@ func CopyToClaude(r Roots, hash, name string) error {
 // RemoveFromMirror handles a Claude-side delete: remove the corresponding
 // mirror file so the next commit propagates the deletion.
 func RemoveFromMirror(r Roots, hash, name string) error {
+	if skipIfLinked(r, hash, name, true) {
+		return nil // a note replaced by a link is not a delete
+	}
 	target := filepath.Join(r.Mirror, hash, "memory", name)
 	err := os.Remove(target)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -296,23 +321,107 @@ func RemoveFromMirror(r Roots, hash, name string) error {
 }
 
 func readIfExists(p string) (bool, []byte) {
-	b, err := os.ReadFile(p)
+	b, err := readRegular(p)
 	if err != nil {
 		return false, nil
 	}
 	return true, b
 }
 
+// errNotRegular means a path is a link, a directory or another special file
+// where a note was expected. Links are never followed: a fetched tree or a
+// local folder could point one at any file the user can read.
+var errNotRegular = errors.New("not a regular file (links are not followed)")
+
+// readRegular reads p only if it is a regular file, not a link to one.
+func readRegular(p string) ([]byte, error) {
+	st, err := os.Lstat(p)
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: %w", p, errNotRegular)
+	}
+	return os.ReadFile(p)
+}
+
+// realDirOrMissing reports whether p is absent or a real directory (not a link).
+func realDirOrMissing(p string) bool {
+	st, err := os.Lstat(p)
+	if err != nil {
+		return errors.Is(err, fs.ErrNotExist)
+	}
+	return st.IsDir()
+}
+
+// skipIfLinked reports whether a folder on the path, or the note itself on
+// either side, exists but is not a real directory or a regular file (a link, a
+// socket, ...). Such a name is skipped outright: it is not "missing" (so no
+// deletion goes into the mirror), nothing is copied over it or out of it, and
+// the manifest is left as it is. It warns once per path.
+func skipIfLinked(r Roots, hash, name string, mirrorDirOK ...bool) bool {
+	for _, d := range []string{
+		filepath.Join(r.Claude, hash), filepath.Join(r.Claude, hash, "memory"),
+		filepath.Join(r.Mirror, hash), filepath.Join(r.Mirror, hash, "memory"),
+	} {
+		if !realDirOrMissing(d) {
+			warnSkipped(d)
+			return true
+		}
+	}
+	for i, p := range []string{
+		filepath.Join(r.Claude, hash, "memory", name), filepath.Join(r.Mirror, hash, "memory", name),
+	} {
+		st, err := os.Lstat(p)
+		if err != nil || st.Mode().IsRegular() {
+			continue
+		}
+		// RemoveFromMirror may meet a directory at the mirror path: removing
+		// it fails on its own, which is the error callers already handle.
+		if i == 1 && st.IsDir() && len(mirrorDirOK) > 0 && mirrorDirOK[0] {
+			continue
+		}
+		warnSkipped(p)
+		return true
+	}
+	return false
+}
+
+func warnSkipped(p string) {
+	if _, seen := warnedLinks.LoadOrStore(p, true); !seen {
+		// Names stay out of the log: a path may match the denylist.
+		log.Printf("reconcile: skipping a link or special entry in a memory folder; it is never followed, deleted or overwritten (names are not logged)")
+	}
+}
+
+var warnedLinks sync.Map
+
+// warnNotRegular logs once per path that a link (or other special entry) was
+// skipped. Plain directories are not worth a line.
+func warnNotRegular(p string, t fs.FileMode) {
+	if t.IsDir() || t.IsRegular() {
+		return
+	}
+	if _, seen := warnedLinks.LoadOrStore(p, true); !seen {
+		log.Printf("reconcile: skipping a link or special entry in a memory folder; it is never followed (names are not logged)")
+	}
+}
+
 // writeAtomic writes content to a unique sibling .tmp file then renames it
 // over the destination. This avoids exposing partial content to a reader
 // (e.g., Claude reading a memory while we're mid-write).
+// renameFile is os.Rename; a variable so a test can make a write fail the same
+// way on every OS (permission bits and directory modes do not do that on
+// Windows).
+var renameFile = os.Rename
+
 func writeAtomic(path string, content []byte) error {
 	dir := filepath.Dir(path)
 	tmp := filepath.Join(dir, fmt.Sprintf(".%s.%s.tmp", filepath.Base(path), randSuffix()))
 	if err := os.WriteFile(tmp, content, 0600); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := renameFile(tmp, path); err != nil {
 		os.Remove(tmp)
 		return err
 	}

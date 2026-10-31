@@ -7,6 +7,13 @@
 # This mirrors the CI gofmt check so formatting failures surface locally
 # instead of after a push. It only inspects staged Go files, so it stays fast.
 
+# No blob over 1 MB and no non-.go file under cmd/*/ (a built binary): see
+# scripts/lint-blobs.sh.
+root=$(git rev-parse --show-toplevel)
+if [ -f "$root/scripts/lint-blobs.sh" ]; then
+	bash "$root/scripts/lint-blobs.sh" --staged || exit 1
+fi
+
 # Added/Copied/Modified staged .go files (skip deletions).
 gofiles=$(git diff --cached --name-only --diff-filter=ACM -- '*.go')
 [ -z "$gofiles" ] && exit 0
