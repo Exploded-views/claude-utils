@@ -10,7 +10,8 @@ It runs on push for `main` and `integ/**`, on pull requests into `main` and
 `integ/**` (opened, synchronize, reopened, ready_for_review), and on manual
 dispatch. Pull requests whose head is a branch in this same repo run too, so a
 branch such as `fix/...` gets a run from its PR. `feat/**` is not a push trigger:
-the PR run covers it, so a commit is not run twice. Runs are grouped per PR
+the PR run covers it, so a commit is not run twice. A pushed branch with no open
+PR gets no run: open a (draft) pull request, or dispatch the workflow by hand. Runs are grouped per PR
 number (per ref for push) and a newer run cancels the superseded one. There is no
 `pull_request_target`, no secrets, and each job has at most `contents: read`.
 

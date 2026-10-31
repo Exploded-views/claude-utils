@@ -6,7 +6,7 @@
 # Triggers: push to main and integ/**, and pull requests into main and integ/**
 # (same-repo heads included, so a fix/... branch gets a run from its PR).
 # feat/** is not a push trigger: its PR run covers it, so a commit is not run
-# twice. A new push to a PR cancels that PR's superseded run. No secrets, no
+# twice. A pushed branch with no open PR gets no run: open a (draft) PR or dispatch. A new push to a PR cancels that PR's superseded run. No secrets, no
 # pull_request_target, read-only token.
 name: Fork CI (fork only)
 
