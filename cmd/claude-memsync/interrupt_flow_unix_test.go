@@ -39,13 +39,14 @@ func installFakeGit(t *testing.T) string {
 	t.Helper()
 	bin := t.TempDir()
 	pids := filepath.Join(bin, "pids")
-	// Only the related-repo git (it carries core.hooksPath) sleeps; the flow's
-	// own git calls (rekey guard, markers) reach the real git.
+	// Only the related-repo git (it carries fetch.fsckObjects, which no other
+	// caller passes) sleeps; the flow's own git calls (rekey guard, markers)
+	// reach the real git. Not core.hooksPath: gitwt pins that on every call.
 	realGit, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := "#!/bin/sh\ncase \"$*\" in *core.hooksPath*) echo $$ >> " + pids + "; exec sleep 60;; esac\nexec " + realGit + " \"$@\"\n"
+	script := "#!/bin/sh\ncase \"$*\" in *fetch.fsckObjects=true*) echo $$ >> " + pids + "; exec sleep 60;; esac\nexec " + realGit + " \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
