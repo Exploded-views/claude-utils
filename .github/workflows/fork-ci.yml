@@ -171,6 +171,13 @@ jobs:
         run: |
           bash scripts/lint-portability_test.sh
           bash scripts/lint-portability.sh
+      # Every checksum check in the docs and scripts must tolerate a SHA256SUMS
+      # that lists files you did not download (--ignore-missing, or the
+      # grep | shasum single-line form).
+      - name: checksum-verify lint
+        run: |
+          bash scripts/lint-sums_test.sh
+          bash scripts/lint-sums.sh
       # No blob over 1 MB and no non-.go file under cmd/*/, in every object this
       # run introduces (base..HEAD, deleted files included): a built binary must
       # never be committed. This run is the guarantee; the pre-commit hook is a
