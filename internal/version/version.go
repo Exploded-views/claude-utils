@@ -23,6 +23,11 @@ import (
 // here and fall back to runtime/debug.BuildInfo.
 var Override string
 
+// Commit is set at link time via -ldflags "-X <pkg>.Commit=<sha>" by builds
+// that have no VCS info (a bootstrap source build runs from git archive). When
+// set, JSON reports it as the commit. Stub: not used yet.
+var Commit string
+
 // String returns the version to display in --version output.
 func String() string {
 	if Override != "" {

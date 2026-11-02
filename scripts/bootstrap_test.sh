@@ -138,6 +138,7 @@ cat >"$STUBS/go" <<'EOF'
 if [ "$1" = version ]; then echo "go version go${STUB_GOVER:-1.25.1} linux/amd64"; exit 0; fi
 echo "go $*" >>"$STUB_DIR/go.log"
 pwd >>"$STUB_DIR/go.cwd"
+cksum <"$PWD/go.mod" >>"$STUB_DIR/go.src"
 echo "GOWORK=${GOWORK-unset} GOFLAGS=${GOFLAGS-unset} GOTOOLCHAIN=${GOTOOLCHAIN-unset}" >>"$STUB_DIR/go.env"
 # go build -o <out> <pkg>: write a stub binary
 out="$3"
@@ -725,7 +726,7 @@ else
   umask 002
   runboot --host testhost --role homelab --yes
   umask "$OLDUMASK"
-  check "umask 002, source build: ~/.local/src, ~/.local/state/claude-memsync and ~/.local/bin are created 0755" bash -c "[ '$(m_ "$H/.local/src")' = 755 ] && [ '$(m_ "$H/.local/state/claude-memsync")' = 755 ] && [ '$(m_ "$H/.local/bin")' = 755 ]"
+  check "umask 002, source build: ~/.local/src, ~/.local/state/claude-memsync and ~/.local/bin are created 0755" bash -c "[ '$(m_ "$H/.local/src")' = 755 ] && [ '$(m_ "$H/.local/state/claude-memsync")' = 755 ] && [ '$(m_ "$H/.local/bin")' = 755 ] && [ '$(m_ "$H/.local/src/claude-utils-$SHA")' = 755 ]"
   # the source build runs in a throwaway archive dir, never in the clone
   newhome srcb
   GOFLAGS=-tags=evil GOWORK=/evil/go.work runboot --host testhost --role homelab --yes
@@ -743,6 +744,14 @@ else
   printf '# tampered\n' >>"$LB/claude-memsync"
   runboot --host testhost --role homelab --yes
   check "source build, tight modes, tampered binary: replaced by the verified build, and the output says so" bash -c "[ $RC -eq 0 ] && cmp -s '$H/good-memsync' '$LB/claude-memsync' && [ '$(m_ "$LB/claude-memsync")' = 755 ] && printf '%s\n' \"\$1\" | grep -qi 'replac'" _ "$OUT"
+  check "source build: the verified commit is stamped as the version's commit field" bash -c "grep -qF 'internal/version.Commit=$SHA' '$STUB_DIR/go.log'"
+  # a planted refs/replace in the clone does not change what is built
+  newhome srcr
+  mkdir -p "$H/.local/src"
+  git clone -q "$BASE/utils.git" "$H/.local/src/claude-utils-$SHA" && git -C "$H/.local/src/claude-utils-$SHA" checkout -q "$SHA"
+  git -C "$H/.local/src/claude-utils-$SHA" replace -f "$(git -C "$H/.local/src/claude-utils-$SHA" rev-parse "$SHA:go.mod")" "$(git -C "$H/.local/src/claude-utils-$SHA" rev-parse "$SHA:README.md")"
+  runboot --host testhost --role homelab --yes
+  check "a planted git replace does not change the built content (go.mod is the commit's own)" bash -c "[ -s '$STUB_DIR/go.src' ] && [ \"\$(sort -u '$STUB_DIR/go.src')\" = \"\$(git -C '$ROOT' show '$SHA:go.mod' | cksum)\" ]"
   check "source build: the version is stamped with the commit (the archive has no .git)" bash -c "grep -q 'internal/version.Override=dev+' '$STUB_DIR/go.log'"
   newhome pb3
   NO_SHA=1 BOOT_PATH="$(minipath go)" runboot --host testhost --role homelab --dry-run --prebuilt-dir "$PB/real"
