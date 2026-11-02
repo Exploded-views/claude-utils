@@ -1427,7 +1427,7 @@ check "--jobs 4: all six projects have a repo, a key, a sync dir and a route" ba
 check "--jobs 4: repos, keys, ssh config, sync dirs, state marks, routes and memsync calls are identical to --jobs 1" bash -c "grep -q '^created: mem-project' '$BASE/par4.snap' && diff '$BASE/par1.snap' '$BASE/par4.snap'"
 check "--jobs 4: the blocks come in plan order, once per phase, although the first project is the slowest" bash -c "[ \"$(blocks "$OUT4")\" = '$PLAN6$PLAN6' ]"
 check "a block is contiguous: nothing of another repo between a header and its last line" bash -c "printf '%s\n' \"\$1\" | awk '/^== / {cur=\"\"; next} /^-- mem-/ {cur=\$2; next} cur != \"\" && /mem-(personal|project-[a-z-]+)/ { for (i=1;i<=NF;i++) if (\$i ~ /^mem-(personal|project-)/ && \$i != cur) bad=1 } END {exit bad}'" _ "$OUT4"
-NORM='s/age1[a-z0-9]+/AGE/g; s/fingerprint: .*/fingerprint: FP/; s/--fingerprint "[0-9a-f ]+"/--fingerprint FP/; s/up to [0-9]+ at once/up to N at once/'
+NORM='s/age1[a-z0-9]+/AGE/g; s/fingerprint: .*/fingerprint: FP/; s/--fingerprint "[0-9a-f ]+"/--fingerprint FP/; s/up to [0-9]+ at once/up to N at once/; s,/claude-memsync/build\.[A-Za-z0-9]{6},/claude-memsync/build.X,g'
 printf '%s\n' "$OUT4" | sed -E "$NORM" >"$BASE/ord4.txt"; printf '%s\n' "$OUT1" | sed -E "$NORM" >"$BASE/ord1.txt"
 check "the output of --jobs 4 and --jobs 1 is the same text (apart from generated keys)" diff "$BASE/ord1.txt" "$BASE/ord4.txt"
 
