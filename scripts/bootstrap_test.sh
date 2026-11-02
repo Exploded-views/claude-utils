@@ -46,11 +46,13 @@ REAL="$BASE/real"; mkdir -p "$REAL"
 if [ -n "${MEMSYNC_BIN:-}" ] && [ -n "${MEMMERGE_BIN:-}" ]; then
   cp "$MEMSYNC_BIN" "$REAL/claude-memsync"; cp "$MEMMERGE_BIN" "$REAL/claude-memmerge"
 elif command -v go >/dev/null; then
-  (cd "$ROOT" && go build -o "$REAL/claude-memsync" ./cmd/claude-memsync && go build -o "$REAL/claude-memmerge" ./cmd/claude-memmerge)
+  # Stamped, not read from VCS info: a dirty worktree must not make the version "+dirty".
+  LDV="-X github.com/MarimerLLC/claude-utils/internal/version.Override=dev+$(git -C "$ROOT" rev-parse HEAD | cut -c1-12)"
+  (cd "$ROOT" && go build -buildvcs=false -ldflags "$LDV" -o "$REAL/claude-memsync" ./cmd/claude-memsync && go build -buildvcs=false -ldflags "$LDV" -o "$REAL/claude-memmerge" ./cmd/claude-memmerge)
 elif command -v docker >/dev/null; then
   docker run --rm --user "$(id -u):$(id -g)" -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -e GOFLAGS=-buildvcs=false \
     -v "$ROOT:/src:ro" -v "$REAL:/out" -w /src golang:1.25 \
-    sh -c 'go build -o /out/claude-memsync ./cmd/claude-memsync && go build -o /out/claude-memmerge ./cmd/claude-memmerge'
+    sh -c "go build -ldflags '-X github.com/MarimerLLC/claude-utils/internal/version.Override=dev+$(git -C "$ROOT" rev-parse HEAD | cut -c1-12)' -o /out/claude-memsync ./cmd/claude-memsync && go build -ldflags '-X github.com/MarimerLLC/claude-utils/internal/version.Override=dev+$(git -C "$ROOT" rev-parse HEAD | cut -c1-12)' -o /out/claude-memmerge ./cmd/claude-memmerge"
 else
   echo "need MEMSYNC_BIN and MEMMERGE_BIN, go, or docker to build the real claude-memsync" >&2; exit 2
 fi
