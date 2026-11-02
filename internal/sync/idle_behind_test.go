@@ -71,3 +71,29 @@ func TestIdle_RemoteAndLocalIdle(t *testing.T) {
 		})
 	}
 }
+
+// An unborn HEAD makes rev-list fail; an error must never read as idle.
+func TestIdle_UnbornHeadIsNotIdle(t *testing.T) {
+	f := newPullFixture(t, map[string]string{"clean.md": "a\n"})
+	captureLog(t)
+	mustGit(t, f.repo, "symbolic-ref", "HEAD", "refs/heads/unborn")
+	idle, err := remoteAndLocalIdle(f.repo, "main")
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if idle {
+		t.Error("unborn HEAD reported idle")
+	}
+}
+
+// Anything but exactly two zero counts must not read as level.
+func TestIdle_LevelWithTracking(t *testing.T) {
+	for out, want := range map[string]bool{
+		"0\t0\n": true, "0 0": true,
+		"": false, "0": false, "0 0 0": false, "x y": false, "1\t0": false, "0\t1": false,
+	} {
+		if got := levelWithTracking(out); got != want {
+			t.Errorf("levelWithTracking(%q) = %v, want %v", out, got, want)
+		}
+	}
+}
