@@ -95,3 +95,46 @@ func TestCommitMirror_BlockedReplacesTheRecord(t *testing.T) {
 		})
 	}
 }
+
+// Scrub off means nothing is held, so an old record must not keep telling
+// sessions their notes are not syncing.
+func TestCommitMirror_ScrubOffClearsTheRecord(t *testing.T) {
+	repo, cfg := commitFixture(t)
+	writeRepoFile(t, repo, "projects/p1/memory/leaky.md", "token "+fakeSecret()+"\n")
+	if _, err := CommitMirror(repo, cfg, "auto: t"); err != nil {
+		t.Fatal(err)
+	}
+	if len(readHeldState(t, repo.Dir)) == 0 {
+		t.Fatal("setup: no record")
+	}
+	cfg.Scrub = false
+	if _, err := CommitMirror(repo, cfg, "auto: t"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readHeldState(t, repo.Dir); len(got) != 0 {
+		t.Fatalf("record with scrub off = %v", got)
+	}
+}
+
+// A note stays held for as long as it is wrong; the log (an unrotated file on
+// macOS) names it when the held set changes, not every cycle.
+func TestCommitMirror_LogsAHeldSetOnceUntilItChanges(t *testing.T) {
+	repo, cfg := commitFixture(t)
+	writeRepoFile(t, repo, "projects/p1/memory/leaky.md", "token "+fakeSecret()+"\n")
+	logs := captureLog(t)
+	for i := 0; i < 2; i++ {
+		if _, err := CommitMirror(repo, cfg, "auto: t"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := strings.Count(logs.String(), "holding back projects/p1/memory/leaky.md"); n != 1 {
+		t.Fatalf("logged %d times over two cycles, want 1:\n%s", n, logs.String())
+	}
+	writeRepoFile(t, repo, "projects/p1/memory/second.md", "token "+fakeSecret()+"\n")
+	if _, err := CommitMirror(repo, cfg, "auto: t"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "holding back projects/p1/memory/second.md") {
+		t.Errorf("a changed set is not logged:\n%s", logs.String())
+	}
+}

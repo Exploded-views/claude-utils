@@ -195,3 +195,71 @@ func TestHook_CountsNameHeldNotesWithoutNamingThem(t *testing.T) {
 		t.Errorf("want a count of the name-matched notes:\n%s", ctx)
 	}
 }
+
+// The daemon may be stopped: a note that is gone is not worth a notice.
+func TestHook_SkipsHeldNotesThatNoLongerExist(t *testing.T) {
+	cfgPath, dir := heldFixture(t)
+	in := hookJSON("sess-hb9", "/home/alice/src/app", "UserPromptSubmit")
+	runHook(t, in, "--config", cfgPath, "--hook")
+	writeHeldRecord(t, dir,
+		"projects/"+ownFolder+"/memory/kept.md",
+		"projects/"+ownFolder+"/memory/gone.md")
+	if err := os.Remove(filepath.Join(dir, "projects", ownFolder, "memory", "gone.md")); err != nil {
+		t.Fatal(err)
+	}
+	_, out, _ := runHook(t, in, "--config", cfgPath, "--hook")
+	ctx := hookContext(t, out)
+	if !strings.Contains(ctx, "kept.md") || strings.Contains(ctx, "gone.md") {
+		t.Errorf("want only the note that still exists:\n%s", ctx)
+	}
+}
+
+// When the list empties and the same list comes back, the session hears again.
+func TestHook_TellsAgainWhenAClearedListRecurs(t *testing.T) {
+	cfgPath, dir := heldFixture(t)
+	in := hookJSON("sess-hb10", "/home/alice/src/app", "UserPromptSubmit")
+	runHook(t, in, "--config", cfgPath, "--hook")
+	note := "projects/" + ownFolder + "/memory/body.md"
+	writeHeldRecord(t, dir, note)
+	if _, out, _ := runHook(t, in, "--config", cfgPath, "--hook"); !strings.Contains(hookContext(t, out), "body.md") {
+		t.Fatal("first notice missing")
+	}
+	if err := os.Remove(filepath.Join(dir, ".state", "held-back")); err != nil {
+		t.Fatal(err)
+	}
+	runHook(t, in, "--config", cfgPath, "--hook") // fixed: the marker is cleared
+	writeHeldRecord(t, dir, note)
+	if _, out, _ := runHook(t, in, "--config", cfgPath, "--hook"); !strings.Contains(hookContext(t, out), "body.md") {
+		t.Error("a recurring list is not told again")
+	}
+}
+
+// A record cut at the read cap ends in a partial path; it must not be taken
+// for a name.
+func TestHook_DropsACutOffLastLine(t *testing.T) {
+	cfgPath, dir := heldFixture(t)
+	in := hookJSON("sess-hb11", "/home/alice/src/app", "UserPromptSubmit")
+	runHook(t, in, "--config", cfgPath, "--hook")
+	prefix := "projects/" + ownFolder + "/memory/"
+	if err := os.WriteFile(filepath.Join(dir, "projects", ownFolder, "memory", "cutnam"), []byte("x"), 0o600); err != nil {
+		// the directory may not exist yet
+		os.MkdirAll(filepath.Join(dir, "projects", ownFolder, "memory"), 0o700)
+		os.WriteFile(filepath.Join(dir, "projects", ownFolder, "memory", "cutnam"), []byte("x"), 0o600)
+	}
+	target := heldBackRecordMax - len(prefix+"cutnam")
+	var rec strings.Builder
+	for rec.Len()+100 < target {
+		rec.WriteString("projects/-x/memory/" + strings.Repeat("a", 20) + ".md\n")
+	}
+	rec.WriteString(strings.Repeat("p", target-rec.Len()-1) + "\n")
+	rec.WriteString(prefix + "cutnam.md\n") // the cap lands inside this line
+	p := filepath.Join(dir, ".state", "held-back")
+	os.MkdirAll(filepath.Dir(p), 0o700)
+	if err := os.WriteFile(p, []byte(rec.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, out, _ := runHook(t, in, "--config", cfgPath, "--hook")
+	if ctx := hookContext(t, out); strings.Contains(ctx, "cutnam") {
+		t.Errorf("a cut-off line was taken for a note:\n%s", ctx)
+	}
+}
