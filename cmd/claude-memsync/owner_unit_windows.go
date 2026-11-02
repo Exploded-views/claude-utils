@@ -4,5 +4,5 @@ package main
 
 import "io/fs"
 
-// ownedBy: Windows has no uid; the user service is not used there.
-func ownedBy(fs.FileInfo, int) bool { return false }
+// platformOwner: Windows has no uid; the user service is not used there.
+func platformOwner(fs.FileInfo) (int, int, bool) { return 0, 0, false }

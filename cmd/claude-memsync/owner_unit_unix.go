@@ -7,8 +7,11 @@ import (
 	"syscall"
 )
 
-// ownedBy reports a file owned by uid.
-func ownedBy(st fs.FileInfo, uid int) bool {
+// platformOwner is the owner uid and group gid of a file.
+func platformOwner(st fs.FileInfo) (uid, gid int, ok bool) {
 	s, ok := st.Sys().(*syscall.Stat_t)
-	return ok && int(s.Uid) == uid
+	if !ok {
+		return 0, 0, false
+	}
+	return int(s.Uid), int(s.Gid), true
 }

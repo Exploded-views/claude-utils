@@ -1504,7 +1504,7 @@ step_install_prebuilt() {
   if [ -x "$LIB/claude-memsync" ] && [ -x "$LIB/claude-memmerge" ]; then   # fs-ok: false (re)installs or rebuilds at the pinned commit; the cmp check above refuses a differing file
     say "  binaries present in $LIB"
   else
-    run mkdir -p "$LIB"
+    mk_lib_dir
     for b in claude-memsync claude-memmerge; do
       run cp "$PREBUILT_DIR/$b" "$LIB/$b.tmp"
       run chmod 755 "$LIB/$b.tmp"
@@ -1512,6 +1512,19 @@ step_install_prebuilt() {
     done
   fi
   link_binaries
+}
+
+# mk_lib_dir makes $LIB with mode 0755 on every level it creates. A umask of 002
+# (Ubuntu, Fedora: user private groups) would leave them 0775, which install
+# refuses as group-writable.
+mk_lib_dir() {
+  local d="$LIB" made=""
+  while [ "$d" != "$HOME" ] && [ "$d" != "/" ] && [ ! -d "$d" ]; do   # fs-ok: a failed test only lists the level as one to create; mkdir -p follows
+    made="$made $d"
+    d="$(dirname "$d")"
+  done
+  run mkdir -p "$LIB"
+  for d in $made; do run chmod 755 "$d"; done
 }
 
 link_binaries() {
@@ -1556,7 +1569,7 @@ step_build() {
   if [ -x "$LIB/claude-memsync" ] && [ -x "$LIB/claude-memmerge" ]; then   # fs-ok: false (re)installs or rebuilds at the pinned commit; the cmp check above refuses a differing file
     say "  binaries present in $LIB"
   else
-    run mkdir -p "$LIB"
+    mk_lib_dir
     if [ "$GO_MODE" = go ]; then
       run sh -c "cd '$SRC' && go build -o '$LIB/claude-memsync' ./cmd/claude-memsync && go build -o '$LIB/claude-memmerge' ./cmd/claude-memmerge"
     else
@@ -1564,6 +1577,7 @@ step_build() {
         -v "$SRC:/src" -v "$LIB:/out" -w /src golang:1.25 \
         sh -c 'go build -o /out/claude-memsync ./cmd/claude-memsync && go build -o /out/claude-memmerge ./cmd/claude-memmerge'
     fi
+    run chmod 755 "$LIB/claude-memsync" "$LIB/claude-memmerge"
   fi
   link_binaries
 }

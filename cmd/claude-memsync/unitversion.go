@@ -1,11 +1,14 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -57,42 +60,72 @@ var exeThrowawayFn = exeUnsafe
 
 // fileOwnerFn is the owner uid and group gid of a file; tests replace it to
 // fake owners. ok is false where the platform has none.
-var fileOwnerFn = func(st fs.FileInfo) (uid, gid int, ok bool) { return 0, 0, false }
+var fileOwnerFn = platformOwner
 
-// privateGroupFn says whether gid is the user's private group; tests replace it.
-var privateGroupFn = func(gid int) bool { return false }
-
-// exeUnsafe stub: the reason is not told apart yet.
-func exeUnsafe(exe string) error {
-	if exeThrowaway(exe) {
-		return fmt.Errorf("%s runs from a temp dir", exe)
+// privateGroupFn says whether gid is the user's private group: it is the
+// primary gid AND the group is named like the user (user-private-group
+// scheme, umask 002). A shared group such as macOS "staff" is not.
+var privateGroupFn = func(gid int) bool {
+	u, err := user.Current()
+	if err != nil || u.Gid != strconv.Itoa(gid) {
+		return false
 	}
-	return nil
+	g, err := user.LookupGroupId(u.Gid)
+	return err == nil && g.Name == u.Username
 }
 
-// tempDirFn is the temp dir; ancestorsFrom, when set, makes the world-writable
-// ancestor walk ignore that directory and everything above it. Tests replace
-// both.
+// tempDirFn is the temp dir; ancestorsFrom, when set, makes the ancestor walk
+// ignore that directory and everything above it. Tests replace both.
 var (
 	tempDirFn     = os.TempDir
 	ancestorsFrom = ""
 )
 
-// exeThrowaway reports a binary that must not become the installed build: one
-// that cannot be resolved, lies under the resolved temp dir, or has a
-// ancestor directory that is group- or world-writable or owned by neither the
-// user nor root, or is not a safe regular file itself (anyone could swap what runs). Symlinks
-// are resolved first, so a path that merely points into such a place counts.
-func exeThrowaway(exe string) bool {
-	r, err := filepath.EvalSymlinks(exe)
-	if err != nil {
-		return true
+// permIssue refuses world-write always, and group-write unless the file's
+// group is the user's private group.
+func permIssue(st fs.FileInfo, p string) error {
+	perm := st.Mode().Perm()
+	if perm&0o002 != 0 {
+		return fmt.Errorf("%s is group/world-writable", p)
 	}
-	if linkTargetSafe(r) != nil {
-		return true
+	if perm&0o020 != 0 {
+		if _, gid, ok := fileOwnerFn(st); !ok || !privateGroupFn(gid) {
+			return fmt.Errorf("%s is group/world-writable", p)
+		}
+	}
+	return nil
+}
+
+// exeUnsafe tells why a binary must not become the installed build, or nil.
+// The path is made absolute and symlinks are resolved first. Refused: an
+// unresolvable exe, one under the resolved temp dir, a file that is not a
+// regular file, is group/world-writable (group-write is excused for the
+// user's private group) or is owned by neither the user nor root, and any
+// ancestor directory with the same faults. Root-owned directories pass.
+func exeUnsafe(exe string) error {
+	abs, err := filepath.Abs(exe)
+	if err != nil {
+		return fmt.Errorf("%s cannot be resolved: %w", exe, err)
+	}
+	r, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return fmt.Errorf("%s cannot be resolved: %w", exe, err)
 	}
 	if t, err := filepath.EvalSymlinks(tempDirFn()); err == nil && underDir(r, t) {
-		return true
+		return fmt.Errorf("%s runs from a temp dir", r)
+	}
+	st, err := os.Lstat(r)
+	if err != nil {
+		return err
+	}
+	if !st.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", r)
+	}
+	if err := permIssue(st, r); err != nil {
+		return err
+	}
+	if uid, _, ok := fileOwnerFn(st); !ok || (uid != currentUID() && uid != 0) {
+		return errors.New("the executable is not owned by you or root")
 	}
 	stop := ""
 	if ancestorsFrom != "" {
@@ -102,15 +135,21 @@ func exeThrowaway(exe string) bool {
 		if stop != "" && (d == stop || !strings.HasPrefix(d, stop+string(filepath.Separator))) {
 			break
 		}
-		st, err := os.Stat(d)
-		if err != nil || st.Mode().Perm()&0o022 != 0 || !(ownedBy(st, currentUID()) || ownedBy(st, 0)) {
-			return true
+		ds, err := os.Stat(d)
+		if err != nil {
+			return err
+		}
+		if err := permIssue(ds, d); err != nil {
+			return err
+		}
+		if uid, _, ok := fileOwnerFn(ds); !ok || (uid != currentUID() && uid != 0) {
+			return fmt.Errorf("%s is owned by uid %d", d, uid)
 		}
 		if filepath.Dir(d) == d {
 			break
 		}
 	}
-	return false
+	return nil
 }
 
 // libRootFn is the bootstrap lib root, ~/.local/lib/claude-memsync; tests
@@ -208,10 +247,10 @@ func linkTargetSafe(p string) error {
 	if !st.Mode().IsRegular() {
 		return fmt.Errorf("%s is not a regular file", p)
 	}
-	if st.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("%s is group- or world-writable", p)
+	if err := permIssue(st, p); err != nil {
+		return err
 	}
-	if !ownedBy(st, currentUID()) {
+	if uid, _, ok := fileOwnerFn(st); !ok || uid != currentUID() {
 		return fmt.Errorf("%s is not owned by the current user", p)
 	}
 	return nil
