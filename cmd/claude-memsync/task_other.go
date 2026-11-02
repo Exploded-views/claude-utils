@@ -57,9 +57,18 @@ func installTask(configPath string) error {
 		return fmt.Errorf("install: cannot read the service unit: %w", rerr)
 	}
 	if ok {
-		exe, err := os.Executable()
+		exe, err := installExeFn()
 		if err != nil {
 			return err
+		}
+		if exeThrowawayFn(exe) {
+			// A go run or test binary must not become the installed build:
+			// nothing that names a build is touched.
+			fmt.Fprintf(os.Stderr, "warning: %s runs from a temp dir; the unit and the bin/ symlinks are left on the installed build\n", exe)
+			if userUnitIsWrong() {
+				return repairUserUnitTo(os.Stderr, "", "")
+			}
+			return nil
 		}
 		if err := relinkBins(os.Stderr, exe); err != nil {
 			return fmt.Errorf("install: cannot repoint the bin/ symlinks: %w", err)

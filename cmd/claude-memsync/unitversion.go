@@ -56,7 +56,13 @@ var exeThrowawayFn = underTemp
 
 // libRootFn is the bootstrap lib root, ~/.local/lib/claude-memsync; tests
 // replace it.
-var libRootFn = func() string { return "" }
+var libRootFn = func() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".local", "lib", "claude-memsync")
+}
 
 // currentUID is the user whose files may be linked; tests replace it.
 var currentUID = os.Getuid
@@ -117,6 +123,41 @@ func sameFile(a, b string) bool {
 	return ra == rb
 }
 
+// underDir reports p (symlinks resolved) inside dir (likewise).
+func underDir(p, dir string) bool {
+	if dir == "" {
+		return false
+	}
+	rp, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return false
+	}
+	rd, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return false
+	}
+	return strings.HasPrefix(rp, rd+string(filepath.Separator))
+}
+
+// linkTargetSafe says whether p may become a bin/ symlink target: a regular
+// file (not a link), owned by the current user, not group- or world-writable.
+func linkTargetSafe(p string) error {
+	st, err := os.Lstat(p)
+	if err != nil {
+		return err
+	}
+	if !st.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", p)
+	}
+	if st.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%s is group- or world-writable", p)
+	}
+	if !ownedBy(st, currentUID()) {
+		return fmt.Errorf("%s is not owned by the current user", p)
+	}
+	return nil
+}
+
 // relinkBins repoints each existing bin/ symlink at the build being installed
 // (the directory of exe), like bootstrap's `ln -sfn`. A name that is absent, a
 // regular file or whose sibling build file is missing is left alone.
@@ -124,6 +165,10 @@ func relinkBins(w io.Writer, exe string) error {
 	dir, err := binLinkDirFn()
 	if err != nil || dir == "" {
 		return err
+	}
+	if !underDir(exe, libRootFn()) {
+		fmt.Fprintf(w, "warning: %s is not under the bootstrap lib root (%s); the bin/ symlinks are left as they are\n", exe, libRootFn())
+		return nil
 	}
 	for _, n := range binLinkNames {
 		link := filepath.Join(dir, n)
@@ -135,7 +180,11 @@ func relinkBins(w io.Writer, exe string) error {
 		if n == binLinkNames[0] {
 			target = exe // the daemon itself, whatever the file is called
 		}
-		if _, err := os.Stat(target); err != nil {
+		if _, err := os.Lstat(target); err != nil {
+			continue
+		}
+		if err := linkTargetSafe(target); err != nil {
+			fmt.Fprintf(w, "warning: not repointing %s: %v\n", link, err)
 			continue
 		}
 		if cur, err := os.Readlink(link); err == nil && cur == target {
@@ -163,7 +212,7 @@ func relinkBins(w io.Writer, exe string) error {
 // absent link are not failures.
 func unitVersionCheck() checkResult {
 	r := checkResult{ID: unitVersionID, OK: true}
-	_, content, ok := readUserUnit()
+	upath, content, ok := readUserUnit()
 	if !ok {
 		r.Detail = "no systemd user unit"
 		return r
@@ -176,7 +225,8 @@ func unitVersionCheck() checkResult {
 			r.Pieces = append(r.Pieces, unitPiece{"ExecStart", exe})
 		} else {
 			r.OK = false
-			r.Detail = "ExecStart is not a line this program can read: " + cur + "\n"
+			// Never echo the line: a hand edit may carry secrets.
+			r.Detail = "ExecStart in " + upath + " could not be parsed\n"
 		}
 	}
 	if dir, err := binLinkDirFn(); err == nil && dir != "" {
