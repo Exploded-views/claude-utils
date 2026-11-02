@@ -491,3 +491,19 @@ func TestRecordStop_ProcessExitZero(t *testing.T) {
 		})
 	}
 }
+
+// A repo named in routes.json whose config is absent has a denylist we cannot
+// read, so nothing can be vouched for; its name (maybe a client term) is not
+// printed.
+func TestRecordStop_RoutedMissingRepoRedactsAllPathsAndNamesNothing(t *testing.T) {
+	routedHost(t, []string{"personal"}, "personal", nil, "client-acme-missing")
+	d, _ := config.Dir()
+	fakeJournal(t, func(context.Context, int) (string, error) { return "see projects/innocent/x.md now\n", nil })
+	_, _, errOut := runRS(t, nil, uncleanEnv)
+	if b := recordBytes(t, filepath.Join(d, "stops")); bytes.Contains(b, []byte("innocent")) {
+		t.Fatalf("closed mode let a path through:\n%s", b)
+	}
+	if !strings.HasPrefix(errOut, "record-stop:") || strings.Contains(errOut, "acme") || !strings.Contains(errOut, "1 ") {
+		t.Fatalf("stderr = %q, want a record-stop: line with the count and no repo name", errOut)
+	}
+}
