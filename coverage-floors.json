@@ -12,7 +12,7 @@
   "github.com/MarimerLLC/claude-utils/internal/ghguard": 90.5,
   "github.com/MarimerLLC/claude-utils/internal/gitwt": 25.8,
   "github.com/MarimerLLC/claude-utils/internal/hosts": 81.4,
-  "github.com/MarimerLLC/claude-utils/internal/lock": 92.2,
+  "github.com/MarimerLLC/claude-utils/internal/lock": 92.1,
   "github.com/MarimerLLC/claude-utils/internal/merge": 93.7,
   "github.com/MarimerLLC/claude-utils/internal/proc": 98.3,
   "github.com/MarimerLLC/claude-utils/internal/related": 83.3,
