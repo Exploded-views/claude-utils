@@ -75,7 +75,7 @@ func TestStatus_PrintsSanitizedFields(t *testing.T) {
 	body := `{"when":"2026-11-02T12:00:00Z","last":"2026-11-02T12:00:00Z","result":"bad\u001b[31mred","exitStatus":"9\u0007","repeats":1,"tail":[]}`
 	os.WriteFile(filepath.Join(dir, "stop-20261102T120000Z-00.json"), []byte(body), 0o600)
 	_, out := captureStdout(t, func() int { return runStatus(nil) })
-	if strings.ContainsAny(out, "\x1b\x07") || !strings.Contains(out, "last unclean stop: 2026-11-02T12:00:00Z bad?[31mred (exit 9?)") {
+	if strings.ContainsAny(out, "\x1b\x07") || !strings.Contains(out, "last unclean stop: 2026-11-02T12:00:00Z bad??31mred (exit 9?)") {
 		t.Fatalf("out:\n%q", out)
 	}
 }

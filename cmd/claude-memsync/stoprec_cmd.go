@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"runtime"
 	"strings"
@@ -36,9 +37,6 @@ var journalctlFn = runJournalctl
 // recordStopHook runs first in record-stop's guarded body; a test makes it
 // panic to prove the recover.
 var recordStopHook = func() {}
-
-// recordStopConfigFn is the config whose denylist the tail is scrubbed with.
-var recordStopConfigFn = recordStopConfig
 
 func runJournalctl(ctx context.Context, n int) (string, error) {
 	cmd := proc.GroupedCommandContext(ctx, "journalctl", "--user", "-u", journalUnit,
@@ -109,6 +107,9 @@ func runRecordStop(args []string, env func(string) string, stdout, stderr io.Wri
 	}
 	if *result == "success" && *exitCode == "exited" && *exitStatus == "0" {
 		return 0 // a clean stop: no I/O, no spawn
+	}
+	if *result == "" {
+		*result = "unknown" // run by hand with nothing to go on
 	}
 	source := "manual" // a flag was given, or nothing came from the service manager
 	if env("SERVICE_RESULT") != "" {
@@ -190,40 +191,52 @@ func lastLines(out string, n int) []string {
 	return lines
 }
 
-// recordStopConfig is the primary repo's config, read without the trust check
-// (no git), for its denylist.
-func recordStopConfig() (config.Config, error) {
+// recordStopScanner builds the scanner for the journal tail from the union of
+// every repo's denylist: the daemon logs for all of its repos into one journal,
+// so a path any of them lists must be redacted. Configs are read without the
+// trust check (no git). It returns nil, which redacts every path-like token,
+// when the routes or any config cannot be loaded or any denylist exists but
+// cannot be read: nothing can then be vouched for.
+func recordStopScanner(stderr io.Writer) *scrub.Scanner {
+	closed := func(format string, a ...any) *scrub.Scanner {
+		fmt.Fprintf(stderr, "record-stop: "+format+"; redacting every path\n", a...)
+		return nil
+	}
+	var cfgs []config.Config
 	if path, ok, err := resolveRoutesPath(""); err != nil {
-		return config.Config{}, err
+		return closed("cannot read the routes: %v", err)
 	} else if ok {
 		set, err := loadRoutedWith(path, loadConfigHook)
 		if err != nil {
-			return config.Config{}, err
+			return closed("cannot load the repo configs: %v", err)
 		}
-		if c, ok := set.Primary(); ok {
-			return c, nil
+		for _, n := range set.names() {
+			cfgs = append(cfgs, set.Cfgs[n])
 		}
+	} else {
+		cfg, err := loadHookConfig("")
+		if err != nil {
+			return closed("cannot read the config: %v", err)
+		}
+		cfgs = append(cfgs, cfg)
 	}
-	return loadHookConfig("")
-}
-
-// recordStopScanner is the scanner for the tail: the primary denylist when
-// there is one, none when there is no denylist, and nil (every path-like
-// token is redacted) when it cannot be told or read.
-func recordStopScanner(stderr io.Writer) *scrub.Scanner {
-	cfg, err := recordStopConfigFn()
-	if err != nil {
-		fmt.Fprintf(stderr, "record-stop: cannot read the config (%v); redacting every path\n", err)
-		return nil
+	var deny []scrub.DenylistPattern
+	for _, cfg := range cfgs {
+		f, err := os.Open(cfg.DenylistPath())
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		var pats []scrub.DenylistPattern
+		if err == nil {
+			pats, err = scrub.ParseDenylist(f)
+			f.Close()
+		}
+		if err != nil {
+			return closed("cannot use the denylist %s (%v)", cfg.DenylistPath(), err)
+		}
+		deny = append(deny, pats...)
 	}
-	sc, hideAll := denylistScanner(cfg, stderr)
-	switch {
-	case hideAll:
-		return nil
-	case sc == nil:
-		return scrub.New(nil)
-	}
-	return sc
+	return scrub.New(deny)
 }
 
 // recordStopMain is the process entry for record-stop.

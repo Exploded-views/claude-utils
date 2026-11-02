@@ -234,7 +234,7 @@ func TestRecordStop_EveryRoutedRepoDenylistApplies(t *testing.T) {
 	if code, _, errOut := runRS(t, nil, uncleanEnv); code != 0 || errOut != "" {
 		t.Fatalf("code=%d stderr=%q", code, errOut)
 	}
-	if b := recordBytes(t, dir); bytes.Contains(b, []byte("acme-merger")) || !bytes.Contains(b, []byte("<path redacted>")) {
+	if b := recordBytes(t, dir); bytes.Contains(b, []byte("acme-merger")) || !bytes.Contains(b, []byte("path redacted")) {
 		t.Fatalf("the secondary repo's denylisted term is in the record:\n%s", b)
 	}
 }

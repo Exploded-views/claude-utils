@@ -32,6 +32,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
+	"github.com/MarimerLLC/claude-utils/internal/scrub"
 )
 
 // Limits bound a record, the directory, and what counts as a repeat.
@@ -114,6 +115,22 @@ func EnsureDir(dir string) error {
 	return nil
 }
 
+// checkDir is the read-side half of EnsureDir: it changes nothing. A missing
+// directory is not an error (the caller sees no records).
+func checkDir(dir string) error {
+	st, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
+		return fmt.Errorf("%s is not a real directory", dir)
+	}
+	if !ownedByMe(st) {
+		return fmt.Errorf("%s belongs to another user", dir)
+	}
+	return nil
+}
+
 var nameRE = regexp.MustCompile(`^stop-\d{8}T\d{6}Z-\d{2}\.json$`)
 
 func recordName(t time.Time, seq int) string {
@@ -128,10 +145,12 @@ type entry struct {
 // entries are the readable records of dir, newest first. A missing directory
 // has none. Foreign files, symbolic links and corrupt records are skipped.
 func entries(dir string) ([]entry, error) {
-	ents, err := os.ReadDir(dir)
-	if errors.Is(err, os.ErrNotExist) {
+	if err := checkDir(dir); errors.Is(err, os.ErrNotExist) {
 		return nil, nil
+	} else if err != nil {
+		return nil, err
 	}
+	ents, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +160,6 @@ func entries(dir string) ([]entry, error) {
 			names = append(names, e.Name())
 		}
 	}
-	sort.Sort(sort.Reverse(sort.StringSlice(names)))
 	var out []entry
 	for _, n := range names {
 		f, err := os.Open(filepath.Join(dir, n))
@@ -151,11 +169,20 @@ func entries(dir string) ([]entry, error) {
 		b, err := io.ReadAll(io.LimitReader(f, 64<<10))
 		f.Close()
 		var r Record
-		if err != nil || json.Unmarshal(b, &r) != nil {
+		if err != nil || json.Unmarshal(b, &r) != nil || r.Last.IsZero() {
 			continue
 		}
+		r.Result, r.ExitCode, r.ExitStatus = field(r.Result), field(r.ExitCode), field(r.ExitStatus)
+		r.Version, r.Source = clean(r.Version, 128), clean(r.Source, 64)
 		out = append(out, entry{n, r})
 	}
+	// Newest stop first: by when it last happened, not when its record began.
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].rec.Last.Equal(out[j].rec.Last) {
+			return out[i].rec.Last.After(out[j].rec.Last)
+		}
+		return out[i].name > out[j].name
+	})
 	return out, nil
 }
 
@@ -180,6 +207,35 @@ func Latest(dir string) (Record, bool, error) {
 
 func sameStop(a, b Record) bool {
 	return a.Result == b.Result && a.ExitCode == b.ExitCode && a.ExitStatus == b.ExitStatus
+}
+
+// field limits a result, exit code or exit status to [A-Za-z0-9._-], anything
+// else becoming "?", so free text (a token in an error string, a control
+// sequence) can neither be stored nor printed. systemd's values are fixed
+// words, numbers and signal names.
+func field(s string) string {
+	s = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			return r
+		}
+		return '?'
+	}, s)
+	if len(s) > 64 {
+		s = s[:64]
+	}
+	return s
+}
+
+var fieldScanner = scrub.New(nil)
+
+// safeField is field, except that a value that trips a built-in scrub rule
+// (a token is made of characters field allows) is stored as "withheld".
+func safeField(s string) string {
+	if firstBuiltin(fieldScanner.Scan([]byte(s))) != "" {
+		return "withheld"
+	}
+	return field(s)
 }
 
 // clean makes s one printable line of at most max bytes, cut on a rune
@@ -209,9 +265,7 @@ func Write(dir string, rec Record, now time.Time, lim Limits) error {
 		return err
 	}
 	rec.Note = Note
-	rec.Result = clean(rec.Result, 64)
-	rec.ExitCode = clean(rec.ExitCode, 64)
-	rec.ExitStatus = clean(rec.ExitStatus, 64)
+	rec.Result, rec.ExitCode, rec.ExitStatus = safeField(rec.Result), safeField(rec.ExitCode), safeField(rec.ExitStatus)
 	rec.Version = clean(rec.Version, 128)
 	rec.Source = clean(rec.Source, 64)
 	tail := rec.Tail
@@ -249,7 +303,7 @@ func Write(dir string, rec Record, now time.Time, lim Limits) error {
 	if err := writeAtomic(dir, name, b); err != nil {
 		return err
 	}
-	return evict(dir, lim.MaxRecords)
+	return evict(dir, lim.MaxRecords, now)
 }
 
 // fit marshals rec, dropping the oldest tail lines until it is within max.
@@ -324,12 +378,26 @@ func writeAtomic(dir, name string, b []byte) (err error) {
 	return nil
 }
 
-func evict(dir string, keep int) error {
+// staleTemp is how old a temp file must be before evict removes it: a writer
+// that was killed between create and rename leaves one.
+const staleTemp = time.Hour
+
+func evict(dir string, keep int, now time.Time) error {
 	es, err := entries(dir)
 	if err != nil {
 		return err
 	}
 	var first error
+	if ents, err := os.ReadDir(dir); err == nil {
+		for _, e := range ents {
+			if !strings.HasPrefix(e.Name(), ".tmp-") || !e.Type().IsRegular() {
+				continue
+			}
+			if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) > staleTemp {
+				os.Remove(filepath.Join(dir, e.Name()))
+			}
+		}
+	}
 	for i := keep; i < len(es); i++ {
 		if err := os.Remove(filepath.Join(dir, es[i].name)); err != nil && first == nil {
 			first = err

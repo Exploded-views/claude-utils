@@ -269,7 +269,7 @@ func TestWrite_FieldsAreLimitedToAFixedAlphabet(t *testing.T) {
 			}
 		}
 	}
-	if rec.ExitStatus != "SIG-TERM_1.2?x1b?31m" || rec.ExitCode != "ex?ited" {
+	if rec.ExitStatus != "SIG-TERM_1.2??31m" || rec.ExitCode != "ex?ited" {
 		t.Fatalf("fields = %q %q", rec.ExitStatus, rec.ExitCode)
 	}
 	_, all := readAll(t, d)
@@ -284,7 +284,7 @@ func TestLatest_SanitizesWhatItReadsFromDisk(t *testing.T) {
 	body := `{"when":"2026-11-02T12:00:00Z","last":"2026-11-02T12:00:00Z","result":"bad\u001b[31mred","exitStatus":"a b","version":"v\u001b[0m1","repeats":1,"tail":[]}`
 	os.WriteFile(filepath.Join(d, "stop-20261102T120000Z-00.json"), []byte(body), 0o600)
 	rec, ok, _ := Latest(d)
-	if !ok || rec.Result != "bad?[31mred" || rec.ExitStatus != "a?b" || strings.ContainsRune(rec.Version, 0x1b) {
+	if !ok || rec.Result != "bad??31mred" || rec.ExitStatus != "a?b" || strings.ContainsRune(rec.Version, 0x1b) {
 		t.Fatalf("rec = %+v", rec)
 	}
 }
