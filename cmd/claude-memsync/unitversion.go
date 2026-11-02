@@ -62,8 +62,35 @@ var (
 	ancestorsFrom = ""
 )
 
-// exeThrowaway stub: refuses nothing yet.
-func exeThrowaway(exe string) bool { return false }
+// exeThrowaway reports a binary that must not become the installed build: one
+// that cannot be resolved, lies under the resolved temp dir, or has a
+// world-writable ancestor directory (anyone could swap what runs). Symlinks
+// are resolved first, so a path that merely points into such a place counts.
+func exeThrowaway(exe string) bool {
+	r, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		return true
+	}
+	if t, err := filepath.EvalSymlinks(tempDirFn()); err == nil && underDir(r, t) {
+		return true
+	}
+	stop := ""
+	if ancestorsFrom != "" {
+		stop, _ = filepath.EvalSymlinks(ancestorsFrom)
+	}
+	for d := filepath.Dir(r); ; d = filepath.Dir(d) {
+		if stop != "" && (d == stop || !strings.HasPrefix(d, stop+string(filepath.Separator))) {
+			break
+		}
+		if st, err := os.Stat(d); err != nil || st.Mode().Perm()&0o002 != 0 {
+			return true
+		}
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	return false
+}
 
 // libRootFn is the bootstrap lib root, ~/.local/lib/claude-memsync; tests
 // replace it.
