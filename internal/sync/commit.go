@@ -168,7 +168,43 @@ func holdBack(repo *gitwt.Repo, cfg config.Config) (bool, error) {
 	if err := repo.Unstage(held...); err != nil {
 		return false, fmt.Errorf("unstage held-back files: %w", err)
 	}
+	recordHeld(cfg, held)
 	return true, nil
+}
+
+// heldRecordRel is where holdBack leaves the paths it held back, relative to
+// the sync dir. The prompt hook reads it to tell a session which of its notes
+// are not syncing, with no git process of its own.
+const heldRecordRel = ".state/held-back"
+
+// recordHeld writes the held paths, one per line (none: no file). It is
+// best-effort: a record that cannot be written only costs the notice.
+func recordHeld(cfg config.Config, held []string) {
+	p := filepath.Join(cfg.SyncDir, filepath.FromSlash(heldRecordRel))
+	var b strings.Builder
+	for _, h := range held {
+		if !strings.Contains(h, "\n") {
+			b.WriteString(h + "\n")
+		}
+	}
+	if b.Len() == 0 {
+		_ = os.Remove(p)
+		return
+	}
+	if old, err := os.ReadFile(p); err == nil && string(old) == b.String() {
+		return
+	}
+	if os.MkdirAll(filepath.Dir(p), 0o700) != nil {
+		return
+	}
+	f, err := os.CreateTemp(filepath.Dir(p), "held-back.*.tmp")
+	if err != nil {
+		return
+	}
+	_, werr := f.WriteString(b.String())
+	if cerr := f.Close(); werr != nil || cerr != nil || os.Rename(f.Name(), p) != nil {
+		_ = os.Remove(f.Name())
+	}
 }
 
 // heldByPath and heldRules are the scrub's two checks, used by holdBack at
