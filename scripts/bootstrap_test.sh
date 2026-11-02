@@ -718,6 +718,10 @@ else
   mkdir -p "$H/real-local"; chmod 775 "$H/real-local"; ln -s "$H/real-local" "$H/.local"
   runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
   check "~/.local symlinked to a group-writable dir: refused, nothing created inside it" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -qF '$H/.local is group- or world-writable' && [ -z \"\$(ls -A '$H/real-local')\" ]" _ "$OUT"
+  newhome pbsp
+  mkdir -p "$H/area/real"; chmod 755 "$H/area/real"; chmod 775 "$H/area"; ln -s "$H/area/real" "$H/.local"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  check "~/.local symlinked into a dir whose PARENT is group-writable: refused, nothing created" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'group- or world-writable' && [ -z \"\$(ls -A '$H/area/real')\" ]" _ "$OUT"
   newhome pbbin
   mkdir -p "$H/.local/bin"; chmod 755 "$H/.local"; chmod 775 "$H/.local/bin"
   runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
