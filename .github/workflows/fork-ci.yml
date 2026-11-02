@@ -197,10 +197,10 @@ jobs:
     name: scripts/bootstrap_test.sh
     if: github.repository_owner != 'MarimerLLC'
     runs-on: ubuntu-latest
-    # The harness (about 380 checks, with daemon and upgrade sections) took just
-    # over 20 minutes on ubuntu-latest; 45 is interim. A wall-time budget and
-    # sharding replace it (issue #7).
-    timeout-minutes: 45
+    # The harness (about 560 checks, with daemon, upgrade and unit sections)
+    # takes about 44 minutes on ubuntu-latest; 60 is interim. A wall-time budget
+    # and sharding replace it (issue #7).
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
