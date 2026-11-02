@@ -25,7 +25,7 @@ var Override string
 
 // Commit is set at link time via -ldflags "-X <pkg>.Commit=<sha>" by builds
 // that have no VCS info (a bootstrap source build runs from git archive). When
-// set, JSON reports it as the commit. Stub: not used yet.
+// set, JSON reports it as the commit.
 var Commit string
 
 // String returns the version to display in --version output.
@@ -71,8 +71,8 @@ func Strings(binary string) string {
 // keys in this order: name, version, commit (the VCS revision, or "" when the
 // build has none), go, os, arch. It is a stable interface.
 func JSON(binary string) string {
-	commit := ""
-	if info, ok := debug.ReadBuildInfo(); ok {
+	commit := Commit
+	if info, ok := debug.ReadBuildInfo(); ok && commit == "" {
 		for _, s := range info.Settings {
 			if s.Key == "vcs.revision" {
 				commit = s.Value

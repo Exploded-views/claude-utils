@@ -46,13 +46,14 @@ REAL="$BASE/real"; mkdir -p "$REAL"
 if [ -n "${MEMSYNC_BIN:-}" ] && [ -n "${MEMMERGE_BIN:-}" ]; then
   cp "$MEMSYNC_BIN" "$REAL/claude-memsync"; cp "$MEMMERGE_BIN" "$REAL/claude-memmerge"
 elif command -v go >/dev/null; then
-  # Stamped, not read from VCS info: a dirty worktree must not make the version "+dirty".
-  LDV="-X github.com/MarimerLLC/claude-utils/internal/version.Override=dev+$(git -C "$ROOT" rev-parse HEAD | cut -c1-12)"
+  # Stamped, not read from VCS info: a dirty worktree must not make the version "+dirty",
+  # and the no-sha checks need a release-shaped version (vX.Y.Z...) that carries the commit.
+  LDV="-X github.com/MarimerLLC/claude-utils/internal/version.Override=v0.0.0-test-$(git -C "$ROOT" rev-parse HEAD | cut -c1-12) -X github.com/MarimerLLC/claude-utils/internal/version.Commit=$(git -C "$ROOT" rev-parse HEAD)"
   (cd "$ROOT" && go build -buildvcs=false -ldflags "$LDV" -o "$REAL/claude-memsync" ./cmd/claude-memsync && go build -buildvcs=false -ldflags "$LDV" -o "$REAL/claude-memmerge" ./cmd/claude-memmerge)
 elif command -v docker >/dev/null; then
   docker run --rm --user "$(id -u):$(id -g)" -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -e GOFLAGS=-buildvcs=false \
     -v "$ROOT:/src:ro" -v "$REAL:/out" -w /src golang:1.25 \
-    sh -c "go build -ldflags '-X github.com/MarimerLLC/claude-utils/internal/version.Override=dev+$(git -C "$ROOT" rev-parse HEAD | cut -c1-12)' -o /out/claude-memsync ./cmd/claude-memsync && go build -ldflags '-X github.com/MarimerLLC/claude-utils/internal/version.Override=dev+$(git -C "$ROOT" rev-parse HEAD | cut -c1-12)' -o /out/claude-memmerge ./cmd/claude-memmerge"
+    sh -c "go build -ldflags '-X github.com/MarimerLLC/claude-utils/internal/version.Override=v0.0.0-test-$(git -C "$ROOT" rev-parse HEAD | cut -c1-12) -X github.com/MarimerLLC/claude-utils/internal/version.Commit=$(git -C "$ROOT" rev-parse HEAD)' -o /out/claude-memsync ./cmd/claude-memsync && go build -ldflags '-X github.com/MarimerLLC/claude-utils/internal/version.Override=v0.0.0-test-$(git -C "$ROOT" rev-parse HEAD | cut -c1-12) -X github.com/MarimerLLC/claude-utils/internal/version.Commit=$(git -C "$ROOT" rev-parse HEAD)' -o /out/claude-memmerge ./cmd/claude-memmerge"
 else
   echo "need MEMSYNC_BIN and MEMMERGE_BIN, go, or docker to build the real claude-memsync" >&2; exit 2
 fi

@@ -1547,17 +1547,28 @@ gw_p() {
 # owner_uid <path>: the owner's uid (GNU stat, then BSD stat).
 owner_uid() { stat -L -c %u "$1" 2>/dev/null || stat -L -f %u "$1"; }
 
-# home_guard: a HARD STOP, before anything is kept or run. ~/.local, ~/.local/lib
-# and $BIN hold what the service runs; if group or other can write one of them,
-# they can swap it. Bootstrap never chmods the user's own layout.
+# home_guard: a HARD STOP, before anything is kept or run, and again after every
+# mkdir that creates one of these levels. $HOME, ~/.local, ~/.local/lib, ~/.local/state
+# (and our dir in it), the clone's parent and $BIN hold what the service runs and
+# what is built from; if group or other can write one of them, or someone other
+# than you or root owns it, they can swap it. Symlinks are followed and the
+# resolved path is checked too. Bootstrap never chmods the user's own layout.
 home_guard() {
-  local p st
-  for p in "$HOME/.local" "$HOME/.local/lib" "$BIN"; do
+  local p q st r u me
+  local dirs=("$HOME" "$HOME/.local" "$HOME/.local/lib" "$HOME/.local/state" "$HOME/.local/state/claude-memsync" "$BIN")
+  [ -z "${SRC:-}" ] || dirs+=("$(dirname "$SRC")")
+  me="$(id -u)" || die "cannot tell who you are (id -u)"
+  for p in "${dirs[@]}"; do
     st="$(g_state "$p")" || die "cannot tell whether $p exists; refusing to continue"
     [ "$st" = PRESENT ] || continue
-    if gw_p "$p"; then
-      die "$p is group- or world-writable; run: chmod go-w $p, then re-run bootstrap (the tree will be reinstalled)"
-    fi
+    r="$(cd -P -- "$p" 2>/dev/null && pwd -P)" || die "cannot resolve $p; refusing to continue"
+    for q in "$p" "$r"; do
+      if gw_p "$q"; then
+        die "$p is group- or world-writable; run: chmod go-w $p, then re-run bootstrap (the tree will be reinstalled)"
+      fi
+      u="$(owner_uid "$q")" || die "cannot read the owner of $q; refusing to continue"
+      if [ "$u" != "$me" ] && [ "$u" != 0 ]; then die "$p is owned by uid $u, not you or root; refusing to continue"; fi
+    done
   done
 }
 
@@ -1619,12 +1630,14 @@ mk_lib_dir() {
   for p in "$(dirname "$LIB")" "$LIB"; do
     if [ "$(g_state "$p")" = PRESENT ] && gw_p "$p"; then run chmod go-w "$p"; fi
   done
-  run mkdir -p "$LIB"
+  run sh -c 'umask 022; mkdir -p "$1"' _ "$LIB"
   for d in $made; do run chmod 755 "$d"; done
+  home_guard
 }
 
 link_binaries() {
-  run mkdir -p "$BIN"
+  run sh -c 'umask 022; mkdir -p "$1"' _ "$BIN"
+  home_guard
   local b aside bs bk
   for b in claude-memsync claude-memmerge; do
     bs="$(g_state "$BIN/$b")" || die "cannot tell whether $BIN/$b exists; refusing to touch it"
@@ -1656,8 +1669,9 @@ step_build() {
     say "  clone present at $SRC"
   else
     [ ! -e "$SRC" ] || die "$SRC exists but is not a checkout at $SHA"   # fs-ok: git clone refuses a non-empty target anyway
-    run mkdir -p "$(dirname "$SRC")"
-    run git clone --quiet "$UTILS_URL" "$SRC"
+    run sh -c 'umask 022; mkdir -p "$1"' _ "$(dirname "$SRC")"
+    home_guard
+    run sh -c 'umask 022; git clone --quiet "$1" "$2"' _ "$UTILS_URL" "$SRC"
     run git -C "$SRC" checkout --quiet "$SHA"
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
@@ -1671,19 +1685,26 @@ step_build() {
   # able to write), into .new files; an identical existing binary is kept, a
   # different one is replaced.
   lib_new_cleanup
-  local b bd="(temp dir)" ver="dev+$SHORT" pkg=github.com/MarimerLLC/claude-utils/internal/version
+  local b bd="$HOME/.local/state/claude-memsync/build.XXXXXX" ver="dev+$SHORT" pkg=github.com/MarimerLLC/claude-utils/internal/version
+  local base="$HOME/.local/state/claude-memsync"
+  run sh -c 'umask 022; mkdir -p "$1"' _ "$base"
+  home_guard
   if [ "$DRY_RUN" -eq 0 ]; then
-    BUILD_DIR="$(mktemp -d)"
+    BUILD_DIR="$(mktemp -d "$base/build.XXXXXX")" || die "cannot make a private build dir under $base"
     chmod 700 "$BUILD_DIR"
     bd="$BUILD_DIR"
   fi
-  run sh -c 'umask 022; git -C "$1" archive "$2" | tar -x -C "$3"' _ "$SRC" "$SHA" "$bd"
+  # The $SRC repo is trusted as this script cloned it; --no-replace-objects keeps a
+  # planted refs/replace out of the archive. Verifying the repo itself (filters in
+  # its config, fsck, a re-fetch) is tracked separately.
+  run sh -c 'umask 022; git --no-replace-objects -C "$1" archive "$2" | tar -x -C "$3"' _ "$SRC" "$SHA" "$bd"
+  # A clean Go environment: no inherited GOFLAGS, no go.work, no toolchain download.
   if [ "$GO_MODE" = go ]; then
-    run sh -c 'umask 022; cd "$1" && go build -o "$2" -trimpath -ldflags "-X $5.Override=$4" ./cmd/claude-memsync && go build -o "$3" -trimpath -ldflags "-X $5.Override=$4" ./cmd/claude-memmerge' _ "$bd" "$LIB/claude-memsync.new" "$LIB/claude-memmerge.new" "$ver" "$pkg"
+    run sh -c 'umask 022; cd "$1" && env -u GOFLAGS GOWORK=off GOFLAGS=-mod=readonly GOTOOLCHAIN=local go build -o "$2" -trimpath -ldflags "-X $5.Override=$4 -X $5.Commit=$6" ./cmd/claude-memsync && env -u GOFLAGS GOWORK=off GOFLAGS=-mod=readonly GOTOOLCHAIN=local go build -o "$3" -trimpath -ldflags "-X $5.Override=$4 -X $5.Commit=$6" ./cmd/claude-memmerge' _ "$bd" "$LIB/claude-memsync.new" "$LIB/claude-memmerge.new" "$ver" "$pkg" "$SHA"
   else
-    run docker run --rm --user "$(id -u):$(id -g)" -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -e GOFLAGS=-buildvcs=false \
+    run docker run --rm --user "$(id -u):$(id -g)" -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -e GOWORK=off -e GOFLAGS=-mod=readonly -e GOTOOLCHAIN=local \
       -v "$bd:/src" -v "$LIB:/out" -w /src golang:1.25 \
-      sh -c 'umask 022; go build -o /out/claude-memsync.new -trimpath -ldflags "-X $2.Override=$1" ./cmd/claude-memsync && go build -o /out/claude-memmerge.new -trimpath -ldflags "-X $2.Override=$1" ./cmd/claude-memmerge' _ "$ver" "$pkg"
+      sh -c 'umask 022; go build -o /out/claude-memsync.new -trimpath -ldflags "-X $2.Override=$1 -X $2.Commit=$3" ./cmd/claude-memsync && go build -o /out/claude-memmerge.new -trimpath -ldflags "-X $2.Override=$1 -X $2.Commit=$3" ./cmd/claude-memmerge' _ "$ver" "$pkg" "$SHA"
   fi
   build_dir_remove
   for b in claude-memsync claude-memmerge; do
