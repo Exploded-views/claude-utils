@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 )
 
@@ -347,7 +348,17 @@ func repairUserUnitTo(w io.Writer, wantExec, wantExe string) error {
 	if execChanged {
 		old, _ := currentExecStart(content)
 		now, _ := currentExecStart(fixed)
-		fmt.Fprintf(w, "updated the unit's ExecStart (paths only, no secrets):\n  was: %s\n  now: %s\nrestart the daemon to apply it (claude-memsync stop; claude-memsync start)\n", old, now)
+		oe, oa, _ := parseExecStart(old)
+		ne, na, _ := parseExecStart(now)
+		verdict := "arguments updated"
+		if slices.Equal(oa, na) {
+			verdict = "arguments unchanged"
+		}
+		if oe == "" { // an unreadable old line: say nothing about its text
+			oe = "(unreadable)"
+		}
+		// Argument text can carry secrets: only the paths are printed.
+		fmt.Fprintf(w, "updated the unit's ExecStart (%s):\n  was: %s\n  now: %s\nrestart the daemon to apply it (claude-memsync stop; claude-memsync start)\n", verdict, oe, ne)
 	}
 	return nil
 }
