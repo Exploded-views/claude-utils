@@ -516,7 +516,7 @@ func (l *Loop) handleEvent(watcher *fsnotify.Watcher, roots Roots, ev fsnotify.E
 //
 // Before doing any pull/push, flush asks origin for the current branch SHA
 // (a single ls-remote round-trip). If origin's SHA matches our cached
-// refs/remotes/origin/<branch> AND we have no unpushed commits, it returns
+// refs/remotes/origin/<branch> AND HEAD is level with it, it returns
 // early — skipping the full pull/push churn that dominates idle ticks.
 func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err error) {
 	if l.held() {
@@ -749,7 +749,14 @@ func remoteAndLocalIdle(repo *gitwt.Repo, branch string) (bool, error) {
 	if err != nil {
 		return false, nil
 	}
-	return strings.Join(strings.Fields(counts), " ") == "0 0", nil
+	return levelWithTracking(counts), nil
+}
+
+// levelWithTracking reports whether `rev-list --left-right --count` output
+// is exactly "0<ws>0": nothing behind, nothing ahead. Anything else,
+// including unparseable output, is not level.
+func levelWithTracking(out string) bool {
+	return strings.Join(strings.Fields(out), " ") == "0 0"
 }
 
 // propagateChanges replays the file changes between pre and post revisions
