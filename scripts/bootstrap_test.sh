@@ -140,7 +140,7 @@ out="$3"
 # record whether the org token leaked into this process env (count only, never the value)
 echo "$(basename "$0"):$(env | grep -v '^STUB_' | grep -cF -- "$STUB_ORG_TOKEN")" >>"$STUB_DIR/env.log"
 case "$out" in
-  */claude-memmerge) cp "$REAL_DIR/claude-memmerge" "$out" ;;
+  */claude-memmerge*) cp "$REAL_DIR/claude-memmerge" "$out" ;;
   *) cp "$STUB_DIR/memsync-wrap" "$out" ;;
 esac
 chmod +x "$out"
@@ -629,17 +629,47 @@ else
   check "prebuilt: ~/.local/bin links point into that dir" bash -c "[ \"\$(readlink '$H/.local/bin/claude-memsync')\" = '$LIBD/claude-memsync' ] && [ \"\$(readlink '$H/.local/bin/claude-memmerge')\" = '$LIBD/claude-memmerge' ]"
   check "prebuilt: no clone, no go build" bash -c "[ ! -e '$H/.local/src' ] && [ ! -e '$STUB_DIR/go.log' ]"
   check "prebuilt: no clone means no plugin step, and the next-step note says so" bash -c "! grep -qs 'plugin' '$STUB_DIR/claude.log' && printf '%s\n' \"\$1\" | grep -q 'plugin step skipped'" _ "$OUT"
-  # umask 002 (Ubuntu, Fedora): the lib dirs and binaries still come out 0755,
-  # and a 0775 tree from an earlier run is repaired by a re-run.
+  # --- the lib tree under umask 002 (Ubuntu, Fedora) and tampering ---------
+  m_()  { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+  ino_() { stat -c %i "$1" 2>/dev/null || stat -f %i "$1"; }
+  # fresh home: what bootstrap creates comes out 0755
   newhome pbum
   OLDUMASK="$(umask)"; umask 002
-  mkdir -p "$H/.local/lib/claude-memsync/$BSHA"   # an old run under umask 002: 0775 levels
   runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
   umask "$OLDUMASK"
-  check "prebuilt under umask 002: the run exits 0" [ "$RC" -eq 0 ]
   LIBU="$H/.local/lib/claude-memsync"
-  check "prebuilt under umask 002: lib levels and <id> are 0755" bash -c "[ \"\$(stat -c %a '$H/.local/lib' 2>/dev/null || stat -f %Lp '$H/.local/lib')\" = 755 ] && [ \"\$(stat -c %a '$LIBU' 2>/dev/null || stat -f %Lp '$LIBU')\" = 755 ] && [ \"\$(stat -c %a '$LIBU/$BSHA' 2>/dev/null || stat -f %Lp '$LIBU/$BSHA')\" = 755 ]"
-  check "prebuilt under umask 002: binaries are 0755" bash -c "[ \"\$(stat -c %a '$LIBU/$BSHA/claude-memsync' 2>/dev/null || stat -f %Lp '$LIBU/$BSHA/claude-memsync')\" = 755 ] && [ \"\$(stat -c %a '$LIBU/$BSHA/claude-memmerge' 2>/dev/null || stat -f %Lp '$LIBU/$BSHA/claude-memmerge')\" = 755 ]"
+  check "umask 002, fresh home: the run exits 0" [ "$RC" -eq 0 ]
+  check "umask 002, fresh home: the levels bootstrap created and the binaries are 0755" bash -c "[ \"\$(stat -c %a '$H/.local/lib' 2>/dev/null || stat -f %Lp '$H/.local/lib')\" = 755 ] && [ \"\$(stat -c %a '$LIBU/$BSHA' 2>/dev/null || stat -f %Lp '$LIBU/$BSHA')\" = 755 ] && [ \"\$(stat -c %a '$LIBU/$BSHA/claude-memsync' 2>/dev/null || stat -f %Lp '$LIBU/$BSHA/claude-memsync')\" = 755 ]"
+  # an earlier run left a 0775 tree with identical binaries: they are rewritten fresh, never chmod-blessed
+  newhome pbum2
+  umask 002
+  mkdir -p "$H/.local/lib/claude-memsync/$BSHA"
+  cp "$PB/wrap/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memsync"; cp "$PB/wrap/claude-memmerge" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
+  chmod 775 "$H/.local/lib/claude-memsync/$BSHA/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
+  LIBU="$H/.local/lib/claude-memsync"; INO0="$(ino_ "$LIBU/$BSHA/claude-memsync")"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  umask "$OLDUMASK"
+  check "0775 tree: the run exits 0" [ "$RC" -eq 0 ]
+  check "0775 tree: the binary is a fresh file (new inode), mode 0755, not chmod-blessed" bash -c "[ '$(ino_ "$LIBU/$BSHA/claude-memsync")' != '$INO0' ] && [ '$(m_ "$LIBU/$BSHA/claude-memsync")' = 755 ] && [ '$(m_ "$LIBU/$BSHA/claude-memmerge")' = 755 ]"
+  check "0775 tree: ~/.local and ~/.local/lib keep their mode, and a warning names the risk" bash -c "[ '$(m_ "$H/.local")' = 775 ] && [ '$(m_ "$H/.local/lib")' = 775 ] && printf '%s\n' \"\$1\" | grep -q 'WARNING: .*\.local/lib.*writable'" _ "$OUT"
+  check "0775 tree: the memsync dirs lost group/world write" bash -c "[ '$(m_ "$LIBU")' = 755 ] && [ '$(m_ "$LIBU/$BSHA")' = 755 ]"
+  # a tampered binary in a 0775 tree is refused, never blessed
+  newhome pbum3
+  umask 002
+  mkdir -p "$H/.local/lib/claude-memsync/$BSHA"
+  cp "$PB/wrap/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memsync"; cp "$PB/wrap/claude-memmerge" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
+  printf '# tampered\n' >>"$H/.local/lib/claude-memsync/$BSHA/claude-memsync"
+  chmod 775 "$H/.local/lib/claude-memsync/$BSHA/claude-memsync"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  umask "$OLDUMASK"
+  check "tampered binary in a 0775 tree: refused, still tampered and not chmodded" bash -c "[ $RC -ne 0 ] && grep -q tampered '$H/.local/lib/claude-memsync/$BSHA/claude-memsync' && [ '$(m_ "$H/.local/lib/claude-memsync/$BSHA/claude-memsync")' = 775 ]"
+  # a symlinked binary is refused before any chmod
+  newhome pbum4
+  mkdir -p "$H/.local/lib/claude-memsync/$BSHA"; cp "$PB/wrap/claude-memsync" "$H/victim"
+  ln -s "$H/victim" "$H/.local/lib/claude-memsync/$BSHA/claude-memsync"; cp "$PB/wrap/claude-memmerge" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
+  chmod 600 "$H/victim"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  check "symlinked binary: refused, the link and its target are untouched" bash -c "[ $RC -ne 0 ] && [ -L '$H/.local/lib/claude-memsync/$BSHA/claude-memsync' ] && [ '$(m_ "$H/victim")' = 600 ]"
   newhome pb3
   NO_SHA=1 BOOT_PATH="$(minipath go)" runboot --host testhost --role homelab --dry-run --prebuilt-dir "$PB/real"
   check "prebuilt without --sha: a release-shaped version is the dir name; no git checkout needed" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -qF '.local/lib/claude-memsync/$PBVER'" _ "$OUT"

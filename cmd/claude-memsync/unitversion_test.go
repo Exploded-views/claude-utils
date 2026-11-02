@@ -482,7 +482,7 @@ func TestExeUnsafe_ReasonsAreTold(t *testing.T) {
 	}
 	os.Chmod(gw, 0o755)
 	os.Chmod(gwExe, 0o775)
-	if rx := real(t, gwExe); !strings.Contains(reason(t, gwExe), rx+" is group-writable; run: chmod g-w "+rx+" (or re-run bootstrap)") {
+	if rx := real(t, gwExe); !strings.Contains(reason(t, gwExe), rx+" is group-writable; rebuild or reinstall (re-run bootstrap)") || strings.Contains(reason(t, gwExe), "chmod") {
 		t.Errorf("writable exe: %q", reason(t, gwExe))
 	}
 	os.Chmod(gwExe, 0o755)
@@ -535,7 +535,7 @@ func TestExeUnsafe_Umask002TreeIsRefusedUntilNormalised(t *testing.T) {
 	}
 	throwawaySeams(t, filepath.Join(root, "nottmp"), root)
 	err = exeUnsafe(exe)
-	if rx := real(t, exe); err == nil || !strings.Contains(err.Error(), rx+" is group-writable; run: chmod g-w "+rx+" (or re-run bootstrap)") {
+	if rx := real(t, exe); err == nil || !strings.Contains(err.Error(), rx+" is group-writable; rebuild or reinstall (re-run bootstrap)") || strings.Contains(err.Error(), "chmod g-w "+rx) {
 		t.Fatalf("a group-writable tree must be refused with the fix: %v", err)
 	}
 	// What bootstrap now does on every run: 0755 on each level and the binary.
@@ -550,5 +550,23 @@ func TestExeUnsafe_Umask002TreeIsRefusedUntilNormalised(t *testing.T) {
 	os.Chmod(exe, 0o777)
 	if err := exeUnsafe(exe); err == nil {
 		t.Error("world-writable must stay refused")
+	}
+}
+
+// A group-writable directory inside the lib tree says "rebuild", not chmod:
+// chmod alone does not prove the binaries are untampered.
+func TestExeUnsafe_LibTreeDirSaysRebuild(t *testing.T) {
+	root := t.TempDir()
+	lib := filepath.Join(root, "lib")
+	exe := mkExe(t, filepath.Join(lib, "id"))
+	os.Chmod(filepath.Join(lib, "id"), 0o775)
+	throwawaySeams(t, filepath.Join(root, "nottmp"), root)
+	oldL := libRootFn
+	libRootFn = func() string { return lib }
+	t.Cleanup(func() { libRootFn = oldL })
+	r := reason(t, exe)
+	rd := real(t, filepath.Join(lib, "id"))
+	if !strings.Contains(r, rd+" is group-writable; rebuild or reinstall (re-run bootstrap)") || strings.Contains(r, "chmod") {
+		t.Errorf("lib dir: %q", r)
 	}
 }
