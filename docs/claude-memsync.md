@@ -140,6 +140,7 @@ and SSH keys. None require root.
 | `claude-memsync run` | Run in the foreground (for debugging). |
 | `claude-memsync changes --since <rev>` or `--marker <file>` | List memory files changed in the sync repo since a point (`--project`, `--json`, `--limit`, `--update-marker`, `--hook`). See [Telling a running session what changed](#telling-a-running-session-what-changed). |
 | `claude-memsync distill` | Rebuild the distilled-memory catalog index (`--prune`, `--dry-run`, and with several repos `--repo <name>` or `--config <path>`, `--routes <path>`). See [distilling-memories.md](distilling-memories.md). |
+| `claude-memsync log append <file> [text...]` / `log check <file>...` | Append a UTC-minute-stamped line to a decision or state log, or list the lines a prefix filter would skip. See [Decision and state logs](#decision-and-state-logs). |
 | `claude-memsync version [--json]` | Print the version. See [version output](#version-output). |
 
 ## Version output
@@ -887,6 +888,28 @@ deliberate purge, for example a leaked secret in an archived note. That is a git
 history rewrite done by the repo owner by hand (rewrite the history of every
 clone, force-push, then have every host re-clone), and the tool has no command,
 flag or setting that does it.
+
+## Decision and state logs
+
+`claude-memsync log append` and `log check` keep plain-text logs whose lines peers can filter on a fixed prefix:
+
+```text
+- 2026-11-02 18:30Z watch memsync: running, no new stop records
+```
+
+An entry is exactly one line, `- YYYY-MM-DD HH:MMZ <text>`. The stamp is UTC, cut to the minute (never rounded). The text has at least one printable character, no newline, CR or other control character (a tab is fine), and the whole line, newline included, is at most 4096 bytes.
+
+```sh
+claude-memsync log append decisions.md chose route A for the cache   # text from the arguments
+claude-memsync log append decisions.md <<'EOF'                       # or one line from stdin
+chose route A; no $VAR or backtick is expanded in a quoted heredoc
+EOF
+claude-memsync log check decisions.md
+```
+
+- `append` writes one line with a single `write(2)` under an advisory file lock, so concurrent writers (goroutines or processes) never interleave. It waits up to `--wait` (default 5 s) for the lock. A new file is created `0600`; an existing file keeps its mode; a symlink is followed; a FIFO or other non-regular file is refused.
+- `append` exits 2 and writes nothing for bad text (empty, a newline or control character, too long), and 1 when the file does not end with a newline (the entry would join a broken line; run `log check`) or the lock times out.
+- `check` prints `path:line: reason` for each line that is not an entry, a `#` heading or a blank line, plus bad stamps, empty text, control characters, over-long lines and a missing final newline. Merge-conflict markers are flagged too. Exit 0 when clean, 1 for problems, 2 for a usage or read error. There is no allow-list: point it only at files that follow the entry format.
 
 ## On-disk layout
 

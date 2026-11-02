@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -152,7 +153,10 @@ func TestLog_MainWiring(t *testing.T) {
 		t.Skip("builds the binary")
 	}
 	bin := filepath.Join(t.TempDir(), "claude-memsync")
-	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+	_, thisFile, _, _ := runtime.Caller(0)
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = filepath.Dir(thisFile)
+	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
 	p := filepath.Join(t.TempDir(), "log.md")
