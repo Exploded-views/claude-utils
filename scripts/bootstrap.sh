@@ -1547,6 +1547,21 @@ gw_p() {
 # owner_uid <path>: the owner's uid (GNU stat, then BSD stat).
 owner_uid() { stat -L -c %u "$1" 2>/dev/null || stat -L -f %u "$1"; }
 
+# path_chain_ok <resolved path>: every directory from it up to / must be owned by
+# you or root and not group- or world-writable (a sticky /tmp does not qualify).
+# On failure it prints why and returns 1.
+path_chain_ok() {
+  local d="$1" u me
+  me="$(id -u)" || { echo "cannot tell who you are (id -u)"; return 1; }
+  while :; do
+    if gw_p "$d"; then echo "$d is group- or world-writable; run: chmod go-w $d"; return 1; fi
+    u="$(owner_uid "$d")" || { echo "cannot read the owner of $d"; return 1; }
+    if [ "$u" != "$me" ] && [ "$u" != 0 ]; then echo "$d is owned by uid $u, not you or root"; return 1; fi
+    [ "$d" != "/" ] || break
+    d="$(dirname "$d")"
+  done
+}
+
 # home_guard: a HARD STOP, before anything is kept or run, and again after every
 # mkdir that creates one of these levels. $HOME, ~/.local, ~/.local/lib, ~/.local/state
 # (and our dir in it), the clone's parent and $BIN hold what the service runs and
@@ -1554,7 +1569,7 @@ owner_uid() { stat -L -c %u "$1" 2>/dev/null || stat -L -f %u "$1"; }
 # than you or root owns it, they can swap it. Symlinks are followed and the
 # resolved path is checked too. Bootstrap never chmods the user's own layout.
 home_guard() {
-  local p q st r u me
+  local p q st r u me why
   local dirs=("$HOME" "$HOME/.local" "$HOME/.local/lib" "$HOME/.local/state" "$HOME/.local/state/claude-memsync" "$BIN")
   [ -z "${SRC:-}" ] || dirs+=("$(dirname "$SRC")")
   me="$(id -u)" || die "cannot tell who you are (id -u)"
@@ -1569,6 +1584,7 @@ home_guard() {
       u="$(owner_uid "$q")" || die "cannot read the owner of $q; refusing to continue"
       if [ "$u" != "$me" ] && [ "$u" != 0 ]; then die "$p is owned by uid $u, not you or root; refusing to continue"; fi
     done
+    why="$(path_chain_ok "$r")" || die "$p: $why, then re-run bootstrap (the tree will be reinstalled)"
   done
 }
 
