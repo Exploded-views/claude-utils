@@ -71,7 +71,7 @@ func TestEnsureDir_RefusesAnotherOwner(t *testing.T) {
 	}
 }
 
-func TestWrite_NeverFollowsASymlinkedRecord(t *testing.T) {
+func TestWrite_PlantedSymlinkAtTheRecordNameIsNotFollowed(t *testing.T) {
 	d := newDir(t)
 	if err := EnsureDir(d); err != nil {
 		t.Fatal(err)
@@ -85,5 +85,23 @@ func TestWrite_NeverFollowsASymlinkedRecord(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(target); string(b) != "keep" {
 		t.Fatalf("the writer followed a symlink: %q", b)
+	}
+}
+
+func TestLatest_RefusesASymlinkedDirAndAForeignOwner(t *testing.T) {
+	real := filepath.Join(t.TempDir(), "real")
+	mustWrite(t, real, Record{Result: "exit-code"}, t0)
+	link := filepath.Join(t.TempDir(), "stops")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip(err)
+	}
+	if _, ok, err := Latest(link); ok || err == nil {
+		t.Fatalf("read through a symlinked dir: ok=%v err=%v", ok, err)
+	}
+	old := currentUID
+	currentUID = func() int { return os.Getuid() + 1 }
+	defer func() { currentUID = old }()
+	if _, ok, err := Latest(real); ok || err == nil {
+		t.Fatalf("read another user's dir: ok=%v err=%v", ok, err)
 	}
 }

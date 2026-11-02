@@ -231,10 +231,106 @@ func TestLatest_IgnoresForeignAndCorruptFiles(t *testing.T) {
 	d := newDir(t)
 	mustWrite(t, d, Record{Result: "timeout"}, t0)
 	os.WriteFile(filepath.Join(d, "notes.txt"), []byte("hi"), 0o600)
-	os.WriteFile(filepath.Join(d, "stop-29990101T000000Z.json"), []byte("{broken"), 0o600)
+	os.WriteFile(filepath.Join(d, "stop-29990101T000000Z-00.json"), []byte("{broken"), 0o600)
 	rec, ok, err := Latest(d)
 	if err != nil || !ok || rec.Result != "timeout" {
 		t.Fatalf("Latest = %+v %v %v", rec, ok, err)
+	}
+	if recs, _ := List(d); len(recs) != 1 {
+		t.Fatalf("List has %d records, want only the valid one", len(recs))
+	}
+}
+
+// The merge window runs from the first stop of a record, so a steady loop
+// makes a new record each hour instead of growing one for ever.
+func TestWrite_MergeWindowRunsFromTheFirstStop(t *testing.T) {
+	d := newDir(t)
+	for _, m := range []int{0, 40, 80} {
+		mustWrite(t, d, Record{Result: "exit-code", ExitStatus: "1"}, t0.Add(time.Duration(m)*time.Minute))
+	}
+	recs, _ := List(d)
+	if len(recs) != 2 {
+		t.Fatalf("%d records, want 2", len(recs))
+	}
+	if recs[0].Repeats != 1 || recs[1].Repeats != 2 {
+		t.Fatalf("repeats newest-first = %d, %d; want 1, 2", recs[0].Repeats, recs[1].Repeats)
+	}
+}
+
+func TestWrite_FieldsAreLimitedToAFixedAlphabet(t *testing.T) {
+	d := newDir(t)
+	secret := "ghp_" + strings.Repeat("c", 36)
+	mustWrite(t, d, Record{Result: "failed: " + secret, ExitCode: "ex ited", ExitStatus: "SIG-TERM_1.2\x1b[31m"}, t0)
+	rec, _, _ := Latest(d)
+	for _, f := range []string{rec.Result, rec.ExitCode, rec.ExitStatus} {
+		for _, r := range f {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-' || r == '?') {
+				t.Fatalf("field %q holds %q", f, r)
+			}
+		}
+	}
+	if rec.ExitStatus != "SIG-TERM_1.2?x1b?31m" || rec.ExitCode != "ex?ited" {
+		t.Fatalf("fields = %q %q", rec.ExitStatus, rec.ExitCode)
+	}
+	_, all := readAll(t, d)
+	if bytes.Contains(all, []byte("ghp_cccc")) {
+		t.Fatal("a token in the result reached the record")
+	}
+}
+
+func TestLatest_SanitizesWhatItReadsFromDisk(t *testing.T) {
+	d := newDir(t)
+	EnsureDir(d)
+	body := `{"when":"2026-11-02T12:00:00Z","last":"2026-11-02T12:00:00Z","result":"bad\u001b[31mred","exitStatus":"a b","version":"v\u001b[0m1","repeats":1,"tail":[]}`
+	os.WriteFile(filepath.Join(d, "stop-20261102T120000Z-00.json"), []byte(body), 0o600)
+	rec, ok, _ := Latest(d)
+	if !ok || rec.Result != "bad?[31mred" || rec.ExitStatus != "a?b" || strings.ContainsRune(rec.Version, 0x1b) {
+		t.Fatalf("rec = %+v", rec)
+	}
+}
+
+// A, B, A: the exit-code stop at 12:20 merges into record A, so A is the
+// latest unclean stop, not B.
+func TestLatest_OrdersByTheLastStop(t *testing.T) {
+	d := newDir(t)
+	mustWrite(t, d, Record{Result: "exit-code"}, t0)
+	mustWrite(t, d, Record{Result: "timeout"}, t0.Add(10*time.Minute))
+	mustWrite(t, d, Record{Result: "exit-code"}, t0.Add(20*time.Minute))
+	rec, _, _ := Latest(d)
+	if rec.Result != "exit-code" || rec.Repeats != 2 {
+		t.Fatalf("Latest = %s x%d, want exit-code x2", rec.Result, rec.Repeats)
+	}
+}
+
+func TestWrite_EvictsByTheLastStop(t *testing.T) {
+	d := newDir(t)
+	lim := Default
+	lim.MaxRecords = 2
+	for i, r := range []string{"exit-code", "timeout", "exit-code", "signal"} {
+		if err := Write(d, Record{Result: r}, t0.Add(time.Duration(i*10)*time.Minute), lim); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recs, _ := List(d)
+	if len(recs) != 2 || recs[0].Result != "signal" || recs[1].Result != "exit-code" {
+		t.Fatalf("kept %+v, want signal and exit-code (timeout is the stalest)", recs)
+	}
+}
+
+func TestWrite_SweepsStaleTempFiles(t *testing.T) {
+	d := newDir(t)
+	EnsureDir(d)
+	old, fresh := filepath.Join(d, ".tmp-old"), filepath.Join(d, ".tmp-fresh")
+	os.WriteFile(old, []byte("x"), 0o600)
+	os.WriteFile(fresh, []byte("x"), 0o600)
+	os.Chtimes(old, t0.Add(-2*time.Hour), t0.Add(-2*time.Hour))
+	os.Chtimes(fresh, t0.Add(-5*time.Minute), t0.Add(-5*time.Minute))
+	mustWrite(t, d, Record{Result: "exit-code"}, t0)
+	if _, err := os.Stat(old); err == nil {
+		t.Fatal("a stale temp file was kept")
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatal("a recent temp file (maybe a writer's) was removed")
 	}
 }
 

@@ -156,16 +156,28 @@ func mustOne(t *testing.T, dir string) string {
 	return ents[0].Name()
 }
 
+// writeDenylist puts a denylist in a repo's sync dir.
+func writeDenylist(t *testing.T, syncDir, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(syncDir, "denylist.txt"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func recordBytes(t *testing.T, dir string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, mustOne(t, dir)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 func TestRecordStop_DenylistedPathsAreRedacted(t *testing.T) {
 	dir := stopHome(t)
-	// The primary config's denylist.
-	cfg := config.Defaults()
-	cfg.SyncDir = filepath.Join(os.Getenv("HOME"), ".claudesync")
-	os.MkdirAll(cfg.SyncDir, 0o700)
-	os.WriteFile(cfg.DenylistPath(), []byte("acme-secret-plans\n"), 0o600)
-	oldCfg := recordStopConfigFn
-	recordStopConfigFn = func() (config.Config, error) { return cfg, nil }
-	defer func() { recordStopConfigFn = oldCfg }()
+	sync := filepath.Join(os.Getenv("HOME"), ".claudesync")
+	os.MkdirAll(sync, 0o700)
+	writeDenylist(t, sync, "acme-secret-plans\n")
 	fakeJournal(t, func(context.Context, int) (string, error) {
 		return "bad ref projects/acme-secret-plans/x.md in tree\n", nil
 	})
@@ -178,20 +190,98 @@ func TestRecordStop_DenylistedPathsAreRedacted(t *testing.T) {
 
 func TestRecordStop_UnreadableDenylistRedactsPathLikeTokens(t *testing.T) {
 	dir := stopHome(t)
-	cfg := config.Defaults()
-	cfg.SyncDir = filepath.Join(os.Getenv("HOME"), ".claudesync")
-	os.MkdirAll(cfg.SyncDir, 0o700)
-	os.WriteFile(cfg.DenylistPath(), []byte("(unclosed\n"), 0o600) // does not parse
-	oldCfg := recordStopConfigFn
-	recordStopConfigFn = func() (config.Config, error) { return cfg, nil }
-	defer func() { recordStopConfigFn = oldCfg }()
+	sync := filepath.Join(os.Getenv("HOME"), ".claudesync")
+	os.MkdirAll(sync, 0o700)
+	writeDenylist(t, sync, "(unclosed\n") // does not parse
 	fakeJournal(t, func(context.Context, int) (string, error) {
 		return "bad ref projects/whatever/x.md in tree\n", nil
 	})
-	runRS(t, nil, uncleanEnv)
+	_, _, errOut := runRS(t, nil, uncleanEnv)
 	r, _, _ := stoprec.Latest(dir)
 	if len(r.Tail) != 1 || strings.Contains(r.Tail[0], "whatever") {
 		t.Fatalf("tail = %v", r.Tail)
+	}
+	if !strings.HasPrefix(errOut, "record-stop:") || strings.Contains(errOut, "(unclosed") {
+		t.Fatalf("stderr = %q, want a record-stop: line that names no pattern", errOut)
+	}
+}
+
+func TestRecordStop_UnloadableConfigRedactsPathLikeTokens(t *testing.T) {
+	dir := stopHome(t)
+	sync := filepath.Join(os.Getenv("HOME"), ".claudesync")
+	os.MkdirAll(sync, 0o700)
+	os.WriteFile(filepath.Join(sync, "config.json"), []byte("{broken"), 0o600)
+	fakeJournal(t, func(context.Context, int) (string, error) {
+		return "bad ref projects/whatever/x.md in tree\n", nil
+	})
+	_, _, errOut := runRS(t, nil, uncleanEnv)
+	r, _, _ := stoprec.Latest(dir)
+	if len(r.Tail) != 1 || strings.Contains(r.Tail[0], "whatever") || !strings.HasPrefix(errOut, "record-stop:") {
+		t.Fatalf("tail = %v stderr = %q", r.Tail, errOut)
+	}
+}
+
+// Routed mode: the daemon logs for every repo into one journal, so every
+// repo's denylist applies, not just the primary's.
+func TestRecordStop_EveryRoutedRepoDenylistApplies(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "client"}, "personal", []map[string]string{{"folder": "-a", "repo": "client"}})
+	writeDenylist(t, cfgs["client"].SyncDir, "acme-merger\n") // only the secondary lists it
+	d, _ := config.Dir()
+	dir := filepath.Join(d, "stops")
+	fakeJournal(t, func(context.Context, int) (string, error) {
+		return "scrub: holding back projects/-Users-b-code-acme/memory/acme-merger.md\n", nil
+	})
+	if code, _, errOut := runRS(t, nil, uncleanEnv); code != 0 || errOut != "" {
+		t.Fatalf("code=%d stderr=%q", code, errOut)
+	}
+	if b := recordBytes(t, dir); bytes.Contains(b, []byte("acme-merger")) || !bytes.Contains(b, []byte("<path redacted>")) {
+		t.Fatalf("the secondary repo's denylisted term is in the record:\n%s", b)
+	}
+}
+
+func TestRecordStop_RoutedUnreadableSecondaryDenylistRedactsAllPaths(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "client"}, "personal", []map[string]string{{"folder": "-a", "repo": "client"}})
+	writeDenylist(t, cfgs["personal"].SyncDir, "other-term\n")
+	writeDenylist(t, cfgs["client"].SyncDir, "(unclosed\n")
+	d, _ := config.Dir()
+	fakeJournal(t, func(context.Context, int) (string, error) { return "see projects/innocent/x.md now\n", nil })
+	runRS(t, nil, uncleanEnv)
+	if b := recordBytes(t, filepath.Join(d, "stops")); bytes.Contains(b, []byte("innocent")) {
+		t.Fatalf("closed mode let a path through:\n%s", b)
+	}
+}
+
+func TestRecordStop_RoutedUnloadableSecondaryConfigRedactsAllPaths(t *testing.T) {
+	cfgs := routedHost(t, []string{"personal", "client"}, "personal", []map[string]string{{"folder": "-a", "repo": "client"}})
+	os.WriteFile(cfgs["client"].Path(), []byte("{broken"), 0o600)
+	d, _ := config.Dir()
+	fakeJournal(t, func(context.Context, int) (string, error) { return "see projects/innocent/x.md now\n", nil })
+	runRS(t, nil, uncleanEnv)
+	if b := recordBytes(t, filepath.Join(d, "stops")); bytes.Contains(b, []byte("innocent")) {
+		t.Fatalf("closed mode let a path through:\n%s", b)
+	}
+}
+
+func TestRecordStop_ByHandWithNoFlagsRecordsUnknown(t *testing.T) {
+	dir := stopHome(t)
+	fakeJournal(t, func(context.Context, int) (string, error) { return "", nil })
+	runRS(t, nil, map[string]string{})
+	r, ok, _ := stoprec.Latest(dir)
+	if !ok || r.Result != "unknown" || r.Source != "manual" {
+		t.Fatalf("record = %+v", r)
+	}
+}
+
+func TestRecordStop_TokenInAResultFlagIsNotStoredOrPrinted(t *testing.T) {
+	dir := stopHome(t)
+	fakeJournal(t, func(context.Context, int) (string, error) { return "", nil })
+	secret := "ghp_" + strings.Repeat("d", 36)
+	code, out, errOut := runRS(t, []string{"--result", "boom " + secret}, map[string]string{})
+	if code != 0 || strings.Contains(out+errOut, secret) {
+		t.Fatalf("code=%d out=%q err=%q", code, out, errOut)
+	}
+	if b := recordBytes(t, dir); bytes.Contains(b, []byte("ghp_")) {
+		t.Fatalf("the token reached the record:\n%s", b)
 	}
 }
 
@@ -201,26 +291,26 @@ func TestRecordStop_NeverReturnsNonZero(t *testing.T) {
 		setup  func(t *testing.T, dir string)
 		env    map[string]string
 		args   []string
-		cfgDir bool // wants a record file
+		stderr bool // a failing case must say why on stderr
 	}{
-		{name: "records dir is a file", setup: func(t *testing.T, dir string) {
+		{name: "records dir is a file", stderr: true, setup: func(t *testing.T, dir string) {
 			os.MkdirAll(filepath.Dir(dir), 0o700)
 			os.WriteFile(dir, []byte("x"), 0o600)
 		}},
 		{name: "dir 0500", setup: func(t *testing.T, dir string) {
 			os.MkdirAll(dir, 0o500)
 		}},
-		{name: "dir is a symlink", setup: func(t *testing.T, dir string) {
+		{name: "dir is a symlink", stderr: true, setup: func(t *testing.T, dir string) {
 			os.MkdirAll(filepath.Dir(dir), 0o700)
 			if err := os.Symlink(t.TempDir(), dir); err != nil {
 				t.Skip(err)
 			}
 		}},
-		{name: "config dir parent is a file", setup: func(t *testing.T, dir string) {
+		{name: "config dir parent is a file", stderr: true, setup: func(t *testing.T, dir string) {
 			home := os.Getenv("HOME")
 			os.WriteFile(filepath.Join(home, ".config"), []byte("x"), 0o600)
 		}},
-		{name: "journalctl fails", setup: func(t *testing.T, dir string) {
+		{name: "journalctl fails", stderr: true, setup: func(t *testing.T, dir string) {
 			fakeJournal(t, func(context.Context, int) (string, error) { return "", errors.New("no journal") })
 		}},
 		{name: "journalctl 50 MB", setup: func(t *testing.T, dir string) {
@@ -229,9 +319,9 @@ func TestRecordStop_NeverReturnsNonZero(t *testing.T) {
 		}},
 		{name: "garbage status", env: map[string]string{"SERVICE_RESULT": "exit-code", "EXIT_CODE": "exited", "EXIT_STATUS": "abc"}},
 		{name: "control bytes in env", env: map[string]string{"SERVICE_RESULT": "exit-code\x1b[31m", "EXIT_CODE": "\x00", "EXIT_STATUS": strings.Repeat("9", 5000)}},
-		{name: "unknown flag", args: []string{"--no-such-flag"}},
-		{name: "positional argument", args: []string{"surprise"}},
-		{name: "panic in the body", setup: func(t *testing.T, dir string) {
+		{name: "unknown flag", stderr: true, args: []string{"--no-such-flag"}},
+		{name: "positional argument", stderr: true, args: []string{"surprise"}},
+		{name: "panic in the body", stderr: true, setup: func(t *testing.T, dir string) {
 			old := recordStopHook
 			recordStopHook = func() { panic("injected") }
 			t.Cleanup(func() { recordStopHook = old })
@@ -251,6 +341,9 @@ func TestRecordStop_NeverReturnsNonZero(t *testing.T) {
 			code, _, errOut := runRS(t, c.args, env)
 			if code != 0 {
 				t.Fatalf("exit %d, want 0 (stderr %q)", code, errOut)
+			}
+			if c.stderr && !strings.HasPrefix(errOut, "record-stop:") {
+				t.Fatalf("stderr = %q, want a line starting record-stop:", errOut)
 			}
 			if c.name == "panic in the body" && !strings.Contains(errOut, "panic") {
 				t.Fatalf("a panic left no stderr line: %q", errOut)
