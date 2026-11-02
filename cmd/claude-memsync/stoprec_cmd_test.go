@@ -61,7 +61,7 @@ func countSpawns(t *testing.T) (n *atomic.Int64, names func() []string) {
 
 var uncleanEnv = map[string]string{"SERVICE_RESULT": "exit-code", "EXIT_CODE": "exited", "EXIT_STATUS": "1"}
 
-func run(t *testing.T, args []string, env map[string]string) (code int, out, errOut string) {
+func runRS(t *testing.T, args []string, env map[string]string) (code int, out, errOut string) {
 	t.Helper()
 	var o, e bytes.Buffer
 	code = runRecordStop(args, envOf(env), &o, &e)
@@ -71,7 +71,7 @@ func run(t *testing.T, args []string, env map[string]string) (code int, out, err
 func TestRecordStop_CleanStopWritesNothingAndSpawnsNothing(t *testing.T) {
 	dir := stopHome(t)
 	n, _ := countSpawns(t)
-	code, out, errOut := run(t, nil, map[string]string{"SERVICE_RESULT": "success", "EXIT_CODE": "exited", "EXIT_STATUS": "0"})
+	code, out, errOut := runRS(t, nil, map[string]string{"SERVICE_RESULT": "success", "EXIT_CODE": "exited", "EXIT_STATUS": "0"})
 	if code != 0 || out != "" || errOut != "" {
 		t.Fatalf("code=%d out=%q err=%q", code, out, errOut)
 	}
@@ -92,7 +92,7 @@ func TestRecordStop_UncleanWritesRecord(t *testing.T) {
 				gotN = n
 				return "2026-11-02T12:00:00+0000 h claude-memsync[1]: first\n2026-11-02T12:00:01+0000 h claude-memsync[1]: second\n", nil
 			})
-			code, _, errOut := run(t, nil, map[string]string{"SERVICE_RESULT": res, "EXIT_CODE": "exited", "EXIT_STATUS": "3"})
+			code, _, errOut := runRS(t, nil, map[string]string{"SERVICE_RESULT": res, "EXIT_CODE": "exited", "EXIT_STATUS": "3"})
 			if code != 0 || errOut != "" {
 				t.Fatalf("code=%d err=%q", code, errOut)
 			}
@@ -117,7 +117,7 @@ func TestRecordStop_UncleanWritesRecord(t *testing.T) {
 func TestRecordStop_FlagsOverrideEnv(t *testing.T) {
 	dir := stopHome(t)
 	fakeJournal(t, func(context.Context, int) (string, error) { return "", nil })
-	code, _, _ := run(t, []string{"--result", "timeout", "--exit-code", "killed", "--exit-status", "KILL"}, map[string]string{"SERVICE_RESULT": "success"})
+	code, _, _ := runRS(t, []string{"--result", "timeout", "--exit-code", "killed", "--exit-status", "KILL"}, map[string]string{"SERVICE_RESULT": "success"})
 	if code != 0 {
 		t.Fatal(code)
 	}
@@ -133,7 +133,7 @@ func TestRecordStop_SecretsNeverStoredOrPrinted(t *testing.T) {
 	fakeJournal(t, func(context.Context, int) (string, error) {
 		return "ok line\nleak " + secret + " here\n", nil
 	})
-	code, out, errOut := run(t, nil, uncleanEnv)
+	code, out, errOut := runRS(t, nil, uncleanEnv)
 	if code != 0 || strings.Contains(out+errOut, secret) {
 		t.Fatalf("code=%d out=%q err=%q", code, out, errOut)
 	}
@@ -169,7 +169,7 @@ func TestRecordStop_DenylistedPathsAreRedacted(t *testing.T) {
 	fakeJournal(t, func(context.Context, int) (string, error) {
 		return "bad ref projects/acme-secret-plans/x.md in tree\n", nil
 	})
-	run(t, nil, uncleanEnv)
+	runRS(t, nil, uncleanEnv)
 	r, _, _ := stoprec.Latest(dir)
 	if len(r.Tail) != 1 || strings.Contains(r.Tail[0], "acme-secret-plans") || !strings.Contains(r.Tail[0], "<path redacted>") {
 		t.Fatalf("tail = %v", r.Tail)
@@ -188,7 +188,7 @@ func TestRecordStop_UnreadableDenylistRedactsPathLikeTokens(t *testing.T) {
 	fakeJournal(t, func(context.Context, int) (string, error) {
 		return "bad ref projects/whatever/x.md in tree\n", nil
 	})
-	run(t, nil, uncleanEnv)
+	runRS(t, nil, uncleanEnv)
 	r, _, _ := stoprec.Latest(dir)
 	if len(r.Tail) != 1 || strings.Contains(r.Tail[0], "whatever") {
 		t.Fatalf("tail = %v", r.Tail)
@@ -248,7 +248,7 @@ func TestRecordStop_NeverReturnsNonZero(t *testing.T) {
 			if env == nil {
 				env = uncleanEnv
 			}
-			code, _, errOut := run(t, c.args, env)
+			code, _, errOut := runRS(t, c.args, env)
 			if code != 0 {
 				t.Fatalf("exit %d, want 0 (stderr %q)", code, errOut)
 			}
@@ -267,7 +267,7 @@ func TestRecordStop_NoHomeStillExitsZero(t *testing.T) {
 	t.Setenv("USERPROFILE", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
 	fakeJournal(t, func(context.Context, int) (string, error) { return "", nil })
-	if code, _, _ := run(t, nil, uncleanEnv); code != 0 {
+	if code, _, _ := runRS(t, nil, uncleanEnv); code != 0 {
 		t.Fatalf("exit %d", code)
 	}
 }
@@ -287,7 +287,7 @@ func TestRecordStop_JournalDeadline(t *testing.T) {
 	journalTimeout = 150 * time.Millisecond
 	defer func() { journalTimeout = old }()
 	start := time.Now()
-	code, _, _ := run(t, nil, uncleanEnv)
+	code, _, _ := runRS(t, nil, uncleanEnv)
 	if code != 0 || time.Since(start) > 3*time.Second {
 		t.Fatalf("exit %d after %v", code, time.Since(start))
 	}
@@ -302,7 +302,7 @@ func TestRecordStop_NoServiceManagerCalls(t *testing.T) {
 	stopHome(t)
 	n, names := countSpawns(t)
 	fakeJournal(t, func(context.Context, int) (string, error) { return "x\n", nil })
-	run(t, nil, uncleanEnv)
+	runRS(t, nil, uncleanEnv)
 	for _, s := range names() {
 		if s == "systemctl" || s == "launchctl" {
 			t.Fatalf("record-stop ran %s", s)
@@ -312,7 +312,7 @@ func TestRecordStop_NoServiceManagerCalls(t *testing.T) {
 }
 
 func TestRecordStop_Help(t *testing.T) {
-	code, out, _ := run(t, []string{"-h"}, nil)
+	code, out, _ := runRS(t, []string{"-h"}, nil)
 	if code != 0 || !strings.Contains(out, "usage: claude-memsync record-stop") {
 		t.Fatalf("code=%d out=%q", code, out)
 	}

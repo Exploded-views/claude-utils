@@ -71,6 +71,8 @@ func main() {
 		os.Exit(runStart(os.Args[2:]))
 	case "stop":
 		os.Exit(runStop(os.Args[2:]))
+	case "record-stop":
+		os.Exit(recordStopMain(os.Args[2:]))
 	case "status":
 		os.Exit(runStatus(os.Args[2:]))
 	default:
@@ -126,6 +128,7 @@ Subcommands:
   start       Start the system service
   stop        Stop the system service
   status      Report service status
+  record-stop Record an unclean service stop (the unit's ExecStopPost; always exits 0)
   version     Print version
   help        Show this help`)
 }
