@@ -724,7 +724,8 @@ func abortRebaseConflict(repo *gitwt.Repo) error {
 }
 
 // remoteAndLocalIdle reports whether there is nothing to do: origin's branch
-// SHA matches our cached remote-tracking ref AND we have no unpushed commits.
+// SHA matches our cached remote-tracking ref AND HEAD is level with it: no
+// unpushed commits and none fetched but not yet merged.
 // Returns (false, nil) when the gate cannot prove idleness — including the
 // first run before refs/remotes/origin/<branch> exists locally.
 func remoteAndLocalIdle(repo *gitwt.Repo, branch string) (bool, error) {
@@ -739,11 +740,16 @@ func remoteAndLocalIdle(repo *gitwt.Repo, branch string) (bool, error) {
 	if strings.TrimSpace(cachedSHA) != remoteSHA {
 		return false, nil // remote moved
 	}
-	unpushed, err := repo.Run("rev-list", "--count", "refs/remotes/origin/"+branch+"..HEAD")
+	// One spawn: "<behind>\t<ahead>" of HEAD against the tracking ref. Behind
+	// matters as much as ahead: a fetch not followed by a merge (a manual
+	// fetch, another tool, a pull whose rebase aborted) leaves the tracking
+	// ref equal to the remote but HEAD behind it, and skipping then would
+	// never merge those commits.
+	counts, err := repo.Run("rev-list", "--left-right", "--count", "refs/remotes/origin/"+branch+"...HEAD")
 	if err != nil {
 		return false, nil
 	}
-	return strings.TrimSpace(unpushed) == "0", nil
+	return strings.Join(strings.Fields(counts), " ") == "0 0", nil
 }
 
 // propagateChanges replays the file changes between pre and post revisions
