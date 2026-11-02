@@ -5,9 +5,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -487,13 +489,27 @@ func runService(configPath, routesFlag string, opts guardOpts) int {
 	}
 	logger, err := svc.Logger(nil)
 	if err == nil {
-		log.SetOutput(serviceLogWriter{logger: logger})
+		if w := serviceLogOutput(runtime.GOOS, logger); w != nil {
+			log.SetOutput(w)
+		}
 	}
 	if err := svc.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "run:", err)
 		return 1
 	}
 	return 0
+}
+
+// serviceLogOutput is where the std logger writes under the service manager.
+// On macOS the service logger is syslog at LOG_INFO, which the system does not
+// keep, so every line after startup would vanish; the launchd unit already
+// sends stderr to a file, so the logger stays on stderr there. Elsewhere the
+// lines go to the service logger (journald, the Windows event log).
+func serviceLogOutput(goos string, svcLogger service.Logger) io.Writer {
+	if goos == "darwin" {
+		return os.Stderr
+	}
+	return serviceLogWriter{logger: svcLogger}
 }
 
 type serviceLogWriter struct{ logger service.Logger }
