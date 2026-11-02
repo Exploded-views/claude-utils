@@ -32,6 +32,8 @@ mkdir -p "$home/.claudesync" "$home/.config"
 cat > "$home/.claudesync/config.json" <<EOF
 {"remoteUrl": "git@github.com:example-org/mem-example.git", "syncDir": "$home/.claudesync"}
 EOF
+# The config loader refuses a config that other users can read or write.
+chmod 600 "$home/.claudesync/config.json"
 
 help() {
   # Run one command with a clean environment; normalise the temp path.

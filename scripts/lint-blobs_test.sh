@@ -89,13 +89,13 @@ check "range: a big old blob moved to a new path is refused" refused_range "move
 newrepo; B=$(base)
 git -C "$R" checkout -q -b side; stage side.txt 10; cm side
 git -C "$R" checkout -q -; stage main.txt 10; cm main
-git -C "$R" merge -q --no-commit --no-ff side >/dev/null 2>&1 || true
+git -C "$R" -c user.name=t -c user.email=t@example.com merge -q --no-commit --no-ff side >/dev/null 2>&1 || true
 stage big.bin 1048577; cm "merge"
 git -C "$R" rm -q big.bin; cm "delete it again"
 check "range: a big file added by a merge commit and deleted later is refused" refused_range "big.bin"
 newrepo; B=$(base); git -C "$R" checkout -q -b side; stage side.txt 10; cm side
 git -C "$R" checkout -q -; stage main.txt 10; cm main
-git -C "$R" merge -q --no-ff -m merge side >/dev/null 2>&1
+git -C "$R" -c user.name=t -c user.email=t@example.com merge -q --no-ff -m merge side >/dev/null 2>&1
 check "range: a clean merge passes" passes_range
 
 # FAIL CLOSED: a range that cannot be judged is an error, never a pass.
