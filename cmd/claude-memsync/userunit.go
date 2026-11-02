@@ -276,7 +276,12 @@ func ensureUserUnitTarget(w io.Writer) error { return repairUserUnit(w, "") }
 // nothing is changed and the manual steps are printed. Otherwise: disable
 // (while the old file still names multi-user.target, so its .wants link goes),
 // rewrite atomically, reload, enable, and confirm.
-func repairUserUnit(w io.Writer, wantExec string) error {
+func repairUserUnit(w io.Writer, wantExec string) error { return repairUserUnitTo(w, wantExec, "") }
+
+// repairUserUnitTo is repairUserUnit that also points the unit's
+// ConditionFileIsExecutable at wantExe when that is not empty, so the
+// Condition and the ExecStart name the same build.
+func repairUserUnitTo(w io.Writer, wantExec, wantExe string) error {
 	path, content, ok, rerr := loadUserUnit()
 	if rerr != nil {
 		fmt.Fprintln(w, unreadableWarning(rerr))
@@ -290,7 +295,11 @@ func repairUserUnit(w io.Writer, wantExec string) error {
 	if wantExec != "" {
 		fixed, execChanged = setExecStart(fixed, wantExec)
 	}
-	if !execChanged && autostartConfirmed(path, content) {
+	condChanged := false
+	if wantExe != "" {
+		fixed, condChanged = setCondition(fixed, wantExe)
+	}
+	if !execChanged && !condChanged && autostartConfirmed(path, content) {
 		return nil
 	}
 	if !targetRight(fixed) {
@@ -328,8 +337,12 @@ func repairUserUnit(w io.Writer, wantExec string) error {
 	}
 	if targetChanged {
 		fmt.Fprintf(w, "fixed autostart: %s is now WantedBy=default.target (was multi-user.target, which a user manager never reaches); reloaded and re-enabled\n", userUnitName)
-	} else if !execChanged {
+	} else if !execChanged && !condChanged {
 		fmt.Fprintf(w, "re-enabled %s: it said default.target but was not linked into %s.wants\n", userUnitName, userTarget)
+	}
+	if condChanged {
+		old, _ := currentCondition(content)
+		fmt.Fprintf(w, "updated the unit's %s%s (was %s)\n", conditionKey, wantExe, old)
 	}
 	if execChanged {
 		old, _ := currentExecStart(content)

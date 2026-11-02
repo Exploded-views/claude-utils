@@ -90,6 +90,7 @@ func TestInstallRerun_CRLFUnitEqualIsNotRewritten(t *testing.T) {
 	line := execStartLine(exe, []string{"run", "--config", "/x/config.json"})
 	path, calls := liveUnit(t, line)
 	b, _ := os.ReadFile(path)
+	b = []byte(strings.Replace(string(b), conditionKey+"/usr/local/bin/claude-memsync", conditionKey+exe, 1)) // the Condition names this build too
 	crlf := strings.ReplaceAll(string(b), "\n", "\r\n")
 	if err := os.WriteFile(path, []byte(crlf), 0o644); err != nil {
 		t.Fatal(err)

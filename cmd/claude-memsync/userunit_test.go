@@ -425,6 +425,7 @@ func TestInstallRerun_SameArgsAndRightUnitKeepsKardianosBehaviour(t *testing.T) 
 	exe, _ := os.Executable()
 	b, _ := os.ReadFile(path)
 	cur := strings.Replace(string(b), execLine(t, path), execStartLine(exe, []string{"run", "--config", "/x/config.json"}), 1)
+	cur = strings.Replace(cur, conditionKey+"/usr/local/bin/claude-memsync", conditionKey+exe, 1) // the Condition names this build too
 	os.WriteFile(path, []byte(cur), 0o644)
 	installed := false
 	kardianosInstall = func(svc service.Service) error { installed = true; return nil }

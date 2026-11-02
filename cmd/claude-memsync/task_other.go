@@ -61,6 +61,9 @@ func installTask(configPath string) error {
 		if err != nil {
 			return err
 		}
+		if err := relinkBins(os.Stderr, exe); err != nil {
+			return fmt.Errorf("install: cannot repoint the bin/ symlinks: %w", err)
+		}
 		want := ""
 		if cur, found := currentExecStart(content); found {
 			// Keep the unit's own arguments (and any hand edit); only the
@@ -76,8 +79,10 @@ func installTask(configPath string) error {
 				want = execStartLine(exe, args)
 			}
 		}
-		if _, changed := setExecStart(content, want); (want != "" && changed) || userUnitIsWrong() {
-			return repairUserUnit(os.Stderr, want)
+		_, changed := setExecStart(content, want)
+		_, condChanged := setCondition(content, exe)
+		if (want != "" && changed) || condChanged || userUnitIsWrong() {
+			return repairUserUnitTo(os.Stderr, want, exe)
 		}
 	}
 	if err := kardianosInstall(svc); err != nil {
