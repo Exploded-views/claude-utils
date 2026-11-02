@@ -52,12 +52,14 @@ for each file you did not download and exits non-zero, even when your archive is
 intact. Check only your archive's line, on any OS:
 
 ```sh
-grep " $NAME.tar.gz\$" SHA256SUMS | shasum -a 256 -c -     # or: grep ... | sha256sum -c -
+grep " $NAME.tar.gz\$" SHA256SUMS | shasum -a 256 -c -
 ```
 
 It must print `<your archive>: OK`. If your archive is not listed (a renamed or
 wrong file) `grep` selects nothing, the checker gets empty input and fails, so
-this form cannot pass by accident.
+this form cannot pass by accident. `shasum` ships with perl on macOS and
+Linux. Do not swap `sha256sum` in for `shasum` here: the macOS one exits 0 on
+empty input.
 
 The alternative is to let the checker skip what is absent:
 
@@ -165,7 +167,7 @@ STEPS
    must print `<archive>: OK`.
 
    ```sh
-   grep " $NAME.tar.gz\$" SHA256SUMS | shasum -a 256 -c -     # or: grep ... | sha256sum -c -
+   grep " $NAME.tar.gz\$" SHA256SUMS | shasum -a 256 -c -
    ```
 
    Do not extract an archive that does not verify. `SHA256SUMS` comes from the

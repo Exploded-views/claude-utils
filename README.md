@@ -83,7 +83,7 @@ PLATFORM=linux-amd64        # linux-arm64, darwin-amd64 or darwin-arm64
 NAME=claude-utils-$TAG-$PLATFORM
 URL=https://github.com/Exploded-views/claude-utils/releases/download/$TAG
 curl -fLO "$URL/$NAME.tar.gz" -O "$URL/SHA256SUMS"
-grep " $NAME.tar.gz\$" SHA256SUMS | shasum -a 256 -c -     # or: grep ... | sha256sum -c -
+grep " $NAME.tar.gz\$" SHA256SUMS | shasum -a 256 -c -
 tar -xzf "$NAME.tar.gz"
 mkdir -p ~/.local/bin && cp "$NAME/claude-memsync" "$NAME/claude-memmerge" ~/.local/bin/
 claude-memsync version      # claude-memsync v0.5.0-ev.1

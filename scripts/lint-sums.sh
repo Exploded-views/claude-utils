@@ -9,7 +9,10 @@
 # command (sha256sum, gsha256sum or shasum, flags in any position, lines joined
 # across a trailing backslash) checks a list (-c or --check) without the
 # --ignore-missing token on that same command, unless it is the single-line
-# form `grep ... | shasum -a 256 -c -` (or | sha256sum -c -), which reads stdin.
+# form `grep " $NAME.tar.gz\$" SHA256SUMS | shasum -a 256 -c -` (a quoted
+# pattern, no -v), which fails on empty input. sha256sum -c - is not accepted:
+# the macOS one exits 0 on empty input. A `&` inside 2>&1 or >&2 does not end
+# the command. Known gap, left alone: shasum -c --ignore-missing is flagged.
 # A command ends at |, ;, &, a backtick, ) or a # comment. Comment lines in
 # *.sh are skipped; a line carrying "sums-ok" is skipped; a file with
 # "sums-lint: skip-file" in its first lines is skipped. The last line says how
@@ -23,9 +26,9 @@ import os, re, sys
 root = sys.argv[1]
 SKIP_DIRS = {".git", "node_modules", "vendor"}
 CMD = re.compile(r"(?<![\w-])(g?sha256sum|shasum)(?!\w)")
-END = re.compile(r"[|;&`)]|\s#")
+END = re.compile(r"[|;`)]|(?<!>)&(?!>)|\s#")
 CHECK = re.compile(r"-[A-Za-z]*c[A-Za-z]*|--check")
-FROM_GREP = re.compile(r"\bgrep\b[^|]*\|\s*$")
+FROM_GREP = re.compile(r"(?<![\w-])grep\s+(?:-[^v\s-]+\s+)*([\"'])[^\"']*\1\s+\S+\s*\|\s*$")
 
 paths = []
 for d, dirs, files in os.walk(root):
@@ -57,7 +60,7 @@ def problem(text):
         if not any(CHECK.fullmatch(t) for t in toks): continue
         if m.group(1).endswith("sha256sum") and "--ignore-missing" in toks:
             continue
-        if toks and toks[-1] == "-" and FROM_GREP.search(text[:m.start()]):
+        if m.group(1) == "shasum" and toks and toks[-1] == "-" and FROM_GREP.search(text[:m.start()]):
             continue
         if m.group(1) == "shasum":
             return "a shasum check must read one grep-selected line from stdin (see docs/releases.md#verify-a-download)"

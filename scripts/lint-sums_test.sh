@@ -54,7 +54,12 @@ check "--ignore-missing as a prefix of another word does not count" flagged docs
 check "grep then shasum reading a file is flagged" flagged docs/a.md 'grep x f | shasum -a 256 -c SHA256SUMS'
 check "grep then sha256sum reading a file is flagged" flagged docs/a.md 'grep x f | sha256sum -c SHA256SUMS'
 check "a command not fed by grep, reading stdin, is flagged" flagged docs/a.md 'echo x | sha256sum -c -'
-check "grep | sha256sum -c - (stdin) is accepted" clean docs/a.md 'grep " $NAME.tar.gz\$" SHA256SUMS | sha256sum -c -'
+check "grep | sha256sum -c - is flagged (macOS sha256sum exits 0 on empty input)" flagged docs/a.md 'grep " $NAME.tar.gz\$" SHA256SUMS | sha256sum -c -'
+check "a stderr redirect before -c does not hide it" flagged docs/a.md 'sha256sum 2>&1 -c SHA256SUMS'
+check "a >&2 redirect before -c does not hide it" flagged docs/a.md 'sha256sum >&2 -c SHA256SUMS'
+check "grep -v into shasum is flagged" flagged docs/a.md 'grep -v foo SHA256SUMS | shasum -a 256 -c -'
+check "grep with an unquoted pattern into shasum is flagged" flagged docs/a.md 'grep foo SHA256SUMS | shasum -a 256 -c -'
+check "grep -F of a quoted name into shasum is accepted" clean docs/a.md 'grep -F " $NAME.tar.gz" SHA256SUMS | shasum -a 256 -c -'
 check "a near miss (-c-style prose) is accepted" clean docs/a.md 'the sha256sum -c-style output'
 check "sha256sum piped to wc -c is accepted" clean docs/a.md 'sha256sum f | wc -c'
 check "a continued command with --ignore-missing is accepted" clean docs/a.md 'sha256sum \
