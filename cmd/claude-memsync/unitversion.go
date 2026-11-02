@@ -64,11 +64,15 @@ var (
 
 // exeThrowaway reports a binary that must not become the installed build: one
 // that cannot be resolved, lies under the resolved temp dir, or has a
-// world-writable ancestor directory (anyone could swap what runs). Symlinks
+// ancestor directory that is group- or world-writable or owned by neither the
+// user nor root, or is not a safe regular file itself (anyone could swap what runs). Symlinks
 // are resolved first, so a path that merely points into such a place counts.
 func exeThrowaway(exe string) bool {
 	r, err := filepath.EvalSymlinks(exe)
 	if err != nil {
+		return true
+	}
+	if linkTargetSafe(r) != nil {
 		return true
 	}
 	if t, err := filepath.EvalSymlinks(tempDirFn()); err == nil && underDir(r, t) {
@@ -82,7 +86,8 @@ func exeThrowaway(exe string) bool {
 		if stop != "" && (d == stop || !strings.HasPrefix(d, stop+string(filepath.Separator))) {
 			break
 		}
-		if st, err := os.Stat(d); err != nil || st.Mode().Perm()&0o002 != 0 {
+		st, err := os.Stat(d)
+		if err != nil || st.Mode().Perm()&0o022 != 0 || !(ownedBy(st, currentUID()) || ownedBy(st, 0)) {
 			return true
 		}
 		if filepath.Dir(d) == d {
