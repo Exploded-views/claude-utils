@@ -88,7 +88,10 @@ mark_state() {
   ms="$(g_state "$STATE/$HOST.$1")" || die "cannot tell whether the mark $1 exists in $STATE; refusing"
   case "$ms" in ABSENT | PRESENT) printf '%s' "$ms" ;; *) die "the mark $1 in $STATE is a dangling symlink; refusing" ;; esac
 }
-mark()   { [ "$DRY_RUN" -eq 1 ] && return 0; mkdir -p "$STATE"; : >"$STATE/$HOST.$1"; }
+# mkdir_p: every directory this script makes is 0755, whatever the user's umask
+# (a 0775 one would be refused by home_guard and by claude-memsync install).
+mkdir_p() { ( umask 022; mkdir -p "$@" ); }
+mark()   { [ "$DRY_RUN" -eq 1 ] && return 0; mkdir_p "$STATE"; : >"$STATE/$HOST.$1"; }
 
 # ---------------------------------------------------------------------------
 # Guards: every "may we proceed?" decision. The shape that keeps them honest is
@@ -1688,7 +1691,7 @@ step_build() {
     run sh -c 'umask 022; mkdir -p "$1"' _ "$(dirname "$SRC")"
     home_guard
     run sh -c 'umask 022; git clone --quiet "$1" "$2"' _ "$UTILS_URL" "$SRC"
-    run git -C "$SRC" checkout --quiet "$SHA"
+    run sh -c 'umask 022; git -C "$1" checkout --quiet "$2"' _ "$SRC" "$SHA"
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
     [ "$(git -C "$SRC" rev-parse HEAD)" = "$SHA" ] || die "HEAD of $SRC is not $SHA"
@@ -1772,7 +1775,7 @@ add_known_host() { # label hostpattern scan-args...
 # shared files, so only this one process writes them.
 step_ssh() {
   step "d. Host keys"
-  run mkdir -p "$HOME/.ssh"
+  run mkdir_p "$HOME/.ssh"
   run chmod 700 "$HOME/.ssh"
   add_known_host "github.com:22" "github.com" github.com
   add_known_host "ssh.github.com:443" "[ssh.github.com]:443" -p 443 ssh.github.com
@@ -1892,7 +1895,7 @@ step_routes() {
       if [ "$added" -gt 0 ]; then say "  denylist-$k.txt: $([ "$DRY_RUN" -eq 1 ] && echo "would add" || echo added) $added keep-out term(s); existing lines kept"
       else say "  denylist-$k.txt: no new keep-out terms (existing lines kept)"; fi
     else
-      run mkdir -p "$CFG"
+      run mkdir_p "$CFG"
       say "  writing $CFG/denylist-$k.txt (${#KEEP_OUT_TERMS[@]} keep-out terms)"
       if [ "$DRY_RUN" -eq 0 ]; then
         : >"$CFG/denylist-$k.txt"; chmod 600 "$CFG/denylist-$k.txt"
@@ -1914,7 +1917,7 @@ step_routes() {
   fi
   say "  writing $ROUTES (0600, default deny, foreignWriters for the old memsync)"
   [ "$DRY_RUN" -eq 1 ] && return 0
-  mkdir -p "$CFG"
+  mkdir_p "$CFG"
   if [ "$rs" = "PRESENT" ]; then
     bak="$(unique_path "$ROUTES.bak.${BOOTSTRAP_ASIDE_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}")" || die "cannot find a free name for the backup of $ROUTES"
     cp -p "$ROUTES" "$bak"
