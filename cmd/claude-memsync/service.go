@@ -379,13 +379,16 @@ func runStatus(args []string) int {
 
 // heldBackLine reports how many notes the scrub is holding back, as a count
 // only: a name could itself match the denylist. It is empty when none are held
-// or the repo cannot be read.
+// or the repo cannot be read; a denylist that stops every commit is said so.
 func heldBackLine(cfg config.Config) string {
 	held, err := syncpkg.HeldBack(gitwt.New(cfg.SyncDir), cfg)
+	if errors.Is(err, syncpkg.ErrDenylistBlocked) {
+		return "committing nothing: denylist missing or unreadable (notes stay local until it is fixed)"
+	}
 	if err != nil || len(held) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("held back by the denylist: %d notes (not synced; run in that project to see which)", len(held))
+	return fmt.Sprintf("held back (denylist or secret rule): %d notes (not synced; run in that project to see which)", len(held))
 }
 
 // routedStatus prints the routing part of status. handled is false only when no

@@ -239,6 +239,11 @@ func heldByPath(sc *scrub.Scanner, path string) bool { return sc.MatchesPath(pat
 // heldRules names the rules the content trips; none means it is not held.
 func heldRules(sc *scrub.Scanner, content []byte) []string { return sc.Scan(content) }
 
+// ErrDenylistBlocked is HeldBack's answer when the denylist policy stops every
+// commit (required and missing, or unreadable): nothing syncs, so no list of
+// held files would describe the state.
+var ErrDenylistBlocked = errors.New("denylist missing or unreadable")
+
 // HeldBack lists the work-tree files, modified or untracked and not ignored,
 // that the scrub would hold back from the next commit. It is read-only: it
 // stages nothing and runs no filter, scanning the plaintext in the work tree.
@@ -248,8 +253,13 @@ func HeldBack(repo *gitwt.Repo, cfg config.Config) ([]string, error) {
 		return nil, nil
 	}
 	deny, err := loadDenylist(cfg)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("read denylist: %w", err)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		if cfg.RequireDenylist {
+			return nil, ErrDenylistBlocked
+		}
+	case err != nil:
+		return nil, fmt.Errorf("%w: %v", ErrDenylistBlocked, err)
 	}
 	dirty, err := repo.DirtyPaths("")
 	if err != nil {
