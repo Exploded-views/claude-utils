@@ -47,6 +47,20 @@ var binLinkDirFn = func() (string, error) {
 	return filepath.Join(home, ".local", "bin"), nil
 }
 
+// installExeFn is the executable being installed; tests replace it.
+var installExeFn = os.Executable
+
+// exeThrowawayFn reports a binary that must not become the installed build;
+// tests replace it.
+var exeThrowawayFn = underTemp
+
+// libRootFn is the bootstrap lib root, ~/.local/lib/claude-memsync; tests
+// replace it.
+var libRootFn = func() string { return "" }
+
+// currentUID is the user whose files may be linked; tests replace it.
+var currentUID = os.Getuid
+
 // sectionLine is the index of the first line with the prefix inside section.
 func sectionLine(lines []string, section, prefix string) int {
 	in := false

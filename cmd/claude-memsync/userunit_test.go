@@ -78,7 +78,12 @@ func unitEnv(t *testing.T, unit string) (path string, calls *[]string) {
 		return nil
 	}
 	unitGOOS = "linux"
+	oldT, oldB, oldL := exeThrowawayFn, binLinkDirFn, libRootFn
+	exeThrowawayFn = func(string) bool { return false } // the test binary lives in a temp dir
+	binLinkDirFn = func() (string, error) { return t.TempDir(), nil }
+	libRootFn = func() string { return "" }
 	t.Cleanup(func() {
+		exeThrowawayFn, binLinkDirFn, libRootFn = oldT, oldB, oldL
 		ctlFail = nil
 		userUnitPathFn, systemctlFn, unitGOOS, kardianosInstall, kardianosStart = oldP, oldS, oldG, oldI, oldSt
 	})

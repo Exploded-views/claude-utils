@@ -45,7 +45,9 @@ func unitFor(t *testing.T, cond, exec string) string {
 	u := strings.Replace(brokenUnit, "multi-user.target", "default.target", 1)
 	u = strings.Replace(u, "ConditionFileIsExecutable=/usr/local/bin/claude-memsync", "ConditionFileIsExecutable="+cond, 1)
 	u = strings.Replace(u, `ExecStart=/usr/local/bin/claude-memsync "run"`, execStartLine(exec, []string{"run"}), 1)
+	keep := binLinkDirFn // unitEnv isolates it; the test's own bin dir wins
 	path, _ := unitEnv(t, u)
+	binLinkDirFn = keep
 	if err := os.MkdirAll(filepath.Dir(wantsLink(path)), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -83,12 +85,12 @@ func TestInstall_RewritesConditionExecStartAndSymlinkTogether(t *testing.T) {
 		t.Fatal(err)
 	}
 	kardianosInstall = func(svc service.Service) error { return nil }
+	exe := newBuild(t, lib)
 	var err error
 	captureStderr(t, func() { err = installTask("") })
 	if err != nil {
 		t.Fatal(err)
 	}
-	exe, _ := os.Executable()
 	want := real(t, exe)
 	if got := real(t, condLine(t, path)); got != want {
 		t.Errorf("Condition = %s, want the new build %s", got, want)
@@ -100,6 +102,28 @@ func TestInstall_RewritesConditionExecStartAndSymlinkTogether(t *testing.T) {
 	if got := real(t, link); got != want {
 		t.Errorf("bin symlink -> %s, want the new build %s", got, want)
 	}
+}
+
+// newBuild adds lib/new/claude-memsync (and a claude-memmerge beside it) under
+// the lib root, makes it the installing executable and returns its path.
+func newBuild(t *testing.T, lib map[string]string) string {
+	t.Helper()
+	root := filepath.Dir(filepath.Dir(lib["build-one"]))
+	d := filepath.Join(root, "new")
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"claude-memsync", "claude-memmerge"} {
+		if err := os.WriteFile(filepath.Join(d, n), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exe := filepath.Join(d, "claude-memsync")
+	oldE, oldL := installExeFn, libRootFn
+	installExeFn = func() (string, error) { return exe, nil }
+	libRootFn = func() string { return root }
+	t.Cleanup(func() { installExeFn, libRootFn = oldE, oldL })
+	return exe
 }
 
 func readFile(t *testing.T, p string) string {
@@ -115,7 +139,7 @@ func readFile(t *testing.T, p string) string {
 // build, the unit still names the old one. The next install repairs the unit.
 func TestInstall_RepairsAnUpgradeInterruptedAfterTheSymlinkStep(t *testing.T) {
 	lib, bin := buildDirs(t)
-	exe, _ := os.Executable()
+	exe := newBuild(t, lib)
 	path := unitFor(t, lib["build-one"], lib["build-one"])
 	link := filepath.Join(bin, "claude-memsync")
 	if err := os.Symlink(exe, link); err != nil {
@@ -187,5 +211,108 @@ func TestUnitVersionCheck_NoUnitIsNotAFailure(t *testing.T) {
 	unitEnv(t, "")
 	if r := unitVersionCheck(); !r.OK {
 		t.Errorf("no unit: %s", r.Detail)
+	}
+}
+
+func installQuietly(t *testing.T) (stderr string, err error) {
+	t.Helper()
+	kardianosInstall = func(svc service.Service) error { return nil }
+	stderr = captureStderr(t, func() { err = installTask("") })
+	return
+}
+
+func TestInstall_TempDirExeChangesNothing(t *testing.T) {
+	lib, bin := buildDirs(t)
+	path := unitFor(t, lib["build-one"], lib["build-one"])
+	link := filepath.Join(bin, "claude-memsync")
+	os.Symlink(lib["build-one"], link)
+	exe := newBuild(t, lib)
+	root := filepath.Dir(filepath.Dir(exe))
+	oldR, oldT := tempRoots, exeThrowawayFn
+	tempRoots = func() []string { return []string{root} }
+	exeThrowawayFn = underTemp
+	t.Cleanup(func() { tempRoots, exeThrowawayFn = oldR, oldT })
+	before := readFile(t, path)
+	stderr, err := installQuietly(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readFile(t, path) != before {
+		t.Error("the unit must not change")
+	}
+	if got := real(t, link); got != real(t, lib["build-one"]) {
+		t.Errorf("symlink moved to %s", got)
+	}
+	if !strings.Contains(stderr, "temp") {
+		t.Errorf("want a warning about the temp dir: %q", stderr)
+	}
+}
+
+func TestInstall_ScratchBuildKeepsLinksButRewritesUnit(t *testing.T) {
+	lib, bin := buildDirs(t)
+	path := unitFor(t, lib["build-one"], lib["build-one"])
+	link := filepath.Join(bin, "claude-memsync")
+	os.Symlink(lib["build-one"], link)
+	exe := newBuild(t, lib)
+	libRootFn = func() string { return filepath.Join(t.TempDir(), "elsewhere") } // exe is not under the lib root
+	stderr, err := installQuietly(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := real(t, link); got != real(t, lib["build-one"]) {
+		t.Errorf("a scratch build must not repoint the link, got %s", got)
+	}
+	if got := real(t, condLine(t, path)); got != real(t, exe) {
+		t.Errorf("Condition = %s, want %s", got, exe)
+	}
+	if !strings.Contains(stderr, "lib") {
+		t.Errorf("want a warning that the links were left: %q", stderr)
+	}
+}
+
+func TestInstall_RefusesAnUnsafeSibling(t *testing.T) {
+	for _, name := range []string{"group-writable", "foreign-owner"} {
+		t.Run(name, func(t *testing.T) {
+			lib, bin := buildDirs(t)
+			unitFor(t, lib["build-one"], lib["build-one"])
+			exe := newBuild(t, lib)
+			mm := filepath.Join(filepath.Dir(exe), "claude-memmerge")
+			mlink := filepath.Join(bin, "claude-memmerge")
+			os.Symlink(lib["build-one"], mlink)
+			if name == "group-writable" {
+				os.Chmod(mm, 0o775)
+			} else {
+				old := currentUID
+				currentUID = func() int { return os.Getuid() + 1 }
+				t.Cleanup(func() { currentUID = old })
+			}
+			stderr, _ := installQuietly(t)
+			if got := real(t, mlink); got != real(t, lib["build-one"]) {
+				t.Errorf("an unsafe sibling must not be linked, got %s", got)
+			}
+			if !strings.Contains(stderr, "claude-memmerge") {
+				t.Errorf("want a warning naming it: %q", stderr)
+			}
+		})
+	}
+}
+
+func TestUnitVersionCheck_NeverPrintsTheExecStartLine(t *testing.T) {
+	lib, _ := buildDirs(t)
+	path := unitFor(t, lib["build-one"], lib["build-one"])
+	b := readFile(t, path)
+	bad := strings.Replace(b, execLine(t, path), "ExecStart=env TOKEN=ghp_FAKESECRET123 /bin/x --key=ghp_FAKESECRET123 'unterminated", 1)
+	os.WriteFile(path, []byte(bad), 0o644)
+	r := unitVersionCheck()
+	var out bytes.Buffer
+	reportUnitVersion(&out, r)
+	if r.OK {
+		t.Fatal("an unreadable ExecStart must fail")
+	}
+	if strings.Contains(r.Detail+out.String(), "FAKESECRET") {
+		t.Errorf("the ExecStart line leaked:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), path) {
+		t.Errorf("want the unit path: %q", out.String())
 	}
 }
