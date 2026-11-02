@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,7 +53,22 @@ var installExeFn = os.Executable
 
 // exeThrowawayFn reports a binary that must not become the installed build;
 // tests replace it.
-var exeThrowawayFn = exeThrowaway
+var exeThrowawayFn = exeUnsafe
+
+// fileOwnerFn is the owner uid and group gid of a file; tests replace it to
+// fake owners. ok is false where the platform has none.
+var fileOwnerFn = func(st fs.FileInfo) (uid, gid int, ok bool) { return 0, 0, false }
+
+// privateGroupFn says whether gid is the user's private group; tests replace it.
+var privateGroupFn = func(gid int) bool { return false }
+
+// exeUnsafe stub: the reason is not told apart yet.
+func exeUnsafe(exe string) error {
+	if exeThrowaway(exe) {
+		return fmt.Errorf("%s runs from a temp dir", exe)
+	}
+	return nil
+}
 
 // tempDirFn is the temp dir; ancestorsFrom, when set, makes the world-writable
 // ancestor walk ignore that directory and everything above it. Tests replace

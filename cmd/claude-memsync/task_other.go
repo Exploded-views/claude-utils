@@ -61,10 +61,10 @@ func installTask(configPath string) error {
 		if err != nil {
 			return err
 		}
-		if exeThrowawayFn(exe) {
+		if why := exeThrowawayFn(exe); why != nil {
 			// A go run or test binary must not become the installed build:
 			// nothing that names a build is touched.
-			fmt.Fprintf(os.Stderr, "warning: %s runs from a temp dir; the unit and the bin/ symlinks are left on the installed build\n", exe)
+			fmt.Fprintf(os.Stderr, "warning: %v; the unit and the bin/ symlinks are left on the installed build\n", why)
 			if userUnitIsWrong() {
 				return repairUserUnitTo(os.Stderr, "", "")
 			}

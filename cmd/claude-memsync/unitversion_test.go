@@ -4,9 +4,12 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/kardianos/service"
@@ -230,7 +233,7 @@ func TestInstall_TempDirExeChangesNothing(t *testing.T) {
 	root := filepath.Dir(filepath.Dir(exe))
 	oldR, oldT := tempRoots, exeThrowawayFn
 	tempRoots = func() []string { return []string{root} }
-	exeThrowawayFn = underTemp
+	exeThrowawayFn = exeUnsafe
 	t.Cleanup(func() { tempRoots, exeThrowawayFn = oldR, oldT })
 	before := readFile(t, path)
 	stderr, err := installQuietly(t)
@@ -319,10 +322,11 @@ func TestUnitVersionCheck_NeverPrintsTheExecStartLine(t *testing.T) {
 
 func throwawaySeams(t *testing.T, tmp, from string) {
 	t.Helper()
-	oT, oF := tempDirFn, ancestorsFrom
+	oT, oF, oG := tempDirFn, ancestorsFrom, privateGroupFn
 	tempDirFn = func() string { return tmp }
 	ancestorsFrom = from
-	t.Cleanup(func() { tempDirFn, ancestorsFrom = oT, oF })
+	privateGroupFn = func(int) bool { return false } // the test user's group is shared
+	t.Cleanup(func() { tempDirFn, ancestorsFrom, privateGroupFn = oT, oF, oG })
 }
 
 func mkExe(t *testing.T, dir string) string {
@@ -348,7 +352,7 @@ func TestExeThrowaway_SymlinkIntoTempIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	throwawaySeams(t, tmp, root)
-	if !exeThrowaway(via) {
+	if exeUnsafe(via) == nil {
 		t.Error("an exe reached through a symlink into the temp dir must be refused")
 	}
 }
@@ -361,7 +365,7 @@ func TestExeThrowaway_WorldWritableAncestorIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	throwawaySeams(t, filepath.Join(root, "nottmp"), root)
-	if !exeThrowaway(exe) {
+	if exeUnsafe(exe) == nil {
 		t.Error("an exe under a world-writable directory must be refused")
 	}
 }
@@ -370,7 +374,7 @@ func TestExeThrowaway_NormalLibPathIsAllowed(t *testing.T) {
 	root := t.TempDir()
 	exe := mkExe(t, filepath.Join(root, "home", ".local", "lib", "claude-memsync", "id"))
 	throwawaySeams(t, filepath.Join(root, "nottmp"), root)
-	if exeThrowaway(exe) {
+	if exeUnsafe(exe) != nil {
 		t.Error("a normal lib path must be allowed")
 	}
 }
@@ -383,7 +387,7 @@ func TestExeThrowaway_GroupWritableAncestorIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	throwawaySeams(t, filepath.Join(root, "nottmp"), root)
-	if !exeThrowaway(exe) {
+	if exeUnsafe(exe) == nil {
 		t.Error("an exe under a group-writable directory must be refused")
 	}
 }
@@ -395,7 +399,7 @@ func TestExeThrowaway_AncestorOfAnotherUserIsRefused(t *testing.T) {
 	old := currentUID
 	currentUID = func() int { return os.Getuid() + 1 } // the directories now belong to someone else
 	t.Cleanup(func() { currentUID = old })
-	if !exeThrowaway(exe) {
+	if exeUnsafe(exe) == nil {
 		t.Error("a directory owned by another user (not root) must be refused")
 	}
 }
@@ -407,7 +411,7 @@ func TestExeThrowaway_GroupWritableExeIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	throwawaySeams(t, filepath.Join(root, "nottmp"), root)
-	if !exeThrowaway(exe) {
+	if exeUnsafe(exe) == nil {
 		t.Error("a group-writable exe must be refused")
 	}
 }
@@ -428,5 +432,125 @@ func TestInstall_NeverPrintsExecStartArguments(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "arguments unchanged") {
 		t.Errorf("want 'arguments unchanged': %q", stderr)
+	}
+}
+
+// fakeOwners makes fileOwnerFn report the real owner except for the named
+// base names, whose uid is replaced.
+func fakeOwners(t *testing.T, uids map[string]int) {
+	t.Helper()
+	old := fileOwnerFn
+	fileOwnerFn = func(st fs.FileInfo) (int, int, bool) {
+		u, g, ok := realOwner(st)
+		if v, hit := uids[st.Name()]; hit {
+			u = v
+		}
+		return u, g, ok
+	}
+	t.Cleanup(func() { fileOwnerFn = old })
+}
+
+func realOwner(st fs.FileInfo) (int, int, bool) {
+	s, ok := st.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, 0, false
+	}
+	return int(s.Uid), int(s.Gid), true
+}
+
+func reason(t *testing.T, exe string) string {
+	t.Helper()
+	err := exeUnsafe(exe)
+	if err == nil {
+		t.Fatalf("%s must be refused", exe)
+	}
+	return err.Error()
+}
+
+func TestExeUnsafe_ReasonsAreTold(t *testing.T) {
+	root := t.TempDir()
+	tmp := filepath.Join(root, "tmp")
+	tmpExe := mkExe(t, tmp)
+	throwawaySeams(t, tmp, root)
+	if r := reason(t, tmpExe); !strings.Contains(r, "runs from a temp dir") {
+		t.Errorf("temp: %q", r)
+	}
+	gw := filepath.Join(root, "gw")
+	gwExe := mkExe(t, filepath.Join(gw, "sub"))
+	os.Chmod(gw, 0o775)
+	if r := reason(t, gwExe); !strings.Contains(r, gw) || !strings.Contains(r, "is group/world-writable") {
+		t.Errorf("writable ancestor: %q", r)
+	}
+	os.Chmod(gw, 0o755)
+	os.Chmod(gwExe, 0o775)
+	if r := reason(t, gwExe); !strings.Contains(r, gwExe) || !strings.Contains(r, "is group/world-writable") {
+		t.Errorf("writable exe: %q", r)
+	}
+	os.Chmod(gwExe, 0o755)
+	foreign := mkExe(t, filepath.Join(root, "foreign", "sub"))
+	fakeOwners(t, map[string]int{"foreign": os.Getuid() + 4242})
+	if r := reason(t, foreign); !strings.Contains(r, filepath.Join(root, "foreign")) || !strings.Contains(r, fmt.Sprintf("is owned by uid %d", os.Getuid()+4242)) {
+		t.Errorf("foreign ancestor: %q", r)
+	}
+	own := mkExe(t, filepath.Join(root, "own"))
+	fakeOwners(t, map[string]int{"claude-memsync": os.Getuid() + 4242})
+	if r := reason(t, own); !strings.Contains(r, "the executable is not owned by you or root") {
+		t.Errorf("foreign exe: %q", r)
+	}
+}
+
+// Kills "drop the ancestor owner check": only an ancestor has a foreign owner.
+func TestExeUnsafe_OnlyAForeignAncestorIsRefused(t *testing.T) {
+	root := t.TempDir()
+	exe := mkExe(t, filepath.Join(root, "foreign", "lib"))
+	throwawaySeams(t, filepath.Join(root, "nottmp"), root)
+	fakeOwners(t, map[string]int{"foreign": os.Getuid() + 4242})
+	if exeUnsafe(exe) == nil {
+		t.Error("a foreign-owned ancestor alone must refuse the exe")
+	}
+}
+
+// Kills "drop the root allowance": the walk reaches a root-owned ancestor.
+func TestExeUnsafe_RootOwnedAncestorAndExeAreAllowed(t *testing.T) {
+	root := t.TempDir()
+	exe := mkExe(t, filepath.Join(root, "usr", "local", "bin"))
+	throwawaySeams(t, filepath.Join(root, "nottmp"), root)
+	fakeOwners(t, map[string]int{"usr": 0, "local": 0, "bin": 0, "claude-memsync": 0})
+	if err := exeUnsafe(exe); err != nil {
+		t.Errorf("a root-owned install (sudo install into /usr/local/bin) must pass: %v", err)
+	}
+}
+
+func TestExeUnsafe_Umask002NeedsAPrivateGroup(t *testing.T) {
+	root := t.TempDir()
+	old := syscall.Umask(0o002)
+	d := filepath.Join(root, "home", ".local", "lib", "claude-memsync", "id")
+	err := os.MkdirAll(d, 0o777)
+	exe := filepath.Join(d, "claude-memsync")
+	if err == nil {
+		err = os.WriteFile(exe, []byte("x"), 0o777)
+	}
+	syscall.Umask(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	throwawaySeams(t, filepath.Join(root, "nottmp"), root)
+	if exeUnsafe(exe) == nil {
+		t.Error("group-writable lib tree in a shared group must be refused")
+	}
+	privateGroupFn = func(int) bool { return true }
+	if err := exeUnsafe(exe); err != nil {
+		t.Errorf("a bootstrap-style tree in the user's private group must pass: %v", err)
+	}
+	// world-write is never excused by a private group
+	os.Chmod(exe, 0o777)
+	if exeUnsafe(exe) == nil {
+		t.Error("world-writable must stay refused")
+	}
+}
+
+func TestPrivateGroup_RequiresPrimaryGidAndMatchingName(t *testing.T) {
+	if privateGroupFn(-1) {
+		t.Error("an unknown gid is not private")
 	}
 }

@@ -79,7 +79,7 @@ func unitEnv(t *testing.T, unit string) (path string, calls *[]string) {
 	}
 	unitGOOS = "linux"
 	oldT, oldB, oldL := exeThrowawayFn, binLinkDirFn, libRootFn
-	exeThrowawayFn = func(string) bool { return false } // the test binary lives in a temp dir
+	exeThrowawayFn = func(string) error { return nil } // the test binary lives in a temp dir
 	binLinkDirFn = func() (string, error) { return t.TempDir(), nil }
 	libRootFn = func() string { return "" }
 	t.Cleanup(func() {
