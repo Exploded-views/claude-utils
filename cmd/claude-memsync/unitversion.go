@@ -91,14 +91,14 @@ func permIssue(st fs.FileInfo, p string) error {
 	if perm&0o022 == 0 {
 		return nil
 	}
-	what, bit := "group-writable", "g"
+	what := "group-writable"
 	if perm&0o002 != 0 {
-		what, bit = "world-writable", "o"
+		what = "world-writable"
 	}
 	if !st.IsDir() || inLibTree(p) {
 		return fmt.Errorf("%s is %s; rebuild or reinstall (re-run bootstrap)", p, what)
 	}
-	return fmt.Errorf("%s is %s; run: chmod %s-w %s (or re-run bootstrap)", p, what, bit, p)
+	return fmt.Errorf("%s is %s; run: chmod go-w %s, then re-run bootstrap (the tree will be reinstalled)", p, what, p)
 }
 
 // exeUnsafe tells why a binary must not become the installed build, or nil.
