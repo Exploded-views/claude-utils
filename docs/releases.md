@@ -49,17 +49,26 @@ system with no libraries to install.
 `SHA256SUMS` covers every asset, not just the one you fetched. The plain
 check, with no `--ignore-missing`, therefore reports "No such file or directory"
 for each file you did not download and exits non-zero, even when your archive is
-intact. Check only what you have:
+intact. Check only your archive's line, on any OS:
+
+```sh
+grep " $NAME.tar.gz\$" SHA256SUMS | shasum -a 256 -c -     # or: grep ... | sha256sum -c -
+```
+
+It must print `<your archive>: OK`. If your archive is not listed (a renamed or
+wrong file) `grep` selects nothing, the checker gets empty input and fails, so
+this form cannot pass by accident.
+
+The alternative is to let the checker skip what is absent:
 
 ```sh
 sha256sum -c --ignore-missing SHA256SUMS
-# macOS, which has no sha256sum:
-grep " $NAME.tar.gz\$" SHA256SUMS | shasum -a 256 -c -
 ```
 
-The command must print `OK` for your archive. `--ignore-missing` still fails if
-your archive is not listed at all (a renamed or wrong file), so that case is
-caught too. `scripts/lint-sums.sh` keeps every checksum check in the docs
+Read its output and look for `<your archive>: OK`. Do not trust the exit status
+alone: if your archive is not listed, some `sha256sum` builds (including the one
+macOS ships) exit 0 and print nothing, and GNU only fails when no listed file at
+all is present. `scripts/lint-sums.sh` keeps every checksum check in the docs
 and scripts in one of these two forms.
 
 ## The budget bench
@@ -153,12 +162,10 @@ STEPS
    ```
 
 2. Verify before extracting, as in [Verify a download](#verify-a-download). It
-   must print `OK` for the archive.
+   must print `<archive>: OK`.
 
    ```sh
-   sha256sum -c --ignore-missing SHA256SUMS
-   # macOS, which has no sha256sum:
-   grep " $NAME.tar.gz\$" SHA256SUMS | shasum -a 256 -c -
+   grep " $NAME.tar.gz\$" SHA256SUMS | shasum -a 256 -c -     # or: grep ... | sha256sum -c -
    ```
 
    Do not extract an archive that does not verify. `SHA256SUMS` comes from the
