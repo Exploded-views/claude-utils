@@ -1,6 +1,8 @@
 package sync
 
 import (
+	"errors"
+	"os"
 	"reflect"
 	"sort"
 	"testing"
@@ -73,5 +75,22 @@ func TestHeldBack_ScrubOffHoldsNothing(t *testing.T) {
 	writeRepoFile(t, repo, "projects/p1/memory/leaky.md", "token "+fakeSecret()+"\n")
 	if got, err := HeldBack(repo, cfg); err != nil || len(got) != 0 {
 		t.Fatalf("held = %v err=%v", got, err)
+	}
+}
+
+// With the policy stopping every commit, "nothing is held" would be a lie.
+func TestHeldBack_BlockedByTheDenylistPolicy(t *testing.T) {
+	repo, cfg := commitFixture(t)
+	writeRepoFile(t, repo, "projects/p1/memory/a.md", "fine\n")
+	cfg.RequireDenylist = true
+	if _, err := HeldBack(repo, cfg); !errors.Is(err, ErrDenylistBlocked) {
+		t.Errorf("required and missing: err = %v", err)
+	}
+	cfg.RequireDenylist = false
+	if err := os.Mkdir(cfg.DenylistPath(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := HeldBack(repo, cfg); !errors.Is(err, ErrDenylistBlocked) {
+		t.Errorf("unreadable: err = %v", err)
 	}
 }

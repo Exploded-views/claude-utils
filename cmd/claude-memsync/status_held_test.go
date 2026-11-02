@@ -33,7 +33,7 @@ func TestStatus_CountsHeldBackNotesWithoutNamingThem(t *testing.T) {
 	t.Cleanup(func() { statusFn = old })
 
 	_, out := captureStdout(t, func() int { return runStatus(nil) })
-	want := "  [projects] held back by the denylist: 2 notes (not synced; run in that project to see which)"
+	want := "  [projects] held back (denylist or secret rule): 2 notes (not synced; run in that project to see which)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing count line, got:\n%s", out)
 	}
@@ -44,5 +44,25 @@ func TestStatus_CountsHeldBackNotesWithoutNamingThem(t *testing.T) {
 		if strings.Contains(out, leak) {
 			t.Errorf("status leaks %q:\n%s", leak, out)
 		}
+	}
+}
+
+// A denylist the daemon cannot use stops every commit; status says so rather
+// than printing nothing.
+func TestStatus_SaysWhenTheDenylistBlocksEveryCommit(t *testing.T) {
+	useFakeHost(t)
+	cfgs := routedHost(t, []string{"personal", "projects"}, "personal", nil)
+	if err := os.Mkdir(cfgs["projects"].DenylistPath(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := statusFn
+	statusFn = func() (string, error) { return "", service.ErrNotInstalled }
+	t.Cleanup(func() { statusFn = old })
+	_, out := captureStdout(t, func() int { return runStatus(nil) })
+	if !strings.Contains(out, "  [projects] committing nothing: denylist missing or unreadable") {
+		t.Fatalf("missing the blocked line:\n%s", out)
+	}
+	if strings.Contains(out, "[personal] committing nothing") {
+		t.Errorf("a healthy repo is reported blocked:\n%s", out)
 	}
 }
