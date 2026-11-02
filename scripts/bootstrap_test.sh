@@ -678,6 +678,31 @@ else
   chmod 755 "$H/.local/lib/claude-memsync/$BSHA/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
   runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
   check "prebuilt, tight modes, tampered binary: refused by the cmp, still tampered" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'differs from' && grep -q tampered '$H/.local/lib/claude-memsync/$BSHA/claude-memsync'" _ "$OUT"
+  # >>> umask-rerun
+  # a prebuilt run under umask 002 and then a re-run (the normal upgrade path) both succeed:
+  # nothing bootstrap itself creates (the state dir included) is group-writable
+  m_()  { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+  OLDUMASK="$(umask)"
+  newhome pbrr
+  umask 002
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"; RC1=$RC; OUT1="$OUT"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  umask "$OLDUMASK"
+  check "umask 002, prebuilt: the first run succeeds" [ "$RC1" -eq 0 ]
+  check "umask 002, prebuilt: the re-run succeeds (bootstrap's own dirs are not group-writable)" bash -c "[ $RC -eq 0 ] || { printf '%s\n' \"\$1\" | tail -3; exit 1; }" _ "$OUT"
+  check "umask 002, prebuilt: ~/.local/state is 0755" bash -c "[ '$(m_ "$H/.local/state")' = 755 ]"
+  # a symlinked \$LIB, and separately a symlinked parent of \$LIB, are refused with nothing written
+  newhome pbsl2
+  mkdir -p "$H/.local/lib/claude-memsync" "$H/elsewhere"
+  ln -s "$H/elsewhere" "$H/.local/lib/claude-memsync/$BSHA"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  check "a symlinked lib dir (\$LIB) is refused and nothing is written through it" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'not a plain directory' && [ -z \"\$(ls -A '$H/elsewhere')\" ] && [ ! -e '$H/.local/bin' ]" _ "$OUT"
+  newhome pbsl3
+  mkdir -p "$H/.local/lib" "$H/elsewhere2"
+  ln -s "$H/elsewhere2" "$H/.local/lib/claude-memsync"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  check "a symlinked parent of the lib dir is refused and nothing is written through it" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'not a plain directory' && [ -z \"\$(ls -A '$H/elsewhere2')\" ] && [ ! -e '$H/.local/bin' ]" _ "$OUT"
+  # <<< umask-rerun
   # a symlinked binary is refused before any chmod
   newhome pbum4
   mkdir -p "$H/.local/lib/claude-memsync/$BSHA"; cp "$PB/wrap/claude-memsync" "$H/victim"
