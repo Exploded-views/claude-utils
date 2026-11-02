@@ -780,6 +780,11 @@ func heldBackAlerts(targets []hookTarget, session, project string) (lines []stri
 			if sc == nil && rec.hadDenylist {
 				hideAll = true
 			}
+			// An older build also wrote the paths held for their name, and
+			// nothing says whether a denylist existed then: list no name.
+			if !rec.v2 {
+				hideAll = true
+			}
 			var names []string
 			hidden := 0
 			for _, rel := range rec.paths {
@@ -848,6 +853,7 @@ type heldRecord struct {
 	nameHeld    int
 	hadDenylist bool
 	blocked     bool
+	v2          bool // the format line: a record without it is not trusted
 }
 
 func parseHeldRecord(b []byte) heldRecord {
@@ -857,6 +863,8 @@ func parseHeldRecord(b []byte) heldRecord {
 		case l == "":
 		case l == "#blocked":
 			r.blocked = true
+		case l == "#v2":
+			r.v2 = true
 		case l == "#denylist":
 			r.hadDenylist = true
 		case strings.HasPrefix(l, "#name-held "):

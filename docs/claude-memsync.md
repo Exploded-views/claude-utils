@@ -563,8 +563,9 @@ private store). Three places tell you:
   not syncing, by file name: `memsync is NOT syncing these notes because they
   are held back (denylist or secret rule); rewrite them without the private
   term (or move them to the right private store): a.md, b.md`. A name that
-  matches the denylist is counted, never listed, and so are all names if the
-  denylist is gone when the hook runs. Other projects' notes are not named.
+  matches the denylist is counted, never listed. All names are counted, none
+  listed, if a denylist was there when the daemon wrote the record and is gone
+  or unreadable when the hook runs (or the record is from an older build). Other projects' notes are not named.
   A session hears a given list once; a changed list is told again. If the daemon
   is stopped the record can be out of date; notes that no longer exist are
   skipped.

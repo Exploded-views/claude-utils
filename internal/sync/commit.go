@@ -193,29 +193,39 @@ func holdBack(repo *gitwt.Repo, cfg config.Config) (bool, error) {
 // not syncing, with no git process of its own. One entry per line: a
 // repo-relative path held for its content, "#name-held N" (a count: a name
 // that matches the denylist is the private term itself, so it is never
-// written), "#denylist" (a denylist existed when it was written) or
+// written), "#denylist" (a denylist existed when it was written), "#v2" (the
+// format, first) or
 // "#blocked" (the denylist policy stopped every commit; no paths).
 const (
 	heldRecordRel = ".state/held-back"
 	heldBlocked   = "#blocked"
+	heldFormat    = "#v2" // first line; a record without it is from an older build
 )
 
 // recordHeld writes the paths held for their content and the count of those
 // held for their name, and reports whether the record changed. It is
 // best-effort: a record that cannot be written only costs the notice.
 func recordHeld(cfg config.Config, held []string, nameHeld int, hadDenylist bool) bool {
-	var b strings.Builder
+	// The hook reads a bounded prefix, so the format line and the directives
+	// come first: a cut loses paths, never them.
+	var paths strings.Builder
 	for _, h := range held {
 		if !strings.Contains(h, "\n") {
-			b.WriteString(h + "\n")
+			paths.WriteString(h + "\n")
 		}
+	}
+	if paths.Len() == 0 && nameHeld == 0 {
+		return writeHeldRecord(cfg, "")
+	}
+	var b strings.Builder
+	b.WriteString(heldFormat + "\n")
+	if hadDenylist {
+		b.WriteString("#denylist\n")
 	}
 	if nameHeld > 0 {
 		fmt.Fprintf(&b, "#name-held %d\n", nameHeld)
 	}
-	if b.Len() > 0 && hadDenylist {
-		b.WriteString("#denylist\n")
-	}
+	b.WriteString(paths.String())
 	return writeHeldRecord(cfg, b.String())
 }
 
