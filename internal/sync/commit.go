@@ -84,6 +84,9 @@ func CommitMirror(repo *gitwt.Repo, cfg config.Config, msg string) (bool, error)
 		if !ok {
 			return false, nil
 		}
+	} else {
+		// Nothing is held back now: an old record would tell sessions otherwise.
+		writeHeldRecord(cfg, "")
 	}
 	if err := finishArchive(repo, cfg, units); err != nil {
 		return false, fmt.Errorf("archive deletes: %w", err)
@@ -108,14 +111,16 @@ func holdBack(repo *gitwt.Repo, cfg config.Config) (bool, error) {
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		if cfg.RequireDenylist {
-			log.Printf("scrub: requireDenylist is set but %s does not exist; committing nothing", cfg.DenylistPath())
-			writeHeldRecord(cfg, heldBlocked+"\n")
+			if writeHeldRecord(cfg, heldBlocked+"\n") {
+				log.Printf("scrub: requireDenylist is set but %s does not exist; committing nothing", cfg.DenylistPath())
+			}
 			return false, unstageAll(repo)
 		}
 	case err != nil:
 		// A denylist we cannot read is a denylist we cannot honor.
-		log.Printf("scrub: cannot use %s (%v); committing nothing until it is fixed", cfg.DenylistPath(), err)
-		writeHeldRecord(cfg, heldBlocked+"\n")
+		if writeHeldRecord(cfg, heldBlocked+"\n") {
+			log.Printf("scrub: cannot use %s (%v); committing nothing until it is fixed", cfg.DenylistPath(), err)
+		}
 		return false, unstageAll(repo)
 	}
 
@@ -126,7 +131,7 @@ func holdBack(repo *gitwt.Repo, cfg config.Config) (bool, error) {
 	scanner := scrub.New(deny)
 
 	// Deletions are not scanned, and neither are submodule entries (no blob).
-	var held, contentHeld, toRead []string
+	var held, contentHeld, toRead, logs []string
 	var readIdx []int
 	byPathHits := 0
 	for i, c := range changes {
@@ -153,7 +158,7 @@ func holdBack(repo *gitwt.Repo, cfg config.Config) (bool, error) {
 		path := changes[readIdx[j]].Path
 		pt, perr := plain(content)
 		if perr != nil {
-			log.Printf("scrub: holding back %s (cannot decrypt to check it)", path)
+			logs = append(logs, fmt.Sprintf("scrub: holding back %s (cannot decrypt to check it)", path))
 			held = append(held, path)
 			contentHeld = append(contentHeld, path)
 			continue
@@ -161,19 +166,25 @@ func holdBack(repo *gitwt.Repo, cfg config.Config) (bool, error) {
 		content = pt
 		if rules := heldRules(scanner, content); len(rules) > 0 {
 			// Path and rule names only: never log the matched text.
-			log.Printf("scrub: holding back %s (rule: %s)", path, strings.Join(rules, ", "))
+			logs = append(logs, fmt.Sprintf("scrub: holding back %s (rule: %s)", path, strings.Join(rules, ", ")))
 			held = append(held, path)
 			contentHeld = append(contentHeld, path)
 		}
 	}
 	if byPathHits > 0 {
 		// The path itself matches the denylist, so it is not printed.
-		log.Printf("scrub: <held back: path matches denylist> (%d)", byPathHits)
+		logs = append(logs, fmt.Sprintf("scrub: <held back: path matches denylist> (%d)", byPathHits))
 	}
 	if err := repo.Unstage(held...); err != nil {
 		return false, fmt.Errorf("unstage held-back files: %w", err)
 	}
-	recordHeld(cfg, contentHeld, byPathHits, hadDenylist)
+	// A note stays held until it is fixed, so the held set is logged when it
+	// changes, not every cycle (the log is an unrotated file on macOS).
+	if recordHeld(cfg, contentHeld, byPathHits, hadDenylist) {
+		for _, l := range logs {
+			log.Print(l)
+		}
+	}
 	return true, nil
 }
 
@@ -190,9 +201,9 @@ const (
 )
 
 // recordHeld writes the paths held for their content and the count of those
-// held for their name. It is best-effort: a record that cannot be written only
-// costs the notice.
-func recordHeld(cfg config.Config, held []string, nameHeld int, hadDenylist bool) {
+// held for their name, and reports whether the record changed. It is
+// best-effort: a record that cannot be written only costs the notice.
+func recordHeld(cfg config.Config, held []string, nameHeld int, hadDenylist bool) bool {
 	var b strings.Builder
 	for _, h := range held {
 		if !strings.Contains(h, "\n") {
@@ -205,30 +216,33 @@ func recordHeld(cfg config.Config, held []string, nameHeld int, hadDenylist bool
 	if b.Len() > 0 && hadDenylist {
 		b.WriteString("#denylist\n")
 	}
-	writeHeldRecord(cfg, b.String())
+	return writeHeldRecord(cfg, b.String())
 }
 
-// writeHeldRecord replaces the record with content (empty: no file).
-func writeHeldRecord(cfg config.Config, content string) {
+// writeHeldRecord replaces the record with content (empty: no file) and
+// reports whether that changed it.
+func writeHeldRecord(cfg config.Config, content string) (changed bool) {
 	p := filepath.Join(cfg.SyncDir, filepath.FromSlash(heldRecordRel))
+	old, rerr := os.ReadFile(p)
 	if content == "" {
 		_ = os.Remove(p)
-		return
+		return rerr == nil
 	}
-	if old, err := os.ReadFile(p); err == nil && string(old) == content {
-		return
+	if rerr == nil && string(old) == content {
+		return false
 	}
 	if os.MkdirAll(filepath.Dir(p), 0o700) != nil {
-		return
+		return true
 	}
 	f, err := os.CreateTemp(filepath.Dir(p), "held-back.*.tmp")
 	if err != nil {
-		return
+		return true
 	}
 	_, werr := f.WriteString(content)
 	if cerr := f.Close(); werr != nil || cerr != nil || os.Rename(f.Name(), p) != nil {
 		_ = os.Remove(f.Name())
 	}
+	return true
 }
 
 // heldByPath and heldRules are the scrub's two checks, used by holdBack at

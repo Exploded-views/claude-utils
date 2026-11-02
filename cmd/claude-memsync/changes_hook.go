@@ -663,11 +663,9 @@ func hookPrelude(in []byte, cfgPath, routesFlag, project string) hookPre {
 		project = h.Cwd
 	}
 	hbLines, hbCommit := heldBackAlerts(targets, h.SessionID, project)
-	if len(hbLines) > 0 {
-		p.alerts = append(p.alerts, hbLines...)
-		held := p.commit
-		p.commit = func() { held(); hbCommit() }
-	}
+	p.alerts = append(p.alerts, hbLines...)
+	held := p.commit
+	p.commit = func() { held(); hbCommit() }
 	return p
 }
 
@@ -759,15 +757,20 @@ const heldBackRecordMax = 64 << 10
 func heldBackAlerts(targets []hookTarget, session, project string) (lines []string, commit func()) {
 	type seen struct{ path, digest string }
 	var marks []seen
+	var clears []string // markers of lists that have emptied
 	prefix := "projects/" + changes.ProjectFolder(project) + "/memory/"
 	for _, tg := range targets {
+		mark := filepath.Join(tg.cfg.SyncDir, ".state", "hook-markers", session+".heldback")
 		b, ok := readStateCapped(filepath.Join(tg.cfg.SyncDir, ".state", "held-back"), heldBackRecordMax)
-		if !ok {
-			continue
+		if ok && len(b) >= heldBackRecordMax {
+			// Cut at the cap: the last line is partial, so it is not a name.
+			b = b[:bytes.LastIndexByte(b, '\n')+1]
 		}
 		var tl []string // this repo's lines
 		rec := parseHeldRecord(b)
-		if rec.blocked {
+		if !ok {
+			// no record: nothing to say
+		} else if rec.blocked {
 			// The daemon commits nothing here, and any list it left is stale.
 			tl = append(tl, "memsync is committing nothing in this repo: its denylist is missing or unreadable (see `claude-memsync status`); no notes sync until it is fixed")
 		} else {
@@ -782,6 +785,10 @@ func heldBackAlerts(targets []hookTarget, session, project string) (lines []stri
 			for _, rel := range rec.paths {
 				name, ok := strings.CutPrefix(rel, prefix)
 				if !ok || name == "" {
+					continue
+				}
+				// The daemon may be stopped: a note that is gone is not held.
+				if _, err := os.Lstat(filepath.Join(tg.cfg.SyncDir, filepath.FromSlash(rel))); err != nil {
 					continue
 				}
 				if hideAll || (sc != nil && sc.MatchesPath(rel)) {
@@ -810,12 +817,14 @@ func heldBackAlerts(targets []hookTarget, session, project string) (lines []stri
 			}
 		}
 		if len(tl) == 0 {
+			if _, err := os.Lstat(mark); err == nil {
+				clears = append(clears, mark)
+			}
 			continue
 		}
 		line := strings.Join(tl, "\n")
 		sum := sha256.Sum256([]byte(line))
 		digest := hex.EncodeToString(sum[:])
-		mark := filepath.Join(tg.cfg.SyncDir, ".state", "hook-markers", session+".heldback")
 		if prev, ok := readHeldRecord(mark); ok && strings.TrimSpace(string(prev)) == digest {
 			continue
 		}
@@ -826,6 +835,9 @@ func heldBackAlerts(targets []hookTarget, session, project string) (lines []stri
 		for _, m := range marks {
 			_ = os.MkdirAll(filepath.Dir(m.path), 0o700)
 			writeMarker(m.path, m.digest+"\n")
+		}
+		for _, c := range clears {
+			_ = os.Remove(c)
 		}
 	}
 }
