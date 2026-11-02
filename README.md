@@ -89,7 +89,9 @@ mkdir -p ~/.local/bin && cp "$NAME/claude-memsync" "$NAME/claude-memmerge" ~/.lo
 claude-memsync version      # claude-memsync v0.5.0-ev.1
 ```
 
-Do not extract an archive that does not verify. On Windows, unzip
+Do not extract an archive that does not verify. The plain check, without
+`--ignore-missing`, fails for files you did not download; see
+[Verify a download](docs/releases.md#verify-a-download). On Windows, unzip
 `claude-utils-<tag>-windows-<arch>.zip` and keep `claude-memsync.exe` and
 `claude-memmerge.exe` in one folder. Each archive also carries
 `scripts/bootstrap.sh`, so a verified download can set up a full host with no

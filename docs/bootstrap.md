@@ -280,7 +280,7 @@ ALREADY SET, FOR REFERENCE (no action needed)
 
 STEPS
 1. mkdir -p "$WORK" && cd "$WORK" && curl -fLO "$REPO/releases/download/$TAG/$NAME.tar.gz" -O "$REPO/releases/download/$TAG/SHA256SUMS"
-2. Verify before extracting (it must print OK for the archive; on macOS use shasum -a 256 -c):
+2. Verify before extracting (it must print OK for the archive; on macOS use the grep form in docs/releases.md#verify-a-download; a plain -c fails for files you did not download):
    sha256sum -c --ignore-missing SHA256SUMS
 3. tar -xzf "$NAME.tar.gz", then read "$X/scripts/bootstrap.sh" in full before running anything.
 4. Define this once:

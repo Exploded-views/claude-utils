@@ -27,8 +27,10 @@ One archive per platform, named `claude-utils-<tag>-<os>-<arch>`:
 and, for each linux and darwin platform, a budget archive
 `claude-utils-<tag>-budget-<os>-<arch>.tar.gz` (see [The budget bench](#the-budget-bench)),
 
-plus one `SHA256SUMS` file that lists every archive, product and budget (`<hash>  <file>`, the
-format `sha256sum -c` reads).
+plus one `SHA256SUMS` file that lists every asset of the release: the product
+archives, the budget archives and the Windows zips (`<hash>  <file>` lines).
+Because it lists all of them, verify a download as described in
+[Verify a download](#verify-a-download).
 
 Each archive unpacks into a folder of the same name that holds:
 
@@ -41,6 +43,24 @@ Each archive unpacks into a folder of the same name that holds:
 
 The binaries are built with `CGO_ENABLED=0 -trimpath`, so they run on a plain
 system with no libraries to install.
+
+### Verify a download
+
+`SHA256SUMS` covers every asset, not just the one you fetched. The plain
+check, with no `--ignore-missing`, therefore reports "No such file or directory"
+for each file you did not download and exits non-zero, even when your archive is
+intact. Check only what you have:
+
+```sh
+sha256sum -c --ignore-missing SHA256SUMS
+# macOS, which has no sha256sum:
+grep " $NAME.tar.gz\$" SHA256SUMS | shasum -a 256 -c -
+```
+
+The command must print `OK` for your archive. `--ignore-missing` still fails if
+your archive is not listed at all (a renamed or wrong file), so that case is
+caught too. `scripts/lint-sums.sh` keeps every checksum check in the docs
+and scripts in one of these two forms.
 
 ## The budget bench
 
@@ -132,7 +152,8 @@ STEPS
           -O "$REPO/releases/download/$TAG/SHA256SUMS"
    ```
 
-2. Verify before extracting. It must print `OK` for the archive.
+2. Verify before extracting, as in [Verify a download](#verify-a-download). It
+   must print `OK` for the archive.
 
    ```sh
    sha256sum -c --ignore-missing SHA256SUMS
