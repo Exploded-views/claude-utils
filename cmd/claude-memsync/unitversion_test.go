@@ -411,3 +411,22 @@ func TestExeThrowaway_GroupWritableExeIsRefused(t *testing.T) {
 		t.Error("a group-writable exe must be refused")
 	}
 }
+
+func TestInstall_NeverPrintsExecStartArguments(t *testing.T) {
+	lib, _ := buildDirs(t)
+	path := unitFor(t, lib["build-one"], lib["build-one"])
+	b := readFile(t, path)
+	withTok := strings.Replace(b, execLine(t, path), execStartLine(lib["build-one"], []string{"run", "--token", "ghp_FAKESECRET123"}), 1)
+	os.WriteFile(path, []byte(withTok), 0o644)
+	newBuild(t, lib)
+	stderr, err := installQuietly(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(stderr, "FAKESECRET") || strings.Contains(stderr, "--token") {
+		t.Errorf("install printed argument text:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "arguments unchanged") {
+		t.Errorf("want 'arguments unchanged': %q", stderr)
+	}
+}
