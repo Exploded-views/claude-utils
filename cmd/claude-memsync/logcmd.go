@@ -21,7 +21,7 @@ func runLog(args []string) int { return logCmd(os.Stdout, os.Stderr, os.Stdin, a
 
 const logUsage = `usage:
   claude-memsync log append [--wait 5s] <file> [text...]
-  claude-memsync log check <file>...
+  claude-memsync log check [--] <file>...
 append adds "- YYYY-MM-DD HH:MMZ <text>" (UTC, now) as one line; with no text it reads one line from stdin.
 check prints "path:line: reason" for every line a prefix filter would skip.`
 
@@ -35,7 +35,7 @@ newline or another control character (a tab is fine), or makes the line longer t
 check). Writers wait up to --wait for each other (exit 1 on timeout).
 Exit status: 0 written, 1 refused by the file or the lock, 2 usage or bad text.`
 
-const logCheckUsage = `usage: claude-memsync log check <file>...
+const logCheckUsage = `usage: claude-memsync log check [--] <file>...
 
 Print "path:line: reason" for every line that is not an entry, a "#" heading or a
 blank line, has a bad stamp, no text, a control character, more than 4096 bytes, or
@@ -78,7 +78,7 @@ func logAppend(stdout, stderr io.Writer, stdin io.Reader, args []string) int {
 	path, words := flags.Arg(0), flags.Args()[1:]
 	text := strings.Join(words, " ")
 	if len(words) == 0 {
-		b, err := io.ReadAll(io.LimitReader(stdin, stamplog.MaxLine+2))
+		b, err := io.ReadAll(io.LimitReader(stdin, stamplog.MaxLine+1))
 		if err != nil {
 			fmt.Fprintln(stderr, "log append: reading stdin:", err)
 			return 2
@@ -100,7 +100,13 @@ func logCheck(stdout, stderr io.Writer, args []string) int {
 		fmt.Fprintln(stdout, logCheckUsage)
 		return 0
 	}
-	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+	if len(args) > 0 && args[0] == "--" {
+		args = args[1:]
+	} else if len(args) > 0 && strings.HasPrefix(args[0], "-") {
+		fmt.Fprintln(stderr, logCheckUsage)
+		return 2
+	}
+	if len(args) == 0 {
 		fmt.Fprintln(stderr, logCheckUsage)
 		return 2
 	}

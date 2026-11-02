@@ -277,7 +277,7 @@ Usage of archive list:
 ```text
 usage:
   claude-memsync log append [--wait 5s] <file> [text...]
-  claude-memsync log check <file>...
+  claude-memsync log check [--] <file>...
 append adds "- YYYY-MM-DD HH:MMZ <text>" (UTC, now) as one line; with no text it reads one line from stdin.
 check prints "path:line: reason" for every line a prefix filter would skip.
 ```
@@ -299,7 +299,7 @@ Exit status: 0 written, 1 refused by the file or the lock, 2 usage or bad text.
 ## `claude-memsync log check -h`
 
 ```text
-usage: claude-memsync log check <file>...
+usage: claude-memsync log check [--] <file>...
 
 Print "path:line: reason" for every line that is not an entry, a "#" heading or a
 blank line, has a bad stamp, no text, a control character, more than 4096 bytes, or
