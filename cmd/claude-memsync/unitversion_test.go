@@ -374,3 +374,40 @@ func TestExeThrowaway_NormalLibPathIsAllowed(t *testing.T) {
 		t.Error("a normal lib path must be allowed")
 	}
 }
+
+func TestExeThrowaway_GroupWritableAncestorIsRefused(t *testing.T) {
+	root := t.TempDir()
+	d := filepath.Join(root, "grp")
+	exe := mkExe(t, filepath.Join(d, "sub"))
+	if err := os.Chmod(d, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	throwawaySeams(t, filepath.Join(root, "nottmp"), root)
+	if !exeThrowaway(exe) {
+		t.Error("an exe under a group-writable directory must be refused")
+	}
+}
+
+func TestExeThrowaway_AncestorOfAnotherUserIsRefused(t *testing.T) {
+	root := t.TempDir()
+	exe := mkExe(t, filepath.Join(root, "home", "lib", "id"))
+	throwawaySeams(t, filepath.Join(root, "nottmp"), root)
+	old := currentUID
+	currentUID = func() int { return os.Getuid() + 1 } // the directories now belong to someone else
+	t.Cleanup(func() { currentUID = old })
+	if !exeThrowaway(exe) {
+		t.Error("a directory owned by another user (not root) must be refused")
+	}
+}
+
+func TestExeThrowaway_GroupWritableExeIsRefused(t *testing.T) {
+	root := t.TempDir()
+	exe := mkExe(t, filepath.Join(root, "lib", "id"))
+	if err := os.Chmod(exe, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	throwawaySeams(t, filepath.Join(root, "nottmp"), root)
+	if !exeThrowaway(exe) {
+		t.Error("a group-writable exe must be refused")
+	}
+}
