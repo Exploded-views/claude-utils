@@ -4,6 +4,7 @@ package main
 
 import (
 	"os"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"testing"
@@ -27,11 +28,12 @@ func TestLaunchAgentPlist_RunAtLoadAndKeepAlive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	home, err := os.UserHomeDir()
+	// Not os.UserHomeDir: that is the isolated $HOME, not the user database's.
+	u, err := user.Current()
 	if err != nil {
 		t.Fatal(err)
 	}
-	plist := filepath.Join(home, "Library", "LaunchAgents", "claude-memsync.plist")
+	plist := filepath.Join(u.HomeDir, "Library", "LaunchAgents", "claude-memsync.plist")
 	if _, err := os.Stat(plist); err == nil {
 		t.Skip("a plist already exists; not overwriting it")
 	}
