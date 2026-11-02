@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/MarimerLLC/claude-utils/internal/agecrypt"
@@ -129,7 +130,7 @@ func holdBack(repo *gitwt.Repo, cfg config.Config) (bool, error) {
 		if c.Status == 'D' || c.Mode == "160000" {
 			continue
 		}
-		if scanner.MatchesPath(c.Path) {
+		if heldByPath(scanner, c.Path) {
 			held = append(held, c.Path)
 			byPathHits++
 			continue
@@ -154,7 +155,7 @@ func holdBack(repo *gitwt.Repo, cfg config.Config) (bool, error) {
 			continue
 		}
 		content = pt
-		if rules := scanner.Scan(content); len(rules) > 0 {
+		if rules := heldRules(scanner, content); len(rules) > 0 {
 			// Path and rule names only: never log the matched text.
 			log.Printf("scrub: holding back %s (rule: %s)", path, strings.Join(rules, ", "))
 			held = append(held, path)
@@ -168,6 +169,56 @@ func holdBack(repo *gitwt.Repo, cfg config.Config) (bool, error) {
 		return false, fmt.Errorf("unstage held-back files: %w", err)
 	}
 	return true, nil
+}
+
+// heldByPath and heldRules are the scrub's two checks, used by holdBack at
+// commit time and by HeldBack to report: one definition of what is held. A
+// path that matches the denylist is held without its content being read.
+func heldByPath(sc *scrub.Scanner, path string) bool { return sc.MatchesPath(path) }
+
+// heldRules names the rules the content trips; none means it is not held.
+func heldRules(sc *scrub.Scanner, content []byte) []string { return sc.Scan(content) }
+
+// HeldBack lists the work-tree files, modified or untracked and not ignored,
+// that the scrub would hold back from the next commit. It is read-only: it
+// stages nothing and runs no filter, scanning the plaintext in the work tree.
+// A missing denylist holds nothing by itself; the built-in rules still apply.
+func HeldBack(repo *gitwt.Repo, cfg config.Config) ([]string, error) {
+	if !cfg.Scrub {
+		return nil, nil
+	}
+	deny, err := loadDenylist(cfg)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("read denylist: %w", err)
+	}
+	dirty, err := repo.DirtyPaths("")
+	if err != nil {
+		return nil, fmt.Errorf("list changed files: %w", err)
+	}
+	scanner := scrub.New(deny)
+	var held []string
+	for _, rel := range dirty {
+		// Per-PC files are never committed, so the scrub is not what stops them.
+		if gitwt.LocalOnlyPath(rel) {
+			continue
+		}
+		if heldByPath(scanner, rel) {
+			held = append(held, rel)
+			continue
+		}
+		abs := filepath.Join(repo.Dir, filepath.FromSlash(rel))
+		if fi, err := os.Lstat(abs); err != nil || !fi.Mode().IsRegular() {
+			continue // deleted, a directory or a link: nothing to scan
+		}
+		content, err := os.ReadFile(abs)
+		if err != nil {
+			continue
+		}
+		if len(heldRules(scanner, content)) > 0 {
+			held = append(held, rel)
+		}
+	}
+	return held, nil
 }
 
 // loadDenylist reads the user's denylist. A missing file is fs.ErrNotExist.

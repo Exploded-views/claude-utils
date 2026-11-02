@@ -17,6 +17,7 @@ import (
 	"github.com/kardianos/service"
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
+	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/route"
 	"github.com/MarimerLLC/claude-utils/internal/secretcmd"
 	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
@@ -363,6 +364,9 @@ func runStatus(args []string) int {
 			fmt.Println(line)
 			code = 1
 		}
+		if line := heldBackLine(cfg); line != "" {
+			fmt.Println(line)
+		}
 		if line := visibilityLine(cfg); line != "" {
 			fmt.Println(line)
 		}
@@ -371,6 +375,17 @@ func runStatus(args []string) int {
 		}
 	}
 	return code
+}
+
+// heldBackLine reports how many notes the scrub is holding back, as a count
+// only: a name could itself match the denylist. It is empty when none are held
+// or the repo cannot be read.
+func heldBackLine(cfg config.Config) string {
+	held, err := syncpkg.HeldBack(gitwt.New(cfg.SyncDir), cfg)
+	if err != nil || len(held) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("held back by the denylist: %d notes (not synced; run in that project to see which)", len(held))
 }
 
 // routedStatus prints the routing part of status. handled is false only when no
@@ -409,6 +424,9 @@ func routedStatus() (handled bool, code int) {
 		if l := syncpkg.PullRefusedLine(cfg.SyncDir); l != "" {
 			lines = append(lines, l)
 			code = 1
+		}
+		if l := heldBackLine(cfg); l != "" {
+			lines = append(lines, l)
 		}
 		if l := visibilityLine(cfg); l != "" {
 			lines = append(lines, l)
