@@ -195,7 +195,7 @@ func lastLines(out string, n int) []string {
 // every repo's denylist: the daemon logs for all of its repos into one journal,
 // so a path any of them lists must be redacted. Configs are read without the
 // trust check (no git). It returns nil, which redacts every path-like token,
-// when the routes or any config cannot be loaded or any denylist exists but
+// when the routes or any config cannot be loaded, or a routed repo has no config here or any denylist exists but
 // cannot be read: nothing can then be vouched for.
 func recordStopScanner(stderr io.Writer) *scrub.Scanner {
 	closed := func(format string, a ...any) *scrub.Scanner {
@@ -209,6 +209,9 @@ func recordStopScanner(stderr io.Writer) *scrub.Scanner {
 		set, err := loadRoutedWith(path, loadConfigHook)
 		if err != nil {
 			return closed("cannot load the repo configs: %v", err)
+		}
+		if len(set.Missing) > 0 { // its denylist cannot be read; never name it
+			return closed("%d repo(s) in the routes have no config on this host", len(set.Missing))
 		}
 		for _, n := range set.names() {
 			cfgs = append(cfgs, set.Cfgs[n])
