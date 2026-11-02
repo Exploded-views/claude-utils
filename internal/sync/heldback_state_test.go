@@ -43,7 +43,7 @@ func TestCommitMirror_RecordsHeldPaths(t *testing.T) {
 	if _, err := CommitMirror(repo, cfg, "auto: t"); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"#denylist", "#name-held 1", "projects/p1/memory/body.md"}
+	want := []string{"#denylist", "#name-held 1", "#v2", "projects/p1/memory/body.md"}
 	if got := readHeldState(t, repo.Dir); !reflect.DeepEqual(got, want) {
 		t.Fatalf("record = %v, want %v", got, want)
 	}
@@ -136,5 +136,33 @@ func TestCommitMirror_LogsAHeldSetOnceUntilItChanges(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "holding back projects/p1/memory/second.md") {
 		t.Errorf("a changed set is not logged:\n%s", logs.String())
+	}
+}
+
+// The hook reads at most 64 KiB of the record, so what is lost to the cut must
+// be paths, not the directives: the format line comes first, then the other
+// "#" lines, then the paths.
+func TestCommitMirror_RecordDirectivesComeBeforePaths(t *testing.T) {
+	repo, cfg := commitFixture(t)
+	writeRepoFile(t, repo, "denylist.txt", "nightjar\n")
+	writeRepoFile(t, repo, "projects/p1/memory/body.md", "about Nightjar\n")
+	writeRepoFile(t, repo, "projects/p1/memory/nightjar-name.md", "fine\n")
+	if _, err := CommitMirror(repo, cfg, "auto: t"); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(readHeldRaw(t, repo.Dir)), "\n")
+	if len(lines) == 0 || lines[0] != "#v2" {
+		t.Fatalf("record does not open with the format line:\n%q", lines)
+	}
+	seenPath := false
+	for _, l := range lines {
+		if !strings.HasPrefix(l, "#") {
+			seenPath = true
+		} else if seenPath {
+			t.Fatalf("a directive after a path:\n%q", lines)
+		}
+	}
+	if !seenPath {
+		t.Fatalf("no path in the record:\n%q", lines)
 	}
 }

@@ -22,9 +22,9 @@ func writeHeldRecord(t *testing.T, syncDir string, paths ...string) {
 	}
 	// Like the daemon: a "#denylist" line when a denylist existed, and the
 	// notes themselves on disk.
-	lines := paths
+	lines := append([]string{"#v2"}, paths...)
 	if _, err := os.Stat(filepath.Join(syncDir, "denylist.txt")); err == nil {
-		lines = append([]string{"#denylist"}, paths...)
+		lines = append([]string{"#v2", "#denylist"}, paths...)
 	}
 	for _, rel := range paths {
 		if strings.HasPrefix(rel, "#") {
@@ -261,5 +261,40 @@ func TestHook_DropsACutOffLastLine(t *testing.T) {
 	_, out, _ := runHook(t, in, "--config", cfgPath, "--hook")
 	if ctx := hookContext(t, out); strings.Contains(ctx, "cutnam") {
 		t.Errorf("a cut-off line was taken for a note:\n%s", ctx)
+	}
+}
+
+// A record without the format line comes from a build that wrote name-matched
+// paths. Whether a denylist existed then is unknown, so no name is listed.
+func TestHook_OldFormatRecordNamesNothing(t *testing.T) {
+	cfgPath, dir := heldFixture(t)
+	in := hookJSON("sess-hb12", "/home/alice/src/app", "UserPromptSubmit")
+	runHook(t, in, "--config", cfgPath, "--hook")
+	mem := filepath.Join(dir, "projects", ownFolder, "memory")
+	if err := os.MkdirAll(mem, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"body.md", "Nightjar-plan.md"} {
+		if err := os.WriteFile(filepath.Join(mem, n), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := "projects/" + ownFolder + "/memory/body.md\nprojects/" + ownFolder + "/memory/Nightjar-plan.md\n"
+	if err := os.MkdirAll(filepath.Join(dir, ".state"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".state", "held-back"), []byte(rec), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "denylist.txt")); err != nil {
+		t.Fatal(err)
+	}
+	_, out, _ := runHook(t, in, "--config", cfgPath, "--hook")
+	ctx := hookContext(t, out)
+	if strings.Contains(strings.ToLower(ctx), "nightjar") || strings.Contains(ctx, "body.md") {
+		t.Errorf("names listed from an old-format record:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "NOT syncing 2 notes") || !strings.Contains(ctx, "not named") {
+		t.Errorf("want a count:\n%s", ctx)
 	}
 }
