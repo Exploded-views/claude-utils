@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/proc"
 	"github.com/MarimerLLC/claude-utils/internal/related"
 )
@@ -32,34 +33,43 @@ type flowHarness struct {
 	f      *fakeSvc
 }
 
-func newFlowHarness(t *testing.T) *flowHarness {
+// installFakeGit puts a git on PATH that records its PID in the returned file
+// and sleeps whenever it is asked to stall, and otherwise runs the real git.
+func installFakeGit(t *testing.T) string {
 	t.Helper()
-	f := &fakeSvc{status: "running"}
-	installFakeSvc(t, f)
-	h := &flowHarness{t: t, guard: make(chan os.Signal, 4), flow: make(chan os.Signal, 4), exited: make(chan int, 4), f: f}
-	h.dir = heldLock(t, f)
 	bin := t.TempDir()
-	h.pids = filepath.Join(bin, "pids")
-	// Only the related-repo git (it carries core.hooksPath) sleeps; the flow's
-	// own git calls (rekey guard, markers) reach the real git.
+	pids := filepath.Join(bin, "pids")
+	// Only the related-repo git (it carries fetch.fsckObjects, which no other
+	// caller passes) sleeps; the flow's own git calls (rekey guard, markers)
+	// reach the real git. Not core.hooksPath: gitwt pins that on every call.
 	realGit, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := "#!/bin/sh\ncase \"$*\" in *core.hooksPath*) echo $$ >> " + h.pids + "; exec sleep 60;; esac\nexec " + realGit + " \"$@\"\n"
+	script := "#!/bin/sh\ncase \"$*\" in *fetch.fsckObjects=true*) echo $$ >> " + pids + "; exec sleep 60;; esac\nexec " + realGit + " \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GIT_SSH_COMMAND", "")
 	t.Cleanup(func() { // stop any stray fake git by its exact PID
-		b, _ := os.ReadFile(h.pids)
+		b, _ := os.ReadFile(pids)
 		for _, s := range strings.Fields(string(b)) {
 			if p, err := strconv.Atoi(s); err == nil {
 				_ = syscall.Kill(p, syscall.SIGKILL)
 			}
 		}
 	})
+	return pids
+}
+
+func newFlowHarness(t *testing.T) *flowHarness {
+	t.Helper()
+	f := &fakeSvc{status: "running"}
+	installFakeSvc(t, f)
+	h := &flowHarness{t: t, guard: make(chan os.Signal, 4), flow: make(chan os.Signal, 4), exited: make(chan int, 4), f: f}
+	h.dir = heldLock(t, f)
+	h.pids = installFakeGit(t)
 	t.Cleanup(proc.Release)
 	var mu sync.Mutex
 	calls := 0
@@ -197,5 +207,27 @@ func TestInterruptGuardOutlivesTheSyncFlow(t *testing.T) {
 	}
 	if !h.goneWithin(pid, 2*time.Second) {
 		t.Errorf("git %d still running after the signal", pid)
+	}
+}
+
+// The fake git must stall only the related clone. gitwt pins core.hooksPath
+// (and more) on every git call, so any pin added later must not bring back
+// the 60 s stall on the flow's own git.
+func TestFakeGitIgnoresGitwtPins(t *testing.T) {
+	pids := installFakeGit(t)
+	done := make(chan error, 1)
+	go func() {
+		done <- gitwt.Command(gitwt.Opts{Dir: t.TempDir()}, "-c", "some.newPin=x", "version").Run()
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a pinned git stalled: the fake git matches a pin every call carries")
+	}
+	if b, _ := os.ReadFile(pids); len(b) != 0 {
+		t.Errorf("a pinned git was stalled, pids recorded: %q", b)
 	}
 }
