@@ -9,19 +9,30 @@ import (
 	"testing"
 )
 
-func readHeldState(t *testing.T, dir string) []string {
+func readHeldRaw(t *testing.T, dir string) string {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(dir, ".state", "held-back"))
 	if err != nil {
-		return nil
+		return ""
 	}
-	lines := strings.Fields(string(b))
+	return string(b)
+}
+
+func readHeldState(t *testing.T, dir string) []string {
+	t.Helper()
+	var lines []string
+	for _, l := range strings.Split(readHeldRaw(t, dir), "\n") {
+		if l != "" {
+			lines = append(lines, l)
+		}
+	}
 	sort.Strings(lines)
 	return lines
 }
 
 // The hook reads this file instead of asking git, so the commit that holds
-// notes back is what records them (paths only, one per line).
+// notes back is what records them. A path held because its name matches the
+// denylist is the private term itself: only counted, never written.
 func TestCommitMirror_RecordsHeldPaths(t *testing.T) {
 	repo, cfg := commitFixture(t)
 	writeRepoFile(t, repo, "denylist.txt", "nightjar\n")
@@ -32,9 +43,12 @@ func TestCommitMirror_RecordsHeldPaths(t *testing.T) {
 	if _, err := CommitMirror(repo, cfg, "auto: t"); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"projects/p1/memory/body.md", "projects/p1/memory/nightjar-name.md"}
+	want := []string{"#denylist", "#name-held 1", "projects/p1/memory/body.md"}
 	if got := readHeldState(t, repo.Dir); !reflect.DeepEqual(got, want) {
 		t.Fatalf("record = %v, want %v", got, want)
+	}
+	if strings.Contains(strings.ToLower(readHeldRaw(t, repo.Dir)), "nightjar") {
+		t.Errorf("the record carries a denylisted name:\n%s", readHeldRaw(t, repo.Dir))
 	}
 
 	// Fixed: the next commit clears the record.
@@ -47,5 +61,37 @@ func TestCommitMirror_RecordsHeldPaths(t *testing.T) {
 	}
 	if got := readHeldState(t, repo.Dir); len(got) != 0 {
 		t.Fatalf("record after the fix = %v, want none", got)
+	}
+}
+
+// When the denylist policy stops every commit, the old list must not stay
+// behind: a denylist that is gone no longer hides names from the hook.
+func TestCommitMirror_BlockedReplacesTheRecord(t *testing.T) {
+	for _, how := range []string{"required and missing", "unreadable"} {
+		t.Run(how, func(t *testing.T) {
+			repo, cfg := commitFixture(t)
+			writeRepoFile(t, repo, "denylist.txt", "nightjar\n")
+			writeRepoFile(t, repo, "projects/p1/memory/body.md", "about Nightjar\n")
+			writeRepoFile(t, repo, "projects/p1/memory/nightjar-name.md", "fine\n")
+			if _, err := CommitMirror(repo, cfg, "auto: t"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(cfg.DenylistPath()); err != nil {
+				t.Fatal(err)
+			}
+			if how == "unreadable" {
+				if err := os.Mkdir(cfg.DenylistPath(), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				cfg.RequireDenylist = true
+			}
+			if _, err := CommitMirror(repo, cfg, "auto: t"); err != nil {
+				t.Fatal(err)
+			}
+			if got := readHeldState(t, repo.Dir); !reflect.DeepEqual(got, []string{"#blocked"}) {
+				t.Fatalf("record = %v, want only #blocked", got)
+			}
+		})
 	}
 }
