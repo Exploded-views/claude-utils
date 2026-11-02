@@ -1503,6 +1503,8 @@ step_install_prebuilt() {
   done
   if [ -x "$LIB/claude-memsync" ] && [ -x "$LIB/claude-memmerge" ]; then   # fs-ok: false (re)installs or rebuilds at the pinned commit; the cmp check above refuses a differing file
     say "  binaries present in $LIB"
+    mk_lib_dir
+    run chmod 755 "$LIB/claude-memsync" "$LIB/claude-memmerge"
   else
     mk_lib_dir
     for b in claude-memsync claude-memmerge; do
@@ -1514,17 +1516,15 @@ step_install_prebuilt() {
   link_binaries
 }
 
-# mk_lib_dir makes $LIB with mode 0755 on every level it creates. A umask of 002
-# (Ubuntu, Fedora: user private groups) would leave them 0775, which install
-# refuses as group-writable.
+# mk_lib_dir makes $LIB and normalises the modes on every run: 0755 on
+# ~/.local/lib/claude-memsync and on $LIB (existing or created), and no group or
+# world write on ~/.local and ~/.local/lib. A umask of 002 (Ubuntu, Fedora: user
+# private groups) would leave them 0775, which `claude-memsync install` refuses
+# as group-writable; a re-run repairs a tree an earlier run left that way.
 mk_lib_dir() {
-  local d="$LIB" made=""
-  while [ "$d" != "$HOME" ] && [ "$d" != "/" ] && [ ! -d "$d" ]; do   # fs-ok: a failed test only lists the level as one to create; mkdir -p follows
-    made="$made $d"
-    d="$(dirname "$d")"
-  done
   run mkdir -p "$LIB"
-  for d in $made; do run chmod 755 "$d"; done
+  run chmod go-w "$HOME/.local" "$HOME/.local/lib"
+  run chmod 755 "$(dirname "$LIB")" "$LIB"
 }
 
 link_binaries() {
@@ -1568,6 +1568,8 @@ step_build() {
   fi
   if [ -x "$LIB/claude-memsync" ] && [ -x "$LIB/claude-memmerge" ]; then   # fs-ok: false (re)installs or rebuilds at the pinned commit; the cmp check above refuses a differing file
     say "  binaries present in $LIB"
+    mk_lib_dir
+    run chmod 755 "$LIB/claude-memsync" "$LIB/claude-memmerge"
   else
     mk_lib_dir
     if [ "$GO_MODE" = go ]; then

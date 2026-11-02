@@ -6,9 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/user"
 	"path/filepath"
-	"strconv"
 	"strings"
 )
 
@@ -62,18 +60,6 @@ var exeThrowawayFn = exeUnsafe
 // fake owners. ok is false where the platform has none.
 var fileOwnerFn = platformOwner
 
-// privateGroupFn says whether gid is the user's private group: it is the
-// primary gid AND the group is named like the user (user-private-group
-// scheme, umask 002). A shared group such as macOS "staff" is not.
-var privateGroupFn = func(gid int) bool {
-	u, err := user.Current()
-	if err != nil || u.Gid != strconv.Itoa(gid) {
-		return false
-	}
-	g, err := user.LookupGroupId(u.Gid)
-	return err == nil && g.Name == u.Username
-}
-
 // tempDirFn is the temp dir; ancestorsFrom, when set, makes the ancestor walk
 // ignore that directory and everything above it. Tests replace both.
 var (
@@ -81,17 +67,16 @@ var (
 	ancestorsFrom = ""
 )
 
-// permIssue refuses world-write always, and group-write unless the file's
-// group is the user's private group.
+// permIssue refuses group- and world-write. A user-private group can still
+// have supplementary members, so group-write is never excused. The group case
+// says how to fix it; messages carry paths only.
 func permIssue(st fs.FileInfo, p string) error {
 	perm := st.Mode().Perm()
 	if perm&0o002 != 0 {
-		return fmt.Errorf("%s is group/world-writable", p)
+		return fmt.Errorf("%s is world-writable; run: chmod o-w %s (or re-run bootstrap)", p, p)
 	}
 	if perm&0o020 != 0 {
-		if _, gid, ok := fileOwnerFn(st); !ok || !privateGroupFn(gid) {
-			return fmt.Errorf("%s is group/world-writable", p)
-		}
+		return fmt.Errorf("%s is group-writable; run: chmod g-w %s (or re-run bootstrap)", p, p)
 	}
 	return nil
 }
@@ -99,8 +84,7 @@ func permIssue(st fs.FileInfo, p string) error {
 // exeUnsafe tells why a binary must not become the installed build, or nil.
 // The path is made absolute and symlinks are resolved first. Refused: an
 // unresolvable exe, one under the resolved temp dir, a file that is not a
-// regular file, is group/world-writable (group-write is excused for the
-// user's private group) or is owned by neither the user nor root, and any
+// regular file, is group- or world-writable or is owned by neither the user nor root, and any
 // ancestor directory with the same faults. Root-owned directories pass.
 func exeUnsafe(exe string) error {
 	abs, err := filepath.Abs(exe)

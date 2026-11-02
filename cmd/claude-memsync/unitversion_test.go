@@ -477,13 +477,13 @@ func TestExeUnsafe_ReasonsAreTold(t *testing.T) {
 	gw := filepath.Join(root, "gw")
 	gwExe := mkExe(t, filepath.Join(gw, "sub"))
 	os.Chmod(gw, 0o775)
-	if r := reason(t, gwExe); !strings.Contains(r, gw+" is group-writable; run: chmod g-w "+gw+" (or re-run bootstrap)") {
-		t.Errorf("writable ancestor: %q", r)
+	if rgw := real(t, gw); !strings.Contains(reason(t, gwExe), rgw+" is group-writable; run: chmod g-w "+rgw+" (or re-run bootstrap)") {
+		t.Errorf("writable ancestor: %q", reason(t, gwExe))
 	}
 	os.Chmod(gw, 0o755)
 	os.Chmod(gwExe, 0o775)
-	if r := reason(t, gwExe); !strings.Contains(r, gwExe+" is group-writable; run: chmod g-w "+gwExe+" (or re-run bootstrap)") {
-		t.Errorf("writable exe: %q", r)
+	if rx := real(t, gwExe); !strings.Contains(reason(t, gwExe), rx+" is group-writable; run: chmod g-w "+rx+" (or re-run bootstrap)") {
+		t.Errorf("writable exe: %q", reason(t, gwExe))
 	}
 	os.Chmod(gwExe, 0o755)
 	foreign := mkExe(t, filepath.Join(root, "foreign", "sub"))
@@ -535,7 +535,7 @@ func TestExeUnsafe_Umask002TreeIsRefusedUntilNormalised(t *testing.T) {
 	}
 	throwawaySeams(t, filepath.Join(root, "nottmp"), root)
 	err = exeUnsafe(exe)
-	if err == nil || !strings.Contains(err.Error(), exe+" is group-writable; run: chmod g-w "+exe+" (or re-run bootstrap)") {
+	if rx := real(t, exe); err == nil || !strings.Contains(err.Error(), rx+" is group-writable; run: chmod g-w "+rx+" (or re-run bootstrap)") {
 		t.Fatalf("a group-writable tree must be refused with the fix: %v", err)
 	}
 	// What bootstrap now does on every run: 0755 on each level and the binary.
