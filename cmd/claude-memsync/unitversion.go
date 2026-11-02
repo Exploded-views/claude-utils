@@ -52,7 +52,18 @@ var installExeFn = os.Executable
 
 // exeThrowawayFn reports a binary that must not become the installed build;
 // tests replace it.
-var exeThrowawayFn = underTemp
+var exeThrowawayFn = exeThrowaway
+
+// tempDirFn is the temp dir; ancestorsFrom, when set, makes the world-writable
+// ancestor walk ignore that directory and everything above it. Tests replace
+// both.
+var (
+	tempDirFn     = os.TempDir
+	ancestorsFrom = ""
+)
+
+// exeThrowaway stub: refuses nothing yet.
+func exeThrowaway(exe string) bool { return false }
 
 // libRootFn is the bootstrap lib root, ~/.local/lib/claude-memsync; tests
 // replace it.

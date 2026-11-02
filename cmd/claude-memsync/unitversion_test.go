@@ -316,3 +316,61 @@ func TestUnitVersionCheck_NeverPrintsTheExecStartLine(t *testing.T) {
 		t.Errorf("want the unit path: %q", out.String())
 	}
 }
+
+func throwawaySeams(t *testing.T, tmp, from string) {
+	t.Helper()
+	oT, oF := tempDirFn, ancestorsFrom
+	tempDirFn = func() string { return tmp }
+	ancestorsFrom = from
+	t.Cleanup(func() { tempDirFn, ancestorsFrom = oT, oF })
+}
+
+func mkExe(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "claude-memsync")
+	if err := os.WriteFile(p, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestExeThrowaway_SymlinkIntoTempIsRefused(t *testing.T) {
+	root := t.TempDir()
+	tmp := filepath.Join(root, "tmp")
+	exe := mkExe(t, tmp)
+	other := filepath.Join(root, "lib", "id")
+	os.MkdirAll(other, 0o755)
+	via := filepath.Join(other, "claude-memsync")
+	if err := os.Symlink(exe, via); err != nil {
+		t.Fatal(err)
+	}
+	throwawaySeams(t, tmp, root)
+	if !exeThrowaway(via) {
+		t.Error("an exe reached through a symlink into the temp dir must be refused")
+	}
+}
+
+func TestExeThrowaway_WorldWritableAncestorIsRefused(t *testing.T) {
+	root := t.TempDir()
+	d := filepath.Join(root, "shared")
+	exe := mkExe(t, filepath.Join(d, "sub"))
+	if err := os.Chmod(d, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	throwawaySeams(t, filepath.Join(root, "nottmp"), root)
+	if !exeThrowaway(exe) {
+		t.Error("an exe under a world-writable directory must be refused")
+	}
+}
+
+func TestExeThrowaway_NormalLibPathIsAllowed(t *testing.T) {
+	root := t.TempDir()
+	exe := mkExe(t, filepath.Join(root, "home", ".local", "lib", "claude-memsync", "id"))
+	throwawaySeams(t, filepath.Join(root, "nottmp"), root)
+	if exeThrowaway(exe) {
+		t.Error("a normal lib path must be allowed")
+	}
+}
