@@ -897,7 +897,7 @@ flag or setting that does it.
 - 2026-11-02 18:30Z watch memsync: running, no new stop records
 ```
 
-An entry is exactly one line, `- YYYY-MM-DD HH:MMZ <text>`. The stamp is UTC, cut to the minute (never rounded). The text has at least one printable character, no newline, CR or other control character (a tab is fine), and no invalid UTF-8, C1 control, line or paragraph separator, or invisible format character (bidi overrides, zero-width characters, a BOM), and the whole line, newline included, is at most 4096 bytes.
+An entry is exactly one line, `- YYYY-MM-DD HH:MMZ <text>`. The stamp is UTC, cut to the minute (never rounded). The text has at least one printable character, no newline, CR or other control character (a tab is fine), and no invalid UTF-8, C1 control, line or paragraph separator, bidi control (U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069), zero-width space or BOM. Joiners (ZWJ, ZWNJ), the soft hyphen and emoji tag characters are allowed, and the whole line, newline included, is at most 4096 bytes.
 
 ```sh
 claude-memsync log append decisions.md chose route A for the cache   # text from the arguments
@@ -907,9 +907,9 @@ EOF
 claude-memsync log check decisions.md
 ```
 
-- `append` writes one line with a single `write(2)` under a lock on the file, so concurrent `log append` calls (goroutines or processes) never interleave. On unix the lock is an advisory `flock`: it stops other `log append` callers, not git, the sync mirror or an editor rewriting the file. On Windows it locks one byte far past the data, so readers are never blocked. If the file is replaced by a rename while `append` waits, it reopens the new file (a few tries, then fails). It waits up to `--wait` (default 5 s) for the lock. A failed write is truncated away, so a full disk never leaves a broken line. A new file is created `0600`; an existing file keeps its mode; a symlink is followed (a dangling one creates its target); a FIFO, device or other non-regular file is refused.
+- `append` writes one line with a single `write(2)` under a lock on the file, so concurrent `log append` calls (goroutines or processes) never interleave. On unix the lock is an advisory `flock`: it stops other `log append` callers, not git, the sync mirror or an editor rewriting the file. On Windows it locks one byte far past the data, so readers are never blocked. If the file is replaced by a rename while `append` waits, it reopens the new file (a few tries, then fails). It waits up to `--wait` (default 5 s) for the lock. On unix a failed write is truncated away, so a full disk never leaves a broken line; on Windows the truncate may be refused for an append handle, and the error then says so and the fragment must be removed by hand. If the file keeps being replaced, the worst-case wait is 5 times `--wait`. A new file is created `0600`; an existing file keeps its mode; a symlink is followed (a dangling one creates its target); a FIFO, device or other non-regular file is refused.
 - `append` exits 2 and writes nothing for bad text (empty, a newline or control character, too long), and 1 when the file does not end with a newline (the entry would join a broken line; run `log check`) or the lock times out.
-- `check` prints `path:line: reason` for each line that is not an entry, a `#` heading or a blank line, plus bad stamps, empty text, control or invisible characters, over-long lines and a missing final newline. Merge-conflict markers are flagged too. Exit 0 when clean, 1 for problems, 2 for a usage or read error. There is no allow-list: point it only at files that follow the entry format.
+- `check` prints `path:line: reason` for each line that is not an entry, a `#` heading or a blank line, plus bad stamps, empty text, control, bidi or zero-width characters, over-long lines and a missing final newline. Merge-conflict markers are flagged too. Exit 0 when clean, 1 for problems, 2 for a usage or read error. There is no allow-list: point it only at files that follow the entry format.
 
 ## On-disk layout
 

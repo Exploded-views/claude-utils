@@ -32,7 +32,7 @@ const (
 	ReasonPrefix    = `not a log entry: want "- YYYY-MM-DD HH:MMZ <text>", a "#" heading or a blank line`
 	ReasonStamp     = "invalid date or time in the stamp"
 	ReasonEmptyText = "entry has no text"
-	ReasonControl   = "control, invisible or invalid-UTF-8 character in line"
+	ReasonControl   = "control, bidi, zero-width or invalid-UTF-8 character in line"
 	ReasonTooLong   = "line longer than 4096 bytes"
 	ReasonConflict  = "merge conflict marker"
 	ReasonNoNewline = "last line has no final newline"
@@ -54,9 +54,10 @@ type Options struct {
 func Stamp(t time.Time) string { return t.UTC().Truncate(time.Minute).Format(stampLayout) }
 
 // hasControl reports text that must not appear in a log line: invalid UTF-8,
-// C0 and C1 controls other than tab, DEL, line and paragraph separators, and
-// format characters (bidi overrides and isolates, zero-width, BOM). They either
-// break the one-line rule or make the bytes display as something else.
+// C0 and C1 controls other than tab, DEL, the line and paragraph separators,
+// the bidi controls and zero-width space and BOM, which break the one-line
+// rule or make the bytes display as something else. Other format characters
+// (ZWJ, ZWNJ, soft hyphen, emoji tags) are legitimate text and are allowed.
 func hasControl(s string) bool {
 	if !utf8.ValidString(s) {
 		return true
@@ -65,9 +66,19 @@ func hasControl(s string) bool {
 		if r == '\t' {
 			continue
 		}
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029' {
+		if unicode.IsControl(r) || misleadingRune(r) {
 			return true
 		}
+	}
+	return false
+}
+
+func misleadingRune(r rune) bool {
+	switch {
+	case r == '\u2028', r == '\u2029', r == '\u061c', r == '\u200b', r == '\ufeff',
+		r == '\u200e', r == '\u200f',
+		r >= '\u202a' && r <= '\u202e', r >= '\u2066' && r <= '\u2069':
+		return true
 	}
 	return false
 }
@@ -162,7 +173,9 @@ func appendOnce(path, line string, timeout time.Duration) (retry bool, err error
 		}
 	}
 	if _, err := writeEntry(f, line); err != nil {
-		// Drop a torn fragment, or every later append would be refused.
+		// Drop a torn fragment, or every later append would be refused. On
+		// Windows the O_APPEND handle may lack write access, so this can fail;
+		// the error then says so and the fragment stays until repaired by hand.
 		if terr := f.Truncate(n); terr != nil {
 			return false, fmt.Errorf("log %s: %w (and truncating the fragment failed: %v)", path, err, terr)
 		}

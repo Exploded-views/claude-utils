@@ -30,7 +30,7 @@ const logAppendUsage = `usage: claude-memsync log append [--wait 5s] <file> [tex
 Append one entry, "- YYYY-MM-DD HH:MMZ <text>", stamped with the current UTC minute.
 The text is the remaining arguments joined by one space, or, with none, one line from
 stdin. A new file is created 0600. Nothing is written when the text is empty, holds a
-newline or another control character (a tab is fine), or makes the line longer than
+newline or another control character (a tab is fine), a bidi override, a zero-width space or BOM, or invalid UTF-8, or makes the line longer than
 4096 bytes (exit 2), or when the file does not end with a newline (exit 1; run log
 check). Writers wait up to --wait for each other (exit 1 on timeout).
 Exit status: 0 written, 1 refused by the file or the lock, 2 usage or bad text.`
@@ -38,7 +38,7 @@ Exit status: 0 written, 1 refused by the file or the lock, 2 usage or bad text.`
 const logCheckUsage = `usage: claude-memsync log check [--] <file>...
 
 Print "path:line: reason" for every line that is not an entry, a "#" heading or a
-blank line, has a bad stamp, no text, a control character, more than 4096 bytes, or
+blank line, has a bad stamp, no text, a control, bidi or zero-width character or invalid UTF-8, more than 4096 bytes, or
 no final newline. Meant for files that follow the entry format only.
 Exit status: 0 clean, 1 problems found, 2 usage or read error.`
 
