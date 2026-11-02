@@ -67,18 +67,38 @@ var (
 	ancestorsFrom = ""
 )
 
+// inLibTree reports p, or something below it, being the bootstrap lib root.
+func inLibTree(p string) bool {
+	root := libRootFn()
+	if root == "" {
+		return false
+	}
+	rp, err1 := filepath.EvalSymlinks(p)
+	rr, err2 := filepath.EvalSymlinks(root)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return rp == rr || strings.HasPrefix(rp, rr+string(filepath.Separator))
+}
+
 // permIssue refuses group- and world-write. A user-private group can still
-// have supplementary members, so group-write is never excused. The group case
-// says how to fix it; messages carry paths only.
+// have supplementary members, so group-write is never excused. Messages carry
+// paths only. For a file, or a directory inside the bootstrap lib tree, the
+// advice is to rebuild or reinstall: chmod alone does not prove the binaries
+// are untampered. For any other ancestor directory a chmod is the fix.
 func permIssue(st fs.FileInfo, p string) error {
 	perm := st.Mode().Perm()
+	if perm&0o022 == 0 {
+		return nil
+	}
+	what, bit := "group-writable", "g"
 	if perm&0o002 != 0 {
-		return fmt.Errorf("%s is world-writable; run: chmod o-w %s (or re-run bootstrap)", p, p)
+		what, bit = "world-writable", "o"
 	}
-	if perm&0o020 != 0 {
-		return fmt.Errorf("%s is group-writable; run: chmod g-w %s (or re-run bootstrap)", p, p)
+	if !st.IsDir() || inLibTree(p) {
+		return fmt.Errorf("%s is %s; rebuild or reinstall (re-run bootstrap)", p, what)
 	}
-	return nil
+	return fmt.Errorf("%s is %s; run: chmod %s-w %s (or re-run bootstrap)", p, what, bit, p)
 }
 
 // exeUnsafe tells why a binary must not become the installed build, or nil.

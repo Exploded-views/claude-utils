@@ -1492,7 +1492,7 @@ confirm_plan() {
 # ---------------------------------------------------------------------------
 step_install_prebuilt() {
   step "b. Install prebuilt binaries from $PREBUILT_DIR ($SHORT)"
-  local b ls_
+  local b ls_ tmp
   for b in claude-memsync claude-memmerge; do
     ls_="$(g_state "$LIB/$b")" || die "cannot tell whether $LIB/$b exists; refusing to overwrite it"
     case "$ls_" in
@@ -1501,30 +1501,90 @@ step_install_prebuilt() {
       *) die "$LIB/$b is a dangling symlink; refusing to overwrite it" ;;
     esac
   done
-  if [ -x "$LIB/claude-memsync" ] && [ -x "$LIB/claude-memmerge" ]; then   # fs-ok: false (re)installs or rebuilds at the pinned commit; the cmp check above refuses a differing file
+  lib_inspect
+  mk_lib_dir
+  if [ "$LIB_REWRITE" -eq 0 ]; then
     say "  binaries present in $LIB"
-    mk_lib_dir
-    run chmod 755 "$LIB/claude-memsync" "$LIB/claude-memmerge"
   else
-    mk_lib_dir
+    # Fresh files only: an existing binary in a tree others could write is
+    # replaced, never chmod-blessed. The cmp check above already refused any
+    # existing binary that differs from the verified archive.
     for b in claude-memsync claude-memmerge; do
-      run cp "$PREBUILT_DIR/$b" "$LIB/$b.tmp"
-      run chmod 755 "$LIB/$b.tmp"
-      run mv -f "$LIB/$b.tmp" "$LIB/$b"
+      tmp="$(unique_path "$LIB/$b.new")" || die "cannot find a free name for $LIB/$b.new"
+      run sh -c 'umask 022; cp "$1" "$2"' _ "$PREBUILT_DIR/$b" "$tmp"
+      run chmod 755 "$tmp"
+      run mv -f "$tmp" "$LIB/$b"
     done
   fi
   link_binaries
 }
 
-# mk_lib_dir makes $LIB and normalises the modes on every run: 0755 on
-# ~/.local/lib/claude-memsync and on $LIB (existing or created), and no group or
-# world write on ~/.local and ~/.local/lib. A umask of 002 (Ubuntu, Fedora: user
-# private groups) would leave them 0775, which `claude-memsync install` refuses
-# as group-writable; a re-run repairs a tree an earlier run left that way.
+# gw_p <path>: true when group or other can write it (or its mode cannot be read).
+gw_p() {
+  local m
+  m="$(stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1")" || return 0
+  m="${m: -3}"
+  [ $((${m:1:1} & 2)) -ne 0 ] || [ $((${m:2:1} & 2)) -ne 0 ]
+}
+
+# lib_inspect decides whether the binaries in $LIB can be kept (LIB_REWRITE=0) or
+# must be written fresh (1): when one is missing or not executable, or when
+# $LIB, its parent or a binary is group- or world-writable (someone else could
+# have swapped it; a chmod would bless whatever is there). A symlink anywhere
+# in that tree is refused before anything is touched.
+lib_inspect() {
+  local p b st k
+  LIB_REWRITE=0
+  for p in "$(dirname "$LIB")" "$LIB"; do
+    st="$(g_state "$p")" || die "cannot tell whether $p exists; refusing to touch it"
+    [ "$st" = ABSENT ] && continue
+    k="$(g_kind "$p")" || die "cannot tell what $p is; refusing to touch it"
+    [ "$k" = dir ] || die "$p is not a plain directory (a symlink or file?); refusing to touch it"
+    if gw_p "$p"; then
+      LIB_REWRITE=1
+      warn "$p is group- or world-writable: another user could have replaced the binaries in it. Fresh binaries are written, and the group/world write bits are removed from this directory."
+    fi
+  done
+  for b in claude-memsync claude-memmerge; do
+    st="$(g_state "$LIB/$b")" || die "cannot tell whether $LIB/$b exists; refusing to touch it"
+    case "$st" in
+      ABSENT) LIB_REWRITE=1 ;;
+      PRESENT)
+        k="$(g_kind "$LIB/$b")" || die "cannot tell what $LIB/$b is; refusing to touch it"
+        [ "$k" = file ] || die "$LIB/$b is not a plain file (a symlink?); refusing to touch it"
+        if gw_p "$LIB/$b"; then
+          LIB_REWRITE=1
+          warn "$LIB/$b is group- or world-writable: it is replaced by a fresh copy, not trusted."
+        fi
+        [ -x "$LIB/$b" ] || LIB_REWRITE=1 ;;   # fs-ok: a binary that cannot be run is written again
+      *) die "$LIB/$b is a dangling symlink; refusing to touch it" ;;
+    esac
+  done
+}
+
+# mk_lib_dir makes $LIB. Levels it creates get 0755 (a umask of 002 would leave
+# 0775). Existing directories of memsync's own tree (~/.local/lib/claude-memsync
+# and $LIB) lose group/world write BEFORE fresh binaries are written into them.
+# ~/.local and ~/.local/lib are the user's layout: never chmodded, only warned
+# about when others can write them (claude-memsync install refuses that too).
 mk_lib_dir() {
+  local d="$LIB" made="" p
+  while [ "$d" != "$HOME" ] && [ "$d" != "/" ]; do
+    [ "$(g_state "$d")" = ABSENT ] || break
+    made="$made $d"
+    d="$(dirname "$d")"
+  done
+  for p in "$(dirname "$LIB")" "$LIB"; do
+    if [ "$(g_state "$p")" = PRESENT ] && gw_p "$p"; then run chmod go-w "$p"; fi
+  done
   run mkdir -p "$LIB"
-  run chmod go-w "$HOME/.local" "$HOME/.local/lib"
-  run chmod 755 "$(dirname "$LIB")" "$LIB"
+  for d in $made; do run chmod 755 "$d"; done
+  for p in "$HOME/.local" "$HOME/.local/lib"; do
+    case " $made " in *" $p "*) continue ;; esac
+    if [ "$(g_state "$p")" = PRESENT ] && gw_p "$p"; then
+      warn "$p is group- or world-writable: another user could replace what is under it, including $BIN and the lib dirs. It is not changed; run: chmod go-w $p"
+    fi
+  done
 }
 
 link_binaries() {
@@ -1566,20 +1626,27 @@ step_build() {
   if [ "$DRY_RUN" -eq 0 ]; then
     [ "$(git -C "$SRC" rev-parse HEAD)" = "$SHA" ] || die "HEAD of $SRC is not $SHA"
   fi
-  if [ -x "$LIB/claude-memsync" ] && [ -x "$LIB/claude-memmerge" ]; then   # fs-ok: false (re)installs or rebuilds at the pinned commit; the cmp check above refuses a differing file
+  lib_inspect
+  mk_lib_dir
+  if [ "$LIB_REWRITE" -eq 0 ]; then
     say "  binaries present in $LIB"
-    mk_lib_dir
-    run chmod 755 "$LIB/claude-memsync" "$LIB/claude-memmerge"
   else
-    mk_lib_dir
+    # Built from the verified $SRC at $SHA into fresh temp files, then moved
+    # over: an existing binary in a tree others could write is replaced, never
+    # chmod-blessed.
+    local t1 t2
+    t1="$(unique_path "$LIB/claude-memsync.new")" || die "cannot find a free name for $LIB/claude-memsync.new"
+    t2="$(unique_path "$LIB/claude-memmerge.new")" || die "cannot find a free name for $LIB/claude-memmerge.new"
     if [ "$GO_MODE" = go ]; then
-      run sh -c "cd '$SRC' && go build -o '$LIB/claude-memsync' ./cmd/claude-memsync && go build -o '$LIB/claude-memmerge' ./cmd/claude-memmerge"
+      run sh -c 'umask 022; cd "$1" && go build -o "$2" ./cmd/claude-memsync && go build -o "$3" ./cmd/claude-memmerge' _ "$SRC" "$t1" "$t2"
     else
       run docker run --rm --user "$(id -u):$(id -g)" -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -e GOFLAGS=-buildvcs=false \
         -v "$SRC:/src" -v "$LIB:/out" -w /src golang:1.25 \
-        sh -c 'go build -o /out/claude-memsync ./cmd/claude-memsync && go build -o /out/claude-memmerge ./cmd/claude-memmerge'
+        sh -c 'umask 022; go build -o "/out/$(basename "$1")" ./cmd/claude-memsync && go build -o "/out/$(basename "$2")" ./cmd/claude-memmerge' _ "$t1" "$t2"
     fi
-    run chmod 755 "$LIB/claude-memsync" "$LIB/claude-memmerge"
+    run chmod 755 "$t1" "$t2"
+    run mv -f "$t1" "$LIB/claude-memsync"
+    run mv -f "$t2" "$LIB/claude-memmerge"
   fi
   link_binaries
 }
