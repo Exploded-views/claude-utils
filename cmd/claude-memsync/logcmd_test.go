@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/MarimerLLC/claude-utils/internal/lock"
 )
 
 func runLogT(t *testing.T, stdin string, args ...string) (code int, out, errs string) {
@@ -182,5 +184,46 @@ func TestLog_MainWiring(t *testing.T) {
 	}
 	if _, out := run("help"); !strings.Contains(out, "  log ") {
 		t.Fatalf("usage lacks the log line:\n%s", out)
+	}
+}
+
+func TestLogAppend_WaitReachesTheLockTimeout(t *testing.T) {
+	p := writeLog(t, "")
+	f, _ := os.OpenFile(p, os.O_RDWR, 0)
+	defer f.Close()
+	rel, err := lock.WaitFile(f, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	code, _, errs := runLogT(t, "", "append", "--wait", "100ms", p, "x")
+	if code != 1 || time.Since(start) > 2*time.Second || !strings.Contains(errs, "timed out") {
+		t.Fatalf("code %d after %v: %q", code, time.Since(start), errs)
+	}
+	go func() { time.Sleep(200 * time.Millisecond); rel() }()
+	if code, _, errs := runLogT(t, "", "append", "--wait", "3s", p, "x"); code != 0 {
+		t.Fatalf("--wait 3s: %d %q", code, errs)
+	}
+}
+
+func TestLogAppend_StdinOverTheCapIsRefusedNotTruncated(t *testing.T) {
+	p := writeLog(t, "")
+	if code, _, _ := runLogT(t, strings.Repeat("a", 5000)+"\n", "append", p); code != 2 {
+		t.Fatalf("code %d, want 2", code)
+	}
+	if b, _ := os.ReadFile(p); len(b) != 0 {
+		t.Fatalf("wrote %d bytes", len(b))
+	}
+}
+
+func TestLogCheck_DoubleDash(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	os.WriteFile("-dash.md", []byte("- 2026-11-02 18:30Z ok\n"), 0600)
+	if code, _, errs := runLogT(t, "", "check", "--", "-dash.md"); code != 0 {
+		t.Fatalf("check -- file: %d %q", code, errs)
+	}
+	if code, _, _ := runLogT(t, "", "check", "-dash.md"); code != 2 {
+		t.Fatalf("a bare -dash.md should be a usage error")
 	}
 }

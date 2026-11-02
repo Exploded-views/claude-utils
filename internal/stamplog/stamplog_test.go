@@ -158,8 +158,9 @@ func TestAppend_LockTimeout(t *testing.T) {
 	}
 }
 
-// The final-newline check must happen under the lock: a writer that is
-// mid-line holds the lock, and the appender has to wait, then refuse.
+// The final-newline check must use the size read under the lock. A writer
+// that dies mid-line while holding the lock leaves a fragment; an appender that
+// opened the file before the fragment existed must still see it.
 func TestAppend_WaitsForLockThenChecksFinalNewline(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "log.md")
 	os.WriteFile(p, []byte("- 2026-11-02 18:29Z first\n"), 0600)
@@ -169,12 +170,20 @@ func TestAppend_WaitsForLockThenChecksFinalNewline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() { done <- Append(p, "x", time.Now(), Options{LockTimeout: 5 * time.Second}) }()
+	time.Sleep(200 * time.Millisecond) // the appender is now blocked on the lock
+	select {
+	case err := <-done:
+		t.Fatalf("Append returned while the lock was held: %v", err)
+	default:
+	}
 	if _, err := f.WriteString("- 2026-11-02 18:29Z partial"); err != nil {
 		t.Fatal(err)
 	}
-	go func() { time.Sleep(200 * time.Millisecond); rel() }()
-	start := time.Now()
-	err = Append(p, "x", time.Now(), Options{LockTimeout: 5 * time.Second})
+	rel()
+	err = <-done
 	if !errors.Is(err, ErrFile) {
 		t.Fatalf("err = %v, want ErrFile after waiting", err)
 	}
@@ -183,6 +192,88 @@ func TestAppend_WaitsForLockThenChecksFinalNewline(t *testing.T) {
 	}
 	if got := mustRead(t, p); got != "- 2026-11-02 18:29Z first\n- 2026-11-02 18:29Z partial" {
 		t.Fatalf("file = %q", got)
+	}
+}
+
+// The file replaced by a rename while an appender waits: the entry must land
+// in the file now at the path, never in the orphaned inode.
+func TestAppend_FileReplacedWhileWaiting(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "log.md")
+	os.WriteFile(p, []byte("- 2026-11-02 18:29Z old\n"), 0600)
+	f, _ := os.OpenFile(p, os.O_RDWR|os.O_APPEND, 0)
+	defer f.Close()
+	rel, err := lock.WaitFile(f, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- Append(p, "mine", time.Now(), Options{LockTimeout: 5 * time.Second}) }()
+	time.Sleep(200 * time.Millisecond)
+	repl := filepath.Join(dir, "repl")
+	os.WriteFile(repl, []byte("- 2026-11-02 18:29Z replaced\n"), 0600)
+	if err := os.Rename(repl, p); err != nil {
+		t.Fatal(err)
+	}
+	rel()
+	if err := <-done; err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	got := mustRead(t, p)
+	if !strings.HasPrefix(got, "- 2026-11-02 18:29Z replaced\n") || !strings.HasSuffix(got, "Z mine\n") {
+		t.Fatalf("entry lost: file = %q", got)
+	}
+}
+
+func TestFormatEntry_RefusesUnicodeControlAndInvisible(t *testing.T) {
+	now := time.Date(2026, 11, 2, 18, 30, 0, 0, time.UTC)
+	for name, text := range map[string]string{
+		"C1 CSI":         "a\u009bb",
+		"C1 NEL":         "a\u0085b",
+		"line sep":       "a\u2028b",
+		"para sep":       "a\u2029b",
+		"bidi override":  "a\u202eb",
+		"bidi isolate":   "a\u2066b",
+		"zero width":     "a\u200bb",
+		"BOM":            "\ufeffa",
+		"invalid utf8":   "a\xffb",
+		"truncated rune": "a\xe2\x82",
+	} {
+		if _, err := FormatEntry(now, text); !errors.Is(err, ErrText) {
+			t.Errorf("%s: err = %v, want ErrText", name, err)
+		}
+	}
+	for _, ok := range []string{"caf\u00e9 \u65e5\u672c \U0001F600", "tab\tok"} {
+		if _, err := FormatEntry(now, ok); err != nil {
+			t.Errorf("%q refused: %v", ok, err)
+		}
+	}
+}
+
+func TestCheck_FlagsUnicodeControlAndInvisible(t *testing.T) {
+	for name, text := range map[string]string{
+		"C1": "a\u009bb", "line sep": "a\u2028b", "bidi": "a\u202eb", "invalid utf8": "a\xffb",
+	} {
+		got := Check(strings.NewReader("- 2026-11-02 18:30Z " + text + "\n"))
+		if len(got) != 1 || got[0].Reason != ReasonControl {
+			t.Errorf("%s: %v, want ReasonControl", name, got)
+		}
+	}
+}
+
+func TestCheck_NoSpaceAfterStamp(t *testing.T) {
+	got := Check(strings.NewReader("- 2026-11-02 18:30Zfoo\n"))
+	if len(got) != 1 || got[0].Line != 1 || got[0].Reason != ReasonPrefix {
+		t.Fatalf("got %v, want one ReasonPrefix on line 1", got)
+	}
+}
+
+func TestCheck_HugeLineIsBoundedAndNumberingHolds(t *testing.T) {
+	huge := "- 2026-11-02 18:30Z " + strings.Repeat("z", 3<<20) + "\n"
+	got := Check(strings.NewReader(huge + "junk\n- 2026-11-02 18:30Z ok\n"))
+	want := []Problem{{1, ReasonTooLong}, {2, ReasonPrefix}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
 	}
 }
 

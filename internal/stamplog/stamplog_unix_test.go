@@ -56,11 +56,16 @@ func TestAppend_RefusesFIFO(t *testing.T) {
 	go func() { done <- Append(p, "x", time.Now(), Options{}) }()
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Fatal("append to a FIFO succeeded")
+		if !errors.Is(err, ErrFile) {
+			t.Fatalf("err = %v, want ErrFile", err)
 		}
-		_ = errors.Is
 	case <-time.After(5 * time.Second):
 		t.Fatal("append to a FIFO blocked")
+	}
+}
+
+func TestAppend_RefusesCharacterDevice(t *testing.T) {
+	if err := Append("/dev/null", "x", time.Now(), Options{}); !errors.Is(err, ErrFile) {
+		t.Fatalf("err = %v, want ErrFile", err)
 	}
 }
