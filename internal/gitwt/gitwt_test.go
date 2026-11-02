@@ -15,6 +15,7 @@ func testRepo(t *testing.T) *Repo {
 	}
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	gitIdent(t) // a runner may have no auto-detectable identity
 	r := New(t.TempDir())
 	if err := r.Init("main"); err != nil {
 		t.Fatal(err)

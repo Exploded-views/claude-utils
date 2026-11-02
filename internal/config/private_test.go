@@ -3,6 +3,8 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,5 +91,83 @@ func TestLoad_RefusesAnUnexpandedTilde(t *testing.T) {
 	t.Chdir(d)
 	if _, err := Load("~/x/config.json"); err == nil || !strings.Contains(err.Error(), "not expanded") {
 		t.Errorf("want a refusal of the literal ~ path, got %v", err)
+	}
+}
+
+// fakeInfo is a FileInfo whose Sys() is not a *syscall.Stat_t, as on a
+// filesystem that cannot say who owns a file.
+type fakeInfo struct{ os.FileInfo }
+
+func (fakeInfo) Sys() any { return nil }
+
+func TestCheckPrivate_RefusesWhenTheOwnerCannotBeDetermined(t *testing.T) {
+	p := writeCfgMode(t, 0o600)
+	st, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = checkPrivate(p, fakeInfo{st})
+	if !errors.Is(err, ErrNotPrivate) || !strings.Contains(err.Error(), "cannot tell who owns") {
+		t.Errorf("want ErrNotPrivate about unknown ownership, got %v", err)
+	}
+}
+
+func TestCheckPrivate_ModeMessageAndOwnerOnlyPass(t *testing.T) {
+	p := writeCfgMode(t, 0o640)
+	st, _ := os.Stat(p)
+	err := checkPrivate(p, st)
+	if !errors.Is(err, ErrNotPrivate) || !strings.Contains(err.Error(), "mode 0640") {
+		t.Errorf("want ErrNotPrivate naming mode 0640, got %v", err)
+	}
+	p = writeCfgMode(t, 0o600)
+	st, _ = os.Stat(p)
+	if err := checkPrivate(p, st); err != nil {
+		t.Errorf("an owner-only file of ours must pass: %v", err)
+	}
+}
+
+func TestCheckPrivate_OwnershipErrorNamesBothUIDs(t *testing.T) {
+	p := writeCfgMode(t, 0o600)
+	st, _ := os.Stat(p)
+	old := currentUID
+	currentUID = func() int { return os.Getuid() + 1 }
+	t.Cleanup(func() { currentUID = old })
+	err := checkPrivate(p, st)
+	want := fmt.Sprintf("owned by uid %d", os.Getuid())
+	if !errors.Is(err, ErrNotPrivate) || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), fmt.Sprintf("uid %d)", os.Getuid()+1)) {
+		t.Errorf("want ErrNotPrivate with %q and the current uid, got %v", want, err)
+	}
+}
+
+func TestLoad_ErrNotPrivateIsMatchable(t *testing.T) {
+	if _, err := Load(writeCfgMode(t, 0o644)); !errors.Is(err, ErrNotPrivate) {
+		t.Errorf("want errors.Is ErrNotPrivate, got %v", err)
+	}
+}
+
+func TestSaveAt_FailsInAReadOnlyDirectoryAndLeavesNoFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions, so this would pass vacuously")
+	}
+	d := t.TempDir()
+	if err := os.Chmod(d, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(d, 0o700) })
+	if err := SaveAt(filepath.Join(d, "config.json"), Defaults()); err == nil {
+		t.Fatal("writing into a read-only directory must fail")
+	}
+	if _, err := os.Stat(filepath.Join(d, "config.json")); err == nil {
+		t.Error("a failed save must not leave a config.json")
+	}
+}
+
+func TestLoad_FailsOnAnUnreadableFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read any file, so this would pass vacuously")
+	}
+	p := writeCfgMode(t, 0o000)
+	if _, err := Load(p); !errors.Is(err, os.ErrPermission) {
+		t.Errorf("want a permission error, got %v", err)
 	}
 }
