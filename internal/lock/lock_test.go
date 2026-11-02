@@ -88,7 +88,9 @@ func TestWaitFile_WaitsForReleaseWithinDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go func() { time.Sleep(100 * time.Millisecond); rel1() }()
+	released := make(chan struct{})
+	go func() { time.Sleep(100 * time.Millisecond); rel1(); close(released) }()
+	defer func() { <-released }() // rel1 touches f1; f1.Close (deferred earlier) must run after it
 	rel2, err := WaitFile(f2, 5*time.Second)
 	if err != nil {
 		t.Fatalf("second WaitFile = %v, want success once released", err)

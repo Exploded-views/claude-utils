@@ -200,7 +200,9 @@ func TestLogAppend_WaitReachesTheLockTimeout(t *testing.T) {
 	if code != 1 || time.Since(start) > 2*time.Second || !strings.Contains(errs, "timed out") {
 		t.Fatalf("code %d after %v: %q", code, time.Since(start), errs)
 	}
-	go func() { time.Sleep(200 * time.Millisecond); rel() }()
+	released := make(chan struct{})
+	go func() { time.Sleep(200 * time.Millisecond); rel(); close(released) }()
+	defer func() { <-released }() // rel touches f; the deferred f.Close must run after it
 	if code, _, errs := runLogT(t, "", "append", "--wait", "3s", p, "x"); code != 0 {
 		t.Fatalf("--wait 3s: %d %q", code, errs)
 	}

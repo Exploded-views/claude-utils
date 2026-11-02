@@ -339,3 +339,57 @@ func TestCheck_StampValidity(t *testing.T) {
 		t.Errorf("valid leap day flagged: %v", p)
 	}
 }
+
+var refusedRunes = map[string]string{
+	"C1 CSI": "a\u009bb", "C1 NEL": "a\u0085b", "line sep": "a\u2028b", "para sep": "a\u2029b",
+	"arabic letter mark": "a\u061cb", "LRM": "a\u200eb", "RLM": "a\u200fb",
+	"LRE": "a\u202ab", "RLO": "a\u202eb", "LRI": "a\u2066b", "PDI": "a\u2069b",
+	"zero width space": "a\u200bb", "BOM": "a\ufeffb", "DEL": "a\x7fb", "NUL": "a\x00b",
+	"invalid utf8": "a\xffb", "truncated rune": "a\xe2\x82",
+}
+
+var allowedTexts = map[string]string{
+	"ZWJ emoji sequence": "shipped \U0001F468\u200D\U0001F4BB done",
+	"ZWNJ persian":       "\u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645",
+	"soft hyphen":        "co\u00ADoperate",
+	"tag flag":           "\U0001F3F4\U000E0067\U000E0062\U000E007F",
+	"cjk":                "\u65e5\u672c\u8a9e",
+	"tab":                "a\tb",
+}
+
+func TestUnicodeRule_RefusedInAppendAndCheck(t *testing.T) {
+	now := time.Date(2026, 11, 2, 18, 30, 0, 0, time.UTC)
+	for name, text := range refusedRunes {
+		if _, err := FormatEntry(now, text); !errors.Is(err, ErrText) {
+			t.Errorf("append %s: err = %v, want ErrText", name, err)
+		}
+		got := Check(strings.NewReader("- 2026-11-02 18:30Z " + text + "\n"))
+		if len(got) != 1 || got[0].Reason != ReasonControl {
+			t.Errorf("check %s: %v, want ReasonControl", name, got)
+		}
+	}
+}
+
+func TestUnicodeRule_AllowedInAppendAndCheck(t *testing.T) {
+	now := time.Date(2026, 11, 2, 18, 30, 0, 0, time.UTC)
+	for name, text := range allowedTexts {
+		if _, err := FormatEntry(now, text); err != nil {
+			t.Errorf("append %s refused: %v", name, err)
+		}
+		if got := Check(strings.NewReader("- 2026-11-02 18:30Z " + text + "\n")); len(got) != 0 {
+			t.Errorf("check %s flagged: %v", name, got)
+		}
+	}
+}
+
+// The cut that bounds Check's buffer can land inside a multi-byte rune; the
+// line must still be reported as too long, not as invalid UTF-8.
+func TestCheck_LongCJKLineIsTooLongNotInvalid(t *testing.T) {
+	for pad := 0; pad < 4; pad++ { // shift the cut across every offset in a 3-byte rune
+		line := "- 2026-11-02 18:30Z " + strings.Repeat("x", pad) + strings.Repeat("\u65e5", 2000) + "\n"
+		got := Check(strings.NewReader(line))
+		if len(got) != 1 || got[0].Reason != ReasonTooLong {
+			t.Fatalf("pad %d: got %v, want one ReasonTooLong", pad, got)
+		}
+	}
+}
