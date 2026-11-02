@@ -95,3 +95,19 @@ func TestWaitFile_WaitsForReleaseWithinDeadline(t *testing.T) {
 	}
 	rel2()
 }
+
+// A hard error from the OS lock call is returned at once, not retried until
+// the deadline and reported as a timeout.
+func TestWaitFile_HardErrorIsNotATimeout(t *testing.T) {
+	old := tryLockFn
+	defer func() { tryLockFn = old }()
+	hard := errors.New("operation not supported")
+	tryLockFn = func(*os.File) error { return hard }
+	f, _ := os.OpenFile(filepath.Join(t.TempDir(), "f"), os.O_CREATE|os.O_RDWR, 0600)
+	defer f.Close()
+	start := time.Now()
+	_, err := WaitFile(f, 5*time.Second)
+	if !errors.Is(err, hard) || errors.Is(err, ErrTimeout) || time.Since(start) > time.Second {
+		t.Fatalf("err = %v after %v", err, time.Since(start))
+	}
+}
