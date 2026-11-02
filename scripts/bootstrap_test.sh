@@ -136,6 +136,7 @@ cat >"$STUBS/go" <<'EOF'
 if [ "$1" = version ]; then echo "go version go${STUB_GOVER:-1.25.1} linux/amd64"; exit 0; fi
 echo "go $*" >>"$STUB_DIR/go.log"
 pwd >>"$STUB_DIR/go.cwd"
+echo "GOWORK=${GOWORK-unset} GOFLAGS=${GOFLAGS-unset} GOTOOLCHAIN=${GOTOOLCHAIN-unset}" >>"$STUB_DIR/go.env"
 # go build -o <out> <pkg>: write a stub binary
 out="$3"
 case "$out" in */claude-memmerge*) [ -z "${STUB_GO_FAIL_MERGE:-}" ] || { echo "go: build failed (injected)" >&2; exit 1; } ;; esac
@@ -705,10 +706,29 @@ else
     STAT_FOREIGN="$FO" BOOT_PATH="$SHIM:$STUBS:$PATH" runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
     check "foreign-owned $what: refused naming the uid, and nothing is replaced" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'is owned by uid 4242' && [ '$(ino_ "$H/.local/lib/claude-memsync/$BSHA/claude-memsync")' = '$INOF' ] && [ ! -e '$H/.local/bin' ]" _ "$OUT"
   done
+  # home_guard: $HOME owner, a symlinked ~/.local, and a group-writable bin dir
+  newhome pbfh
+  STAT_FOREIGN="$H" BOOT_PATH="$SHIM:$STUBS:$PATH" runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  check "foreign-owned \$HOME: refused naming the uid, nothing created" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -qF '$H is owned by uid 4242' && [ ! -e '$H/.local' ]" _ "$OUT"
+  newhome pbsl
+  mkdir -p "$H/real-local"; chmod 775 "$H/real-local"; ln -s "$H/real-local" "$H/.local"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  check "~/.local symlinked to a group-writable dir: refused, nothing created inside it" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -qF '$H/.local is group- or world-writable' && [ -z \"\$(ls -A '$H/real-local')\" ]" _ "$OUT"
+  newhome pbbin
+  mkdir -p "$H/.local/bin"; chmod 755 "$H/.local"; chmod 775 "$H/.local/bin"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  check "group-writable ~/.local/bin: refused before anything is installed" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -qF '$H/.local/bin is group- or world-writable' && [ ! -e '$H/.local/lib' ]" _ "$OUT"
+  # created under umask 002: the clone's parent, the state dir and the bin dir are 0755
+  newhome srcu
+  umask 002
+  runboot --host testhost --role homelab --yes
+  umask "$OLDUMASK"
+  check "umask 002, source build: ~/.local/src, ~/.local/state/claude-memsync and ~/.local/bin are created 0755" bash -c "[ '$(m_ "$H/.local/src")' = 755 ] && [ '$(m_ "$H/.local/state/claude-memsync")' = 755 ] && [ '$(m_ "$H/.local/bin")' = 755 ]"
   # the source build runs in a throwaway archive dir, never in the clone
   newhome srcb
-  runboot --host testhost --role homelab --yes
-  check "source build: go ran in a temp dir from git archive, never in the clone, and that dir is gone" bash -c "[ -s '$STUB_DIR/go.cwd' ] && ! grep -qF '$H/.local/src' '$STUB_DIR/go.cwd' && ! grep -qF '$H' '$STUB_DIR/go.cwd' && while read -r d; do [ ! -e \"\$d\" ] || exit 1; done <'$STUB_DIR/go.cwd'"
+  GOFLAGS=-tags=evil GOWORK=/evil/go.work runboot --host testhost --role homelab --yes
+  check "source build: go ran in a private build dir under ~/.local/state, from git archive, never in the clone, and that dir is gone" bash -c "[ -s '$STUB_DIR/go.cwd' ] && ! grep -qF '$H/.local/src' '$STUB_DIR/go.cwd' && ! grep -qv '^$H/.local/state/claude-memsync/build\\.' '$STUB_DIR/go.cwd' && while read -r d; do [ ! -e \"\$d\" ] || exit 1; done <'$STUB_DIR/go.cwd'"
+  check "source build: a hostile GOFLAGS and GOWORK in the environment never reach go (GOWORK=off, GOFLAGS=-mod=readonly, GOTOOLCHAIN=local)" bash -c "[ -s '$STUB_DIR/go.env' ] && ! grep -qv '^GOWORK=off GOFLAGS=-mod=readonly GOTOOLCHAIN=local\$' '$STUB_DIR/go.env'"
   # a failing second build leaves no .new file behind (and a retry succeeds)
   newhome srcb2
   STUB_GO_FAIL_MERGE=1 runboot --host testhost --role homelab --yes
