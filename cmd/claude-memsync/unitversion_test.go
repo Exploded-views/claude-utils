@@ -322,11 +322,10 @@ func TestUnitVersionCheck_NeverPrintsTheExecStartLine(t *testing.T) {
 
 func throwawaySeams(t *testing.T, tmp, from string) {
 	t.Helper()
-	oT, oF, oG := tempDirFn, ancestorsFrom, privateGroupFn
+	oT, oF := tempDirFn, ancestorsFrom
 	tempDirFn = func() string { return tmp }
 	ancestorsFrom = from
-	privateGroupFn = func(int) bool { return false } // the test user's group is shared
-	t.Cleanup(func() { tempDirFn, ancestorsFrom, privateGroupFn = oT, oF, oG })
+	t.Cleanup(func() { tempDirFn, ancestorsFrom = oT, oF })
 }
 
 func mkExe(t *testing.T, dir string) string {
@@ -478,12 +477,12 @@ func TestExeUnsafe_ReasonsAreTold(t *testing.T) {
 	gw := filepath.Join(root, "gw")
 	gwExe := mkExe(t, filepath.Join(gw, "sub"))
 	os.Chmod(gw, 0o775)
-	if r := reason(t, gwExe); !strings.Contains(r, gw) || !strings.Contains(r, "is group/world-writable") {
+	if r := reason(t, gwExe); !strings.Contains(r, gw+" is group-writable; run: chmod g-w "+gw+" (or re-run bootstrap)") {
 		t.Errorf("writable ancestor: %q", r)
 	}
 	os.Chmod(gw, 0o755)
 	os.Chmod(gwExe, 0o775)
-	if r := reason(t, gwExe); !strings.Contains(r, gwExe) || !strings.Contains(r, "is group/world-writable") {
+	if r := reason(t, gwExe); !strings.Contains(r, gwExe+" is group-writable; run: chmod g-w "+gwExe+" (or re-run bootstrap)") {
 		t.Errorf("writable exe: %q", r)
 	}
 	os.Chmod(gwExe, 0o755)
@@ -521,7 +520,7 @@ func TestExeUnsafe_RootOwnedAncestorAndExeAreAllowed(t *testing.T) {
 	}
 }
 
-func TestExeUnsafe_Umask002NeedsAPrivateGroup(t *testing.T) {
+func TestExeUnsafe_Umask002TreeIsRefusedUntilNormalised(t *testing.T) {
 	root := t.TempDir()
 	old := syscall.Umask(0o002)
 	d := filepath.Join(root, "home", ".local", "lib", "claude-memsync", "id")
@@ -535,22 +534,21 @@ func TestExeUnsafe_Umask002NeedsAPrivateGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	throwawaySeams(t, filepath.Join(root, "nottmp"), root)
-	if exeUnsafe(exe) == nil {
-		t.Error("group-writable lib tree in a shared group must be refused")
+	err = exeUnsafe(exe)
+	if err == nil || !strings.Contains(err.Error(), exe+" is group-writable; run: chmod g-w "+exe+" (or re-run bootstrap)") {
+		t.Fatalf("a group-writable tree must be refused with the fix: %v", err)
 	}
-	privateGroupFn = func(int) bool { return true }
+	// What bootstrap now does on every run: 0755 on each level and the binary.
+	for p := exe; p != root; p = filepath.Dir(p) {
+		if err := os.Chmod(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := exeUnsafe(exe); err != nil {
-		t.Errorf("a bootstrap-style tree in the user's private group must pass: %v", err)
+		t.Errorf("after the modes are normalised the tree must pass: %v", err)
 	}
-	// world-write is never excused by a private group
 	os.Chmod(exe, 0o777)
-	if exeUnsafe(exe) == nil {
+	if err := exeUnsafe(exe); err == nil {
 		t.Error("world-writable must stay refused")
-	}
-}
-
-func TestPrivateGroup_RequiresPrimaryGidAndMatchingName(t *testing.T) {
-	if privateGroupFn(-1) {
-		t.Error("an unknown gid is not private")
 	}
 }

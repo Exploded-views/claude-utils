@@ -629,6 +629,17 @@ else
   check "prebuilt: ~/.local/bin links point into that dir" bash -c "[ \"\$(readlink '$H/.local/bin/claude-memsync')\" = '$LIBD/claude-memsync' ] && [ \"\$(readlink '$H/.local/bin/claude-memmerge')\" = '$LIBD/claude-memmerge' ]"
   check "prebuilt: no clone, no go build" bash -c "[ ! -e '$H/.local/src' ] && [ ! -e '$STUB_DIR/go.log' ]"
   check "prebuilt: no clone means no plugin step, and the next-step note says so" bash -c "! grep -qs 'plugin' '$STUB_DIR/claude.log' && printf '%s\n' \"\$1\" | grep -q 'plugin step skipped'" _ "$OUT"
+  # umask 002 (Ubuntu, Fedora): the lib dirs and binaries still come out 0755,
+  # and a 0775 tree from an earlier run is repaired by a re-run.
+  newhome pbum
+  OLDUMASK="$(umask)"; umask 002
+  mkdir -p "$H/.local/lib/claude-memsync/$BSHA"   # an old run under umask 002: 0775 levels
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  umask "$OLDUMASK"
+  check "prebuilt under umask 002: the run exits 0" [ "$RC" -eq 0 ]
+  LIBU="$H/.local/lib/claude-memsync"
+  check "prebuilt under umask 002: lib levels and <id> are 0755" bash -c "[ \"\$(stat -c %a '$H/.local/lib' 2>/dev/null || stat -f %Lp '$H/.local/lib')\" = 755 ] && [ \"\$(stat -c %a '$LIBU' 2>/dev/null || stat -f %Lp '$LIBU')\" = 755 ] && [ \"\$(stat -c %a '$LIBU/$BSHA' 2>/dev/null || stat -f %Lp '$LIBU/$BSHA')\" = 755 ]"
+  check "prebuilt under umask 002: binaries are 0755" bash -c "[ \"\$(stat -c %a '$LIBU/$BSHA/claude-memsync' 2>/dev/null || stat -f %Lp '$LIBU/$BSHA/claude-memsync')\" = 755 ] && [ \"\$(stat -c %a '$LIBU/$BSHA/claude-memmerge' 2>/dev/null || stat -f %Lp '$LIBU/$BSHA/claude-memmerge')\" = 755 ]"
   newhome pb3
   NO_SHA=1 BOOT_PATH="$(minipath go)" runboot --host testhost --role homelab --dry-run --prebuilt-dir "$PB/real"
   check "prebuilt without --sha: a release-shaped version is the dir name; no git checkout needed" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -qF '.local/lib/claude-memsync/$PBVER'" _ "$OUT"
