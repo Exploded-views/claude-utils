@@ -765,43 +765,61 @@ func heldBackAlerts(targets []hookTarget, session, project string) (lines []stri
 		if !ok {
 			continue
 		}
-		sc, hideAll := denylistScanner(tg.cfg, io.Discard)
-		var names []string
-		hidden := 0
-		for _, rel := range strings.Split(string(b), "\n") {
-			name, ok := strings.CutPrefix(rel, prefix)
-			if !ok || name == "" {
-				continue
+		var tl []string // this repo's lines
+		rec := parseHeldRecord(b)
+		if rec.blocked {
+			// The daemon commits nothing here, and any list it left is stale.
+			tl = append(tl, "memsync is committing nothing in this repo: its denylist is missing or unreadable (see `claude-memsync status`); no notes sync until it is fixed")
+		} else {
+			sc, hideAll := denylistScanner(tg.cfg, io.Discard)
+			// A denylist that was there when the record was written and is gone
+			// now cannot say which names are the private term: count them all.
+			if sc == nil && rec.hadDenylist {
+				hideAll = true
 			}
-			if hideAll || (sc != nil && sc.MatchesPath(rel)) {
-				hidden++
-				continue
+			var names []string
+			hidden := 0
+			for _, rel := range rec.paths {
+				name, ok := strings.CutPrefix(rel, prefix)
+				if !ok || name == "" {
+					continue
+				}
+				if hideAll || (sc != nil && sc.MatchesPath(rel)) {
+					hidden++
+					continue
+				}
+				names = append(names, oneLine(name, 80))
 			}
-			names = append(names, oneLine(name, 80))
+			more := hidden
+			if len(names) > heldBackNamesMax {
+				more += len(names) - heldBackNamesMax
+				names = names[:heldBackNamesMax]
+			}
+			switch {
+			case len(names) > 0:
+				line := "memsync is NOT syncing these notes because they are held back (denylist or secret rule); rewrite them without the private term (or move them to the right private store): " + strings.Join(names, ", ")
+				if more > 0 {
+					line += fmt.Sprintf(" (and %d more, not named)", more)
+				}
+				tl = append(tl, line)
+			case more > 0:
+				tl = append(tl, fmt.Sprintf("memsync is NOT syncing %d notes of this project because they are held back (denylist or secret rule) and their names match it, so they are not named; rename them or move them to the right private store", more))
+			}
+			if rec.nameHeld > 0 {
+				tl = append(tl, fmt.Sprintf("memsync is NOT syncing %d notes in this repo because their names match your denylist (not named); rename them or move them to the right private store", rec.nameHeld))
+			}
 		}
-		if len(names) == 0 && hidden == 0 {
+		if len(tl) == 0 {
 			continue
 		}
-		more := hidden
-		if len(names) > heldBackNamesMax {
-			more += len(names) - heldBackNamesMax
-			names = names[:heldBackNamesMax]
-		}
-		line := "memsync is NOT syncing these notes because they match your denylist or a secret rule; rewrite them without the private term (or move them to the right private store): " + strings.Join(names, ", ")
-		if more > 0 {
-			if len(names) > 0 {
-				line += fmt.Sprintf(" (and %d more, not named)", more)
-			} else {
-				line = fmt.Sprintf("memsync is NOT syncing %d notes of this project because they match your denylist or a secret rule (their names match it, so they are not named); rename them or move them to the right private store", more)
-			}
-		}
+		line := strings.Join(tl, "\n")
 		sum := sha256.Sum256([]byte(line))
 		digest := hex.EncodeToString(sum[:])
 		mark := filepath.Join(tg.cfg.SyncDir, ".state", "hook-markers", session+".heldback")
 		if prev, ok := readHeldRecord(mark); ok && strings.TrimSpace(string(prev)) == digest {
 			continue
 		}
-		lines = append(lines, line)
+		lines = append(lines, tl...)
 		marks = append(marks, seen{mark, digest})
 	}
 	return lines, func() {
@@ -810,6 +828,33 @@ func heldBackAlerts(targets []hookTarget, session, project string) (lines []stri
 			writeMarker(m.path, m.digest+"\n")
 		}
 	}
+}
+
+// heldRecord is the daemon's .state/held-back (see sync.heldRecordRel).
+type heldRecord struct {
+	paths       []string
+	nameHeld    int
+	hadDenylist bool
+	blocked     bool
+}
+
+func parseHeldRecord(b []byte) heldRecord {
+	var r heldRecord
+	for _, l := range strings.Split(string(b), "\n") {
+		switch {
+		case l == "":
+		case l == "#blocked":
+			r.blocked = true
+		case l == "#denylist":
+			r.hadDenylist = true
+		case strings.HasPrefix(l, "#name-held "):
+			r.nameHeld, _ = strconv.Atoi(strings.TrimPrefix(l, "#name-held "))
+		case strings.HasPrefix(l, "#"):
+		default:
+			r.paths = append(r.paths, l)
+		}
+	}
+	return r
 }
 
 // writeMarker replaces p with data through a fresh temp file in the same

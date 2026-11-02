@@ -104,15 +104,18 @@ func CommitMirror(repo *gitwt.Repo, cfg config.Config, msg string) (bool, error)
 // the index has been emptied).
 func holdBack(repo *gitwt.Repo, cfg config.Config) (bool, error) {
 	deny, err := loadDenylist(cfg)
+	hadDenylist := err == nil
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		if cfg.RequireDenylist {
 			log.Printf("scrub: requireDenylist is set but %s does not exist; committing nothing", cfg.DenylistPath())
+			writeHeldRecord(cfg, heldBlocked+"\n")
 			return false, unstageAll(repo)
 		}
 	case err != nil:
 		// A denylist we cannot read is a denylist we cannot honor.
 		log.Printf("scrub: cannot use %s (%v); committing nothing until it is fixed", cfg.DenylistPath(), err)
+		writeHeldRecord(cfg, heldBlocked+"\n")
 		return false, unstageAll(repo)
 	}
 
@@ -123,7 +126,7 @@ func holdBack(repo *gitwt.Repo, cfg config.Config) (bool, error) {
 	scanner := scrub.New(deny)
 
 	// Deletions are not scanned, and neither are submodule entries (no blob).
-	var held, toRead []string
+	var held, contentHeld, toRead []string
 	var readIdx []int
 	byPathHits := 0
 	for i, c := range changes {
@@ -152,6 +155,7 @@ func holdBack(repo *gitwt.Repo, cfg config.Config) (bool, error) {
 		if perr != nil {
 			log.Printf("scrub: holding back %s (cannot decrypt to check it)", path)
 			held = append(held, path)
+			contentHeld = append(contentHeld, path)
 			continue
 		}
 		content = pt
@@ -159,6 +163,7 @@ func holdBack(repo *gitwt.Repo, cfg config.Config) (bool, error) {
 			// Path and rule names only: never log the matched text.
 			log.Printf("scrub: holding back %s (rule: %s)", path, strings.Join(rules, ", "))
 			held = append(held, path)
+			contentHeld = append(contentHeld, path)
 		}
 	}
 	if byPathHits > 0 {
@@ -168,30 +173,49 @@ func holdBack(repo *gitwt.Repo, cfg config.Config) (bool, error) {
 	if err := repo.Unstage(held...); err != nil {
 		return false, fmt.Errorf("unstage held-back files: %w", err)
 	}
-	recordHeld(cfg, held)
+	recordHeld(cfg, contentHeld, byPathHits, hadDenylist)
 	return true, nil
 }
 
-// heldRecordRel is where holdBack leaves the paths it held back, relative to
-// the sync dir. The prompt hook reads it to tell a session which of its notes
-// are not syncing, with no git process of its own.
-const heldRecordRel = ".state/held-back"
+// heldRecordRel is where holdBack leaves what it held back, relative to the
+// sync dir. The prompt hook reads it to tell a session which of its notes are
+// not syncing, with no git process of its own. One entry per line: a
+// repo-relative path held for its content, "#name-held N" (a count: a name
+// that matches the denylist is the private term itself, so it is never
+// written), "#denylist" (a denylist existed when it was written) or
+// "#blocked" (the denylist policy stopped every commit; no paths).
+const (
+	heldRecordRel = ".state/held-back"
+	heldBlocked   = "#blocked"
+)
 
-// recordHeld writes the held paths, one per line (none: no file). It is
-// best-effort: a record that cannot be written only costs the notice.
-func recordHeld(cfg config.Config, held []string) {
-	p := filepath.Join(cfg.SyncDir, filepath.FromSlash(heldRecordRel))
+// recordHeld writes the paths held for their content and the count of those
+// held for their name. It is best-effort: a record that cannot be written only
+// costs the notice.
+func recordHeld(cfg config.Config, held []string, nameHeld int, hadDenylist bool) {
 	var b strings.Builder
 	for _, h := range held {
 		if !strings.Contains(h, "\n") {
 			b.WriteString(h + "\n")
 		}
 	}
-	if b.Len() == 0 {
+	if nameHeld > 0 {
+		fmt.Fprintf(&b, "#name-held %d\n", nameHeld)
+	}
+	if b.Len() > 0 && hadDenylist {
+		b.WriteString("#denylist\n")
+	}
+	writeHeldRecord(cfg, b.String())
+}
+
+// writeHeldRecord replaces the record with content (empty: no file).
+func writeHeldRecord(cfg config.Config, content string) {
+	p := filepath.Join(cfg.SyncDir, filepath.FromSlash(heldRecordRel))
+	if content == "" {
 		_ = os.Remove(p)
 		return
 	}
-	if old, err := os.ReadFile(p); err == nil && string(old) == b.String() {
+	if old, err := os.ReadFile(p); err == nil && string(old) == content {
 		return
 	}
 	if os.MkdirAll(filepath.Dir(p), 0o700) != nil {
@@ -201,7 +225,7 @@ func recordHeld(cfg config.Config, held []string) {
 	if err != nil {
 		return
 	}
-	_, werr := f.WriteString(b.String())
+	_, werr := f.WriteString(content)
 	if cerr := f.Close(); werr != nil || cerr != nil || os.Rename(f.Name(), p) != nil {
 		_ = os.Remove(f.Name())
 	}
