@@ -1,8 +1,11 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -176,5 +179,130 @@ func TestQuietSecAndDistilledPath(t *testing.T) {
 func TestDiscoverMergeDriverFailsWhenNoSiblingExists(t *testing.T) {
 	if _, err := DiscoverMergeDriver(); err == nil {
 		t.Skip("a claude-memmerge sits beside the test binary")
+	}
+}
+
+func TestLoad_MissingFileReportsNotExist(t *testing.T) {
+	_, err := Load(filepath.Join(t.TempDir(), "absent.json"))
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("want ErrNotExist, got %v", err)
+	}
+}
+
+func TestLoad_RefusesADirectory(t *testing.T) {
+	d := t.TempDir()
+	_, err := Load(d)
+	if err == nil || !strings.Contains(err.Error(), "not a regular file") || !strings.Contains(err.Error(), d) {
+		t.Errorf("want a not-a-regular-file error naming the path, got %v", err)
+	}
+}
+
+func TestLoad_RejectsBadContent(t *testing.T) {
+	cases := []struct{ name, body, want string }{
+		{"malformed JSON", `{"scrub":`, "parse"},
+		{"wrong type", `{"debounceMs":"fast"}`, "parse"},
+		{"foreign writer with no kind", `{"foreignWriters":[{}]}`, "foreignWriters[0]"},
+		{"bad expiry", `{"expiresAt":"next week"}`, "expiresAt must be a YYYY-MM-DD date"},
+		{"negative quiet", `{"startQuietSec":-1}`, "startQuietSec must not be negative"},
+	}
+	for _, tc := range cases {
+		p := writeCfg(t, tc.body)
+		_, err := Load(p)
+		if err == nil {
+			t.Errorf("%s: Load must fail", tc.name)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), p) {
+			t.Errorf("%s: error %q should mention %q and %q", tc.name, err, tc.want, p)
+		}
+	}
+}
+
+func TestLoad_AcceptsZeroQuietAndRecordsThePath(t *testing.T) {
+	p := writeCfg(t, `{"startQuietSec":0,"expiresAt":"2030-01-02"}`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ConfigPath != p || c.StartQuietSec == nil || *c.StartQuietSec != 0 || c.ExpiresAt != "2030-01-02" {
+		t.Errorf("got %+v", c)
+	}
+}
+
+func TestSaveAt_FailsWhenTheParentIsAFile(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveAt(filepath.Join(blocker, "sub", "config.json"), Defaults()); err == nil {
+		t.Error("creating a directory under a regular file must fail")
+	}
+	if b, _ := os.ReadFile(blocker); string(b) != "x" {
+		t.Errorf("the blocking file was changed: %q", b)
+	}
+}
+
+func TestSaveAt_FailsWhenThePathIsADirectory(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := os.Mkdir(p, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveAt(p, Defaults()); err == nil {
+		t.Error("writing over a directory must fail")
+	}
+	if st, err := os.Stat(p); err != nil || !st.IsDir() {
+		t.Errorf("the directory should be left alone: %v", err)
+	}
+}
+
+func TestSave_FailsWhenSyncDirCannotBeCreated(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := Defaults()
+	c.SyncDir = filepath.Join(blocker, "sync")
+	if err := Save(c); err == nil {
+		t.Error("Save must report a SyncDir it cannot create")
+	}
+}
+
+func TestDiscoverMergeDriverFindsASiblingOfTheExecutable(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Skip(err)
+	}
+	name := "claude-memmerge"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	sibling := filepath.Join(filepath.Dir(exe), name)
+	if _, err := os.Lstat(sibling); err == nil {
+		t.Skip("a real claude-memmerge sits beside the test binary")
+	}
+	if err := os.WriteFile(sibling, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Skipf("cannot write beside the test binary: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(sibling) })
+	got, err := DiscoverMergeDriver()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != sibling {
+		t.Errorf("got %q, want %q", got, sibling)
+	}
+}
+
+func TestDiscoverMergeDriverErrorNamesTheCandidate(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Skip(err)
+	}
+	if _, err := os.Lstat(filepath.Join(filepath.Dir(exe), "claude-memmerge")); err == nil {
+		t.Skip("a claude-memmerge sits beside the test binary")
+	}
+	_, err = DiscoverMergeDriver()
+	if err == nil || !strings.Contains(err.Error(), "merge driver not found at") || !strings.Contains(err.Error(), filepath.Dir(exe)) {
+		t.Errorf("want a not-found error naming the directory searched, got %v", err)
 	}
 }

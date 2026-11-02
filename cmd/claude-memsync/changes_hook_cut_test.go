@@ -132,7 +132,13 @@ func TestHook_SlowGitCutsConvergeWithoutLossOrRepeat(t *testing.T) {
 	for _, name := range names {
 		notes[name] = noteFor(t, cfgs, name, "news")
 	}
-	s := gitShim(t, "0.05") // a repo needs about 5 git calls: 0.25 s, 24 repos, 8 at a time
+	// A repo's hook work is 4 git calls (measured: 96 calls for 24 repos), so
+	// with 0.1 s per call a repo takes 0.4 s, a wave of 8 repos about 0.4 s
+	// (0.6 of the deadline) and the 24 repos in three waves about 1.2 s (1.7x
+	// the deadline), plus real git time. The first call is cut with 0.5 s to
+	// spare and still settles its first wave with 0.3 s to spare, however fast
+	// the runner is.
+	s := gitShim(t, "0.1")
 	wait := workerSync(t)
 	printed := map[string]int{}
 	cuts, calls := 0, 0
