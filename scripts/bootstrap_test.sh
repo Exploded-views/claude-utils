@@ -665,6 +665,14 @@ else
   runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
   umask "$OLDUMASK"
   check "tampered binary in a 0775 tree: refused, still tampered and not chmodded" bash -c "[ $RC -ne 0 ] && grep -q tampered '$H/.local/lib/claude-memsync/$BSHA/claude-memsync' && [ '$(m_ "$H/.local/lib/claude-memsync/$BSHA/claude-memsync")' = 775 ]"
+  # tight modes (0755), tampered content, prebuilt: the cmp against the archive refuses it
+  newhome pbum6
+  mkdir -p "$H/.local/lib/claude-memsync/$BSHA"
+  cp "$PB/wrap/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memsync"; cp "$PB/wrap/claude-memmerge" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
+  printf '# tampered\n' >>"$H/.local/lib/claude-memsync/$BSHA/claude-memsync"
+  chmod 755 "$H/.local/lib/claude-memsync/$BSHA/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  check "prebuilt, tight modes, tampered binary: refused by the cmp, still tampered" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'differs from' && grep -q tampered '$H/.local/lib/claude-memsync/$BSHA/claude-memsync'" _ "$OUT"
   # a symlinked binary is refused before any chmod
   newhome pbum4
   mkdir -p "$H/.local/lib/claude-memsync/$BSHA"; cp "$PB/wrap/claude-memsync" "$H/victim"
@@ -707,6 +715,12 @@ else
   check "failing second build: the run fails and no .new temp file is left in the lib dir" bash -c "[ $RC -ne 0 ] && [ -z \"\$(find '$H/.local/lib/claude-memsync' -name '*.new*' 2>/dev/null)\" ]"
   runboot --host testhost --role homelab --yes
   check "failing second build: the retry succeeds and leaves no .new files" bash -c "[ $RC -eq 0 ] && [ -z \"\$(find '$H/.local/lib/claude-memsync' -name '*.new*' 2>/dev/null)\" ]"
+  # modes already tight, content tampered: a re-run verifies by content and replaces it
+  LB="$H/.local/lib/claude-memsync/$SHA"
+  cp "$LB/claude-memsync" "$H/good-memsync"
+  printf '# tampered\n' >>"$LB/claude-memsync"
+  runboot --host testhost --role homelab --yes
+  check "source build, tight modes, tampered binary: replaced by the verified build, and the output says so" bash -c "[ $RC -eq 0 ] && cmp -s '$H/good-memsync' '$LB/claude-memsync' && [ '$(m_ "$LB/claude-memsync")' = 755 ] && printf '%s\n' \"\$1\" | grep -qi 'replac'" _ "$OUT"
   check "source build: the version is stamped with the commit (the archive has no .git)" bash -c "grep -q 'internal/version.Override=dev+' '$STUB_DIR/go.log'"
   newhome pb3
   NO_SHA=1 BOOT_PATH="$(minipath go)" runboot --host testhost --role homelab --dry-run --prebuilt-dir "$PB/real"
