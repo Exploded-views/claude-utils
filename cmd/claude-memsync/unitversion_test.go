@@ -477,7 +477,7 @@ func TestExeUnsafe_ReasonsAreTold(t *testing.T) {
 	gw := filepath.Join(root, "gw")
 	gwExe := mkExe(t, filepath.Join(gw, "sub"))
 	os.Chmod(gw, 0o775)
-	if rgw := real(t, gw); !strings.Contains(reason(t, gwExe), rgw+" is group-writable; run: chmod g-w "+rgw+" (or re-run bootstrap)") {
+	if rgw := real(t, gw); !strings.Contains(reason(t, gwExe), rgw+" is group-writable; run: chmod go-w "+rgw+", then re-run bootstrap (the tree will be reinstalled)") {
 		t.Errorf("writable ancestor: %q", reason(t, gwExe))
 	}
 	os.Chmod(gw, 0o755)

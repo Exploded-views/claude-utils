@@ -135,8 +135,10 @@ cat >"$STUBS/go" <<'EOF'
 #!/bin/sh
 if [ "$1" = version ]; then echo "go version go${STUB_GOVER:-1.25.1} linux/amd64"; exit 0; fi
 echo "go $*" >>"$STUB_DIR/go.log"
+pwd >>"$STUB_DIR/go.cwd"
 # go build -o <out> <pkg>: write a stub binary
 out="$3"
+case "$out" in */claude-memmerge*) [ -z "${STUB_GO_FAIL_MERGE:-}" ] || { echo "go: build failed (injected)" >&2; exit 1; } ;; esac
 # record whether the org token leaked into this process env (count only, never the value)
 echo "$(basename "$0"):$(env | grep -v '^STUB_' | grep -cF -- "$STUB_ORG_TOKEN")" >>"$STUB_DIR/env.log"
 case "$out" in
@@ -646,12 +648,12 @@ else
   mkdir -p "$H/.local/lib/claude-memsync/$BSHA"
   cp "$PB/wrap/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memsync"; cp "$PB/wrap/claude-memmerge" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
   chmod 775 "$H/.local/lib/claude-memsync/$BSHA/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
+  chmod 755 "$H/.local" "$H/.local/lib"   # the user's own layout is fine
   LIBU="$H/.local/lib/claude-memsync"; INO0="$(ino_ "$LIBU/$BSHA/claude-memsync")"
   runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
   umask "$OLDUMASK"
   check "0775 tree: the run exits 0" [ "$RC" -eq 0 ]
   check "0775 tree: the binary is a fresh file (new inode), mode 0755, not chmod-blessed" bash -c "[ '$(ino_ "$LIBU/$BSHA/claude-memsync")' != '$INO0' ] && [ '$(m_ "$LIBU/$BSHA/claude-memsync")' = 755 ] && [ '$(m_ "$LIBU/$BSHA/claude-memmerge")' = 755 ]"
-  check "0775 tree: ~/.local and ~/.local/lib keep their mode, and a warning names the risk" bash -c "[ '$(m_ "$H/.local")' = 775 ] && [ '$(m_ "$H/.local/lib")' = 775 ] && printf '%s\n' \"\$1\" | grep -q 'WARNING: .*\.local/lib.*writable'" _ "$OUT"
   check "0775 tree: the memsync dirs lost group/world write" bash -c "[ '$(m_ "$LIBU")' = 755 ] && [ '$(m_ "$LIBU/$BSHA")' = 755 ]"
   # a tampered binary in a 0775 tree is refused, never blessed
   newhome pbum3
@@ -659,7 +661,7 @@ else
   mkdir -p "$H/.local/lib/claude-memsync/$BSHA"
   cp "$PB/wrap/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memsync"; cp "$PB/wrap/claude-memmerge" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
   printf '# tampered\n' >>"$H/.local/lib/claude-memsync/$BSHA/claude-memsync"
-  chmod 775 "$H/.local/lib/claude-memsync/$BSHA/claude-memsync"
+  chmod 775 "$H/.local/lib/claude-memsync/$BSHA/claude-memsync"; chmod 755 "$H/.local" "$H/.local/lib"
   runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
   umask "$OLDUMASK"
   check "tampered binary in a 0775 tree: refused, still tampered and not chmodded" bash -c "[ $RC -ne 0 ] && grep -q tampered '$H/.local/lib/claude-memsync/$BSHA/claude-memsync' && [ '$(m_ "$H/.local/lib/claude-memsync/$BSHA/claude-memsync")' = 775 ]"
@@ -670,6 +672,42 @@ else
   chmod 600 "$H/victim"
   runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
   check "symlinked binary: refused, the link and its target are untouched" bash -c "[ $RC -ne 0 ] && [ -L '$H/.local/lib/claude-memsync/$BSHA/claude-memsync' ] && [ '$(m_ "$H/victim")' = 600 ]"
+  # a group-writable ~/.local is a hard stop: nothing is kept, run or changed
+  newhome pbum5
+  umask 002
+  mkdir -p "$H/.local/lib/claude-memsync/$BSHA"
+  cp "$PB/wrap/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memsync"; cp "$PB/wrap/claude-memmerge" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
+  chmod 755 "$H/.local/lib/claude-memsync/$BSHA/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge" "$H/.local/lib/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA"
+  INO5="$(ino_ "$H/.local/lib/claude-memsync/$BSHA/claude-memsync")"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  umask "$OLDUMASK"
+  check "group-writable ~/.local: bootstrap dies with the chmod-and-re-run advice" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -qF '$H/.local is group- or world-writable; run: chmod go-w $H/.local, then re-run bootstrap (the tree will be reinstalled)'" _ "$OUT"
+  check "group-writable ~/.local: nothing changed (mode, binary, no links)" bash -c "[ '$(m_ "$H/.local")' = 775 ] && [ '$(ino_ "$H/.local/lib/claude-memsync/$BSHA/claude-memsync")' = '$INO5' ] && [ ! -e '$H/.local/bin' ]"
+  # a foreign-owned lib dir or binary is refused (a stat shim reports another uid)
+  SHIM="$BASE/statshim"; mkdir -p "$SHIM"
+  REALSTAT="$(command -v stat)"
+  printf '%s\n' '#!/bin/sh' 'for a; do last="$a"; done' 'case "$*" in *%u*) [ "$last" = "${STAT_FOREIGN:-}" ] && { echo 4242; exit 0; } ;; esac' "exec $REALSTAT \"\$@\"" >"$SHIM/stat"; chmod +x "$SHIM/stat"
+  for what in dir binary; do
+    newhome "pbfo-$what"
+    mkdir -p "$H/.local/lib/claude-memsync/$BSHA"
+    cp "$PB/wrap/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memsync"; cp "$PB/wrap/claude-memmerge" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
+    chmod 755 "$H/.local/lib/claude-memsync/$BSHA/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
+    FO="$H/.local/lib/claude-memsync/$BSHA"; [ "$what" = dir ] || FO="$FO/claude-memsync"
+    INOF="$(ino_ "$H/.local/lib/claude-memsync/$BSHA/claude-memsync")"
+    STAT_FOREIGN="$FO" BOOT_PATH="$SHIM:$STUBS:$PATH" runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+    check "foreign-owned $what: refused naming the uid, and nothing is replaced" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'is owned by uid 4242' && [ '$(ino_ "$H/.local/lib/claude-memsync/$BSHA/claude-memsync")' = '$INOF' ] && [ ! -e '$H/.local/bin' ]" _ "$OUT"
+  done
+  # the source build runs in a throwaway archive dir, never in the clone
+  newhome srcb
+  runboot --host testhost --role homelab --yes
+  check "source build: go ran in a temp dir from git archive, never in the clone, and that dir is gone" bash -c "[ -s '$STUB_DIR/go.cwd' ] && ! grep -qF '$H/.local/src' '$STUB_DIR/go.cwd' && ! grep -qF '$H' '$STUB_DIR/go.cwd' && while read -r d; do [ ! -e \"\$d\" ] || exit 1; done <'$STUB_DIR/go.cwd'"
+  # a failing second build leaves no .new file behind (and a retry succeeds)
+  newhome srcb2
+  STUB_GO_FAIL_MERGE=1 runboot --host testhost --role homelab --yes
+  check "failing second build: the run fails and no .new temp file is left in the lib dir" bash -c "[ $RC -ne 0 ] && [ -z \"\$(find '$H/.local/lib/claude-memsync' -name '*.new*' 2>/dev/null)\" ]"
+  runboot --host testhost --role homelab --yes
+  check "failing second build: the retry succeeds and leaves no .new files" bash -c "[ $RC -eq 0 ] && [ -z \"\$(find '$H/.local/lib/claude-memsync' -name '*.new*' 2>/dev/null)\" ]"
+  check "source build: the version is stamped with the commit (the archive has no .git)" bash -c "grep -q 'internal/version.Override=dev+' '$STUB_DIR/go.log'"
   newhome pb3
   NO_SHA=1 BOOT_PATH="$(minipath go)" runboot --host testhost --role homelab --dry-run --prebuilt-dir "$PB/real"
   check "prebuilt without --sha: a release-shaped version is the dir name; no git checkout needed" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -qF '.local/lib/claude-memsync/$PBVER'" _ "$OUT"
@@ -677,6 +715,13 @@ else
   runboot --host testhost --role homelab --yes --sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --prebuilt-dir "$PB/real"
   check "prebuilt: a version that does not match --sha is refused, nothing installed" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'does not match --sha' && [ ! -e '$H/.local/lib' ] && [ ! -s '$STUB_DIR/gh.log' ]" _ "$OUT"
 fi
+# gw_p reads any mode, short ones too (a mode like 55 is 055)
+GWP="$(sed -n '/^gw_p() {/,/^}/p' "$ROOT/scripts/bootstrap.sh")"
+for pair in 55:1 5:1 775:0 757:0 755:1 2:0 20:0 0:1; do
+  check "gw_p: mode ${pair%%:*} gives status ${pair##*:} and no error" bash -c "$GWP
+stat() { echo ${pair%%:*}; }
+out=\$(gw_p x 2>&1); rc=\$?; [ -z \"\$out\" ] && [ \$rc -eq ${pair##*:} ]"
+done
 newhome pb5
 runboot --host testhost --role homelab --yes --prebuilt-dir "$PB/onlyone"
 check "prebuilt: a missing claude-memmerge is refused" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'claude-memmerge is missing or not executable'" _ "$OUT"
