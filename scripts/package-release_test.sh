@@ -19,7 +19,7 @@ if [ -z "${TARGET:-}" ]; then
 fi
 NAME="claude-utils-$VER-${TARGET%/*}-${TARGET#*/}"
 BOOT_BASH="${BOOT_BASH:-bash}"
-if command -v sha256sum >/dev/null 2>&1; then SUMC=(sha256sum -c); else SUMC=(shasum -a 256 -c); fi
+if command -v sha256sum >/dev/null 2>&1; then SUMC=(sha256sum -c); else SUMC=(shasum -a 256 -c); fi   # sums-ok: the list holds only the archives just built
 GO_BUILD="${GO:-go}"
 PASS=0 FAIL=0
 ok()    { PASS=$((PASS + 1)); printf 'PASS    %s\n' "$1"; }
