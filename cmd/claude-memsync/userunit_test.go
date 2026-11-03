@@ -78,7 +78,12 @@ func unitEnv(t *testing.T, unit string) (path string, calls *[]string) {
 		return nil
 	}
 	unitGOOS = "linux"
+	oldT, oldB, oldL := exeThrowawayFn, binLinkDirFn, libRootFn
+	exeThrowawayFn = func(string) error { return nil } // the test binary lives in a temp dir
+	binLinkDirFn = func() (string, error) { return t.TempDir(), nil }
+	libRootFn = func() string { return "" }
 	t.Cleanup(func() {
+		exeThrowawayFn, binLinkDirFn, libRootFn = oldT, oldB, oldL
 		ctlFail = nil
 		userUnitPathFn, systemctlFn, unitGOOS, kardianosInstall, kardianosStart = oldP, oldS, oldG, oldI, oldSt
 	})
@@ -425,6 +430,7 @@ func TestInstallRerun_SameArgsAndRightUnitKeepsKardianosBehaviour(t *testing.T) 
 	exe, _ := os.Executable()
 	b, _ := os.ReadFile(path)
 	cur := strings.Replace(string(b), execLine(t, path), execStartLine(exe, []string{"run", "--config", "/x/config.json"}), 1)
+	cur = strings.Replace(cur, conditionKey+"/usr/local/bin/claude-memsync", conditionKey+exe, 1) // the Condition names this build too
 	os.WriteFile(path, []byte(cur), 0o644)
 	installed := false
 	kardianosInstall = func(svc service.Service) error { installed = true; return nil }

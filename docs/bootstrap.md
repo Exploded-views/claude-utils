@@ -43,6 +43,8 @@ Keep-out owners are **not** written to the denylist. Only terms are. A re-run ad
 
 Placeholders below are `<angle brackets>`. Put real values only in the session you paste into, never in this repository.
 
+Bootstrap stops, before it changes anything, when `$HOME`, `~/.local`, `~/.local/lib`, `~/.local/state` or the bin dir is writable by group or others, or owned by someone other than you or root. On Ubuntu and Fedora (umask 002), `pip install --user` can create `~/.local/lib` as 0775; the message names the directory, and the fix is `chmod go-w ~/.local/lib` (or the directory it names), then run the same command again. Everything bootstrap creates itself is 0755.
+
 ## The paste prompts
 
 Paste one into a Claude Code session on the new host after replacing every `<placeholder>` in INPUTS.

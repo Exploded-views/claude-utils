@@ -46,11 +46,14 @@ REAL="$BASE/real"; mkdir -p "$REAL"
 if [ -n "${MEMSYNC_BIN:-}" ] && [ -n "${MEMMERGE_BIN:-}" ]; then
   cp "$MEMSYNC_BIN" "$REAL/claude-memsync"; cp "$MEMMERGE_BIN" "$REAL/claude-memmerge"
 elif command -v go >/dev/null; then
-  (cd "$ROOT" && go build -o "$REAL/claude-memsync" ./cmd/claude-memsync && go build -o "$REAL/claude-memmerge" ./cmd/claude-memmerge)
+  # Stamped, not read from VCS info: a dirty worktree must not make the version "+dirty",
+  # and the no-sha checks need a release-shaped version (vX.Y.Z...) that carries the commit.
+  LDV="-X github.com/MarimerLLC/claude-utils/internal/version.Override=v0.0.0-test-$(git -C "$ROOT" rev-parse HEAD | cut -c1-12) -X github.com/MarimerLLC/claude-utils/internal/version.Commit=$(git -C "$ROOT" rev-parse HEAD)"
+  (cd "$ROOT" && go build -buildvcs=false -ldflags "$LDV" -o "$REAL/claude-memsync" ./cmd/claude-memsync && go build -buildvcs=false -ldflags "$LDV" -o "$REAL/claude-memmerge" ./cmd/claude-memmerge)
 elif command -v docker >/dev/null; then
   docker run --rm --user "$(id -u):$(id -g)" -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -e GOFLAGS=-buildvcs=false \
     -v "$ROOT:/src:ro" -v "$REAL:/out" -w /src golang:1.25 \
-    sh -c 'go build -o /out/claude-memsync ./cmd/claude-memsync && go build -o /out/claude-memmerge ./cmd/claude-memmerge'
+    sh -c "go build -ldflags '-X github.com/MarimerLLC/claude-utils/internal/version.Override=v0.0.0-test-$(git -C "$ROOT" rev-parse HEAD | cut -c1-12) -X github.com/MarimerLLC/claude-utils/internal/version.Commit=$(git -C "$ROOT" rev-parse HEAD)' -o /out/claude-memsync ./cmd/claude-memsync && go build -ldflags '-X github.com/MarimerLLC/claude-utils/internal/version.Override=v0.0.0-test-$(git -C "$ROOT" rev-parse HEAD | cut -c1-12) -X github.com/MarimerLLC/claude-utils/internal/version.Commit=$(git -C "$ROOT" rev-parse HEAD)' -o /out/claude-memmerge ./cmd/claude-memmerge"
 else
   echo "need MEMSYNC_BIN and MEMMERGE_BIN, go, or docker to build the real claude-memsync" >&2; exit 2
 fi
@@ -135,12 +138,16 @@ cat >"$STUBS/go" <<'EOF'
 #!/bin/sh
 if [ "$1" = version ]; then echo "go version go${STUB_GOVER:-1.25.1} linux/amd64"; exit 0; fi
 echo "go $*" >>"$STUB_DIR/go.log"
+pwd >>"$STUB_DIR/go.cwd"
+cksum <"$PWD/go.mod" >>"$STUB_DIR/go.src"
+echo "GOWORK=${GOWORK-unset} GOFLAGS=${GOFLAGS-unset} GOTOOLCHAIN=${GOTOOLCHAIN-unset}" >>"$STUB_DIR/go.env"
 # go build -o <out> <pkg>: write a stub binary
 out="$3"
+case "$out" in */claude-memmerge*) [ -z "${STUB_GO_FAIL_MERGE:-}" ] || { echo "go: build failed (injected)" >&2; exit 1; } ;; esac
 # record whether the org token leaked into this process env (count only, never the value)
 echo "$(basename "$0"):$(env | grep -v '^STUB_' | grep -cF -- "$STUB_ORG_TOKEN")" >>"$STUB_DIR/env.log"
 case "$out" in
-  */claude-memmerge) cp "$REAL_DIR/claude-memmerge" "$out" ;;
+  */claude-memmerge*) cp "$REAL_DIR/claude-memmerge" "$out" ;;
   *) cp "$STUB_DIR/memsync-wrap" "$out" ;;
 esac
 chmod +x "$out"
@@ -629,6 +636,153 @@ else
   check "prebuilt: ~/.local/bin links point into that dir" bash -c "[ \"\$(readlink '$H/.local/bin/claude-memsync')\" = '$LIBD/claude-memsync' ] && [ \"\$(readlink '$H/.local/bin/claude-memmerge')\" = '$LIBD/claude-memmerge' ]"
   check "prebuilt: no clone, no go build" bash -c "[ ! -e '$H/.local/src' ] && [ ! -e '$STUB_DIR/go.log' ]"
   check "prebuilt: no clone means no plugin step, and the next-step note says so" bash -c "! grep -qs 'plugin' '$STUB_DIR/claude.log' && printf '%s\n' \"\$1\" | grep -q 'plugin step skipped'" _ "$OUT"
+  # --- the lib tree under umask 002 (Ubuntu, Fedora) and tampering ---------
+  m_()  { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+  ino_() { stat -c %i "$1" 2>/dev/null || stat -f %i "$1"; }
+  # fresh home: what bootstrap creates comes out 0755
+  newhome pbum
+  OLDUMASK="$(umask)"; umask 002
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  umask "$OLDUMASK"
+  LIBU="$H/.local/lib/claude-memsync"
+  check "umask 002, fresh home: the run exits 0" [ "$RC" -eq 0 ]
+  check "umask 002, fresh home: the levels bootstrap created and the binaries are 0755" bash -c "[ \"\$(stat -c %a '$H/.local/lib' 2>/dev/null || stat -f %Lp '$H/.local/lib')\" = 755 ] && [ \"\$(stat -c %a '$LIBU/$BSHA' 2>/dev/null || stat -f %Lp '$LIBU/$BSHA')\" = 755 ] && [ \"\$(stat -c %a '$LIBU/$BSHA/claude-memsync' 2>/dev/null || stat -f %Lp '$LIBU/$BSHA/claude-memsync')\" = 755 ]"
+  # an earlier run left a 0775 tree with identical binaries: they are rewritten fresh, never chmod-blessed
+  newhome pbum2
+  umask 002
+  mkdir -p "$H/.local/lib/claude-memsync/$BSHA"
+  cp "$PB/wrap/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memsync"; cp "$PB/wrap/claude-memmerge" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
+  chmod 775 "$H/.local/lib/claude-memsync/$BSHA/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
+  chmod 755 "$H/.local" "$H/.local/lib"   # the user's own layout is fine
+  LIBU="$H/.local/lib/claude-memsync"; INO0="$(ino_ "$LIBU/$BSHA/claude-memsync")"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  umask "$OLDUMASK"
+  check "0775 tree: the run exits 0" [ "$RC" -eq 0 ]
+  check "0775 tree: the binary is a fresh file (new inode), mode 0755, not chmod-blessed" bash -c "[ '$(ino_ "$LIBU/$BSHA/claude-memsync")' != '$INO0' ] && [ '$(m_ "$LIBU/$BSHA/claude-memsync")' = 755 ] && [ '$(m_ "$LIBU/$BSHA/claude-memmerge")' = 755 ]"
+  check "0775 tree: the memsync dirs lost group/world write" bash -c "[ '$(m_ "$LIBU")' = 755 ] && [ '$(m_ "$LIBU/$BSHA")' = 755 ]"
+  # a tampered binary in a 0775 tree is refused, never blessed
+  newhome pbum3
+  umask 002
+  mkdir -p "$H/.local/lib/claude-memsync/$BSHA"
+  cp "$PB/wrap/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memsync"; cp "$PB/wrap/claude-memmerge" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
+  printf '# tampered\n' >>"$H/.local/lib/claude-memsync/$BSHA/claude-memsync"
+  chmod 775 "$H/.local/lib/claude-memsync/$BSHA/claude-memsync"; chmod 755 "$H/.local" "$H/.local/lib"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  umask "$OLDUMASK"
+  check "tampered binary in a 0775 tree: refused, still tampered and not chmodded" bash -c "[ $RC -ne 0 ] && grep -q tampered '$H/.local/lib/claude-memsync/$BSHA/claude-memsync' && [ '$(m_ "$H/.local/lib/claude-memsync/$BSHA/claude-memsync")' = 775 ]"
+  # tight modes (0755), tampered content, prebuilt: the cmp against the archive refuses it
+  newhome pbum6
+  mkdir -p "$H/.local/lib/claude-memsync/$BSHA"
+  cp "$PB/wrap/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memsync"; cp "$PB/wrap/claude-memmerge" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
+  printf '# tampered\n' >>"$H/.local/lib/claude-memsync/$BSHA/claude-memsync"
+  chmod 755 "$H/.local/lib/claude-memsync/$BSHA/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  check "prebuilt, tight modes, tampered binary: refused by the cmp, still tampered" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'differs from' && grep -q tampered '$H/.local/lib/claude-memsync/$BSHA/claude-memsync'" _ "$OUT"
+  # >>> umask-rerun
+  # a prebuilt run under umask 002 and then a re-run (the normal upgrade path) both succeed:
+  # nothing bootstrap itself creates (the state dir included) is group-writable
+  m_()  { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+  OLDUMASK="$(umask)"
+  newhome pbrr
+  umask 002
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"; RC1=$RC; OUT1="$OUT"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  umask "$OLDUMASK"
+  check "umask 002, prebuilt: the first run succeeds" [ "$RC1" -eq 0 ]
+  check "umask 002, prebuilt: the re-run succeeds (bootstrap's own dirs are not group-writable)" bash -c "[ $RC -eq 0 ] || { printf '%s\n' \"\$1\" | tail -3; exit 1; }" _ "$OUT"
+  check "umask 002, prebuilt: ~/.local/state is 0755" bash -c "[ '$(m_ "$H/.local/state")' = 755 ]"
+  # a symlinked \$LIB, and separately a symlinked parent of \$LIB, are refused with nothing written
+  newhome pbsl2
+  mkdir -p "$H/.local/lib/claude-memsync" "$H/elsewhere"
+  ln -s "$H/elsewhere" "$H/.local/lib/claude-memsync/$BSHA"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  check "a symlinked lib dir (\$LIB) is refused and nothing is written through it" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'not a plain directory' && [ -z \"\$(ls -A '$H/elsewhere')\" ] && [ ! -e '$H/.local/bin' ]" _ "$OUT"
+  newhome pbsl3
+  mkdir -p "$H/.local/lib" "$H/elsewhere2"
+  ln -s "$H/elsewhere2" "$H/.local/lib/claude-memsync"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  check "a symlinked parent of the lib dir is refused and nothing is written through it" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'not a plain directory' && [ -z \"\$(ls -A '$H/elsewhere2')\" ] && [ ! -e '$H/.local/bin' ]" _ "$OUT"
+  # <<< umask-rerun
+  # a symlinked binary is refused before any chmod
+  newhome pbum4
+  mkdir -p "$H/.local/lib/claude-memsync/$BSHA"; cp "$PB/wrap/claude-memsync" "$H/victim"
+  ln -s "$H/victim" "$H/.local/lib/claude-memsync/$BSHA/claude-memsync"; cp "$PB/wrap/claude-memmerge" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
+  chmod 600 "$H/victim"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  check "symlinked binary: refused, the link and its target are untouched" bash -c "[ $RC -ne 0 ] && [ -L '$H/.local/lib/claude-memsync/$BSHA/claude-memsync' ] && [ '$(m_ "$H/victim")' = 600 ]"
+  # a group-writable ~/.local is a hard stop: nothing is kept, run or changed
+  newhome pbum5
+  umask 002
+  mkdir -p "$H/.local/lib/claude-memsync/$BSHA"
+  cp "$PB/wrap/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memsync"; cp "$PB/wrap/claude-memmerge" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
+  chmod 755 "$H/.local/lib/claude-memsync/$BSHA/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge" "$H/.local/lib/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA"
+  INO5="$(ino_ "$H/.local/lib/claude-memsync/$BSHA/claude-memsync")"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  umask "$OLDUMASK"
+  check "group-writable ~/.local: bootstrap dies with the chmod-and-re-run advice" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -qF '$H/.local is group- or world-writable; run: chmod go-w $H/.local, then re-run bootstrap (the tree will be reinstalled)'" _ "$OUT"
+  check "group-writable ~/.local: nothing changed (mode, binary, no links)" bash -c "[ '$(m_ "$H/.local")' = 775 ] && [ '$(ino_ "$H/.local/lib/claude-memsync/$BSHA/claude-memsync")' = '$INO5' ] && [ ! -e '$H/.local/bin' ]"
+  # a foreign-owned lib dir or binary is refused (a stat shim reports another uid)
+  SHIM="$BASE/statshim"; mkdir -p "$SHIM"
+  REALSTAT="$(command -v stat)"
+  printf '%s\n' '#!/bin/sh' 'for a; do last="$a"; done' 'case "$*" in *%u*) [ "$last" = "${STAT_FOREIGN:-}" ] && { echo 4242; exit 0; } ;; esac' "exec $REALSTAT \"\$@\"" >"$SHIM/stat"; chmod +x "$SHIM/stat"
+  for what in dir binary; do
+    newhome "pbfo-$what"
+    mkdir -p "$H/.local/lib/claude-memsync/$BSHA"
+    cp "$PB/wrap/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memsync"; cp "$PB/wrap/claude-memmerge" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
+    chmod 755 "$H/.local/lib/claude-memsync/$BSHA/claude-memsync" "$H/.local/lib/claude-memsync/$BSHA/claude-memmerge"
+    FO="$H/.local/lib/claude-memsync/$BSHA"; [ "$what" = dir ] || FO="$FO/claude-memsync"
+    INOF="$(ino_ "$H/.local/lib/claude-memsync/$BSHA/claude-memsync")"
+    STAT_FOREIGN="$FO" BOOT_PATH="$SHIM:$STUBS:$PATH" runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+    check "foreign-owned $what: refused naming the uid, and nothing is replaced" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'is owned by uid 4242' && [ '$(ino_ "$H/.local/lib/claude-memsync/$BSHA/claude-memsync")' = '$INOF' ] && [ ! -e '$H/.local/bin' ]" _ "$OUT"
+  done
+  # home_guard: $HOME owner, a symlinked ~/.local, and a group-writable bin dir
+  newhome pbfh
+  STAT_FOREIGN="$H" BOOT_PATH="$SHIM:$STUBS:$PATH" runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  check "foreign-owned \$HOME: refused naming the uid, nothing created" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -qF '$H is owned by uid 4242' && [ ! -e '$H/.local' ]" _ "$OUT"
+  newhome pbsl
+  mkdir -p "$H/real-local"; chmod 775 "$H/real-local"; ln -s "$H/real-local" "$H/.local"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  check "a .local symlinked to a group-writable dir: refused, nothing created inside it" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -qF '$H/.local is group- or world-writable' && [ -z \"\$(ls -A '$H/real-local')\" ]" _ "$OUT"
+  newhome pbsp
+  mkdir -p "$H/area/real"; chmod 755 "$H/area/real"; chmod 775 "$H/area"; ln -s "$H/area/real" "$H/.local"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  check "a .local symlinked into a dir whose PARENT is group-writable: refused, nothing created" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -q 'group- or world-writable' && [ -z \"\$(ls -A '$H/area/real')\" ]" _ "$OUT"
+  newhome pbbin
+  mkdir -p "$H/.local/bin"; chmod 755 "$H/.local"; chmod 775 "$H/.local/bin"
+  runboot --host testhost --role homelab --yes --sha "$BSHA" --prebuilt-dir "$PB/wrap"
+  check "group-writable ~/.local/bin: refused before anything is installed" bash -c "[ $RC -ne 0 ] && printf '%s\n' \"\$1\" | grep -qF '$H/.local/bin is group- or world-writable' && [ ! -e '$H/.local/lib' ]" _ "$OUT"
+  # created under umask 002: the clone's parent, the state dir and the bin dir are 0755
+  newhome srcu
+  umask 002
+  runboot --host testhost --role homelab --yes
+  umask "$OLDUMASK"
+  check "umask 002, source build: ~/.local/src, ~/.local/state/claude-memsync and ~/.local/bin are created 0755" bash -c "[ '$(m_ "$H/.local/src")' = 755 ] && [ '$(m_ "$H/.local/state/claude-memsync")' = 755 ] && [ '$(m_ "$H/.local/bin")' = 755 ] && [ '$(m_ "$H/.local/src/claude-utils-$SHA")' = 755 ]"
+  # the source build runs in a throwaway archive dir, never in the clone
+  newhome srcb
+  GOFLAGS=-tags=evil GOWORK=/evil/go.work runboot --host testhost --role homelab --yes
+  check "source build: go ran in a private build dir under ~/.local/state, from git archive, never in the clone, and that dir is gone" bash -c "[ -s '$STUB_DIR/go.cwd' ] && ! grep -qF '$H/.local/src' '$STUB_DIR/go.cwd' && ! grep -qv '^$H/.local/state/claude-memsync/build\\.' '$STUB_DIR/go.cwd' && while read -r d; do [ ! -e \"\$d\" ] || exit 1; done <'$STUB_DIR/go.cwd'"
+  check "source build: a hostile GOFLAGS and GOWORK in the environment never reach go (GOWORK=off, GOFLAGS=-mod=readonly, GOTOOLCHAIN=local)" bash -c "[ -s '$STUB_DIR/go.env' ] && ! grep -qv '^GOWORK=off GOFLAGS=-mod=readonly GOTOOLCHAIN=local\$' '$STUB_DIR/go.env'"
+  # a failing second build leaves no .new file behind (and a retry succeeds)
+  newhome srcb2
+  STUB_GO_FAIL_MERGE=1 runboot --host testhost --role homelab --yes
+  check "failing second build: the run fails and no .new temp file is left in the lib dir" bash -c "[ $RC -ne 0 ] && [ -z \"\$(find '$H/.local/lib/claude-memsync' -name '*.new*' 2>/dev/null)\" ]"
+  runboot --host testhost --role homelab --yes
+  check "failing second build: the retry succeeds and leaves no .new files" bash -c "[ $RC -eq 0 ] && [ -z \"\$(find '$H/.local/lib/claude-memsync' -name '*.new*' 2>/dev/null)\" ]"
+  # modes already tight, content tampered: a re-run verifies by content and replaces it
+  LB="$H/.local/lib/claude-memsync/$SHA"
+  cp "$LB/claude-memsync" "$H/good-memsync"
+  printf '# tampered\n' >>"$LB/claude-memsync"
+  runboot --host testhost --role homelab --yes
+  check "source build, tight modes, tampered binary: replaced by the verified build, and the output says so" bash -c "[ $RC -eq 0 ] && cmp -s '$H/good-memsync' '$LB/claude-memsync' && [ '$(m_ "$LB/claude-memsync")' = 755 ] && printf '%s\n' \"\$1\" | grep -qi 'replac'" _ "$OUT"
+  check "source build: the verified commit is stamped as the version's commit field" bash -c "grep -qF 'internal/version.Commit=$SHA' '$STUB_DIR/go.log'"
+  # a planted refs/replace in the clone does not change what is built
+  newhome srcr
+  mkdir -p "$H/.local/src"
+  git clone -q "$BASE/utils.git" "$H/.local/src/claude-utils-$SHA" && git -C "$H/.local/src/claude-utils-$SHA" checkout -q "$SHA"
+  git -C "$H/.local/src/claude-utils-$SHA" replace -f "$(git -C "$H/.local/src/claude-utils-$SHA" rev-parse "$SHA:go.mod")" "$(git -C "$H/.local/src/claude-utils-$SHA" rev-parse "$SHA:README.md")"
+  runboot --host testhost --role homelab --yes
+  check "a planted git replace does not change the built content (go.mod is the commit's own)" bash -c "[ -s '$STUB_DIR/go.src' ] && [ \"\$(sort -u '$STUB_DIR/go.src')\" = \"\$(git -C '$ROOT' show '$SHA:go.mod' | cksum)\" ]"
+  check "source build: the version is stamped with the commit (the archive has no .git)" bash -c "grep -q 'internal/version.Override=dev+' '$STUB_DIR/go.log'"
   newhome pb3
   NO_SHA=1 BOOT_PATH="$(minipath go)" runboot --host testhost --role homelab --dry-run --prebuilt-dir "$PB/real"
   check "prebuilt without --sha: a release-shaped version is the dir name; no git checkout needed" bash -c "[ $RC -eq 0 ] && printf '%s\n' \"\$1\" | grep -qF '.local/lib/claude-memsync/$PBVER'" _ "$OUT"
@@ -636,6 +790,13 @@ else
   runboot --host testhost --role homelab --yes --sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --prebuilt-dir "$PB/real"
   check "prebuilt: a version that does not match --sha is refused, nothing installed" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'does not match --sha' && [ ! -e '$H/.local/lib' ] && [ ! -s '$STUB_DIR/gh.log' ]" _ "$OUT"
 fi
+# gw_p reads any mode, short ones too (a mode like 55 is 055)
+GWP="$(sed -n '/^gw_p() {/,/^}/p' "$ROOT/scripts/bootstrap.sh")"
+for pair in 55:1 5:1 775:0 757:0 755:1 2:0 20:0 0:1; do
+  check "gw_p: mode ${pair%%:*} gives status ${pair##*:} and no error" bash -c "$GWP
+stat() { echo ${pair%%:*}; }
+out=\$(gw_p x 2>&1); rc=\$?; [ -z \"\$out\" ] && [ \$rc -eq ${pair##*:} ]"
+done
 newhome pb5
 runboot --host testhost --role homelab --yes --prebuilt-dir "$PB/onlyone"
 check "prebuilt: a missing claude-memmerge is refused" bash -c "[ $RC -eq 1 ] && printf '%s\n' \"\$1\" | grep -q 'claude-memmerge is missing or not executable'" _ "$OUT"
@@ -1266,7 +1427,7 @@ check "--jobs 4: all six projects have a repo, a key, a sync dir and a route" ba
 check "--jobs 4: repos, keys, ssh config, sync dirs, state marks, routes and memsync calls are identical to --jobs 1" bash -c "grep -q '^created: mem-project' '$BASE/par4.snap' && diff '$BASE/par1.snap' '$BASE/par4.snap'"
 check "--jobs 4: the blocks come in plan order, once per phase, although the first project is the slowest" bash -c "[ \"$(blocks "$OUT4")\" = '$PLAN6$PLAN6' ]"
 check "a block is contiguous: nothing of another repo between a header and its last line" bash -c "printf '%s\n' \"\$1\" | awk '/^== / {cur=\"\"; next} /^-- mem-/ {cur=\$2; next} cur != \"\" && /mem-(personal|project-[a-z-]+)/ { for (i=1;i<=NF;i++) if (\$i ~ /^mem-(personal|project-)/ && \$i != cur) bad=1 } END {exit bad}'" _ "$OUT4"
-NORM='s/age1[a-z0-9]+/AGE/g; s/fingerprint: .*/fingerprint: FP/; s/--fingerprint "[0-9a-f ]+"/--fingerprint FP/; s/up to [0-9]+ at once/up to N at once/'
+NORM='s/age1[a-z0-9]+/AGE/g; s/fingerprint: .*/fingerprint: FP/; s/--fingerprint "[0-9a-f ]+"/--fingerprint FP/; s/up to [0-9]+ at once/up to N at once/; s,/claude-memsync/build\.[A-Za-z0-9]{6},/claude-memsync/build.X,g'
 printf '%s\n' "$OUT4" | sed -E "$NORM" >"$BASE/ord4.txt"; printf '%s\n' "$OUT1" | sed -E "$NORM" >"$BASE/ord1.txt"
 check "the output of --jobs 4 and --jobs 1 is the same text (apart from generated keys)" diff "$BASE/ord1.txt" "$BASE/ord4.txt"
 

@@ -57,9 +57,21 @@ func installTask(configPath string) error {
 		return fmt.Errorf("install: cannot read the service unit: %w", rerr)
 	}
 	if ok {
-		exe, err := os.Executable()
+		exe, err := installExeFn()
 		if err != nil {
 			return err
+		}
+		if why := exeThrowawayFn(exe); why != nil {
+			// A go run or test binary must not become the installed build:
+			// nothing that names a build is touched.
+			fmt.Fprintf(os.Stderr, "warning: %v; the unit and the bin/ symlinks are left on the installed build\n", why)
+			if userUnitIsWrong() {
+				return repairUserUnitTo(os.Stderr, "", "")
+			}
+			return nil
+		}
+		if err := relinkBins(os.Stderr, exe); err != nil {
+			return fmt.Errorf("install: cannot repoint the bin/ symlinks: %w", err)
 		}
 		want := ""
 		if cur, found := currentExecStart(content); found {
@@ -76,8 +88,10 @@ func installTask(configPath string) error {
 				want = execStartLine(exe, args)
 			}
 		}
-		if _, changed := setExecStart(content, want); (want != "" && changed) || userUnitIsWrong() {
-			return repairUserUnit(os.Stderr, want)
+		_, changed := setExecStart(content, want)
+		_, condChanged := setCondition(content, exe)
+		if (want != "" && changed) || condChanged || userUnitIsWrong() {
+			return repairUserUnitTo(os.Stderr, want, exe)
 		}
 	}
 	if err := kardianosInstall(svc); err != nil {
