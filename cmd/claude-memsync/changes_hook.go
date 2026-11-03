@@ -138,7 +138,7 @@ func changesHook(stdin io.Reader, stdout, stderr io.Writer, cfgPath, routesFlag,
 		buf, rerr := io.ReadAll(io.LimitReader(stdin, 1<<20))
 		var p hookPre
 		if rerr == nil {
-			p = hookPrelude(buf, cfgPath, routesFlag)
+			p = hookPrelude(buf, cfgPath, routesFlag, project)
 		}
 		pre <- p
 		o.out, o.commit, o.release, o.err = hookWork(bytes.NewReader(buf), &errBuf, cfgPath, routesFlag, project, limit, p, prog)
@@ -642,7 +642,7 @@ type hookPre struct {
 
 // hookPrelude reads the hook input and the held-repo alerts. Any problem gives
 // no alerts; the worker reports the input error itself.
-func hookPrelude(in []byte, cfgPath, routesFlag string) hookPre {
+func hookPrelude(in []byte, cfgPath, routesFlag, project string) hookPre {
 	p := hookPre{commit: func() {}}
 	var h hookInput
 	if json.Unmarshal(in, &h) != nil || !sessionIDPattern.MatchString(h.SessionID) || h.Event == "" {
@@ -655,6 +655,17 @@ func hookPrelude(in []byte, cfgPath, routesFlag string) hookPre {
 	}
 	p.event = h.Event
 	p.alerts, p.commit = heldAlerts(targets, h.SessionID)
+	// The same project the worker resolves.
+	if project == "" {
+		project = os.Getenv("CLAUDE_PROJECT_DIR")
+	}
+	if project == "" {
+		project = h.Cwd
+	}
+	hbLines, hbCommit := heldBackAlerts(targets, h.SessionID, project)
+	p.alerts = append(p.alerts, hbLines...)
+	held := p.commit
+	p.commit = func() { held(); hbCommit() }
 	return p
 }
 
@@ -729,6 +740,143 @@ func heldAlerts(targets []hookTarget, session string) (lines []string, commit fu
 	}
 }
 
+// heldBackNamesMax caps how many held notes one notice names.
+const heldBackNamesMax = 10
+
+// heldBackRecordMax bounds how much of the daemon's held-back record is read.
+const heldBackRecordMax = 64 << 10
+
+// heldBackAlerts tells the session which notes of its own project the daemon's
+// scrub is not syncing, by file name only. The daemon writes the paths to
+// .state/held-back when it holds them back (sync.holdBack), so this reads one
+// local file per repo: no git, no lock. A name that itself matches the
+// denylist is the private term, so it is counted, not listed; another
+// project's held notes are not mentioned. A session hears a given list once;
+// commit records it in the session's ".heldback" marker, after the output went
+// out.
+func heldBackAlerts(targets []hookTarget, session, project string) (lines []string, commit func()) {
+	type seen struct{ path, digest string }
+	var marks []seen
+	var clears []string // markers of lists that have emptied
+	prefix := "projects/" + changes.ProjectFolder(project) + "/memory/"
+	for _, tg := range targets {
+		mark := filepath.Join(tg.cfg.SyncDir, ".state", "hook-markers", session+".heldback")
+		b, ok := readStateCapped(filepath.Join(tg.cfg.SyncDir, ".state", "held-back"), heldBackRecordMax)
+		if ok && len(b) >= heldBackRecordMax {
+			// Cut at the cap: the last line is partial, so it is not a name.
+			b = b[:bytes.LastIndexByte(b, '\n')+1]
+		}
+		var tl []string // this repo's lines
+		rec := parseHeldRecord(b)
+		if !ok {
+			// no record: nothing to say
+		} else if rec.blocked {
+			// The daemon commits nothing here, and any list it left is stale.
+			tl = append(tl, "memsync is committing nothing in this repo: its denylist is missing or unreadable (see `claude-memsync status`); no notes sync until it is fixed")
+		} else {
+			sc, hideAll := denylistScanner(tg.cfg, io.Discard)
+			// A denylist that was there when the record was written and is gone
+			// now cannot say which names are the private term: count them all.
+			if sc == nil && rec.hadDenylist {
+				hideAll = true
+			}
+			// An older build also wrote the paths held for their name, and
+			// nothing says whether a denylist existed then: list no name.
+			if !rec.v2 {
+				hideAll = true
+			}
+			var names []string
+			hidden := 0
+			for _, rel := range rec.paths {
+				name, ok := strings.CutPrefix(rel, prefix)
+				if !ok || name == "" {
+					continue
+				}
+				// The daemon may be stopped: a note that is gone is not held.
+				if _, err := os.Lstat(filepath.Join(tg.cfg.SyncDir, filepath.FromSlash(rel))); err != nil {
+					continue
+				}
+				if hideAll || (sc != nil && sc.MatchesPath(rel)) {
+					hidden++
+					continue
+				}
+				names = append(names, oneLine(name, 80))
+			}
+			more := hidden
+			if len(names) > heldBackNamesMax {
+				more += len(names) - heldBackNamesMax
+				names = names[:heldBackNamesMax]
+			}
+			switch {
+			case len(names) > 0:
+				line := "memsync is NOT syncing these notes because they are held back (denylist or secret rule); rewrite them without the private term (or move them to the right private store): " + strings.Join(names, ", ")
+				if more > 0 {
+					line += fmt.Sprintf(" (and %d more, not named)", more)
+				}
+				tl = append(tl, line)
+			case more > 0:
+				tl = append(tl, fmt.Sprintf("memsync is NOT syncing %d notes of this project because they are held back (denylist or secret rule) and their names match it, so they are not named; rename them or move them to the right private store", more))
+			}
+			if rec.nameHeld > 0 {
+				tl = append(tl, fmt.Sprintf("memsync is NOT syncing %d notes in this repo because their names match your denylist (not named); rename them or move them to the right private store", rec.nameHeld))
+			}
+		}
+		if len(tl) == 0 {
+			if _, err := os.Lstat(mark); err == nil {
+				clears = append(clears, mark)
+			}
+			continue
+		}
+		line := strings.Join(tl, "\n")
+		sum := sha256.Sum256([]byte(line))
+		digest := hex.EncodeToString(sum[:])
+		if prev, ok := readHeldRecord(mark); ok && strings.TrimSpace(string(prev)) == digest {
+			continue
+		}
+		lines = append(lines, tl...)
+		marks = append(marks, seen{mark, digest})
+	}
+	return lines, func() {
+		for _, m := range marks {
+			_ = os.MkdirAll(filepath.Dir(m.path), 0o700)
+			writeMarker(m.path, m.digest+"\n")
+		}
+		for _, c := range clears {
+			_ = os.Remove(c)
+		}
+	}
+}
+
+// heldRecord is the daemon's .state/held-back (see sync.heldRecordRel).
+type heldRecord struct {
+	paths       []string
+	nameHeld    int
+	hadDenylist bool
+	blocked     bool
+	v2          bool // the format line: a record without it is not trusted
+}
+
+func parseHeldRecord(b []byte) heldRecord {
+	var r heldRecord
+	for _, l := range strings.Split(string(b), "\n") {
+		switch {
+		case l == "":
+		case l == "#blocked":
+			r.blocked = true
+		case l == "#v2":
+			r.v2 = true
+		case l == "#denylist":
+			r.hadDenylist = true
+		case strings.HasPrefix(l, "#name-held "):
+			r.nameHeld, _ = strconv.Atoi(strings.TrimPrefix(l, "#name-held "))
+		case strings.HasPrefix(l, "#"):
+		default:
+			r.paths = append(r.paths, l)
+		}
+	}
+	return r
+}
+
 // writeMarker replaces p with data through a fresh temp file in the same
 // directory (os.CreateTemp: O_EXCL with a random name, so no planted link is
 // followed) and a rename. Errors leave the old marker; the alert repeats.
@@ -750,7 +898,10 @@ const heldRecordMax = 4 << 10
 // and only from a regular file: a symlink is not followed and a FIFO does not
 // block (openStateFlags), so a stray file can neither hang the hook nor grow
 // its memory. ok is false for anything else or any error.
-func readHeldRecord(p string) (b []byte, ok bool) {
+func readHeldRecord(p string) (b []byte, ok bool) { return readStateCapped(p, heldRecordMax) }
+
+// readStateCapped is readHeldRecord with the cap given.
+func readStateCapped(p string, max int64) (b []byte, ok bool) {
 	if fi, err := os.Lstat(p); err != nil || !fi.Mode().IsRegular() {
 		return nil, false
 	}
@@ -762,6 +913,6 @@ func readHeldRecord(p string) (b []byte, ok bool) {
 	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
 		return nil, false
 	}
-	b, err = io.ReadAll(io.LimitReader(f, heldRecordMax))
+	b, err = io.ReadAll(io.LimitReader(f, max))
 	return b, err == nil
 }

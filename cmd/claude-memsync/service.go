@@ -5,9 +5,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/kardianos/service"
 
 	"github.com/MarimerLLC/claude-utils/internal/config"
+	"github.com/MarimerLLC/claude-utils/internal/gitwt"
 	"github.com/MarimerLLC/claude-utils/internal/route"
 	"github.com/MarimerLLC/claude-utils/internal/secretcmd"
 	syncpkg "github.com/MarimerLLC/claude-utils/internal/sync"
@@ -364,6 +367,9 @@ func runStatus(args []string) int {
 			fmt.Println(line)
 			code = 1
 		}
+		if line := heldBackLine(cfg); line != "" {
+			fmt.Println(line)
+		}
 		if line := visibilityLine(cfg); line != "" {
 			fmt.Println(line)
 		}
@@ -372,6 +378,20 @@ func runStatus(args []string) int {
 		}
 	}
 	return code
+}
+
+// heldBackLine reports how many notes the scrub is holding back, as a count
+// only: a name could itself match the denylist. It is empty when none are held
+// or the repo cannot be read; a denylist that stops every commit is said so.
+func heldBackLine(cfg config.Config) string {
+	held, err := syncpkg.HeldBack(gitwt.New(cfg.SyncDir), cfg)
+	if errors.Is(err, syncpkg.ErrDenylistBlocked) {
+		return "committing nothing: denylist missing or unreadable (notes stay local until it is fixed)"
+	}
+	if err != nil || len(held) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("held back (denylist or secret rule): %d notes (not synced; run in that project to see which)", len(held))
 }
 
 // routedStatus prints the routing part of status. handled is false only when no
@@ -410,6 +430,9 @@ func routedStatus() (handled bool, code int) {
 		if l := syncpkg.PullRefusedLine(cfg.SyncDir); l != "" {
 			lines = append(lines, l)
 			code = 1
+		}
+		if l := heldBackLine(cfg); l != "" {
+			lines = append(lines, l)
 		}
 		if l := visibilityLine(cfg); l != "" {
 			lines = append(lines, l)
@@ -490,13 +513,27 @@ func runService(configPath, routesFlag string, opts guardOpts) int {
 	}
 	logger, err := svc.Logger(nil)
 	if err == nil {
-		log.SetOutput(serviceLogWriter{logger: logger})
+		if w := serviceLogOutput(runtime.GOOS, logger); w != nil {
+			log.SetOutput(w)
+		}
 	}
 	if err := svc.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "run:", err)
 		return 1
 	}
 	return 0
+}
+
+// serviceLogOutput is where the std logger writes under the service manager.
+// On macOS the service logger is syslog at LOG_INFO, which the system does not
+// keep, so every line after startup would vanish; the launchd unit already
+// sends stderr to a file, so the logger stays on stderr there. Elsewhere the
+// lines go to the service logger (journald, the Windows event log).
+func serviceLogOutput(goos string, svcLogger service.Logger) io.Writer {
+	if goos == "darwin" {
+		return os.Stderr
+	}
+	return serviceLogWriter{logger: svcLogger}
 }
 
 type serviceLogWriter struct{ logger service.Logger }

@@ -74,6 +74,9 @@ section() {
   section "distill -h" distill -h
   section "archive" archive
   section "archive list -h" archive list -h
+  section "log" log
+  section "log append -h" log append -h
+  section "log check -h" log check -h
   section "route" route
   section "route home -h" route home -h
   section "route publish -h" route publish -h

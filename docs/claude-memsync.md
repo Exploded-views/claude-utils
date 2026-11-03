@@ -141,6 +141,7 @@ and SSH keys. None require root.
 | `claude-memsync run` | Run in the foreground (for debugging). |
 | `claude-memsync changes --since <rev>` or `--marker <file>` | List memory files changed in the sync repo since a point (`--project`, `--json`, `--limit`, `--update-marker`, `--hook`). See [Telling a running session what changed](#telling-a-running-session-what-changed). |
 | `claude-memsync distill` | Rebuild the distilled-memory catalog index (`--prune`, `--dry-run`, and with several repos `--repo <name>` or `--config <path>`, `--routes <path>`). See [distilling-memories.md](distilling-memories.md). |
+| `claude-memsync log append <file> [text...]` / `log check [--] <file>...` | Append a UTC-minute-stamped line to a decision or state log, or list the lines a prefix filter would skip. See [Decision and state logs](#decision-and-state-logs). |
 | `claude-memsync version [--json]` | Print the version. See [version output](#version-output). |
 
 ## Unclean stop records
@@ -552,6 +553,35 @@ not logged either; you will see a count instead:
 scrub: <held back: path matches denylist> (2)
 ```
 
+### Seeing what is held back
+
+A held note stays in `~/.claude` and in the sync dir; it is not committed or
+pushed until you rewrite it without the private term (or move it to the right
+private store). Three places tell you:
+
+- **The log.** On macOS the daemon's log lines go to stderr, which the launchd
+  plist sends to its `StandardErrorPath` file (`~/claude-memsync.err.log` for the
+  user agent). They used to go to the system logger and were not kept. On Linux
+  they are in the journal. The held set is logged when it changes, not every
+  cycle.
+- **`claude-memsync status`.** Per repo, `held back (denylist or secret rule): N
+  notes (not synced; run in that project to see which)`. It is a count only:
+  a name that matches the denylist is the private term. When the denylist is
+  missing with `requireDenylist` set, or cannot be read, it says `committing
+  nothing: denylist missing or unreadable` instead.
+- **The prompt hook.** The daemon records what it held in
+  `.state/held-back` (never synced), and the `UserPromptSubmit` hook, with no
+  extra git process, tells the session which notes of **its own** project are
+  not syncing, by file name: `memsync is NOT syncing these notes because they
+  are held back (denylist or secret rule); rewrite them without the private
+  term (or move them to the right private store): a.md, b.md`. A name that
+  matches the denylist is counted, never listed. All names are counted, none
+  listed, if a denylist was there when the daemon wrote the record and is gone
+  or unreadable when the hook runs (or the record is from an older build). Other projects' notes are not named.
+  A session hears a given list once; a changed list is told again. If the daemon
+  is stopped the record can be out of date; notes that no longer exist are
+  skipped.
+
 The same rule covers error messages: an error from copying a file, from the
 park, or from git (a failed pull or checkout names files in its output) that
 mentions a path matching the denylist is logged with `<path redacted>` in place
@@ -898,6 +928,28 @@ deliberate purge, for example a leaked secret in an archived note. That is a git
 history rewrite done by the repo owner by hand (rewrite the history of every
 clone, force-push, then have every host re-clone), and the tool has no command,
 flag or setting that does it.
+
+## Decision and state logs
+
+`claude-memsync log append` and `log check` keep plain-text logs whose lines peers can filter on a fixed prefix:
+
+```text
+- 2026-11-02 18:30Z watch memsync: running, no new stop records
+```
+
+An entry is exactly one line, `- YYYY-MM-DD HH:MMZ <text>`. The stamp is UTC, cut to the minute (never rounded). The text has at least one printable character, no newline, CR or other control character (a tab is fine), and no invalid UTF-8, C1 control, line or paragraph separator, bidi control (U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069), zero-width space or BOM. Joiners (ZWJ, ZWNJ), the soft hyphen and emoji tag characters are allowed, and the whole line, newline included, is at most 4096 bytes.
+
+```sh
+claude-memsync log append decisions.md chose route A for the cache   # text from the arguments
+claude-memsync log append decisions.md <<'EOF'                       # or one line from stdin
+chose route A; no $VAR or backtick is expanded in a quoted heredoc
+EOF
+claude-memsync log check decisions.md
+```
+
+- `append` writes one line with a single `write(2)` under a lock on the file, so concurrent `log append` calls (goroutines or processes) never interleave. On unix the lock is an advisory `flock`: it stops other `log append` callers, not git, the sync mirror or an editor rewriting the file. On Windows it locks one byte far past the data, so readers are never blocked. If the file is replaced by a rename while `append` waits, it reopens the new file (a few tries, then fails). It waits up to `--wait` (default 5 s) for the lock. On unix a failed write is truncated away, so a full disk never leaves a broken line; on Windows the truncate may be refused for an append handle, and the error then says so and the fragment must be removed by hand. If the file keeps being replaced, the worst-case wait is 5 times `--wait`. A new file is created `0600`; an existing file keeps its mode; a symlink is followed (a dangling one creates its target); a FIFO, device or other non-regular file is refused.
+- `append` exits 2 and writes nothing for bad text (empty, a newline or control character, too long), and 1 when the file does not end with a newline (the entry would join a broken line; run `log check`) or the lock times out.
+- `check` prints `path:line: reason` for each line that is not an entry, a `#` heading or a blank line, plus bad stamps, empty text, control, bidi or zero-width characters, over-long lines and a missing final newline. Merge-conflict markers are flagged too. Exit 0 when clean, 1 for problems, 2 for a usage or read error. There is no allow-list: point it only at files that follow the entry format.
 
 ## On-disk layout
 

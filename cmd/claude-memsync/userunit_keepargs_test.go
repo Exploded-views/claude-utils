@@ -72,11 +72,15 @@ func TestInstallRoutesFlag_ReplacesOnlyRoutesAndPrintsOldAndNew(t *testing.T) {
 	if !strings.Contains(got, `"--config" "/keep/config.json"`) || !strings.HasSuffix(got, `"--routes" "`+z+`"`) {
 		t.Errorf("only routes may change, got %q", got)
 	}
-	if !strings.Contains(errs, keepExec) {
-		t.Errorf("the old ExecStart line must be printed:\n%s", errs)
+	exe, _ := os.Executable()
+	if !strings.Contains(errs, "/old/bin/claude-memsync") || !strings.Contains(errs, exe) {
+		t.Errorf("the old and new executable paths must be printed:\n%s", errs)
 	}
-	if !strings.Contains(errs, got) {
-		t.Errorf("the new ExecStart line must be printed:\n%s", errs)
+	if !strings.Contains(errs, "arguments updated") {
+		t.Errorf("say that the arguments changed:\n%s", errs)
+	}
+	if strings.Contains(errs, "/keep/config.json") || strings.Contains(errs, z) {
+		t.Errorf("argument text must never be printed:\n%s", errs)
 	}
 	if !strings.Contains(errs, "restart") {
 		t.Errorf("tell the user to restart:\n%s", errs)
@@ -90,6 +94,7 @@ func TestInstallRerun_CRLFUnitEqualIsNotRewritten(t *testing.T) {
 	line := execStartLine(exe, []string{"run", "--config", "/x/config.json"})
 	path, calls := liveUnit(t, line)
 	b, _ := os.ReadFile(path)
+	b = []byte(strings.Replace(string(b), conditionKey+"/usr/local/bin/claude-memsync", conditionKey+exe, 1)) // the Condition names this build too
 	crlf := strings.ReplaceAll(string(b), "\n", "\r\n")
 	if err := os.WriteFile(path, []byte(crlf), 0o644); err != nil {
 		t.Fatal(err)

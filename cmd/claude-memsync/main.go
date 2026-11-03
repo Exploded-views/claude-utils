@@ -41,6 +41,8 @@ func main() {
 		os.Exit(runDistill(os.Args[2:]))
 	case "archive":
 		os.Exit(runArchive(os.Args[2:]))
+	case "log":
+		os.Exit(runLog(os.Args[2:]))
 	case "age-filter":
 		os.Exit(runAgeFilter(os.Args[2:]))
 	case "age-textconv":
@@ -114,6 +116,7 @@ Subcommands:
   run         Run the sync daemon in the foreground
   distill     Rebuild the distilled-memory catalog index (see --prune, --dry-run)
   archive     List or search the archive of deleted notes (archive list, archive search <term>)
+  log         log append|check: UTC-minute-stamped decision and state logs
   route       Edit routing: the home folder, publish or inherit a host template
   changes     List memory files changed in the sync repo since a commit (for hooks)
   relate      Declare a read or join relation between two memory repos (registry)
