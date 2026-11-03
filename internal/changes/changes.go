@@ -749,6 +749,10 @@ func WriteMarker(path, sha string) (err error) {
 
 var driveName = regexp.MustCompile(`^[A-Za-z]--`)
 
+// ProjectFolder is projectFolder for callers outside the package: Claude's
+// folder name for a project directory (or for a value that already is one).
+func ProjectFolder(p string) string { return projectFolder(p) }
+
 // projectFolder maps a --project value to Claude's folder name: a value that
 // already looks like one is used as is, anything else is treated as a
 // directory and escaped the way Claude Code does it.
