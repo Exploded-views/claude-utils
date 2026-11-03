@@ -507,3 +507,16 @@ func TestRecordStop_RoutedMissingRepoRedactsAllPathsAndNamesNothing(t *testing.T
 		t.Fatalf("stderr = %q, want a record-stop: line with the count and no repo name", errOut)
 	}
 }
+
+// The term is only in the repo that sorts later by name, so a scanner built
+// from the first config alone misses it.
+func TestRecordStop_DenylistOfTheLaterRepoApplies(t *testing.T) {
+	cfgs := routedHost(t, []string{"alpha", "zeta"}, "alpha", []map[string]string{{"folder": "-a", "repo": "zeta"}})
+	writeDenylist(t, cfgs["zeta"].SyncDir, "zeta-only-term\n")
+	d, _ := config.Dir()
+	fakeJournal(t, func(context.Context, int) (string, error) { return "held back projects/zeta-only-term/x.md\n", nil })
+	runRS(t, nil, uncleanEnv)
+	if b := recordBytes(t, filepath.Join(d, "stops")); bytes.Contains(b, []byte("zeta-only-term")) {
+		t.Fatalf("the later repo's denylisted term is in the record:\n%s", b)
+	}
+}

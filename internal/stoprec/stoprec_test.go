@@ -415,3 +415,18 @@ func TestScrubTail_NoSecretByteReachesTheFile(t *testing.T) {
 		t.Fatalf("Withheld = %d, want 3", rec.Withheld)
 	}
 }
+
+// Valid JSON with no times is not a record: it would sort oldest, never be
+// evicted by age, and print a zero time.
+func TestLatest_IgnoresAnEmptyJSONRecord(t *testing.T) {
+	d := newDir(t)
+	EnsureDir(d)
+	os.WriteFile(filepath.Join(d, "stop-29990101T000000Z-00.json"), []byte("{}"), 0o600)
+	if recs, err := List(d); err != nil || len(recs) != 0 {
+		t.Fatalf("List = %v, %v; want none", recs, err)
+	}
+	mustWrite(t, d, Record{Result: "timeout"}, t0)
+	if rec, ok, _ := Latest(d); !ok || rec.Result != "timeout" {
+		t.Fatalf("Latest = %+v", rec)
+	}
+}
