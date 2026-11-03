@@ -515,8 +515,11 @@ func TestRecordStop_DenylistOfTheLaterRepoApplies(t *testing.T) {
 	writeDenylist(t, cfgs["zeta"].SyncDir, "zeta-only-term\n")
 	d, _ := config.Dir()
 	fakeJournal(t, func(context.Context, int) (string, error) { return "held back projects/zeta-only-term/x.md\n", nil })
-	runRS(t, nil, uncleanEnv)
-	if b := recordBytes(t, filepath.Join(d, "stops")); bytes.Contains(b, []byte("zeta-only-term")) {
-		t.Fatalf("the later repo's denylisted term is in the record:\n%s", b)
+	_, _, errOut := runRS(t, nil, uncleanEnv)
+	if errOut != "" {
+		t.Fatalf("stderr = %q, want normal mode (no closed-mode line)", errOut)
+	}
+	if b := recordBytes(t, filepath.Join(d, "stops")); bytes.Contains(b, []byte("zeta-only-term")) || !bytes.Contains(b, []byte("path redacted")) {
+		t.Fatalf("the later repo's term is in the record, or the scanner was not in normal mode:\n%s", b)
 	}
 }

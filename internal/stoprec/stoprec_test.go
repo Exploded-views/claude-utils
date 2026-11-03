@@ -416,8 +416,9 @@ func TestScrubTail_NoSecretByteReachesTheFile(t *testing.T) {
 	}
 }
 
-// Valid JSON with no times is not a record: it would sort oldest, never be
-// evicted by age, and print a zero time.
+// Valid JSON with no times is not a record: a zero Last sorts oldest and is
+// evicted first, but while it is the only record, status would print a zero
+// time.
 func TestLatest_IgnoresAnEmptyJSONRecord(t *testing.T) {
 	d := newDir(t)
 	EnsureDir(d)
