@@ -516,7 +516,7 @@ func (l *Loop) handleEvent(watcher *fsnotify.Watcher, roots Roots, ev fsnotify.E
 //
 // Before doing any pull/push, flush asks origin for the current branch SHA
 // (a single ls-remote round-trip). If origin's SHA matches our cached
-// refs/remotes/origin/<branch> AND we have no unpushed commits, it returns
+// refs/remotes/origin/<branch> AND HEAD is level with it, it returns
 // early — skipping the full pull/push churn that dominates idle ticks.
 func (l *Loop) flush(repo *gitwt.Repo, roots Roots, includeLocal bool) (err error) {
 	if l.held() {
@@ -724,7 +724,8 @@ func abortRebaseConflict(repo *gitwt.Repo) error {
 }
 
 // remoteAndLocalIdle reports whether there is nothing to do: origin's branch
-// SHA matches our cached remote-tracking ref AND we have no unpushed commits.
+// SHA matches our cached remote-tracking ref AND HEAD is level with it: no
+// unpushed commits and none fetched but not yet merged.
 // Returns (false, nil) when the gate cannot prove idleness — including the
 // first run before refs/remotes/origin/<branch> exists locally.
 func remoteAndLocalIdle(repo *gitwt.Repo, branch string) (bool, error) {
@@ -739,11 +740,23 @@ func remoteAndLocalIdle(repo *gitwt.Repo, branch string) (bool, error) {
 	if strings.TrimSpace(cachedSHA) != remoteSHA {
 		return false, nil // remote moved
 	}
-	unpushed, err := repo.Run("rev-list", "--count", "refs/remotes/origin/"+branch+"..HEAD")
+	// One spawn: "<behind>\t<ahead>" of HEAD against the tracking ref. Behind
+	// matters as much as ahead: a fetch not followed by a merge (a manual
+	// fetch, another tool, a pull whose rebase aborted) leaves the tracking
+	// ref equal to the remote but HEAD behind it, and skipping then would
+	// never merge those commits.
+	counts, err := repo.Run("rev-list", "--left-right", "--count", "refs/remotes/origin/"+branch+"...HEAD")
 	if err != nil {
 		return false, nil
 	}
-	return strings.TrimSpace(unpushed) == "0", nil
+	return levelWithTracking(counts), nil
+}
+
+// levelWithTracking reports whether `rev-list --left-right --count` output
+// is exactly "0<ws>0": nothing behind, nothing ahead. Anything else,
+// including unparseable output, is not level.
+func levelWithTracking(out string) bool {
+	return strings.Join(strings.Fields(out), " ") == "0 0"
 }
 
 // propagateChanges replays the file changes between pre and post revisions
