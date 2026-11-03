@@ -380,6 +380,15 @@ func loadExisting(path string) (cfg config.Config, exists bool, err error) {
 func runDoctor(args []string) int { return doctorCmd(os.Stdout, os.Stderr, args) }
 
 func doctorCmd(stdout, stderr io.Writer, args []string) int {
+	unitBad := false
+	code := doctorCmdInner(stdout, stderr, args, &unitBad)
+	if unitBad && code == 0 {
+		return 1
+	}
+	return code
+}
+
+func doctorCmdInner(stdout, stderr io.Writer, args []string, unitBad *bool) int {
 	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	org := flags.String("org", "", "GitHub org to check (default: config githubOrg, else owner of the remote)")
@@ -410,6 +419,9 @@ func doctorCmd(stdout, stderr io.Writer, args []string) int {
 	tokenFlags{File: *tokenFile, Cmd: *tokenCmd, App: *ghApp}.apply(&cfg)
 	if w := unitTargetWarning(); w != "" && !*timer {
 		fmt.Fprintln(stdout, w)
+	}
+	if !*timer {
+		*unitBad = !reportUnitVersion(stderr, unitVersionCheck())
 	}
 	if *timer {
 		o, err := orgFor(cfg, *org)

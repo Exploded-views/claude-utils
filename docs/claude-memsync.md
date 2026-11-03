@@ -542,6 +542,35 @@ not logged either; you will see a count instead:
 scrub: <held back: path matches denylist> (2)
 ```
 
+### Seeing what is held back
+
+A held note stays in `~/.claude` and in the sync dir; it is not committed or
+pushed until you rewrite it without the private term (or move it to the right
+private store). Three places tell you:
+
+- **The log.** On macOS the daemon's log lines go to stderr, which the launchd
+  plist sends to its `StandardErrorPath` file (`~/claude-memsync.err.log` for the
+  user agent). They used to go to the system logger and were not kept. On Linux
+  they are in the journal. The held set is logged when it changes, not every
+  cycle.
+- **`claude-memsync status`.** Per repo, `held back (denylist or secret rule): N
+  notes (not synced; run in that project to see which)`. It is a count only:
+  a name that matches the denylist is the private term. When the denylist is
+  missing with `requireDenylist` set, or cannot be read, it says `committing
+  nothing: denylist missing or unreadable` instead.
+- **The prompt hook.** The daemon records what it held in
+  `.state/held-back` (never synced), and the `UserPromptSubmit` hook, with no
+  extra git process, tells the session which notes of **its own** project are
+  not syncing, by file name: `memsync is NOT syncing these notes because they
+  are held back (denylist or secret rule); rewrite them without the private
+  term (or move them to the right private store): a.md, b.md`. A name that
+  matches the denylist is counted, never listed. All names are counted, none
+  listed, if a denylist was there when the daemon wrote the record and is gone
+  or unreadable when the hook runs (or the record is from an older build). Other projects' notes are not named.
+  A session hears a given list once; a changed list is told again. If the daemon
+  is stopped the record can be out of date; notes that no longer exist are
+  skipped.
+
 The same rule covers error messages: an error from copying a file, from the
 park, or from git (a failed pull or checkout names files in its output) that
 mentions a path matching the denylist is logged with `<path redacted>` in place

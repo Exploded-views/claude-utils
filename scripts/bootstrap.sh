@@ -88,7 +88,10 @@ mark_state() {
   ms="$(g_state "$STATE/$HOST.$1")" || die "cannot tell whether the mark $1 exists in $STATE; refusing"
   case "$ms" in ABSENT | PRESENT) printf '%s' "$ms" ;; *) die "the mark $1 in $STATE is a dangling symlink; refusing" ;; esac
 }
-mark()   { [ "$DRY_RUN" -eq 1 ] && return 0; mkdir -p "$STATE"; : >"$STATE/$HOST.$1"; }
+# mkdir_p: every directory this script makes is 0755, whatever the user's umask
+# (a 0775 one would be refused by home_guard and by claude-memsync install).
+mkdir_p() { ( umask 022; mkdir -p "$@" ); }
+mark()   { [ "$DRY_RUN" -eq 1 ] && return 0; mkdir_p "$STATE"; : >"$STATE/$HOST.$1"; }
 
 # ---------------------------------------------------------------------------
 # Guards: every "may we proceed?" decision. The shape that keeps them honest is
@@ -612,7 +615,7 @@ check_prereqs() {
   if [ "${BASH_VERSINFO[0]}" -lt 3 ] || { [ "${BASH_VERSINFO[0]}" -eq 3 ] && [ "${BASH_VERSINFO[1]}" -lt 2 ]; }; then
     miss "bash ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]} is too old (need >= 3.2; macOS /bin/bash 3.2 is enough)"
   fi
-  for t in sed awk grep tr cut sort head find stat mktemp id uname dirname chmod ln $([ "$BUILD_FROM_SOURCE" -eq 1 ] || echo 'cp cmp'); do
+  for t in sed awk grep tr cut sort head find stat mktemp id uname dirname chmod ln cmp $([ "$BUILD_FROM_SOURCE" -eq 1 ] && echo tar || echo cp); do
     command -v "$t" >/dev/null 2>&1 || miss "$t (a basic tool the script uses)"
   done
   if command -v git >/dev/null 2>&1; then
@@ -866,10 +869,25 @@ run_dir_remove() {
   rmdir "$RUN_DIR" 2>/dev/null || true
   RUN_DIR=""
 }
+# build_dir_remove: the throwaway git-archive build dir (made by mktemp -d), on every exit path.
+BUILD_DIR=""
+build_dir_remove() {
+  [ -n "$BUILD_DIR" ] || return 0
+  rm -rf -- "$BUILD_DIR"
+  BUILD_DIR=""
+}
+# lib_new_cleanup: the .new temp files this bootstrap writes into $LIB (these two names only).
+lib_new_cleanup() {
+  [ -n "${LIB:-}" ] || return 0
+  [ "$DRY_RUN" -eq 0 ] || return 0
+  rm -f -- "$LIB/claude-memsync.new" "$LIB/claude-memmerge.new"
+}
 on_exit() {
   local rc=$?
   jr_shield
   set +e   # clean up as much as possible, whatever fails on the way
+  build_dir_remove
+  lib_new_cleanup
   guard_abort   # a check a guard is waiting for
   jr_kill_all   # repo jobs still running, with what they started
   run_dir_remove
@@ -1493,6 +1511,9 @@ confirm_plan() {
 step_install_prebuilt() {
   step "b. Install prebuilt binaries from $PREBUILT_DIR ($SHORT)"
   local b ls_
+  lib_inspect
+  # Every run compares what is there with the verified archive, whatever the
+  # modes are: a binary that differs is refused, never kept.
   for b in claude-memsync claude-memmerge; do
     ls_="$(g_state "$LIB/$b")" || die "cannot tell whether $LIB/$b exists; refusing to overwrite it"
     case "$ls_" in
@@ -1501,21 +1522,141 @@ step_install_prebuilt() {
       *) die "$LIB/$b is a dangling symlink; refusing to overwrite it" ;;
     esac
   done
-  if [ -x "$LIB/claude-memsync" ] && [ -x "$LIB/claude-memmerge" ]; then   # fs-ok: false (re)installs or rebuilds at the pinned commit; the cmp check above refuses a differing file
-    say "  binaries present in $LIB"
+  mk_lib_dir
+  if [ "$LIB_REWRITE" -eq 0 ]; then
+    say "  binaries present in $LIB (verified against the archive)"
   else
-    run mkdir -p "$LIB"
+    # Fresh files only: an existing binary in a tree others could write is
+    # replaced, never chmod-blessed.
+    lib_new_cleanup
     for b in claude-memsync claude-memmerge; do
-      run cp "$PREBUILT_DIR/$b" "$LIB/$b.tmp"
-      run chmod 755 "$LIB/$b.tmp"
-      run mv -f "$LIB/$b.tmp" "$LIB/$b"
+      run sh -c 'umask 022; cp "$1" "$2"' _ "$PREBUILT_DIR/$b" "$LIB/$b.new"
+      run chmod 755 "$LIB/$b.new"
+      run mv -f "$LIB/$b.new" "$LIB/$b"
     done
   fi
   link_binaries
 }
 
+# gw_p <path>: true when group or other can write it (or its mode cannot be read).
+# The mode is zero-padded, so a short one such as 55 reads as 055.
+gw_p() {
+  local m
+  m="$(stat -L -c %a "$1" 2>/dev/null || stat -L -f %Lp "$1")" || return 0
+  m="000$m"
+  m="${m: -3}"
+  [ $((${m:1:1} & 2)) -ne 0 ] || [ $((${m:2:1} & 2)) -ne 0 ]
+}
+# owner_uid <path>: the owner's uid (GNU stat, then BSD stat).
+owner_uid() { stat -L -c %u "$1" 2>/dev/null || stat -L -f %u "$1"; }
+
+# path_chain_ok <resolved path>: every directory from it up to / must be owned by
+# you or root and not group- or world-writable (a sticky /tmp does not qualify).
+# On failure it prints why and returns 1.
+path_chain_ok() {
+  local d="$1" u me
+  me="$(id -u)" || { echo "cannot tell who you are (id -u)"; return 1; }
+  while :; do
+    if gw_p "$d"; then echo "$d is group- or world-writable; run: chmod go-w $d"; return 1; fi
+    u="$(owner_uid "$d")" || { echo "cannot read the owner of $d"; return 1; }
+    if [ "$u" != "$me" ] && [ "$u" != 0 ]; then echo "$d is owned by uid $u, not you or root"; return 1; fi
+    [ "$d" != "/" ] || break
+    d="$(dirname "$d")"
+  done
+}
+
+# home_guard: a HARD STOP, before anything is kept or run, and again after every
+# mkdir that creates one of these levels. $HOME, ~/.local, ~/.local/lib, ~/.local/state
+# (and our dir in it), the clone's parent and $BIN hold what the service runs and
+# what is built from; if group or other can write one of them, or someone other
+# than you or root owns it, they can swap it. Symlinks are followed and the
+# resolved path is checked too. Bootstrap never chmods the user's own layout.
+home_guard() {
+  local p q st r u me why
+  local dirs=("$HOME" "$HOME/.local" "$HOME/.local/lib" "$HOME/.local/state" "$HOME/.local/state/claude-memsync" "$BIN")
+  [ -z "${SRC:-}" ] || dirs+=("$(dirname "$SRC")")
+  me="$(id -u)" || die "cannot tell who you are (id -u)"
+  for p in "${dirs[@]}"; do
+    st="$(g_state "$p")" || die "cannot tell whether $p exists; refusing to continue"
+    [ "$st" = PRESENT ] || continue
+    r="$(cd -P -- "$p" 2>/dev/null && pwd -P)" || die "cannot resolve $p; refusing to continue"
+    for q in "$p" "$r"; do
+      if gw_p "$q"; then
+        die "$p is group- or world-writable; run: chmod go-w $p, then re-run bootstrap (the tree will be reinstalled)"
+      fi
+      u="$(owner_uid "$q")" || die "cannot read the owner of $q; refusing to continue"
+      if [ "$u" != "$me" ] && [ "$u" != 0 ]; then die "$p is owned by uid $u, not you or root; refusing to continue"; fi
+    done
+    why="$(path_chain_ok "$r")" || die "$p: $why, then re-run bootstrap (the tree will be reinstalled)"
+  done
+}
+
+# lib_inspect looks at the existing lib tree before anything is kept or written.
+# For $LIB's parent, $LIB and each binary that exist, it dies on a symlink (or
+# anything not a plain dir/file), on an owner other than you, and on an owner it
+# cannot read; (~/.local, ~/.local/lib and $BIN are home_guard's writable stop).
+# Then it sets LIB_REWRITE=1 when $LIB, its parent or a binary is group- or
+# world-writable, or a binary is missing or not executable: those are written
+# fresh and replaced, never chmod-blessed. Whether kept binaries are the
+# verified ones is not decided by modes: every run checks their content (prebuilt:
+# cmp against the archive; source: cmp against a fresh git-archive build).
+lib_inspect() {
+  local p b st k u me
+  me="$(id -u)" || die "cannot tell who you are (id -u)"
+  LIB_REWRITE=0
+  for p in "$(dirname "$LIB")" "$LIB"; do
+    st="$(g_state "$p")" || die "cannot tell whether $p exists; refusing to touch it"
+    [ "$st" = ABSENT ] && continue
+    k="$(g_kind "$p")" || die "cannot tell what $p is; refusing to touch it"
+    [ "$k" = dir ] || die "$p is not a plain directory (a symlink or file?); refusing to touch it"
+    u="$(owner_uid "$p")" || die "cannot read the owner of $p; refusing to use it"
+    [ "$u" = "$me" ] || die "$p is owned by uid $u, not you; refusing to use it"
+    if gw_p "$p"; then
+      LIB_REWRITE=1
+      warn "$p is group- or world-writable: another user could have replaced the binaries in it. Fresh binaries are written, and the group/world write bits are removed from this directory."
+    fi
+  done
+  for b in claude-memsync claude-memmerge; do
+    st="$(g_state "$LIB/$b")" || die "cannot tell whether $LIB/$b exists; refusing to touch it"
+    case "$st" in
+      ABSENT) LIB_REWRITE=1 ;;
+      PRESENT)
+        k="$(g_kind "$LIB/$b")" || die "cannot tell what $LIB/$b is; refusing to touch it"
+        [ "$k" = file ] || die "$LIB/$b is not a plain file (a symlink?); refusing to touch it"
+        u="$(owner_uid "$LIB/$b")" || die "cannot read the owner of $LIB/$b; refusing to use it"
+        [ "$u" = "$me" ] || die "$LIB/$b is owned by uid $u, not you; refusing to use it"
+        if gw_p "$LIB/$b"; then
+          LIB_REWRITE=1
+          warn "$LIB/$b is group- or world-writable: it is replaced by a fresh copy, not trusted."
+        fi
+        [ -x "$LIB/$b" ] || LIB_REWRITE=1 ;;   # fs-ok: a binary that cannot be run is written again
+      *) die "$LIB/$b is a dangling symlink; refusing to touch it" ;;
+    esac
+  done
+}
+
+# mk_lib_dir makes $LIB. Levels it creates get 0755 (a umask of 002 would leave
+# 0775). Existing directories of memsync's own tree (~/.local/lib/claude-memsync
+# and $LIB) lose group/world write BEFORE fresh binaries are written into them.
+# ~/.local and ~/.local/lib are the user's layout (home_guard stops on them).
+mk_lib_dir() {
+  local d="$LIB" made="" p
+  while [ "$d" != "$HOME" ] && [ "$d" != "/" ]; do
+    [ "$(g_state "$d")" = ABSENT ] || break
+    made="$made $d"
+    d="$(dirname "$d")"
+  done
+  for p in "$(dirname "$LIB")" "$LIB"; do
+    if [ "$(g_state "$p")" = PRESENT ] && gw_p "$p"; then run chmod go-w "$p"; fi
+  done
+  run sh -c 'umask 022; mkdir -p "$1"' _ "$LIB"
+  for d in $made; do run chmod 755 "$d"; done
+  home_guard
+}
+
 link_binaries() {
-  run mkdir -p "$BIN"
+  run sh -c 'umask 022; mkdir -p "$1"' _ "$BIN"
+  home_guard
   local b aside bs bk
   for b in claude-memsync claude-memmerge; do
     bs="$(g_state "$BIN/$b")" || die "cannot tell whether $BIN/$b exists; refusing to touch it"
@@ -1540,31 +1681,61 @@ link_binaries() {
 }
 
 step_build() {
+  home_guard
   if [ -n "$PREBUILT_DIR" ]; then step_install_prebuilt; return 0; fi
   step "b. Clone claude-utils at $SHORT and build"
   if [ -d "$SRC/.git" ] && [ "$(git -C "$SRC" rev-parse HEAD)" = "$SHA" ]; then   # fs-ok: false takes the clone branch, where git clone refuses a non-empty target
     say "  clone present at $SRC"
   else
     [ ! -e "$SRC" ] || die "$SRC exists but is not a checkout at $SHA"   # fs-ok: git clone refuses a non-empty target anyway
-    run mkdir -p "$(dirname "$SRC")"
-    run git clone --quiet "$UTILS_URL" "$SRC"
-    run git -C "$SRC" checkout --quiet "$SHA"
+    run sh -c 'umask 022; mkdir -p "$1"' _ "$(dirname "$SRC")"
+    home_guard
+    run sh -c 'umask 022; git clone --quiet "$1" "$2"' _ "$UTILS_URL" "$SRC"
+    run sh -c 'umask 022; git -C "$1" checkout --quiet "$2"' _ "$SRC" "$SHA"
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
     [ "$(git -C "$SRC" rev-parse HEAD)" = "$SHA" ] || die "HEAD of $SRC is not $SHA"
   fi
-  if [ -x "$LIB/claude-memsync" ] && [ -x "$LIB/claude-memmerge" ]; then   # fs-ok: false (re)installs or rebuilds at the pinned commit; the cmp check above refuses a differing file
-    say "  binaries present in $LIB"
-  else
-    run mkdir -p "$LIB"
-    if [ "$GO_MODE" = go ]; then
-      run sh -c "cd '$SRC' && go build -o '$LIB/claude-memsync' ./cmd/claude-memsync && go build -o '$LIB/claude-memmerge' ./cmd/claude-memmerge"
-    else
-      run docker run --rm --user "$(id -u):$(id -g)" -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -e GOFLAGS=-buildvcs=false \
-        -v "$SRC:/src" -v "$LIB:/out" -w /src golang:1.25 \
-        sh -c 'go build -o /out/claude-memsync ./cmd/claude-memsync && go build -o /out/claude-memmerge ./cmd/claude-memmerge'
-    fi
+  [ "$DRY_RUN" -eq 1 ] || git -C "$SRC" cat-file -e "$SHA^{commit}" || die "$SHA is not a commit in $SRC"
+  lib_inspect
+  mk_lib_dir
+  # Every run builds from the verified commit and compares: the build runs in a
+  # fresh private dir made by git archive (never in $SRC, which others might be
+  # able to write), into .new files; an identical existing binary is kept, a
+  # different one is replaced.
+  lib_new_cleanup
+  local b bd="$HOME/.local/state/claude-memsync/build.XXXXXX" ver="dev+$SHORT" pkg=github.com/MarimerLLC/claude-utils/internal/version
+  local base="$HOME/.local/state/claude-memsync"
+  run sh -c 'umask 022; mkdir -p "$1"' _ "$base"
+  home_guard
+  if [ "$DRY_RUN" -eq 0 ]; then
+    BUILD_DIR="$(mktemp -d "$base/build.XXXXXX")" || die "cannot make a private build dir under $base"
+    chmod 700 "$BUILD_DIR"
+    bd="$BUILD_DIR"
   fi
+  # The $SRC repo is trusted as this script cloned it; --no-replace-objects keeps a
+  # planted refs/replace out of the archive. Verifying the repo itself (filters in
+  # its config, fsck, a re-fetch) is tracked separately.
+  run sh -c 'umask 022; git --no-replace-objects -C "$1" archive "$2" | tar -x -C "$3"' _ "$SRC" "$SHA" "$bd"
+  # A clean Go environment: no inherited GOFLAGS, no go.work, no toolchain download.
+  if [ "$GO_MODE" = go ]; then
+    run sh -c 'umask 022; cd "$1" && env -u GOFLAGS GOWORK=off GOFLAGS=-mod=readonly GOTOOLCHAIN=local go build -o "$2" -trimpath -ldflags "-X $5.Override=$4 -X $5.Commit=$6" ./cmd/claude-memsync && env -u GOFLAGS GOWORK=off GOFLAGS=-mod=readonly GOTOOLCHAIN=local go build -o "$3" -trimpath -ldflags "-X $5.Override=$4 -X $5.Commit=$6" ./cmd/claude-memmerge' _ "$bd" "$LIB/claude-memsync.new" "$LIB/claude-memmerge.new" "$ver" "$pkg" "$SHA"
+  else
+    run docker run --rm --user "$(id -u):$(id -g)" -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -e GOWORK=off -e GOFLAGS=-mod=readonly -e GOTOOLCHAIN=local \
+      -v "$bd:/src" -v "$LIB:/out" -w /src golang:1.25 \
+      sh -c 'umask 022; go build -o /out/claude-memsync.new -trimpath -ldflags "-X $2.Override=$1 -X $2.Commit=$3" ./cmd/claude-memsync && go build -o /out/claude-memmerge.new -trimpath -ldflags "-X $2.Override=$1 -X $2.Commit=$3" ./cmd/claude-memmerge' _ "$ver" "$pkg" "$SHA"
+  fi
+  build_dir_remove
+  for b in claude-memsync claude-memmerge; do
+    if [ "$DRY_RUN" -eq 0 ] && [ "$LIB_REWRITE" -eq 0 ] && cmp -s "$LIB/$b.new" "$LIB/$b"; then
+      say "  $LIB/$b matches the verified build; kept"
+      run rm -f -- "$LIB/$b.new"
+    else
+      [ ! -e "$LIB/$b" ] || say "  replacing $LIB/$b with the verified build"   # fs-ok: only the wording of a message
+      run chmod 755 "$LIB/$b.new"
+      run mv -f "$LIB/$b.new" "$LIB/$b"
+    fi
+  done
   link_binaries
 }
 
@@ -1604,7 +1775,7 @@ add_known_host() { # label hostpattern scan-args...
 # shared files, so only this one process writes them.
 step_ssh() {
   step "d. Host keys"
-  run mkdir -p "$HOME/.ssh"
+  run mkdir_p "$HOME/.ssh"
   run chmod 700 "$HOME/.ssh"
   add_known_host "github.com:22" "github.com" github.com
   add_known_host "ssh.github.com:443" "[ssh.github.com]:443" -p 443 ssh.github.com
@@ -1724,7 +1895,7 @@ step_routes() {
       if [ "$added" -gt 0 ]; then say "  denylist-$k.txt: $([ "$DRY_RUN" -eq 1 ] && echo "would add" || echo added) $added keep-out term(s); existing lines kept"
       else say "  denylist-$k.txt: no new keep-out terms (existing lines kept)"; fi
     else
-      run mkdir -p "$CFG"
+      run mkdir_p "$CFG"
       say "  writing $CFG/denylist-$k.txt (${#KEEP_OUT_TERMS[@]} keep-out terms)"
       if [ "$DRY_RUN" -eq 0 ]; then
         : >"$CFG/denylist-$k.txt"; chmod 600 "$CFG/denylist-$k.txt"
@@ -1746,7 +1917,7 @@ step_routes() {
   fi
   say "  writing $ROUTES (0600, default deny, foreignWriters for the old memsync)"
   [ "$DRY_RUN" -eq 1 ] && return 0
-  mkdir -p "$CFG"
+  mkdir_p "$CFG"
   if [ "$rs" = "PRESENT" ]; then
     bak="$(unique_path "$ROUTES.bak.${BOOTSTRAP_ASIDE_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}")" || die "cannot find a free name for the backup of $ROUTES"
     cp -p "$ROUTES" "$bak"

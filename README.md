@@ -83,13 +83,15 @@ PLATFORM=linux-amd64        # linux-arm64, darwin-amd64 or darwin-arm64
 NAME=claude-utils-$TAG-$PLATFORM
 URL=https://github.com/Exploded-views/claude-utils/releases/download/$TAG
 curl -fLO "$URL/$NAME.tar.gz" -O "$URL/SHA256SUMS"
-sha256sum -c --ignore-missing SHA256SUMS     # macOS: grep " $NAME.tar.gz\$" SHA256SUMS | shasum -a 256 -c -
+grep " $NAME.tar.gz\$" SHA256SUMS | shasum -a 256 -c -
 tar -xzf "$NAME.tar.gz"
 mkdir -p ~/.local/bin && cp "$NAME/claude-memsync" "$NAME/claude-memmerge" ~/.local/bin/
 claude-memsync version      # claude-memsync v0.5.0-ev.1
 ```
 
-Do not extract an archive that does not verify. On Windows, unzip
+Do not extract an archive that does not verify. It must print `<archive>: OK`. The plain
+check, without `--ignore-missing`, fails for files you did not download; see
+[Verify a download](docs/releases.md#verify-a-download). On Windows, unzip
 `claude-utils-<tag>-windows-<arch>.zip` and keep `claude-memsync.exe` and
 `claude-memmerge.exe` in one folder. Each archive also carries
 `scripts/bootstrap.sh`, so a verified download can set up a full host with no
