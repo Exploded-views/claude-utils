@@ -19,3 +19,7 @@ func tryLock(f *os.File) error {
 }
 
 func unlock(f *os.File) { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }
+
+// tryLockWait and unlockWait lock the whole file (flock has no ranges).
+func tryLockWait(f *os.File) error { return tryLock(f) }
+func unlockWait(f *os.File)        { unlock(f) }

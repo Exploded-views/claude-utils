@@ -21,6 +21,7 @@ Subcommands:
   run         Run the sync daemon in the foreground
   distill     Rebuild the distilled-memory catalog index (see --prune, --dry-run)
   archive     List or search the archive of deleted notes (archive list, archive search <term>)
+  log         log append|check: UTC-minute-stamped decision and state logs
   route       Edit routing: the home folder, publish or inherit a host template
   changes     List memory files changed in the sync repo since a commit (for hooks)
   relate      Declare a read or join relation between two memory repos (registry)
@@ -269,6 +270,41 @@ Usage of archive list:
     	search: print the matching lines, not only paths and line counts
   -since string
     	list: only archive dates on or after this one
+```
+
+## `claude-memsync log`
+
+```text
+usage:
+  claude-memsync log append [--wait 5s] <file> [text...]
+  claude-memsync log check [--] <file>...
+append adds "- YYYY-MM-DD HH:MMZ <text>" (UTC, now) as one line; with no text it reads one line from stdin.
+check prints "path:line: reason" for every line a prefix filter would skip.
+```
+
+## `claude-memsync log append -h`
+
+```text
+usage: claude-memsync log append [--wait 5s] <file> [text...]
+
+Append one entry, "- YYYY-MM-DD HH:MMZ <text>", stamped with the current UTC minute.
+The text is the remaining arguments joined by one space, or, with none, one line from
+stdin. A new file is created 0600. Nothing is written when the text is empty, holds a
+newline or another control character (a tab is fine), a bidi override, a zero-width space or BOM, or invalid UTF-8, or makes the line longer than
+4096 bytes (exit 2), or when the file does not end with a newline (exit 1; run log
+check). Writers wait up to --wait for each other (exit 1 on timeout).
+Exit status: 0 written, 1 refused by the file or the lock, 2 usage or bad text.
+```
+
+## `claude-memsync log check -h`
+
+```text
+usage: claude-memsync log check [--] <file>...
+
+Print "path:line: reason" for every line that is not an entry, a "#" heading or a
+blank line, has a bad stamp, no text, a control, bidi or zero-width character or invalid UTF-8, more than 4096 bytes, or
+no final newline. Meant for files that follow the entry format only.
+Exit status: 0 clean, 1 problems found, 2 usage or read error.
 ```
 
 ## `claude-memsync route`
