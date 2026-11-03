@@ -334,6 +334,9 @@ func runStatus(args []string) int {
 	if h := legacyIdentityHint(); h != "" {
 		fmt.Println(h)
 	}
+	if l := uncleanStopLine(); l != "" {
+		fmt.Println(l)
+	}
 	if handled, c := routedStatus(); handled {
 		if c > code {
 			code = c

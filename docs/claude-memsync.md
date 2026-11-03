@@ -137,11 +137,22 @@ and SSH keys. None require root.
 | `claude-memsync start` | Start the daemon now. |
 | `claude-memsync stop` | Stop the running daemon. |
 | `claude-memsync status` | Print `running (pid N)`, `stopped` or `service: not installed` (a foreground or dry run), then the routing and per-repo state. Exits non-zero only when a repo is in an error state (its loop keeps failing) or the routes file is unusable. |
+| `claude-memsync record-stop` | Record an unclean service stop (see [Unclean stop records](#unclean-stop-records)). Always exits 0. |
 | `claude-memsync run` | Run in the foreground (for debugging). |
 | `claude-memsync changes --since <rev>` or `--marker <file>` | List memory files changed in the sync repo since a point (`--project`, `--json`, `--limit`, `--update-marker`, `--hook`). See [Telling a running session what changed](#telling-a-running-session-what-changed). |
 | `claude-memsync distill` | Rebuild the distilled-memory catalog index (`--prune`, `--dry-run`, and with several repos `--repo <name>` or `--config <path>`, `--routes <path>`). See [distilling-memories.md](distilling-memories.md). |
 | `claude-memsync log append <file> [text...]` / `log check [--] <file>...` | Append a UTC-minute-stamped line to a decision or state log, or list the lines a prefix filter would skip. See [Decision and state logs](#decision-and-state-logs). |
 | `claude-memsync version [--json]` | Print the version. See [version output](#version-output). |
+
+## Unclean stop records
+
+`claude-memsync record-stop` writes a small record when the service stops uncleanly, so a crash loop can be diagnosed afterwards. It is meant to run as the systemd unit's `ExecStopPost` (which supplies `SERVICE_RESULT`, `EXIT_CODE` and `EXIT_STATUS`); the `--result`, `--exit-code` and `--exit-status` flags override them. A clean stop (`success`, `exited`, `0`) does nothing. This version does not install the hook yet; run `claude-memsync record-stop --result test` by hand to see what a record looks like (a run with no flags records the result `unknown`).
+
+- **Where**: `${XDG_CONFIG_HOME:-~/.config}/claude-memsync/stops/`, the per-host config directory. It is never synced. The directory is 0700 and each record 0600. Deleting old records by hand is fine; they are host-local diagnostics, not notes.
+- **What**: the result, exit code and exit status, the version, and the last 80 lines of `journalctl --user -u claude-memsync.service`. A record is at most 16 KiB (80 lines of at most 512 bytes), at most 20 records are kept (the oldest go first), and identical stops within an hour of the first merge into one record with a `repeats` count, so a restart loop writes about one record an hour.
+- **What is left out**: a line that looks like a secret under the [built-in rules](#built-in-rules) is replaced by `[line withheld: <rule>]`, paths that any repo's [denylist](#denylist) matches (the union over every repo of the routes file, since the daemon logs for all of them into one journal) become `<path redacted>`, and if a denylist or a repo's config cannot be read, every path-like word is redacted. A host that holds only some of the routed repos (a repo in routes.json with no config here) is therefore always in redact-all mode. The result, exit code and exit status are limited to letters, digits, `.`, `_` and `-`. The scrub cannot see ordinary prose, so read a record before pasting it anywhere, and paste only the lines you need, only to the fork.
+- **Never fails the unit**: the command always exits 0 and reports its own problems on stderr.
+- **`status`** prints `last unclean stop: <time> <result> (exit <status>, ×<repeats>); records in <dir>` for the record whose latest stop is newest. It is information only; the exit code is unchanged.
 
 ## Version output
 

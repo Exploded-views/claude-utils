@@ -36,6 +36,7 @@ Subcommands:
   start       Start the system service
   stop        Stop the system service
   status      Report service status
+  record-stop Record an unclean service stop (the unit's ExecStopPost; always exits 0)
   version     Print version
   help        Show this help
 ```
@@ -633,6 +634,22 @@ Remove the system service; takes no flags
 usage: claude-memsync status
 
 Report the service state, the routing and each repo's state; takes no flags
+```
+
+## `claude-memsync record-stop -h`
+
+```text
+usage: claude-memsync record-stop [--result R] [--exit-code C] [--exit-status S]
+
+Record an unclean stop of the service: the result and exit code the service
+manager reports, and a scrubbed tail of the journal, in a private, bounded
+record under the per-host config directory (stops/). It runs as the unit's
+ExecStopPost, which gives it SERVICE_RESULT, EXIT_CODE and EXIT_STATUS; the
+flags override them. A clean stop (success, exited, 0) does nothing.
+
+It always exits 0 and never fails the unit; problems go to stderr.
+Lines that look like secrets are withheld and denylisted paths are redacted, but
+prose cannot be detected: review a record before pasting it.
 ```
 
 ## `claude-memsync version -h`

@@ -105,6 +105,7 @@ section() {
   section "stop -h" stop -h
   section "uninstall -h" uninstall -h
   section "status -h" status -h
+  section "record-stop -h" record-stop -h
   section "version -h" version -h
 } > "$out.tmp"
 mv "$out.tmp" "$out"

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/MarimerLLC/claude-utils/internal/testenv"
@@ -19,8 +21,21 @@ func TestMain(m *testing.M) {
 	stopFn = func() error { panic("a test stopped a real service") }
 	// Nor may one touch the real systemd user manager or unit file.
 	systemctlFn = func(args ...string) error { panic("a test ran systemctl") }
+	// Nor may one read the real journal.
+	journalctlFn = func(ctx context.Context, n int) (string, error) { panic("a test ran journalctl") }
 	userUnitPathFn = func() (string, error) {
 		return filepath.Join(os.TempDir(), "claude-memsync-test-no-such-dir", userUnitName), nil
+	}
+	// A subprocess test runs the real main() (so the dispatch and the exit
+	// status are covered) with a fake journal.
+	if mode := os.Getenv("MEMSYNC_TEST_MAIN"); strings.HasPrefix(mode, "record-stop") {
+		journalctlFn = func(ctx context.Context, n int) (string, error) { return "from the fake journal\n", nil }
+		if mode == "record-stop-panic" {
+			recordStopHook = func() { panic("injected") }
+		}
+		os.Args = []string{"claude-memsync", "record-stop"}
+		main()
+		os.Exit(99) // main exits; reaching here is a bug
 	}
 	cleanup := testenv.SmallTempDir()
 	gitCleanup, err := testenv.IsolateGitMain()
